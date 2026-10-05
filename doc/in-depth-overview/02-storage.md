@@ -75,16 +75,19 @@ The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-i
 
 ### `PageInfo` and `PageState`
 
-Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.PageInfo.cs) tracking:
+Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.PageInfo.cs) record: 64 bytes, one cache line, in a native table rather than one GC object per slot, so a very large cache adds nothing for the garbage collector to trace. A zeroed record is a free slot. It tracks:
 
-- `MemPageIndex` / `FilePageIndex` — slot ↔ file mapping
+- `FilePageIndex` — which file page the slot holds (the slot's own index is its position in the table)
 - `PageState` — current state machine value (see below)
 - `ClockSweepCounter` — eviction heuristic (range 0..5, see [§2](#two-pass-clock-sweep-eviction))
-- `DirtyCounter` (`DC`) — > 0 means the page has unsaved writes; prevents eviction
+- `DirtyCounter` (`DC`) — mutator marks a unit of work still holds on the page; > 0 prevents eviction
+- `WritebackGen` / `CapturedGen` — the page owes a write to the data file while they differ; prevents eviction until a checkpoint has made the bytes durable. A bitmap with one bit per slot lets the checkpoint find the owed pages without visiting every slot
 - `ActiveChunkWriters` (`ACW`) — > 0 means writers are mid-flight; prevents *checkpoint snapshot* (but not eviction)
 - `SlotRefCount` — number of `ChunkAccessor` slots holding raw pointers into this page
 - `AccessEpoch` — epoch tag (see [01-foundation §4](01-foundation.md))
 - `CrcVerified` — CRC checked since this load? (reset on allocate)
+- `SlotReady` — false while the slot's owner is still preparing it (loading or zeroing the page); other requesters wait
+- `ReadPending` — a disk read for the slot may be in flight; its task is kept in a small side table, not in the record
 - `StateSyncRoot` — `AccessControlSmall` protecting state transitions
 - `PageExclusiveLatch` — `AccessControlSmall` for exclusive writer ownership
 - `ExclusiveLatchDepth` — re-entrance counter (multiple chunks on the same page)

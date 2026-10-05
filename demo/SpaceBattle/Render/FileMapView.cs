@@ -13,11 +13,11 @@ namespace SpaceBattle;
 /// <para>
 /// The static half is fully supported — <c>DatabaseEngine.ClassifyAllPages</c> is public and derives everything from
 /// in-memory structures with no page I/O. The activity half is not: nothing public reports write recency. The
-/// closest signal is <c>PagedMMF.PageInfo.DirtyCounter</c>, which lives in a <b>private</b> array, so this reaches it
-/// by reflection once at startup and then reads the typed array directly (no per-page reflection).
+/// closest signal is a page-cache slot's dirty counter, which only the internal <c>PagedMMF.DirtyCounterOf</c> reports,
+/// so this binds it by reflection once at startup and then calls the bound delegate (no per-page reflection).
 /// </para>
 /// <para>
-/// If that field is ever renamed the map degrades to layout-only rather than failing — the reflection result is
+/// If that method is ever renamed the map degrades to layout-only rather than failing — the reflection result is
 /// cached as "unavailable" and the HUD says so. This is the one part of the tool built on an unsupported surface,
 /// and it is deliberately the one part that is allowed to not work.
 /// </para>
@@ -31,8 +31,8 @@ internal sealed class FileMapView
     private float[] _heat = Array.Empty<float>();
     private int[] _lastDirty = Array.Empty<int>();
 
-    private Array _pageInfos;                 // PagedMMF.PageInfo[] when reachable
-    private FieldInfo _dirtyField;
+    private Func<int, int> _dirtyCounterOf;   // PagedMMF.DirtyCounterOf, bound to the engine's store, when reachable
+    private int _slotCount;
     private bool _activityProbed;
     public string ActivityStatus { get; private set; } = "not probed";
 
@@ -55,19 +55,17 @@ internal sealed class FileMapView
         try
         {
             object mmf = _host.DBE.MMF;
-            // ManagedPagedMMF wraps or extends PagedMMF; walk the object graph for the private page-info array.
-            var found = FindPageInfoArray(mmf, 0);
-            if (found == null)
+            // ManagedPagedMMF derives from PagedMMF, which declares both members internal; walk the base chain to find them.
+            var dirtyCounterOf = FindMember<MethodInfo>(mmf.GetType(), t => t.GetMethod("DirtyCounterOf", Flags, null, [typeof(int)], null));
+            var slotCount = FindMember<PropertyInfo>(mmf.GetType(), t => t.GetProperty("PageCacheSlotCountForDiagnostics", Flags));
+            if (dirtyCounterOf == null || slotCount == null)
             {
-                ActivityStatus = "unavailable (page-info array not found) — layout only";
+                ActivityStatus = "unavailable (dirty-counter accessor not found) — layout only";
                 return;
             }
-            _pageInfos = found;
-            var elemType = found.GetType().GetElementType();
-            _dirtyField = elemType?.GetField("DirtyCounter", BindingFlags.Public | BindingFlags.Instance);
-            ActivityStatus = _dirtyField != null
-                ? $"live (DirtyCounter over {found.Length} pages)"
-                : "unavailable (DirtyCounter missing) — layout only";
+            _dirtyCounterOf = (Func<int, int>)dirtyCounterOf.CreateDelegate(typeof(Func<int, int>), mmf);
+            _slotCount = (int)slotCount.GetValue(mmf);
+            ActivityStatus = $"live (DirtyCounter over {_slotCount} pages)";
         }
         catch (Exception ex)
         {
@@ -75,42 +73,16 @@ internal sealed class FileMapView
         }
     }
 
-    /// <summary>
-    /// Finds the page-info array. It is a PRIVATE field on <c>PagedMMF</c>, and <c>ManagedPagedMMF</c> derives from
-    /// it — so the search must walk the base-type chain, because <c>GetFields</c> does not return private members of
-    /// base classes. (That omission is exactly why the first version of this reported "not found".)
-    /// </summary>
-    private static Array FindPageInfoArray(object root, int depth)
+    private const BindingFlags Flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+    private static T FindMember<T>(Type type, Func<Type, T> find) where T : class
     {
-        if (root == null || depth > 2)
+        for (var t = type; t != null && t != typeof(object); t = t.BaseType)
         {
-            return null;
-        }
-        for (var t = root.GetType(); t != null && t != typeof(object); t = t.BaseType)
-        {
-            foreach (var f in t.GetFields(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly))
+            var member = find(t);
+            if (member != null)
             {
-                object v;
-                try
-                {
-                    v = f.GetValue(root);
-                }
-                catch
-                {
-                    continue;
-                }
-                if (v is Array arr && arr.GetType().GetElementType()?.Name == "PageInfo")
-                {
-                    return arr;
-                }
-                if (v != null && depth < 2 && v.GetType().Name.Contains("PagedMMF", StringComparison.Ordinal))
-                {
-                    var nested = FindPageInfoArray(v, depth + 1);
-                    if (nested != null)
-                    {
-                        return nested;
-                    }
-                }
+                return member;
             }
         }
         return null;
@@ -119,7 +91,7 @@ internal sealed class FileMapView
     /// <summary>Refreshes the layout and decays/boosts the heat. Called every N ticks, not every tick.</summary>
     public void Refresh()
     {
-        if (!_activityProbed || (_pageInfos == null && _host.Tick % 240 == 0))
+        if (!_activityProbed || (_dirtyCounterOf == null && _host.Tick % 240 == 0))
         {
             ProbeActivitySource();
         }
@@ -142,17 +114,12 @@ internal sealed class FileMapView
             _heat[i] *= _cfg.FileMapDecay;
         }
 
-        if (_pageInfos != null && _dirtyField != null)
+        if (_dirtyCounterOf != null)
         {
-            var n = Math.Min(_pageInfos.Length, pageCount);
+            var n = Math.Min(_slotCount, pageCount);
             for (var i = 0; i < n; i++)
             {
-                var pi = _pageInfos.GetValue(i);
-                if (pi == null)
-                {
-                    continue;
-                }
-                var d = (int)_dirtyField.GetValue(pi);
+                var d = _dirtyCounterOf(i);
                 // A rising DirtyCounter means "written again since the checkpointer last looked".
                 if (d != _lastDirty[i])
                 {

@@ -1,18 +1,98 @@
-﻿using System;
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace Typhon.Engine.Internals;
 
 public partial class PagedMMF
 {
-    internal class PageInfo
+    /// <summary>
+    /// The state of one page-cache slot: 64 bytes, one cache line, in native memory (<see cref="PageSlotTable"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// No managed references (#1127): a cache of 67 M slots must not give the GC 67 M objects to mark. A slot's in-flight read lives in a side table
+    /// sized by the reads in flight (<see cref="PagedMMF"/>'s <c>_readTasks</c>), and <see cref="ReadPending"/> says whether to look there.
+    /// </para>
+    /// <para>
+    /// All-zero bytes are a free slot, so a freshly allocated table needs no initialisation: <see cref="EncodedFilePageIndex"/> holds the
+    /// complement of the file page index, which makes zero read as -1 (no page). Every other field is free at zero.
+    /// </para>
+    /// <para>
+    /// One slot per cache line also ends the false sharing neighbouring slots had as heap objects allocated in one loop.
+    /// </para>
+    /// </remarks>
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    internal struct PageInfoData
     {
-        private const int ClockSweepMaxValue = 5;
-        
-        public readonly int MemPageIndex;
-        public int FilePageIndex;
-        public int ClockSweepCounter => _clockSweepCounter;
+        internal const int ClockSweepMaxValue = 5;
+
+        /// <inheritdoc cref="PageInfo.WritebackGen"/>
+        [FieldOffset(0)] public long WritebackGen;
+
+        /// <inheritdoc cref="PageInfo.CapturedGen"/>
+        [FieldOffset(8)] public long CapturedGen;
+
+        /// <inheritdoc cref="PageInfo.AccessEpoch"/>
+        [FieldOffset(16)] public long AccessEpoch;
+
+        /// <summary><c>~FilePageIndex</c>, so that zero bytes decode as -1. Read and written only through <see cref="PageInfo"/>.</summary>
+        [FieldOffset(24)] public int EncodedFilePageIndex;
+
+        /// <inheritdoc cref="PageInfo.DirtyCounter"/>
+        [FieldOffset(28)] public int DirtyCounter;
+
+        [FieldOffset(32)] public AccessControlSmall StateSyncRoot;
+        [FieldOffset(36)] public AccessControlSmall PageExclusiveLatch;
+
+        /// <inheritdoc cref="PageInfo.ActiveChunkWriters"/>
+        [FieldOffset(40)] public int ActiveChunkWriters;
+
+        /// <inheritdoc cref="PageInfo.SlotRefCount"/>
+        [FieldOffset(44)] public int SlotRefCount;
+
+        [FieldOffset(48)] public int ClockSweepCounter;
+        [FieldOffset(52)] public PageState PageState;
+        [FieldOffset(54)] public short ExclusiveLatchDepth;
+
+        /// <inheritdoc cref="PageInfo.CrcVerified"/>
+        [FieldOffset(56)] public bool CrcVerified;
+
+        /// <inheritdoc cref="PageInfo.SlotReady"/>
+        [FieldOffset(57)] public bool SlotReady;
+
+        /// <inheritdoc cref="PageInfo.ReadPending"/>
+        [FieldOffset(58)] public bool ReadPending;
+    }
+
+    /// <summary>
+    /// A handle on one slot's <see cref="PageInfoData"/>. Copying it copies a pointer, so code that takes a handle in a local and mutates through
+    /// it cannot lose a write to a struct copy: every field is exposed by <c>ref</c>, the two locks included — a lock returned by value would
+    /// compile and lock a copy.
+    /// </summary>
+    /// <remarks>
+    /// Two exceptions. <see cref="FilePageIndex"/> is stored encoded: it has a plain getter and setter, and volatile helpers for the code that
+    /// needs ordering on it (PS-15). <see cref="ClockSweepCounter"/> is read-only; it changes only through the methods below.
+    /// </remarks>
+    internal readonly unsafe struct PageInfo
+    {
+        private readonly PageInfoData* _p;
+
+        internal PageInfo(PageInfoData* p) => _p = p;
+
+        /// <summary>The file page this slot holds, or -1.</summary>
+        public int FilePageIndex
+        {
+            get => ~_p->EncodedFilePageIndex;
+            set => _p->EncodedFilePageIndex = ~value;
+        }
+
+        /// <summary><see cref="FilePageIndex"/> read with acquire semantics.</summary>
+        public int ReadFilePageIndexVolatile() => ~Volatile.Read(ref _p->EncodedFilePageIndex);
+
+        /// <summary><see cref="FilePageIndex"/> written with release semantics.</summary>
+        public void WriteFilePageIndexVolatile(int filePageIndex) => Volatile.Write(ref _p->EncodedFilePageIndex, ~filePageIndex);
 
         /// <summary>
         /// Number of live mutator marks on this page — one per <see cref="ChangeSet.AddByMemPageIndex"/> /
@@ -32,7 +112,7 @@ public partial class PagedMMF
         /// (#385). Neither is fixable while one integer carries both meanings.
         /// </para>
         /// </remarks>
-        public int DirtyCounter;
+        public ref int DirtyCounter => ref _p->DirtyCounter;
 
         /// <summary>
         /// Monotonic stamp bumped by every path that modifies this page's bytes. Compared against
@@ -43,43 +123,57 @@ public partial class PagedMMF
         /// checkpoint and must not be evicted. The writer captures the value it snapshotted and, after fsync, publishes it
         /// to <see cref="CapturedGen"/>. A modification racing the capture bumps <see cref="WritebackGen"/> past the
         /// captured value, so the page stays owed — CP-04's re-dirty defence falls out of the comparison instead of
-        /// needing a count to survive a decrement.
+        /// needing a count to survive a decrement. The pair carries over when the slot is reused (PS-10), so a capture
+        /// published late for a previous occupant can never exceed it.
         /// </remarks>
-        public long WritebackGen;
+        public ref long WritebackGen => ref _p->WritebackGen;
 
         /// <summary>
         /// The <see cref="WritebackGen"/> value whose bytes are known durable on the data file. Only ever advanced, and
         /// only by a writer that has fsynced the snapshot it took at that generation.
         /// </summary>
-        public long CapturedGen;
+        public ref long CapturedGen => ref _p->CapturedGen;
 
-        public AccessControlSmall StateSyncRoot;
-        public PageState PageState;                     // Must always be changed under StateSyncRoot lock
-        public short ExclusiveLatchDepth;               // Re-entrance depth (multiple chunks on same page)
-        public AccessControlSmall PageExclusiveLatch;   // Thread ownership for exclusive latch
+        public ref AccessControlSmall StateSyncRoot => ref _p->StateSyncRoot;
+
+        /// <summary>Must always be changed under <see cref="StateSyncRoot"/>.</summary>
+        public ref PageState PageState => ref _p->PageState;
+
+        /// <summary>Re-entrance depth of the exclusive latch (several chunks on one page).</summary>
+        public ref short ExclusiveLatchDepth => ref _p->ExclusiveLatchDepth;
+
+        /// <summary>Thread ownership of the exclusive latch.</summary>
+        public ref AccessControlSmall PageExclusiveLatch => ref _p->PageExclusiveLatch;
 
         /// <summary>
         /// The epoch at which this page was last accessed via epoch-based protection.
         /// Pages with AccessEpoch >= MinActiveEpoch cannot be evicted.
         /// Value 0 means "not epoch-tagged" (legacy access only).
         /// </summary>
-        public long AccessEpoch;
+        public ref long AccessEpoch => ref _p->AccessEpoch;
 
         /// <summary>
         /// Whether the page CRC has been verified since it was loaded from disk.
         /// Reset to false during page allocation (Allocating state), set to true after verification.
         /// No need for volatile — reset by the slot's owner before <see cref="SlotReady"/> publishes it, and checked after I/O completion.
         /// </summary>
-        public bool CrcVerified;
+        public ref bool CrcVerified => ref _p->CrcVerified;
 
         /// <summary>
         /// PS-15: <c>false</c> from the moment the slot is claimed for a file page until its owner has prepared it — <see cref="CrcVerified"/>
-        /// reset, and the page either cleared (not on disk, PS-14) or its read started and recorded as the read task. The slot is visible in the
+        /// reset, and the page either cleared (not on disk, PS-14) or its read started and recorded in the read table. The slot is visible in the
         /// page directory before that, so a concurrent requester that finds it waits on this flag instead of using it. Written with
         /// <c>Volatile.Write</c> (a release, so the preparation is visible to whoever reads <c>true</c>) and read with
         /// <c>Volatile.Read</c>.
         /// </summary>
-        public bool SlotReady;
+        public ref bool SlotReady => ref _p->SlotReady;
+
+        /// <summary>
+        /// Whether the read table may hold a read task for this slot. Set by the slot's owner after inserting the task and before
+        /// <see cref="SlotReady"/> publishes both; cleared only by a thread that may not race a new read into the slot — a requester holding
+        /// the slot by its epoch tag, <see cref="TryAcquire"/> under the slot's lock, or the slot's owner. Lets a cache hit skip the table.
+        /// </summary>
+        public ref bool ReadPending => ref _p->ReadPending;
 
         /// <summary>
         /// Number of <see cref="ChunkAccessor{TStore}"/> instances that have marked this page dirty in their local
@@ -94,7 +188,7 @@ public partial class PagedMMF
         /// checkpoint thread reads). Plain reads are safe on x64 TSO after Interlocked barriers on writer side.
         /// </para>
         /// </summary>
-        public int ActiveChunkWriters;
+        public ref int ActiveChunkWriters => ref _p->ActiveChunkWriters;
 
         /// <summary>
         /// Number of <see cref="ChunkAccessor{TStore}"/> slots currently referencing this memory page.
@@ -110,39 +204,24 @@ public partial class PagedMMF
         /// <see cref="ChunkAccessor{TStore}.EvictSlot"/> and (immediate) in <see cref="ChunkAccessor{TStore}.Dispose"/>.
         /// </para>
         /// </summary>
-        public int SlotRefCount;
+        public ref int SlotRefCount => ref _p->SlotRefCount;
 
-        private int _clockSweepCounter;
-        private Lazy<Task<int>> _ioReadTask;
-
-        public void SetIOReadTask(ValueTask<int> task) => _ioReadTask = new Lazy<Task<int>>(task.AsTask);
-
-        public Task<int> IOReadTask => _ioReadTask?.Value;
-
-        public void ResetIOCompletionTask() => _ioReadTask = null;
-
-        public PageInfo(int memPageIndex)
-        {
-            MemPageIndex = memPageIndex;
-            FilePageIndex = -1;
-            _clockSweepCounter = 0;
-            StateSyncRoot = new AccessControlSmall();
-            PageExclusiveLatch = new AccessControlSmall();
-        }
+        public int ClockSweepCounter => _p->ClockSweepCounter;
 
         public void IncrementClockSweepCounter()
         {
-            var curValue = _clockSweepCounter;
-            if (curValue == ClockSweepMaxValue)
+            ref var counter = ref _p->ClockSweepCounter;
+            var curValue = counter;
+            if (curValue == PageInfoData.ClockSweepMaxValue)
             {
                 return;
             }
 
             SpinWait sw = new();
-            while (Interlocked.CompareExchange(ref _clockSweepCounter, curValue + 1, curValue) != curValue)
+            while (Interlocked.CompareExchange(ref counter, curValue + 1, curValue) != curValue)
             {
-                curValue = _clockSweepCounter;
-                if (curValue == ClockSweepMaxValue)
+                curValue = counter;
+                if (curValue == PageInfoData.ClockSweepMaxValue)
                 {
                     return;
                 }
@@ -152,16 +231,17 @@ public partial class PagedMMF
 
         public void DecrementClockSweepCounter()
         {
-            var curValue = _clockSweepCounter;
+            ref var counter = ref _p->ClockSweepCounter;
+            var curValue = counter;
             if (curValue == 0)
             {
                 return;
             }
 
             SpinWait sw = new();
-            while (Interlocked.CompareExchange(ref _clockSweepCounter, curValue - 1, curValue) != curValue)
+            while (Interlocked.CompareExchange(ref counter, curValue - 1, curValue) != curValue)
             {
-                curValue = _clockSweepCounter;
+                curValue = counter;
                 if (curValue == 0)
                 {
                     return;
@@ -170,6 +250,64 @@ public partial class PagedMMF
             }
         }
 
-        public void ResetClockSweepCounter() => _clockSweepCounter = 0;
+        public void ResetClockSweepCounter() => _p->ClockSweepCounter = 0;
+    }
+
+    /// <summary>
+    /// The block holding every slot's <see cref="PageInfoData"/>, 64-byte aligned, allocated from the engine's allocator as a child of the
+    /// store, so it is counted with the engine's native memory and freed with the store.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Allocated zeroed: every slot starts free, with no initialisation loop over the records. Sized in an <c>int</c>, which holds under
+    /// today's 2 GiB cache ceiling (≤ 16 MiB of records); #945 moves it onto the 64-bit allocation, where large blocks come lazily zeroed.
+    /// </para>
+    /// <para>
+    /// Freed deterministically when <see cref="PagedMMF"/> is disposed. Nothing may touch it after that, and nothing does: the checkpoint
+    /// thread is joined and the shutdown flush has run before the engine disposes its store. What may still arrive afterwards is a caller
+    /// the store's teardown cannot order — a transaction outliving the store releasing its dirty marks, a diagnostic — and those find
+    /// <see cref="PagedMMF"/>'s reference already null and touch nothing. Using the store concurrently with its disposal is not supported,
+    /// for the records as for the page memory.
+    /// </para>
+    /// </remarks>
+    internal sealed unsafe class PageSlotTable
+    {
+        private readonly PinnedMemoryBlock _block;
+
+        /// <summary>First slot, 64-byte aligned.</summary>
+        public readonly PageInfoData* Base;
+
+        /// <summary>Number of slots.</summary>
+        public readonly int Count;
+
+        public PageSlotTable(IMemoryAllocator allocator, IResource owner, int count)
+        {
+            Count = count;
+            _block = allocator.AllocatePinned("PageSlots", owner, count * sizeof(PageInfoData), zeroed: true, alignment: 64);
+            Base = (PageInfoData*)_block.DataAsPointer;
+        }
+
+        /// <summary>Bytes held.</summary>
+        public long Bytes => _block.MemoryBlockSize;
+
+        /// <summary>Whether the block has been freed. Test seam.</summary>
+        internal bool IsFreed => _block.IsDisposed;
+
+        public PageInfo this[int memPageIndex]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                if ((uint)memPageIndex >= (uint)Count)
+                {
+                    ThrowSlotOutOfRange(memPageIndex, Count);
+                }
+                return new PageInfo(Base + memPageIndex);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowSlotOutOfRange(int memPageIndex, int count) =>
+            throw new IndexOutOfRangeException($"Page-cache slot {memPageIndex} is outside the cache's {count} slots.");
     }
 }
