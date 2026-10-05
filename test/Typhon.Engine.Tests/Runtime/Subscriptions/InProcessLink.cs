@@ -31,6 +31,9 @@ internal sealed class InProcessLink : ISubscriptionLink
     private readonly ConcurrentQueue<byte[]> _messages = new();
     private readonly SemaphoreSlim _arrived = new(0);
     private int _closes;
+    private int _closeRecorded;
+    private ushort _closeCode;
+    private string _closeReason;
     private int _inFlight;
     private int _overlaps;
     private int _stalledSends;
@@ -60,17 +63,31 @@ internal sealed class InProcessLink : ISubscriptionLink
     /// <inheritdoc />
     public bool SupportsUnreliable => false;
 
-    /// <summary>Whether <see cref="Close"/> has been called.</summary>
-    public bool IsClosed => Volatile.Read(ref _closes) != 0;
+    /// <summary>Whether the first close has been recorded — its code and reason are readable once this is true.</summary>
+    /// <remarks>
+    /// Reads <c>_closeRecorded</c> rather than <c>_closes</c>, and the difference is the whole point. The counter is bumped on ENTRY to <see cref="Close"/>,
+    /// before the code and reason have been stored, so a reader that spun on it and then read <see cref="CloseCode"/> could legitimately see the default. The
+    /// 2026-10-05 nightly read exactly that: close code 0 on two of six <c>ClientInputFuzzTests</c> seeds, 0 being a code no constant defines and nothing
+    /// sends. The pump thread closes the link while the test thread waits, so a 4-vCPU runner is contention enough to land in a one-instruction window.
+    /// </remarks>
+    public bool IsClosed => Volatile.Read(ref _closeRecorded) != 0;
 
     /// <summary>How many times <see cref="Close"/> was called. More than one is a bug in the engine's close path, not in the link.</summary>
+    /// <remarks>
+    /// Counts every call, including the ones that return early, which is what makes it an engine-bug detector. It therefore moves BEFORE
+    /// <see cref="IsClosed"/> does; spin on <see cref="IsClosed"/>, not on this, when the close's code is about to be read.
+    /// </remarks>
     public int CloseCount => Volatile.Read(ref _closes);
 
-    /// <summary>The code of the first close.</summary>
-    public ushort CloseCode { get; private set; }
+    /// <summary>The code of the first close, or 0 before <see cref="IsClosed"/>.</summary>
+    /// <remarks>
+    /// Gated on <see cref="IsClosed"/> so the acquire load is part of reading the value, and a caller that reads this WITHOUT having spun on
+    /// <see cref="IsClosed"/> first is still correctly ordered against the release store in <see cref="Close"/>.
+    /// </remarks>
+    public ushort CloseCode => IsClosed ? _closeCode : (ushort)0;
 
-    /// <summary>The reason of the first close.</summary>
-    public string CloseReason { get; private set; }
+    /// <summary>The reason of the first close, or <see langword="null"/> before <see cref="IsClosed"/>.</summary>
+    public string CloseReason => IsClosed ? _closeReason : null;
 
     /// <summary>Messages the engine tried to send after the link was closed. A real link would drop them too.</summary>
     public int DroppedAfterClose { get; private set; }
@@ -168,8 +185,11 @@ internal sealed class InProcessLink : ISubscriptionLink
             return;
         }
 
-        CloseCode = code;
-        CloseReason = reason;
+        // Store the payload, THEN publish it. The release store is what makes the two plain writes above visible to any thread that observes
+        // _closeRecorded, and nothing may observe the close before them: a reader seeing the close but not its code is the bug this ordering removes.
+        _closeCode = code;
+        _closeReason = reason;
+        Volatile.Write(ref _closeRecorded, 1);
         Connection?.OnClosed(code, null);
     }
 
