@@ -1872,8 +1872,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refutes, since the array only ever grows and is
         // sized for clusterChunkId + 1 on the next line. The real defect was a negative id produced one frame up (#842). An out-of-range index here is
         // always the caller's, so it should say so; the array access bounds-checks anyway, so this replaces an implicit throw rather than adding a check.
-        // Mirrored onto NoteClusterDied, which needs it for a different reason: RecoveryApplier passes a chunk id decoded out of a WAL buffer, so that
-        // side takes untrusted input rather than an already-validated slot.
+        // Mirrored onto NoteClusterDied, which needs it for a different reason: RecoveryApplier passes a chunk id decoded out of an EntityMap record buffer,
+        // so that side takes untrusted input rather than an already-validated slot.
         //
         // int.MaxValue is rejected with the negatives, and not because such a cluster could exist: `clusterChunkId + 1` OVERFLOWS to int.MinValue on the
         // next line, so the capacity call would be asked for a negative length, return without growing, and leave the index to fault anyway — past a guard
@@ -1990,14 +1990,15 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <remarks>
     /// A site that tombstones WITHOUT clearing the occupancy bit must fold <see cref="VisibilityUnknown"/> rather than the death's TSN. The watermark's whole
     /// argument is that a reader past the last death is exact because occupancy already reflects it; where the bit survives, that is false and a satisfiable
-    /// watermark grants the gate over a tombstone. Two sites are in that shape today — recovery replay and cluster migration — and both pass the sentinel.
+    /// watermark grants the gate over a tombstone. One site is in that shape today — cluster migration — and it passes the sentinel. Recovery replay was the
+    /// other until it started releasing the slot like the commit path (#935); it now folds the death's TSN.
     /// </remarks>
     internal void NoteClusterDied(int clusterChunkId, long diedTsn)
     {
-        // The mirror of NoteClusterBorn's precondition, and this side is the one with untrusted input: RecoveryApplier decodes the chunk id out of a WAL
-        // record buffer, so a truncated or corrupt record reaches here as an arbitrary int. Unguarded it lands as the same IndexOutOfRangeException from
-        // inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see NoteClusterBorn for why `+ 1` makes
-        // it the same case.
+        // The mirror of NoteClusterBorn's precondition, and this side is the one with untrusted input: RecoveryApplier decodes the chunk id out of an
+        // EntityMap record buffer, so a truncated or corrupt record reaches here as an arbitrary int. Unguarded it lands as the same
+        // IndexOutOfRangeException from inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see
+        // NoteClusterBorn for why `+ 1` makes it the same case.
         if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
         {
             ThrowHelper.ThrowInvalidOp(

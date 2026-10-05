@@ -4584,6 +4584,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // consolidated into the data file by the same checkpoint.
         ScrubVersionedChains();
 
+        // Phase 4b — the ECS cleanup of every replayed destroy (#935). RecoveryApplier.ApplyDestroyToExisting queues each one as the live destroy does, and
+        // SCRUB has just collapsed their chains to the tombstones it appended. Drained here, not by the first transaction after open: recovery has no readers
+        // (D1), and the seal must persist the result. Left to that later drain, a session ending first keeps those chain roots allocated for good — the next
+        // crash-path open re-derives the EntityMap without the dead entities, and SCRUB and the orphan sweep keep every allocated chain head.
+        DrainReplayedDestroys();
+
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
         // rebuilt index pages.
@@ -4615,6 +4621,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
         RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Runs the ECS cleanup the WAL apply queued for its replayed destroys — frees each dead entity's chain roots and removes its EntityMap record — so the
+    /// seal consolidates it. The call site in <see cref="RunWalV2Recovery"/> says why it cannot wait for the first transaction.
+    /// </summary>
+    private void DrainReplayedDestroys()
+    {
+        if (EcsCleanupQueueSize == 0)
+        {
+            return;
+        }
+
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            // Every replayed death is below this cutoff: the driver resumed the TSN allocator past the highest TSN it applied (RB-05).
+            ProcessEcsCleanups(TransactionChain.NextFreeId + 1, changeSet);
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
     }
 
     /// <summary>

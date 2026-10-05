@@ -414,9 +414,10 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
   never folding a real `DiedTSN` at a site that does not clear the bit. The died watermark's entire argument is that a
         reader past the last death is exact BECAUSE occupancy already reflects it; where the bit survives, that is false and
         every reader past that TSN is granted over a tombstone.
-  enforce the two sites in that shape — WAL replay (`RecoveryApplier.ApplyDestroyToExisting`, whose cleanup is deferred to
-          the orphan sweep) and cluster migration (which sets a dst bit and releases only the src slot) — fold
-          `VisibilityUnknown`, restoring the permanent deny the pre-#722 sticky flag gave for free.
+  enforce the one site in that shape — cluster migration (which sets a dst bit and releases only the src slot) — folds
+          `VisibilityUnknown`, restoring the permanent deny the pre-#722 sticky flag gave for free. WAL replay
+          (`RecoveryApplier.ApplyDestroyToExisting`) was the other until #935: it now releases the slot like the commit path
+          and folds the death's TSN before the release.
   scope: RecoveryApplier.ApplyDestroyToExisting, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.NoteClusterDied
   on_violation: permanent over-count after any recovery that replays a below-frontier destroy; `Count()` returns N+1 while
                 the scan returns N.

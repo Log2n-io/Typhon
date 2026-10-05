@@ -555,6 +555,321 @@ internal sealed class TrueCrashE2ETests
         }
     }
 
+    /// <summary>How the session that ran the recovery ends.</summary>
+    public enum RecoverySessionEnd { HardCrash, CleanShutdown }
+
+    /// <summary>
+    /// A destroy that recovery replays must stay applied through every LATER open, not only the one that replayed it (#935).
+    /// </summary>
+    /// <remarks>
+    /// The open after a recovery has nothing to replay — the seal moved CheckpointLSN past the destroys — and re-derives the EntityMap from the cluster
+    /// occupancy (RB-01), carrying nothing else of the old map across but EnabledBits. So the death survives only if the replay cleared the occupancy bit the
+    /// way the commit path's <c>ReleaseSlot</c> does; a replay that only tombstones the EntityMap record brings the entity back with its old values. A clean
+    /// shutdown in between does not help: the WAL files outlive it, so that open takes the same re-derive. The count and the broad scan pin the occupancy
+    /// side directly — the rebuilt clusters are all-genesis, so <c>Count()</c> popcounts the occupancy word with no per-entity probe behind it.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-01")]
+    public void DestroyCheckpointedEntity_StaysDeadThroughTheOpenAfterRecovery([Values] RecoverySessionEnd end, [Values] bool mixedArchetype)
+    {
+        const int count = 10;
+        var entityIds = new EntityId[count];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, mixedArchetype);
+
+            long spawnHighLsn;
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    entityIds[i] = mixedArchetype
+                        ? tx.Spawn<SealMixedArch>(SealMixedArch.Pos.Set(new SealPos(i, i)), SealMixedArch.Score.Set(new SealScore(i + 1)))
+                        : tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i + 1, i, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+                spawnHighLsn = dbe.DurabilityLog.LastAppendedLsn;
+            }
+
+            // The spawns go below the recovery window, so the replay meets each destroy as a base-entity destroy (ApplyDestroyToExisting).
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn), "premise: the spawns are below the recovery window");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i += 2)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Destroy(entityIds[i]);
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        // Recovery replays the destroys and seals them below CheckpointLSN.
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, mixedArchetype);
+            Assert.That(dbe.LastWalV2RecoveryResult.RecordsApplied, Is.GreaterThan(0), "premise: this open replayed the destroys");
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                AssertOnlyOddEntitiesAlive(tx, entityIds, mixedArchetype, "the open that replayed the destroys");
+            }
+
+            if (end == RecoverySessionEnd.HardCrash)
+            {
+                dbe.SimulateHardCrash();
+            }
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, mixedArchetype);
+            Assert.That(dbe.LastWalV2RecoveryResult.RecordsApplied, Is.Zero,
+                "premise: the seal moved CheckpointLSN past the destroys, so nothing replays them");
+            Assert.That(dbe.LastOpenCrashEntityMapRebuildCount, Is.GreaterThan(0), "premise: this open re-derived the EntityMap from the cluster occupancy");
+
+            using var tx = dbe.CreateQuickTransaction();
+            AssertOnlyOddEntitiesAlive(tx, entityIds, mixedArchetype, $"the open after the recovery ({end})");
+        }
+    }
+
+    /// <summary>
+    /// A replayed destroy reclaims what a live one does (#935), and the seal persists it: SCRUB frees the chain's content, since the chain now ends in a
+    /// tombstone rather than a live head, and recovery's own drain of the ECS cleanup queue frees the chain root and removes the EntityMap record.
+    /// </summary>
+    /// <remarks>
+    /// Asserted at the open, before any transaction could drain the queue, and again after a crash that follows it at once. A root left for the first
+    /// transaction to free is lost by that crash, and the open after it keeps the root for good: its map no longer names the entity, and SCRUB and the
+    /// orphan sweep keep every allocated chain head.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void RecoveredDestroy_ReclaimsTheChainAndTheRecord()
+    {
+        const int count = 10;
+        var entityIds = new EntityId[count];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, false);
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    entityIds[i] = tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i + 1, i, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i += 2)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Destroy(entityIds[i]);
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        int rootsAfterRecovery;
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, false);
+            Assert.That(dbe.LastWalV2RecoveryResult.RecordsApplied, Is.EqualTo(count / 2), "premise: this open replayed the destroys");
+
+            // Before any transaction: whatever is reclaimed here was reclaimed by the recovery itself, ahead of its seal.
+            rootsAfterRecovery = AssertChainStorage(dbe, count / 2, "the open that replayed the destroys");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, false);
+            Assert.That(dbe.LastWalV2RecoveryResult.RecordsApplied, Is.Zero, "premise: nothing replays the destroys again");
+            Assert.That(AssertChainStorage(dbe, count / 2, "the open after a crash that followed the recovery"), Is.EqualTo(rootsAfterRecovery),
+                "the seal must have persisted the reclamation");
+        }
+    }
+
+    /// <summary>
+    /// Asserts <c>CompAArch</c> holds storage for exactly <paramref name="survivors"/> entities: their EntityMap records, and one content chunk per chain root.
+    /// </summary>
+    /// <returns>The allocated chain-root count, so a caller can compare it across opens.</returns>
+    private static int AssertChainStorage(DatabaseEngine dbe, int survivors, string when)
+    {
+        var meta = Archetype<CompAArch>.Metadata;
+        var state = dbe._archetypeStates[meta.ArchetypeId];
+        var table = state.SlotToComponentTable[meta.GetSlot(ArchetypeRegistry.GetComponentTypeId<CompA>())];
+        var roots = table.CompRevTableSegment.AllocatedChunkCount;
+        var content = table.ComponentSegment.AllocatedChunkCount;
+        var report = $"roots {roots}, content {content}, records {state.EntityMap.EntryCount}";
+
+        Assert.That(state.EntityMap.EntryCount, Is.EqualTo(survivors), $"{when}: the dead entities' records must be gone ({report})");
+        Assert.That(content, Is.EqualTo(roots), $"{when}: SCRUB must have freed the dead chains' content — one content chunk per root ({report})");
+
+        // The roots, counted against the live chains rather than a constant, so the segment's reserved chunk does not have to be guessed.
+        int chains;
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            chains = ComponentRevisionManager.EnumerateVersionedChainHeads(table, dbe.RoutingIdOf(meta)).Count;
+        }
+
+        Assert.That(chains, Is.EqualTo(survivors), $"{when}: only the survivors may keep a chain ({report})");
+        return roots;
+    }
+
+    /// <summary>
+    /// A window that destroys every entity of a checkpointed cluster and spawns new ones (#935): the replayed destroys drain the cluster and free its chunk
+    /// mid-apply, while the replayed spawns claim slots in the same pass — possibly that very chunk id, reissued.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void DestroyEveryCheckpointedEntity_AndSpawnInTheSameWindow_SurvivesTwoOpens()
+    {
+        const int count = 10;
+        const int spawned = 3;
+        var oldIds = new EntityId[count];
+        var newIds = new EntityId[spawned];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, false);
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    oldIds[i] = tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i + 1, i, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe._archetypeStates[Archetype<CompAArch>.Metadata.ArchetypeId].ClusterState.ActiveClusterCount, Is.EqualTo(1),
+                "premise: the checkpointed entities share one cluster, so destroying them all drains it");
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    tx.Destroy(oldIds[i]);
+                    tx.Commit();
+                }
+
+                for (int i = 0; i < spawned; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    newIds[i] = tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(100 + i, i, i)));
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        for (var open = 0; open < 2; open++)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterDestroyWorkload(dbe, false);
+            var when = open == 0 ? "the open that replayed the window" : "the open after it";
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    Assert.That(tx.IsAlive(oldIds[i]), Is.False, $"{when}: destroyed entity {i} came back");
+                }
+
+                for (int i = 0; i < spawned; i++)
+                {
+                    Assert.That(tx.IsAlive(newIds[i]) && tx.Open(newIds[i]).Read(CompAArch.A).A == 100 + i, Is.True,
+                        $"{when}: the entity spawned in the window must be alive with its value");
+                }
+
+                Assert.That(tx.Query<CompAArch>().Count(), Is.EqualTo(spawned), $"{when}: Count()");
+            }
+
+            dbe.SimulateHardCrash();
+        }
+    }
+
+    private static void RegisterDestroyWorkload(DatabaseEngine dbe, bool mixedArchetype)
+    {
+        if (mixedArchetype)
+        {
+            dbe.RegisterComponentFromAccessor<SealPos>();
+            dbe.RegisterComponentFromAccessor<SealScore>();
+        }
+        else
+        {
+            dbe.RegisterComponentFromAccessor<CompA>();
+        }
+
+        dbe.InitializeArchetypes();
+    }
+
+    private static void AssertOnlyOddEntitiesAlive(Transaction tx, EntityId[] entityIds, bool mixedArchetype, string when)
+    {
+        for (int i = 0; i < entityIds.Length; i++)
+        {
+            if (i % 2 == 0)
+            {
+                Assert.That(tx.IsAlive(entityIds[i]), Is.False, $"{when}: destroyed entity {i} came back");
+                continue;
+            }
+
+            Assert.That(tx.IsAlive(entityIds[i]), Is.True, $"{when}: survivor {i} must be alive");
+            var value = mixedArchetype ? tx.Open(entityIds[i]).Read(SealMixedArch.Score).Value : tx.Open(entityIds[i]).Read(CompAArch.A).A;
+            Assert.That(value, Is.EqualTo(i + 1), $"{when}: survivor {i}'s value must be intact");
+        }
+
+        var scanned = mixedArchetype ? tx.Query<SealMixedArch>().Execute() : tx.Query<CompAArch>().Execute();
+        var counted = mixedArchetype ? tx.Query<SealMixedArch>().Count() : tx.Query<CompAArch>().Count();
+        for (int i = 0; i < entityIds.Length; i += 2)
+        {
+            Assert.That(scanned.Contains(entityIds[i]), Is.False, $"{when}: a broad scan returned destroyed entity {i}");
+        }
+
+        Assert.That(scanned.Count, Is.EqualTo(entityIds.Length / 2), $"{when}: broad scan size");
+        Assert.That(counted, Is.EqualTo(entityIds.Length / 2), $"{when}: Count()");
+    }
+
     /// <summary>
     /// The Phase-6 seal must CONSOLIDATE recovered state into the data file, not leave it re-derivable from the WAL. After a crash
     /// the first reopen replays the WAL and seals (a checkpoint that writes the recovered pages + advances CheckpointLSN). We then

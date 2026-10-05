@@ -283,11 +283,26 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     }
 
     /// <summary>
-    /// Applies a committed Destroy to an entity that already exists in the loaded EntityMap (its Spawn is below the checkpoint
-    /// frontier, so it is not in the recovery window — only the Destroy is). Sets DiedTSN on the existing record and writes it
-    /// back dirty-marked, mirroring the live FlushPendingDestroys archetype-level tombstone. Idempotent: a missing entity is a
-    /// no-op. Component-chain / index cleanup is consolidation (orphan sweep, a later increment) — DiedTSN alone makes IsAlive false.
+    /// Applies a committed Destroy to an entity that already exists in the loaded EntityMap (its Spawn is below the checkpoint frontier, so it is not in the
+    /// recovery window — only the Destroy is). Does what the live destroy does: tombstones each Versioned chain (<c>PrepareEcsDestroys</c>), releases the
+    /// cluster slot and sets DiedTSN (<c>FlushPendingDestroys</c>), and queues the entity for the deferred ECS cleanup. Idempotent (AP-12): an entity that is
+    /// missing or already tombstoned is not present, so there is nothing to destroy.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Releasing the slot is what makes the death outlive the next open</b> (#935). The open after this one has nothing to replay — the seal moves
+    /// CheckpointLSN past the Destroy — and the crash path re-derives the EntityMap from the cluster occupancy (RB-01), carrying nothing else of the old map
+    /// across but EnabledBits. This method used to set DiedTSN only, so the bit stayed set and that open rebuilt the entity alive with its old values. A clean
+    /// shutdown did not help: the WAL files outlive it, and their presence alone sends the next open down the re-derive.
+    /// </para>
+    /// <para>
+    /// The per-archetype index entries and the spatial cell layer are NOT removed here: on this path both are rebuilt from the cluster occupancy after the
+    /// apply (<c>RebuildClusterIndexes</c>, <c>RebuildSpatialLayerAfterRecovery</c>), so a released slot simply never reaches them. The tombstone is what lets
+    /// Phase-4 SCRUB free the chain's content (collection buffers included) instead of keeping it as a live head; the queued cleanup then frees the chain
+    /// root and removes the EntityMap record, as it does after a live destroy. Recovery drains that queue itself, right after SCRUB and before the seal
+    /// (<c>DatabaseEngine.DrainReplayedDestroys</c>).
+    /// </para>
+    /// </remarks>
     public void ApplyDestroyToExisting(long entityIdRaw, long tsn)
     {
         Track(tsn);
@@ -301,14 +316,70 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             return; // not in the base map (already gone / never persisted) — nothing to tombstone
         }
 
-        EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
-        // H1, and NOT with `tsn`. Unlike the commit-path tombstone this replay does NOT call ReleaseSlot — cleanup is deferred to the orphan sweep — so the
-        // cluster keeps a SET occupancy bit for a dead entity. The whole died-watermark argument rests on the bit being cleared at destroy: a reader past the
-        // last death is exact only because occupancy already reflects it. Fold `tsn` here and every post-recovery reader satisfies `died <= txTsn`, the gate
-        // grants, and TryCountViaOccupancy popcounts a tombstone with no per-entity probe to catch it — a permanent over-count after any recovery that
-        // replays a below-frontier destroy. VisibilityUnknown denies this cluster until the sweep clears the bit, which is what the pre-#722 sticky flag did.
-        _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), ArchetypeClusterState.VisibilityUnknown);
+        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
+        if (header.DiedTSN != 0)
+        {
+            // Already dead, so the destroy that set this released the slot — which a later spawn may have claimed since. Releasing it again would kill that
+            // entity instead. Unreachable while the crash path re-derives the map (every rebuilt record is alive), but this method must not depend on that.
+            return;
+        }
+
+        if (_hasClusterAccessor)
+        {
+            TombstoneVersionedChains(readBuf, tsn);
+
+            var clusterState = _engineState.ClusterState;
+            var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
+            var slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
+
+            // H1 ordering, as in FlushPendingDestroys: the died watermark is folded BEFORE ReleaseSlot clears the occupancy bit. With the bit cleared the
+            // watermark is exact, so this folds `tsn` — not the VisibilityUnknown a tombstone-only replay had to fold to keep the gate from popcounting it.
+            clusterState.NoteClusterDied(clusterChunkId, tsn);
+            clusterState.ReleaseSlot(ref _clusterAccessor, clusterChunkId, slotIndex, _changeSet, clusterState.SpatialOfCluster(clusterChunkId).Grid);
+        }
+
+        header.DiedTSN = tsn;
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+        _dbe.EnqueueEcsCleanup(eid, _metadata, tsn);
+    }
+
+    /// <summary>
+    /// Appends a committed tombstone (a revision with no content chunk) to every Versioned chain a cluster entity holds — the end state the live destroy's
+    /// <c>MarkComponentDeleted</c> leaves once its transaction commits.
+    /// </summary>
+    private void TombstoneVersionedChains(byte* recordPtr, long tsn)
+    {
+        var slotToVi = _engineState.ClusterState.Layout.SlotToVersionedIndex;
+        if (slotToVi == null)
+        {
+            return; // no Versioned component, so no chain
+        }
+
+        for (var slot = 0; slot < _componentCount; slot++)
+        {
+            var vi = slotToVi[slot];
+            if (vi < 0)
+            {
+                continue;
+            }
+
+            var root = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordPtr, vi);
+            if (root == 0)
+            {
+                continue; // spawned without this component — there is no chain to end
+            }
+
+            var info = GetRecoveryInfo(_engineState.SlotToComponentTable[slot]);
+            var compRevInfo = new ComponentInfo.CompRevInfo
+            {
+                CompRevTableFirstChunkId = root,
+                PrevRevisionIndex = -1,
+                CurRevisionIndex = -1,
+            };
+
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, 0, true);
+            ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, root, compRevInfo.CurRevisionIndex).Commit(tsn);
+        }
     }
 
     /// <summary>
