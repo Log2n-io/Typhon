@@ -33,7 +33,7 @@ public class SpatialBulkLoadTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialBulkLoadTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialBulkLoadTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

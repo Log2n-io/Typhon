@@ -25,7 +25,7 @@ class LegacyBundleArtifactTests
     [SetUp]
     public void Setup()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(LegacyBundleArtifactTests));
+        _dir = Path.Combine(TestStorage.Root, nameof(LegacyBundleArtifactTests));
         Directory.CreateDirectory(_dir);
         Clean();
     }

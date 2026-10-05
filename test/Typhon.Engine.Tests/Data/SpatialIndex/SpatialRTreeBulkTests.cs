@@ -29,7 +29,7 @@ public class SpatialRTreeBulkTests
             testName = testName[^25..];
         }
 
-        _testDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialBulk");
+        _testDir = Path.Combine(TestStorage.Root, "SpatialBulk");
         Directory.CreateDirectory(_testDir);
 
         var sc = new ServiceCollection();

@@ -20,16 +20,21 @@ public abstract class AllocatorTestBase
     protected IResource AllocationResource => ResourceRegistry.Allocation;
 
     /// <summary>
-    /// Per-fixture isolated database directory. Fixtures that build their own MMF must place it here rather than directly in <see cref="Path.GetTempPath"/>:
-    /// under parallel execution dozens of fixtures create/open/delete DB bundles at once, and sharing the temp root produces "file used by another process"
-    /// contention. A per-fixture subdirectory keeps each fixture's I/O isolated (fixtures parallelize; tests within a fixture run serially).
+    /// Per-fixture isolated database directory, inside this RUN's root. Fixtures that build their own MMF must place it here rather than directly in
+    /// <see cref="Path.GetTempPath"/>: under parallel execution dozens of fixtures create/open/delete DB bundles at once, and sharing the temp root produces
+    /// "file used by another process" contention. A per-fixture subdirectory keeps each fixture's I/O isolated (fixtures parallelize; tests within a fixture
+    /// run serially).
     /// </summary>
+    /// <remarks>
+    /// Per-fixture was only ever half of it: a fixture name separates fixtures inside ONE test host and separates nothing between two of them. See
+    /// <see cref="TestStorage"/> for the run-scoped root that closes that, and for what it cost to find out.
+    /// </remarks>
     protected string TestDatabaseDir { get; private set; }
 
     [SetUp]
     public virtual void Setup()
     {
-        TestDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", GetType().Name);
+        TestDatabaseDir = Path.Combine(TestStorage.Root, GetType().Name);
         Directory.CreateDirectory(TestDatabaseDir);
 
         var config = new LoggerConfiguration()

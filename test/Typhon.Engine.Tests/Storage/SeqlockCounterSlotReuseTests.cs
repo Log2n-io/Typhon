@@ -40,7 +40,7 @@ class SeqlockCounterSlotReuseTests
         // Pre-fix the invariant violation reproduced on a fraction of builds; loop so a regression is caught reliably. Each build overflows the min cache
         // (forcing the eviction/reuse path), then asserts the invariant directly. Which slots get reused depends on the checkpoint thread's timing, so a
         // run exercises a different interleaving each time; what is asserted does not depend on it.
-        var baseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SeqlockCounterSlotReuseTests));
+        var baseDir = Path.Combine(TestStorage.Root, nameof(SeqlockCounterSlotReuseTests));
         Directory.CreateDirectory(baseDir);
 
         for (var iter = 0; iter < 15; iter++)

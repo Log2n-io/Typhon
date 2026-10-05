@@ -55,7 +55,7 @@ internal sealed class LockHandoffTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(LockHandoffTests), DbName);
+        _root = Path.Combine(TestStorage.Root, nameof(LockHandoffTests), DbName);
         _dbDir = Path.Combine(_root, "db");
         Directory.CreateDirectory(_dbDir);
     }

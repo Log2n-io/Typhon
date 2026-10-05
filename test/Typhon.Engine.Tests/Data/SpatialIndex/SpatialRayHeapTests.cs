@@ -59,7 +59,7 @@ public class SpatialRayHeapTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialRayHeapTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialRayHeapTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

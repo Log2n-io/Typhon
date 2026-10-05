@@ -69,7 +69,7 @@ public unsafe class SpatialDeepTreeTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialDeepTreeTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialDeepTreeTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

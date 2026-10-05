@@ -45,7 +45,7 @@ internal sealed class AdvisoryLockOwnershipTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(AdvisoryLockOwnershipTests), DbName);
+        _root = Path.Combine(TestStorage.Root, nameof(AdvisoryLockOwnershipTests), DbName);
         _dbDir = Path.Combine(_root, "db");
         Directory.CreateDirectory(_dbDir);
 

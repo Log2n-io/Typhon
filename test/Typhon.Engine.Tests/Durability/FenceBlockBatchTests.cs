@@ -63,7 +63,7 @@ internal sealed class FenceBlockBatchTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(FenceBlockBatchTests));
+        var root = Path.Combine(TestStorage.Root, nameof(FenceBlockBatchTests));
         _dbDir = Path.Combine(root, CurrentDatabaseName, "db");
         _walDir = Path.Combine(root, CurrentDatabaseName, "wal");
         Directory.CreateDirectory(_dbDir);

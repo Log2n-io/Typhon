@@ -27,7 +27,7 @@ unsafe class CellClusterTreeDifferentialTests
     [SetUp]
     public void Setup()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "CellClusterTreeDiff");
+        _dir = Path.Combine(TestStorage.Root, "CellClusterTreeDiff");
         Directory.CreateDirectory(_dir);
 
         var sc = new ServiceCollection();

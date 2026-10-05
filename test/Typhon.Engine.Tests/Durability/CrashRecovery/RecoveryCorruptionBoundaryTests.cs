@@ -66,7 +66,7 @@ internal sealed class RecoveryCorruptionBoundaryTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(RecoveryCorruptionBoundaryTests), DbName);
+        var root = Path.Combine(TestStorage.Root, nameof(RecoveryCorruptionBoundaryTests), DbName);
         _dbDir = Path.Combine(root, "db");
         _walDir = Path.Combine(root, "wal");
         Directory.CreateDirectory(_dbDir);

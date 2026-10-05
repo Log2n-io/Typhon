@@ -27,7 +27,7 @@ public class TyphonSetupTests
     [SetUp]
     public void SetUp()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(TyphonSetupTests), Guid.NewGuid().ToString("N"));
+        _dir = Path.Combine(TestStorage.Root, nameof(TyphonSetupTests), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
     }
 

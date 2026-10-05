@@ -188,7 +188,7 @@ internal sealed class WalCrashSweepTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(WalCrashSweepTests));
+        var root = Path.Combine(TestStorage.Root, nameof(WalCrashSweepTests));
         _dbDir = Path.Combine(root, CurrentDatabaseName, "db");
         _walDir = Path.Combine(root, CurrentDatabaseName, "wal");
         Directory.CreateDirectory(_dbDir);

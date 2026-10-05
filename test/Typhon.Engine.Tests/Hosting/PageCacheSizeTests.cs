@@ -22,7 +22,7 @@ public class PageCacheSizeTests
     [SetUp]
     public void SetUp()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(PageCacheSizeTests), Guid.NewGuid().ToString("N"));
+        _dir = Path.Combine(TestStorage.Root, nameof(PageCacheSizeTests), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
     }
 

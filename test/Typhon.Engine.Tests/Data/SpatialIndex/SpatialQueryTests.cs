@@ -36,7 +36,7 @@ public class SpatialQueryTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialQueryTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialQueryTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

@@ -37,7 +37,7 @@ internal sealed class SectorGeometryDeclarationTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SectorGeometryDeclarationTests), DbName);
+        _root = Path.Combine(TestStorage.Root, nameof(SectorGeometryDeclarationTests), DbName);
         Directory.CreateDirectory(_root);
 
         var services = new ServiceCollection();

@@ -26,7 +26,7 @@ class BundleWalRecoveryTests
     [SetUp]
     public void Setup()
     {
-        _dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(BundleWalRecoveryTests));
+        _dbDir = Path.Combine(TestStorage.Root, nameof(BundleWalRecoveryTests));
         Directory.CreateDirectory(_dbDir);
         // Start clean — remove any bundle left by a prior run so session 1 truly creates the database.
         var bundle = Path.Combine(_dbDir, $"{DbName}.typhon");

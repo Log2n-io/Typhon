@@ -33,7 +33,7 @@ public class SeedTests
     [SetUp]
     public void SetUp()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SeedTests), Guid.NewGuid().ToString("N"));
+        _dir = Path.Combine(TestStorage.Root, nameof(SeedTests), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
     }
 

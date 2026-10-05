@@ -49,7 +49,7 @@ unsafe class BroadphaseCrossoverSweepTests
     [SetUp]
     public void Setup()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "BroadphaseCrossover");
+        _dir = Path.Combine(TestStorage.Root, "BroadphaseCrossover");
         Directory.CreateDirectory(_dir);
 
         var sc = new ServiceCollection();

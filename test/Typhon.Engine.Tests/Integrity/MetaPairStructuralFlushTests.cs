@@ -44,7 +44,7 @@ internal sealed class MetaPairStructuralFlushTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(MetaPairStructuralFlushTests), DbName);
+        _root = Path.Combine(TestStorage.Root, nameof(MetaPairStructuralFlushTests), DbName);
         Directory.CreateDirectory(DbDir);
         Directory.CreateDirectory(Path.Combine(_root, "wal"));
     }

@@ -96,7 +96,7 @@ internal sealed class CheckpointDurabilityCrashTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(CheckpointDurabilityCrashTests));
+        var root = Path.Combine(TestStorage.Root, nameof(CheckpointDurabilityCrashTests));
         _dbDir = Path.Combine(root, CurrentDatabaseName, "db");
         _walDir = Path.Combine(root, CurrentDatabaseName, "wal");
         Directory.CreateDirectory(_dbDir);

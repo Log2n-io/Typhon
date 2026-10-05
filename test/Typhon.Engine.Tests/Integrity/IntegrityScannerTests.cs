@@ -50,7 +50,7 @@ internal sealed class IntegrityScannerTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(IntegrityScannerTests), CurrentDatabaseName);
+        _root = Path.Combine(TestStorage.Root, nameof(IntegrityScannerTests), CurrentDatabaseName);
         Directory.CreateDirectory(DbDir);
         Directory.CreateDirectory(Path.Combine(_root, "wal"));
 
