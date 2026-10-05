@@ -13,6 +13,11 @@ public partial class PagedMMF
 
     [LoggerMessage(
         Level = LogLevel.Warning,
+        Message = "Page cache backpressure: wait#{WaitCount} dirty={DirtyCount} epoch={EpochCount} retry={RetryCount} remaining={RemainingMs}ms")]
+    private static partial void LogBackpressure(ILogger logger, int waitCount, int dirtyCount, int epochCount, int retryCount, double remainingMs);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
         Message = "CopyPageWithSeqlock: page {MemPageIndex} has odd ModificationCounter={Counter} but is not Exclusive-latched — "
                 + "stale seqlock counter, skipping without wait.")]
     private static partial void LogStaleSeqlockCounterSkip(ILogger logger, int memPageIndex, int counter);

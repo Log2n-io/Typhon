@@ -153,6 +153,10 @@ class PageSlotRecordTests
         Assert.That(mmf.CollectDirtyMemPageIndices(), Is.Empty);
         Assert.That(mmf.EstimatedMemorySize, Is.Zero);
         Assert.DoesNotThrow(() => mmf.DecrementDirtyByDelta(0, 1));
+
+        // The page directory (#1136) is native too, and freed with the store: the residency diagnostics find nothing rather than reading it.
+        Assert.That(mmf.TryGetPageResidency(0, out _, out _), Is.False);
+        Assert.That(mmf.GetClockSweepCounterForDiagnostic(0), Is.EqualTo(-1));
     }
 
     // ─── Writeback debt (PS-10, PS-16) ───────────────────────────────────────────────────────────────────────────

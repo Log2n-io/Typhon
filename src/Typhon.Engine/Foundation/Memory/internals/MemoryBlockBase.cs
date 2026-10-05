@@ -9,7 +9,7 @@ namespace Typhon.Engine.Internals;
 internal abstract class MemoryBlockBase : MemoryManager<byte>, IMemoryResource, IDebugPropertiesProvider
 {
     public MemoryAllocator Allocator { get; }
-    public abstract int EstimatedMemorySize { get; }
+    public abstract long EstimatedMemorySize { get; }
     public abstract int MemoryBlockSize { get; }
     public abstract bool IsDisposed { get; }
     public abstract Span<byte> DataAsSpan { get; }

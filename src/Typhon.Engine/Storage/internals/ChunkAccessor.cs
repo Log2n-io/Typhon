@@ -89,9 +89,8 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetMemPageIndexFromSlot(int slot) =>
-        // _baseAddresses[slot] points to raw data (after PageHeaderSize)
-        // memPageIndex = (rawDataAddr - PageHeaderSize - _memPagesBaseAddr) / PageSize
-        (int)(((byte*)_baseAddresses[slot] - PagedMMF.PageHeaderSize - _memPagesBaseAddr) >> PagedMMF.PageSizePow2);
+        // _baseAddresses[slot] points to raw data (after PageHeaderSize). Exact because the cache is one contiguous block (PS-13).
+        PagedMMF.MemPageIndexOfRawData((byte*)_baseAddresses[slot], _memPagesBaseAddr);
 
     /// <summary>
     /// Create a new ChunkAccessor. All storage is stack-allocated — zero heap allocations.
