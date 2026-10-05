@@ -1476,8 +1476,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
         (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
 ### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
-  invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is published in
-            the page directory — from that moment a concurrent request for the same file page can take it and write to it
+  invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is ready (PS-15)
+            — its owner clears it after publishing it in the page directory, while no other thread may use it, so the "not on disk" decision
+            is taken when nothing else can bring the page in
   invariant every page a segment is given is cleared in full before any of it is written, header included: each data page, the root and
             every new map-extension page, including the one that holds only the terminating 0. Its page number may be reused from a deleted
             segment, so the slot holds that page's bytes — resident, or read back from disk — and the slot clear above never runs for it
@@ -1485,11 +1486,12 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             revision never goes backwards (`PageSectorFooter` stamps each sector with its low 16 bits). Not claimed: that the next stamp
             differs from every stale sector — a checkpoint bumps only its staging copy (CP-08), so the live revision can trail the disk's
   invariant the page-cache block itself is never zeroed: a slot's content before it is first assigned is undefined
-  scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, LogicalSegment.InitHeader, LogicalSegment.InitDataPages,
+  scope: PagedMMF.FetchPageToMemoryOnMiss, LogicalSegment.InitHeader, LogicalSegment.InitDataPages,
          LogicalSegment.CreateOrGrow, PagedMMF.PoisonCacheForProcess
   rationale: a slot handed to a new page holds its previous occupant's bytes, and two directory sites used to clear only the 192-byte
     header before writing a few entries; data pages of a segment created without a clear got nothing. Whatever the caller does not
-    write survives — and the clear has to come before publication, because a new page has no read task a second requester would wait on.
+    write survives — and the clear has to come before the slot is ready, because a new page has no read task a second requester would
+    wait on.
   on_violation: unrelated page content — component data, index keys, string-table bytes — reaches the data file inside a page's unwritten
     part, and `StampPageForWrite` CRCs the whole page, so it reloads as valid content. A disclosure into the file, its backups and copies;
     two logically identical databases differ byte for byte. Not `[fatal]`: no write is lost and no reader faults.
@@ -1500,9 +1502,43 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: `PagedMMF.PoisonCacheForProcess`, set once by the test assembly, fills every test page cache with 0xA5 at allocation. A fresh
         multi-MiB allocation reads zero on every supported platform, so without it a reader of undefined content would pass by accident.
   note: the block is not zeroed so that a large cache does not become resident at startup; #945 builds on this.
-  note: known gaps, open. A page that IS read from disk is published before its read starts, so a concurrent requester can use the slot's
-        previous content; and the loser of a concurrent miss reads into the winner's slot (#1128). A directory pair's twin is never cleared,
-        and a reused twin's old image can win at open (#1129).
+  note: known gap, open. A directory pair's twin is never cleared, and a reused twin's old image can win at open (#1129).
+
+### PS-15: A slot in the page directory is used only once its owner has prepared it `[fatal]` `[silent]`
+  invariant a slot claimed for file page X is published (`GetOrAdd`) before it is prepared, so it carries `SlotReady == false` from its claim
+            (`TryAcquire`) until its owner — the thread whose `GetOrAdd` published it — has reset `CrcVerified` and either cleared the page (not
+            on disk, PS-14) or started its read and recorded it as the slot's read task; the owner then sets `SlotReady` with a release write
+  invariant every `RequestPageEpoch*` that finds a slot not ready waits — acquire reads — until it is ready (then goes on) or no longer holds
+            X (its owner abandoned it, or it was reclaimed — then looks the page up again)
+  invariant after tagging the slot's epoch, a requester re-validates `FilePageIndex == X && SlotReady` before using it, and only then takes it
+            out of `Allocating`, under `StateSyncRoot`. The tag (a full-fence CAS, or an acquire read when no CAS is needed) pairs with
+            `TryAcquire`, which withdraws `SlotReady` and fences BEFORE re-checking the epoch, and restores it when it backs off: of a reclaim and
+            a tag that race, at least one sees the other, so the reclaim backs off or the requester retries — never a slot being reclaimed
+  invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
+            replacement
+  invariant an owner that throws before its read starts unpublishes the slot and frees it; a waiter sees it no longer holds X and looks the
+            page up again. It does NOT mark the slot ready: once Free it may already be another owner's unprepared slot
+  scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, PagedMMF.WaitForSlotReady, PagedMMF.ValidateTaggedSlot,
+         PagedMMF.AbandonUnpreparedSlot, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked, PagedMMF.RequestPageEpochNoSweep,
+         PagedMMF.TryAcquire, SlotReady
+  rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
+    the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
+    occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
+  on_violation: (1) a requester uses the page before its read lands — on `main` it silently got zeros (a stored CRC of 0 skips
+    verification): `PrepSliceEquivalenceTests` under 6 concurrent processes failed 22 of 60 with 2 001 index entries missing; with the test
+    poison it is a CRC failure on 0xA5 bytes, or a lock word that looks held (a 10 s `SegmentAllocation/LockBuffer` timeout); (2) the loser's
+    second read overwrites the winner's slot after a writer changed it — a lost write, a seqlock counter left odd, a false CRC failure
+  verified: PageSlotPublicationTests [VerifiesRule]: ARequesterOfAPublishedSlot_WaitsUntilItsOwnerHasStartedTheRead (the owner is held
+            between publishing and preparing; a second requester must still be waiting, then see the disk content),
+            TheLoserOfAConcurrentMiss_LeavesTheWinnersSlotAlone (a loser held before publishing must not overwrite a write made after the
+            winner's read, and the page is read once) and AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck. Each fails with its part of the
+            fix removed (#1128). Contended: `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of
+            60 with this rule held. The reclaim/tag pairing has no deterministic test: it is argued above and covered only by that stress
+  note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, so the bound only
+        turns a defect into a loud `LockTimeoutException` instead of a hang.
+  note: one gap is accepted. If allocating the read-task wrappers fails AFTER the read has started (out of memory, or the telemetry scope's
+        Dispose), the slot cannot be freed under an in-flight read and is never made ready: every later request for that file page times out
+        and the slot stays in `Allocating` — the page is unusable until the engine restarts.
 
 ---
 

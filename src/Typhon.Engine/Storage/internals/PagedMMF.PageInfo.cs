@@ -68,9 +68,18 @@ public partial class PagedMMF
         /// <summary>
         /// Whether the page CRC has been verified since it was loaded from disk.
         /// Reset to false during page allocation (Allocating state), set to true after verification.
-        /// No need for volatile — set during single-owner Allocating state and checked after I/O completion.
+        /// No need for volatile — reset by the slot's owner before <see cref="SlotReady"/> publishes it, and checked after I/O completion.
         /// </summary>
         public bool CrcVerified;
+
+        /// <summary>
+        /// PS-15: <c>false</c> from the moment the slot is claimed for a file page until its owner has prepared it — <see cref="CrcVerified"/>
+        /// reset, and the page either cleared (not on disk, PS-14) or its read started and recorded as the read task. The slot is visible in the
+        /// page directory before that, so a concurrent requester that finds it waits on this flag instead of using it. Written with
+        /// <c>Volatile.Write</c> (a release, so the preparation is visible to whoever reads <c>true</c>) and read with
+        /// <c>Volatile.Read</c>.
+        /// </summary>
+        public bool SlotReady;
 
         /// <summary>
         /// Number of <see cref="ChunkAccessor{TStore}"/> instances that have marked this page dirty in their local
