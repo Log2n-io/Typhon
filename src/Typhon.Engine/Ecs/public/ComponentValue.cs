@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -52,9 +52,11 @@ public unsafe struct ComponentValue
     /// <summary>Create a ComponentValue from raw bytes. Used by reflection-based callers (Shell CLI).</summary>
     internal static ComponentValue CreateFromRaw(int componentTypeId, byte* data, int dataSize)
     {
-        if (CheckConfig.Enabled && dataSize > MaxPayloadSize)
+        // Ungated for the same reason as Create<T>: the CopyTo below is bounded, but DataSize is then stored and read back by Read<T>, so an oversized value
+        // would be silently truncated here and mis-sized there. One compare against a memcpy is not a cost worth a flag.
+        if (dataSize > MaxPayloadSize)
         {
-            ThrowHelper.ThrowInvalidOp($"Data size {dataSize} exceeds max payload {MaxPayloadSize}");
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(null, dataSize, MaxPayloadSize);
         }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;
@@ -63,12 +65,27 @@ public unsafe struct ComponentValue
         return cv;
     }
 
+    /// <summary>Packs a component value for the spawn path.</summary>
+    /// <param name="componentTypeId">The component's type id.</param>
+    /// <param name="value">The value, copied into the inline buffer.</param>
+    /// <returns>The packed value.</returns>
+    /// <remarks>
+    /// <b>The size check is NOT gated on <c>CheckConfig.Enabled</c>, and gating it was a memory-safety hole.</b> The write below is an
+    /// <see cref="Unsafe.WriteUnaligned{T}(ref byte, T)"/> of <c>sizeof(T)</c> bytes into a <see cref="MaxPayloadSize"/>-byte <c>fixed</c> buffer, so an
+    /// oversized component overwrote whatever followed it — a stack frame, or another element of a <c>ComponentValue[]</c> on the heap. With
+    /// <c>CheckConfig.Enabled</c> false by default and no runtime setter, the guard was compiled out of Debug and Release alike, and a 132-byte component
+    /// killed the process with no managed exception, no message and no stack: found that way from the SWG demo's first non-spatial archetype.
+    /// <para>
+    /// <b>It is free.</b> <c>sizeof(T)</c> is a JIT-time constant for a concrete <c>T</c>, so the comparison folds to a constant and the whole branch is
+    /// eliminated in every instantiation that fits — which is every legal one. There was never a cost to gate.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ComponentValue Create<T>(int componentTypeId, in T value) where T : unmanaged
     {
-        if (CheckConfig.Enabled && sizeof(T) > MaxPayloadSize)
+        if (sizeof(T) > MaxPayloadSize)
         {
-            ThrowHelper.ThrowInvalidOp($"Component size {sizeof(T)} exceeds max payload {MaxPayloadSize}");
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(typeof(T), sizeof(T), MaxPayloadSize);
         }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;

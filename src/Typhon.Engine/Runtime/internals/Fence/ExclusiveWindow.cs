@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -111,11 +111,34 @@ internal sealed class ExclusiveWindow
     }
 
     /// <summary>
-    /// Records a mutation of a fence-owned structure, and fails loudly when it comes from outside the fence while the window is open.
+    /// Records a mutation of a fence-owned structure, and fails loudly when it comes from outside the fence while the window is open AND the structure is one
+    /// the fence is currently writing without its protocol.
     /// </summary>
     /// <param name="site">Call-site name for the message. A literal at every call, so no allocation and no formatting on the fast path.</param>
+    /// <param name="unlatchedHere">
+    /// Whether the fence is, right now, mutating THIS structure through a path that has dropped its latch / OLC validation.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>Observation and violation are separate, and conflating them is what made this detector reject correct code.</b> The fence writes B+Trees and the
+    /// EntityMap every tick, almost entirely through their ordinary latched mutators; it drops the protocol on exactly one path per structure — a B+Tree's bulk
+    /// value rewrite, which repoints migrants' index entries and is therefore reached only for a SPATIAL archetype, and an EntityMap's pre-sorted bulk batch,
+    /// which a concurrent insert can invalidate by splitting the map. So:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>every fence-thread mutation still sets <see cref="ObservedFenceMutation"/>, because that is the anti-vacuity signal EW-01's verifier pairs with
+    ///         its zero — a fence that wrote nothing must fail as loudly as one that was raced;</item>
+    ///   <item>a foreign-thread mutation is a violation only when <paramref name="unlatchedHere"/>, because everywhere else the structure's own latch or OLC
+    ///         protocol makes it safe — and it always did.</item>
+    /// </list>
+    /// <para>
+    /// Before this parameter existed the check was "is any fence running on this engine", with no idea which structure the caller held. An off-tick commit of a
+    /// <c>StorageMode.Versioned</c>, non-spatial entity — which writes the EntityMap on spawn and a B+Tree for any indexed field, both fully latched — was
+    /// rejected for a hazard that was not present. That is a false positive on the engine's own concurrency guarantee, and the guarantee is the thing to keep.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void NoteMutation(string site)
+    internal void NoteMutation(string site, bool unlatchedHere)
     {
         // Closed is overwhelmingly the common case: outside the fence this is one field read and a not-taken branch.
         if (Volatile.Read(ref _depth) == 0)
@@ -133,6 +156,12 @@ internal sealed class ExclusiveWindow
                 Volatile.Write(ref _sawFenceMutation, true);
             }
 
+            return;
+        }
+
+        // Foreign, with the window open — but harmless unless the fence has dropped this structure's protocol.
+        if (!unlatchedHere)
+        {
             return;
         }
 
@@ -159,10 +188,11 @@ internal sealed class ExclusiveWindow
         Interlocked.Increment(ref _violations);
 
         ThrowHelper.ThrowInvalidOp(
-            $"EW-01 violation: thread {threadId} called {site} while the tick fence was open. The fence writes cluster B+Trees, the EntityMap and the "
-            + "per-cell spatial structures with no OLC validation, no write latch and no B-link right-walk, so a concurrent mutation corrupts them silently. "
-            + "The usual cause is a side transaction from TickContext.CreateSideTransaction committed after the system that created it returned — commit and "
-            + "dispose it before returning. A host driving WriteTickFence itself owns the same obligation.");
+            $"EW-01 violation: thread {threadId} called {site} while the tick fence was rewriting that same structure without its latch — a B+Tree's bulk "
+            + "value rewrite or the EntityMap's pre-sorted batch, both reached only for a SPATIAL archetype's migrants. A concurrent mutation there relocates "
+            + "keys out from under a slice that is not validating versions, or splits the map the batch was sorted against. Do this work from a system, or "
+            + "from a side transaction committed and disposed before the creating system returns. A host driving WriteTickFence itself owns the same "
+            + "obligation. NOTE: an ordinary off-tick write to a Versioned, non-spatial entity is NOT this — it is safe and no longer reported.");
     }
 
     /// <summary>Undoes one <see cref="Open"/> or <see cref="EnterWorker"/>.</summary>

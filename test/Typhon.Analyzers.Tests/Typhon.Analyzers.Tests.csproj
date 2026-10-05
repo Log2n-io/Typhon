@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -18,6 +18,9 @@
   <ItemGroup>
     <!-- Reference the analyzers as a normal assembly reference so tests can instantiate the analyzer types directly. -->
     <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj" />
+    <!-- For ONE assertion: TYPHON012's byte limit is a copy of ComponentValue.MaxPayloadSize, which a netstandard2.0 analyzer cannot reference, and a copy
+         with nothing checking it is a copy that rots. See TheInlinePayloadConstantMatchesTheEngines. -->
+    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
   </ItemGroup>
 
 </Project>

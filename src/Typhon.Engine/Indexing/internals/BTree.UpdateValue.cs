@@ -1,4 +1,4 @@
-using System.Threading;
+﻿using System.Threading;
 
 using System;
 
@@ -52,7 +52,7 @@ internal abstract partial class BTree<TKey, TStore>
 
     private bool TryUpdateValueUnguarded(TKey key, int newValue, ref ChunkAccessor<TStore> accessor)
     {
-        _fenceWindow?.NoteMutation("BTree.TryUpdateValue");
+        NoteLatchedMutation("BTree.TryUpdateValue");
         // On an AllowMultiple tree the leaf slot holds a bufferId, not a value (see CreateInsertValue in BTree.Insert.cs), so SetValueOnly below would
         // overwrite it with a ClusterLocation: the buffer is orphaned and every later read of that key dereferences an arbitrary chunk id as a buffer root.
         // That is silent index corruption from a caller using the wrong overload, which is why this throws rather than returning false — `false` is the
@@ -222,7 +222,7 @@ internal abstract partial class BTree<TKey, TStore>
 
     private bool TryUpdateValueAtUnguarded(TKey key, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> accessor)
     {
-        _fenceWindow?.NoteMutation("BTree.TryUpdateValueAt");
+        NoteLatchedMutation("BTree.TryUpdateValueAt");
 
         // Symmetric with TryUpdateValue's guard, and for the same reason: a unique index has no element buffers at all, so there is nothing this could
         // address. Returning false would report it as "the element is not there", which is a different and recoverable condition.

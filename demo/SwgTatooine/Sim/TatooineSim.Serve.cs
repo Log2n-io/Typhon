@@ -143,6 +143,13 @@ public sealed partial class TatooineSim
         // declarations against the builder ones this way).
         var catalog = _runtime.SubscriptionsCatalogJson;
         Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
+
+        // Where the token signing key came from, and NEVER the key itself. Printed because the consequence is invisible otherwise: with a per-process key,
+        // every token a browser holds stops working the moment this process restarts, and the operator finds that out from a user rather than from the log.
+        Console.WriteLine(Accounts.AuthToken.KeyIsPersistent
+            ? $"  auth: tokens signed with {Accounts.AuthToken.KeyVariable} — they survive a restart"
+            : $"  auth: tokens signed with a key generated for this process — every token stops working on restart. "
+              + $"Set {Accounts.AuthToken.KeyVariable} (openssl rand -base64 32) for an instance that is kept.");
     }
 
     /// <summary>The simulation's own schedule, plus the two systems a server needs that a benchmark does not.</summary>

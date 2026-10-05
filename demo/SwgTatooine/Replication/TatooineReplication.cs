@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using SwgTatooine.Accounts;
 using Typhon.Protocol;
 
 namespace SwgTatooine;
@@ -442,6 +443,23 @@ public static class TatooineReplication
     /// <summary>The close code a session kicked by <see cref="RequestShutdown"/> carries.</summary>
     public const ushort ShutdownCloseCode = 4100;
 
+    /// <summary>
+    /// The close code a <c>player</c> session carrying no valid token is refused with (A3).
+    /// </summary>
+    /// <remarks>
+    /// Its own code rather than reusing <see cref="HouseFullCloseCode"/>, because a client must be able to tell "come back
+    /// later" from "log in again": the first is worth a retry on the same credentials and the second never is. A browser that
+    /// cannot distinguish them either retries forever against a rejected token or gives up on a full server.
+    /// </remarks>
+    public const ushort NotAuthenticatedCloseCode = 4102;
+
+    /// <summary>
+    /// How many <c>player</c> admissions were refused for want of a valid token. Read by a test and by the stats page.
+    /// </summary>
+    public static long RefusedUnauthenticated => System.Threading.Interlocked.Read(ref _refusedUnauthenticated);
+
+    private static long _refusedUnauthenticated;
+
     // Live sessions of each role, as the last tick counted them from the session table, and admissions granted since that count. The hook runs on the
     // transport thread and the count runs in the tick, so neither alone is the truth: the hook admits against live + pending, and the tick zeroes pending
     // BEFORE it walks. That ordering is what makes the cap safe — a session admitted during the walk is either seen by the walk or still in pending, so it
@@ -575,13 +593,28 @@ public static class TatooineReplication
         var player = string.Equals(request.Kind, PlayerKind, StringComparison.Ordinal);
         if (player)
         {
+            // A3: a player session IS its account, so the token is checked before the capacity reservation — refusing after reserving would leak a pending
+            // slot on every unauthenticated attempt, which is a cap this hook cannot get back without a tick.
+            if (!AuthToken.TryValidate(request.Token, out var account))
+            {
+                System.Threading.Interlocked.Increment(ref _refusedUnauthenticated);
+                return Admission.Reject(NotAuthenticatedCloseCode, "log in at /auth/login and present the token on HELLO");
+            }
+
             // The byte budget stays with BindOpenedSessions' SetBudget rather than moving into these limits. Both would work, and setting it in two places
             // would mean two numbers to keep equal — and that one is what the Phase 2 criteria measure with.
+            //
+            // The account rides through as AppData, which is what the session system reads on SessionEventKind.Opened to know WHICH avatar to bind (A5).
+            // Carrying it here rather than looking the token up again later is the point: the hook is where the token was proved, and proving it twice would
+            // be two places that could disagree.
             return TryReserve(ref _pendingClients, System.Threading.Volatile.Read(ref _liveClients), MaxClients)
-                ? Admission.Accept(SessionRole.Player)
+                ? Admission.Accept(SessionRole.Player, null, new PlayerIdentity(account))
                 : Full("player", MaxClients);
         }
 
+        // A god session stays ANONYMOUS and carries no AppData. It is read-only by role — SessionRole.Spectator — and every game intent is Roles(Player), so
+        // there is nothing for an identity to authorise. Requiring a token here would mean a login screen in front of the god camera, which is the one tool
+        // that has to work on a box nobody has an account on.
         return TryReserve(ref _pendingSpectators, System.Threading.Volatile.Read(ref _liveSpectators), MaxSpectators)
             ? Admission.Accept(SessionRole.Spectator, SessionLimits.God)
             : Full("spectator", MaxSpectators);
@@ -602,6 +635,7 @@ public static class TatooineReplication
         System.Threading.Volatile.Write(ref _pendingClients, 0);
         System.Threading.Volatile.Write(ref _pendingSpectators, 0);
         System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
+        System.Threading.Interlocked.Exchange(ref _refusedUnauthenticated, 0);
         System.Threading.Interlocked.Exchange(ref _kicksStaged, 0);
         Kicked.Clear();
         Spectators.Clear();

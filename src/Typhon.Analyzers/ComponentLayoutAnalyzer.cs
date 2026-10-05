@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
@@ -17,6 +17,7 @@ namespace Typhon.Analyzers;
 /// <list type="bullet">
 ///   <item><b>TYPHON010</b> (warning) — the struct stores padding that <c>Pack = 4</c> would remove; every entity pays for bytes that carry no field.</item>
 ///   <item><b>TYPHON011</b> (error) — the struct's managed and marshalled layouts differ, so the schema cannot describe it correctly.</item>
+///   <item><b>TYPHON013</b> (warning) — the struct is too large to travel in a <c>ComponentValue</c>'s inline payload, so it cannot be passed to <c>Spawn</c>.</item>
 /// </list>
 ///
 /// <para>
@@ -45,12 +46,39 @@ namespace Typhon.Analyzers;
 /// The rule is a comparison rather than a ban on <c>bool</c>/<c>char</c> because the two layouts often agree anyway — a lone <c>bool</c> before an <c>int</c>
 /// sits at the same offset either way — and because <c>CharSet.Unicode</c> or an explicit <c>[MarshalAs]</c> can reconcile them deliberately.
 /// </para>
+///
+/// <para>
+/// <b>TYPHON013</b> reports a struct past <see cref="InlineSpawnPayloadBytes"/>, the payload a <c>ComponentValue</c> carries inline on the spawn path. It is a
+/// WARNING and not an error, because such a component is perfectly legal — it just cannot be handed to <c>Spawn</c>; the caller spawns the entity with its
+/// smaller components and writes the large one through <c>OpenMut</c> afterwards, in the same transaction. A component that deliberately takes that route
+/// suppresses this, and the suppression is then the only place that decision is written down.
+/// </para>
+///
+/// <para>
+/// <b>It exists because the runtime failure used to be silent, and is still late.</b> <c>ComponentValue.Create&lt;T&gt;</c> copies <c>sizeof(T)</c> bytes into a
+/// fixed buffer of exactly this size, and its bounds check sat behind <c>CheckConfig.Enabled</c> — false by default, no runtime setter — so an oversized
+/// component wrote past the buffer and killed the process with no exception, no message and no stack (#1140, found from a 132-byte component). That check is
+/// ungated now, so the failure is loud; but it still arrives on the first spawn at run time, whereas the size is a fact about the declaration and is knowable
+/// here. The layout walk this analyzer already performs for TYPHON010 is the whole cost.
+/// </para>
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
 {
     public const string PaddingDiagnosticId = "TYPHON010";
     public const string MarshalDivergenceDiagnosticId = "TYPHON011";
+    public const string InlineSpawnPayloadDiagnosticId = "TYPHON013";
+
+    /// <summary>
+    /// Bytes a <c>ComponentValue</c> carries inline on the spawn path — <c>Typhon.Engine</c>'s <c>ComponentValue.MaxPayloadSize</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Duplicated, necessarily, and pinned by a test.</b> This project targets <c>netstandard2.0</c> and must not reference the assembly it analyses, so the
+    /// number cannot be read from its owner. <c>ComponentLayoutAnalyzerTests.TheInlinePayloadConstantMatchesTheEngines</c> asserts the two are equal, because a
+    /// duplicated constant with nothing holding the halves together is one that rots — and this one rotting means the analyzer either nags about components
+    /// that fit, or stays quiet about ones that do not.
+    /// </remarks>
+    public const int InlineSpawnPayloadBytes = 112;
 
     private const string ComponentAttributeFqn = "Typhon.Schema.Definition.ComponentAttribute";
     private const string StructLayoutAttributeFqn = "System.Runtime.InteropServices.StructLayoutAttribute";
@@ -104,7 +132,25 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
           + "even have the same total size, so no runtime size check can detect it. This is an error rather than a warning because there is no correct way to "
           + "use such a component.");
 
-    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(PaddingRule, MarshalDivergenceRule);
+    private static readonly DiagnosticDescriptor InlineSpawnPayloadRule = new DiagnosticDescriptor(
+        InlineSpawnPayloadDiagnosticId,
+        "Component struct is too large to pass to Spawn",
+        "Component '{0}' is {1} bytes, past the {2} a ComponentValue carries inline, so it cannot be passed to Spawn. Split it — a large key and its payload "
+      + "are usually two components, and splitting also keeps the bigger half out of every read that only wanted the smaller — or spawn the entity without "
+      + "it and write it through OpenMut in the same transaction.",
+        "Correctness",
+        DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description:
+            "Spawn takes its component values as ComponentValue, a 128-byte struct whose inline payload is 112 bytes, so a larger component cannot travel that "
+          + "way. This is reported at the declaration because that is where it can still be acted on: the author can split the component, which is usually the "
+          + "better layout anyway, while at the call site the only remaining option is the two-step spawn. A component over the limit is LEGAL - spawn the "
+          + "entity with its smaller components and write this one through OpenMut - so this is a warning, and a component taking that route deliberately should "
+          + "suppress it with a reason. The runtime check used to be compiled out by default and corrupted memory instead of throwing (#1140); it is ungated "
+          + "now, but it still fires on the first spawn, whereas the size is a property of the declaration.");
+
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
+        ImmutableArray.Create(PaddingRule, MarshalDivergenceRule, InlineSpawnPayloadRule);
 
     public override void Initialize(AnalysisContext context)
     {
@@ -188,6 +234,15 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
                     managed[culprit].Size, managed[culprit].Offset, marshalled[culprit].Size, marshalled[culprit].Offset));
                 return;
             }
+        }
+
+        // TYPHON013 next, and it does NOT return: a component can be both too large to spawn inline and wasteful of padding, and the two remedies are
+        // independent - splitting it does not remove the padding from either half, and Pack almost never brings 132 bytes under 112. Reporting one and
+        // swallowing the other would mean fixing the first only to discover the second.
+        if (managedLayout.Size > InlineSpawnPayloadBytes)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                InlineSpawnPayloadRule, type.Locations[0], type.Name, managedLayout.Size, InlineSpawnPayloadBytes));
         }
 
         // What the struct would measure at the recommended Pack, which is the only honest baseline: comparing against the end of the last field would report

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 
 namespace Typhon.Engine.Internals;
@@ -197,7 +197,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// <param name="stats">Node visits, leaves touched and entries applied — the measurement §5.3's model is checked against.</param>
     public int UpdateValues(ReadOnlySpan<BTreeValueUpdate<TKey>> sortedByKey, ref ChunkAccessor<TStore> accessor, out BulkUpdateStats stats)
     {
-        _fenceWindow?.NoteMutation("BTree.UpdateValues");
+        _fenceWindow?.NoteMutation("BTree.UpdateValues", unlatchedHere: true);
         // Same guard, same reason as TryUpdateValue: on an AllowMultiple tree the leaf slot is a bufferId, and SetValueOnly would overwrite it with a value.
         if (AllowMultiple)
         {
@@ -228,7 +228,7 @@ internal abstract partial class BTree<TKey, TStore>
     /// <param name="stats">Node visits, leaves touched and entries applied.</param>
     public int UpdateValues(ReadOnlySpan<BTreeMultiValueUpdate<TKey>> sortedByKey, ref ChunkAccessor<TStore> accessor, out BulkUpdateStats stats)
     {
-        _fenceWindow?.NoteMutation("BTree.UpdateValues(multi)");
+        _fenceWindow?.NoteMutation("BTree.UpdateValues(multi)", unlatchedHere: true);
         if (!AllowMultiple)
         {
             ThrowHelper.ThrowBulkUpdateValuesOnUnique();
@@ -249,6 +249,11 @@ internal abstract partial class BTree<TKey, TStore>
         }
 
         AssertSortedAscending<TEntry, TApplier>(batch);
+
+        // THIS is the path that drops the protocol — no ValidateVersion, no write latch, no right-walk — so it is what arms the detector for this tree. A
+        // latched mutator on another thread is harmless against this tree at any other moment and throws only while this scope is live; see
+        // _unlatchedRewriteDepth for why the detector used to reject correct off-tick work.
+        using var unlatched = EnterUnlatchedRewrite();
 
         var root = Root;
         if (!root.IsValid)

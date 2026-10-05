@@ -271,6 +271,12 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<ShipMotion>();
         Dbe.RegisterComponentFromAccessor<ShipRealm>();
 
+        // Identity (A1). The only NON-SPATIAL archetype here — no placement, so no AABB and no cluster migration — and the only one carrying an [Index]. That
+        // combination is what lets /auth read and write it from a Kestrel thread while the tick runs: Versioned is MVCC, and being out of the spatial index
+        // keeps it clear of the fence's unlatched fast paths (EW-02 in rules/runtime-scheduling.md).
+        Dbe.RegisterComponentFromAccessor<Account>();
+        Dbe.RegisterComponentFromAccessor<AccountSecret>();
+
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
         // that way, and shifting them would put a transcription error between the source and the world.

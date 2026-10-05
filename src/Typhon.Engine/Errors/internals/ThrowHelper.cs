@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
@@ -19,6 +19,25 @@ internal static class ThrowHelper
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
     public static void ThrowInvalidOp(string message) => throw new InvalidOperationException(message);
+
+    /// <summary>
+    /// Refuses a component too large to travel in a <c>ComponentValue</c>'s inline payload.
+    /// </summary>
+    /// <param name="componentType">The component type, or <see langword="null"/> for a raw-bytes caller that has no type to name.</param>
+    /// <param name="size">The size offered, bytes.</param>
+    /// <param name="maxPayload">The inline payload's capacity, bytes.</param>
+    /// <remarks>
+    /// Its own helper, and the message says what to do instead, because the alternative a caller needs — spawn then write — is not something the size alone
+    /// suggests. Before this existed the condition was checked only under <c>CheckConfig.Enabled</c> and the write ran off the end of the buffer, which killed
+    /// the process with no exception at all.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    public static void ThrowComponentTooLargeToSpawnInline(Type componentType, int size, int maxPayload)
+        => throw new InvalidOperationException(
+            $"{componentType?.Name ?? "A component"} is {size} bytes, past the {maxPayload} a ComponentValue carries inline, so it cannot be passed to Spawn. "
+            + "Spawn the entity with its smaller components and write this one through OpenMut afterwards, or split it — a 64-byte String64 plus a payload is "
+            + "usually two components, and splitting also keeps the larger half out of every read that only wanted the key.");
 
     // --- New — Tier 1 ---
 

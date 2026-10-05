@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Accounts;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -303,8 +304,12 @@ internal static class ClientSays
 
     /// <summary>Encodes a <c>HELLO</c>.</summary>
     /// <param name="kind">The session kind the client names.</param>
+    /// <param name="token">
+    /// The credential presented. A <c>player</c> needs a real one since A3 — <see cref="SessionHarness.Connect"/> mints it — and a
+    /// <c>god</c> session is anonymous, so anything at all does there.
+    /// </param>
     /// <returns>The message.</returns>
-    public static byte[] Hello(string kind)
+    public static byte[] Hello(string kind, string token = "opaque")
     {
         var hello = new HelloMessage
         {
@@ -312,7 +317,7 @@ internal static class ClientSays
             Minor = ProtocolConstants.Minor,
             Caps = Capabilities.None,
             Kind = kind,
-            Token = "opaque",
+            Token = token,
             ClientCatalogHash = 0,
             HelloPayload = [],
         };
@@ -344,17 +349,48 @@ internal sealed class SessionHarness
         _current = this;
     }
 
+    /// <summary>
+    /// The account a <c>player</c> link is minted a token for when a case does not name one.
+    /// </summary>
+    /// <remarks>
+    /// <b>It does not have to exist, and that is a property of A3 rather than a shortcut here.</b> <c>Admit</c> validates the
+    /// token's signature and expiry and carries the account id through as <c>AppData</c>; it never resolves the entity, because the
+    /// hook runs on the transport thread with no transaction to resolve it in. Binding an avatar to the account is A5's job, in the
+    /// tick, where a non-existent account is the thing that fails. So every case that only needs a <i>session</i> gets one without
+    /// also needing a signup.
+    /// </remarks>
+    private static readonly EntityId SyntheticAccount = EntityId.FromRawValue(1);
+
     /// <summary>Connects one client and completes its handshake.</summary>
     /// <param name="kind">The session kind: <c>god</c> or <c>player</c>.</param>
+    /// <param name="account">
+    /// The account a <c>player</c>'s token names; <see cref="SyntheticAccount"/> when not given. Ignored for <c>god</c>, which is
+    /// anonymous by design.
+    /// </param>
     /// <returns>The link, whose <see cref="FakeLink.Sent"/> is what the client received.</returns>
-    public FakeLink Connect(string kind)
+    public FakeLink Connect(string kind, EntityId? account = null)
+    {
+        var token = string.Equals(kind, TatooineReplication.PlayerKind, StringComparison.Ordinal)
+            ? AuthToken.Mint(account ?? SyntheticAccount)
+            : "opaque";
+
+        return ConnectWithToken(kind, token);
+    }
+
+    /// <summary>
+    /// Connects one client presenting a token this harness did not mint — a rubbish one, an expired one, or none.
+    /// </summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="token">Exactly what the client presents.</param>
+    /// <returns>The link. For a refused admission it carries the CLOSE the server sent, which is what the case asserts on.</returns>
+    public FakeLink ConnectWithToken(string kind, string token)
     {
         var link = new FakeLink();
         var info = new LinkInfo { Transport = "fake", SubProtocol = ProtocolConstants.WebSocketSubprotocol };
         var connection = _acceptor.Accept(link, info);
         Assert.That(connection, Is.Not.Null, "the runtime declined the link outright");
         link.Connection = connection;
-        connection.OnMessage(ClientSays.Hello(kind));
+        connection.OnMessage(ClientSays.Hello(kind, token));
         _links.Add(link);
         return link;
     }

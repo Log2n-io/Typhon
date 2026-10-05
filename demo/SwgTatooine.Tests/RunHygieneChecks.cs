@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using SwgTatooine.Accounts;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -146,11 +147,118 @@ public sealed class RunHygieneChecks
 
     // ── Admission control ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>A request as the transport builds one, for the admission hook.</summary>
+    /// <summary>
+    /// A request as the transport builds one, for the admission hook.
+    /// </summary>
     /// <param name="kind">The session kind the client names.</param>
     /// <returns>The request.</returns>
+    /// <remarks>
+    /// <b>A <c>player</c> gets a freshly minted token, because since A3 an unauthenticated one is refused before the caps are even
+    /// consulted.</b> These cases are about the caps and the roles, so they present a valid credential and let the thing under test
+    /// be the thing under test. The refusal itself is pinned separately by
+    /// <see cref="AnUnauthenticatedPlayerIsRefused"/> and <see cref="AGodSessionNeedsNoToken"/>.
+    /// </remarks>
     private static AdmissionRequest Asking(string kind)
-        => new(kind, "opaque", 0, [], null, null, null, "fake");
+        => Asking(kind, string.Equals(kind, TatooineReplication.PlayerKind, StringComparison.Ordinal) ? AuthToken.Mint(SomeAccount) : "opaque");
+
+    /// <summary>A request presenting exactly the token given, however bad.</summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="token">The credential presented.</param>
+    /// <returns>The request.</returns>
+    private static AdmissionRequest Asking(string kind, string token)
+        => new(kind, token, 0, [], null, null, null, "fake");
+
+    /// <summary>An account id for a minted token. Nothing resolves it — see <c>SessionHarness.SyntheticAccount</c> for why.</summary>
+    private static readonly EntityId SomeAccount = EntityId.FromRawValue(1);
+
+    /// <summary>
+    /// AC A-6, first half: a <c>player</c> session carrying no valid token is refused, and counted.
+    /// </summary>
+    /// <remarks>
+    /// Every shape of bad credential, because they must be indistinguishable to the client: absent, empty, rubbish, and a
+    /// well-formed token whose MAC does not check out. The last is the one that matters — a forged token is the attack, and the
+    /// others are just mistakes.
+    /// </remarks>
+    [Test]
+    public void AnUnauthenticatedPlayerIsRefused()
+    {
+        TatooineReplication.MaxClients = 0;
+        var minted = AuthToken.Mint(SomeAccount);
+
+        // One character of the token flipped: same length, same shape, wrong MAC. 'A' and 'B' are both base64url, so this stays decodable.
+        var forged = minted[..^1] + (minted[^1] == 'A' ? 'B' : 'A');
+
+        Assert.Multiple(() =>
+        {
+            foreach (var bad in new[] { null, string.Empty, "not-a-token", forged })
+            {
+                var refusal = TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind, bad));
+                Assert.That(refusal.IsAccepted, Is.False, $"a player presenting {bad ?? "null"} was admitted");
+                Assert.That(refusal.RejectCode, Is.EqualTo(TatooineReplication.NotAuthenticatedCloseCode),
+                    "the code must say 'log in again' and not 'come back later', or a client cannot tell a retry from a re-login");
+                Assert.That(refusal.RejectReason, Is.Not.Null.And.Not.Empty);
+            }
+
+            Assert.That(TatooineReplication.RefusedUnauthenticated, Is.EqualTo(4), "every refusal must be counted");
+            Assert.That(TatooineReplication.RefusedFull, Is.Zero, "a refusal for want of a token must not be charged to the cap");
+        });
+    }
+
+    /// <summary>
+    /// AC A-6, second half: a <c>god</c> session still connects anonymously, and carries no identity.
+    /// </summary>
+    /// <remarks>
+    /// The god camera is the one tool that has to work on a box nobody has an account on, and it can do nothing with an identity
+    /// anyway: it is <see cref="SessionRole.Spectator"/>, and every game intent is <c>Roles(Player)</c>.
+    /// </remarks>
+    [Test]
+    public void AGodSessionNeedsNoToken()
+    {
+        TatooineReplication.MaxSpectators = 0;
+
+        var admitted = TatooineReplication.Admit(Asking(TatooineReplication.GodKind, null));
+        Assert.Multiple(() =>
+        {
+            Assert.That(admitted.IsAccepted, Is.True, "a god session must not need a login");
+            Assert.That(admitted.Role, Is.EqualTo(SessionRole.Spectator));
+            Assert.That(admitted.AppData, Is.Null, "a god session is anonymous: it must carry no account");
+        });
+    }
+
+    /// <summary>An admitted player carries the account its token named, which is how A5 knows whose avatar to bind.</summary>
+    [Test]
+    public void AnAdmittedPlayerCarriesItsAccount()
+    {
+        TatooineReplication.MaxClients = 0;
+        var account = EntityId.FromRawValue(0x4D2);
+
+        var admitted = TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind, AuthToken.Mint(account)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(admitted.IsAccepted, Is.True);
+            Assert.That(admitted.AppData, Is.InstanceOf<PlayerIdentity>(), "the account must reach the tick as a NAMED type, not a boxed id");
+            Assert.That(((PlayerIdentity)admitted.AppData).Account, Is.EqualTo(account));
+        });
+    }
+
+    /// <summary>An expired token is refused, which is the only bound on a stolen one.</summary>
+    /// <remarks>
+    /// There is no revocation list — a token this server does not store cannot be withdrawn — so expiry is the whole of the defence
+    /// and it has to actually be checked. A negative lifetime is how that is staged rather than waited for.
+    /// </remarks>
+    [Test]
+    public void AnExpiredTokenIsRefused()
+    {
+        TatooineReplication.MaxClients = 0;
+        var stale = AuthToken.Mint(SomeAccount, TimeSpan.FromSeconds(-30));
+
+        var refusal = TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind, stale));
+        Assert.Multiple(() =>
+        {
+            Assert.That(refusal.IsAccepted, Is.False);
+            Assert.That(refusal.RejectCode, Is.EqualTo(TatooineReplication.NotAuthenticatedCloseCode));
+        });
+    }
 
     /// <summary>
     /// The hook admits up to the cap and refuses past it, with a code in the application range and a reason.

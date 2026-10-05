@@ -1,4 +1,4 @@
-# Runtime Scheduling Rules
+﻿# Runtime Scheduling Rules
 
 | Field | Value |
 |-------|-------|
@@ -385,16 +385,69 @@ The interval in which the tick fence owns the structures it maintains. Everythin
 is allowed to do cheaply — and steps 4-7 of `design/Spatial/vdb-cell-grid-and-migration.md` are built on it —
 descends from this one property.
 
-### EW-01: The tick fence runs with no concurrent mutation of the structures it maintains `[fatal]` `[silent]`
-  invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating (cluster B+Trees ∪ EntityMap ∪
-            per-cell spatial index ∪ ClusterCellMap ∪ ClusterAabbs)
+### EW-02: What a thread outside the DAG may touch `[fatal]` `[silent]`
+  invariant a thread that is not executing a system may, at any time and with no coordination:
+              - READ anything (pinned: ExclusiveWindowTests.ForeignThreadREADINGInsideTheWindow_IsNotAViolation)
+              - read and write StorageMode.Versioned components of a NON-SPATIAL archetype, including spawning and
+                destroying such entities and writing their [Index]ed fields
+            and must NOT, ever:
+              - write a StorageMode.SingleVersion or StorageMode.Transient component
+              - write any component of an archetype that has a [SpatialIndex] field
+              - call DatabaseEngine.WriteTickFence
+  rationale: Versioned is MVCC and the structures such a write touches are all concurrent by construction — the
+            revision chain, the EntityMap under its bucket write latch, a B+Tree under OLC, the WAL ring under
+            claim/publish, UowRegistry under Interlocked, NextEntityKey under Interlocked. This is the engine's
+            founding guarantee and it holds. Being BLUNT about the other two is the point of this rule: SV and
+            Transient in-place writes and anything spatial are NOT thread-safe outside the DAG, by design, because
+            that is where the fence's fast paths live.
+  never an off-tick SV or Transient in-place write. It sets ClusterShadowBitmap/ClusterDirtyBitmap bits while the
+        fence is draining and Clear()ing those same bitmaps, and DirtyBitmap.Clear is documented "Not thread-safe —
+        call only when no concurrent writers are active" (DirtyBitmap.cs:100). A lost bit means the index keeps the
+        pre-mutation key, or the write never reaches the WAL. SILENT: no detector covers this.
+  never an off-tick write to ClusterAabbs, ClusterCellMap, the per-cell spatial index, the cluster occupancy word,
+        AddToActiveList, FreeClusterHead, EnabledBits, NoteClusterBorn or the ZoneMapArray widen. The fence writes
+        these plainly and ClusterRef.WriteSpatial CASes ClusterAabbs from a user thread under a growth stamp, so the
+        window is the only thing ordering them. SILENT: no detector covers these either (see #1139).
+  caveat a transaction's Dispose can drain the ECS cleanup queue and call EntityMap.Remove
+        (DatabaseEngine.cs:1586), so even a READ-ONLY off-tick transaction mutates a guarded structure on the way
+        out. Harmless under EW-01 as now scoped, but it is why "reads are always safe" is true of the reads and not
+        of the transaction object.
+  scope: DatabaseEngineExtensions.CreateQuickTransaction, Transaction.Commit, EntityRefMut.ShadowClusterIndexedFields,
+         ClusterRef.WriteSpatial, DatabaseEngine.WriteTickFence
+  host_mode: unenforced for every clause. Transaction.AssertThreadAffinity exists but its body is
+        `if (CheckConfig.Enabled && ...)` and Enabled defaults FALSE with no runtime setter (CheckConfig.cs:62), so it
+        is dead code in Debug and Release alike unless TYPHON__CHECKS__ENABLED is set before start.
+  on_violation: silent data loss for the SV/Transient clause; silent structural corruption for the spatial clause.
+  verified: NOT COVERED — the Versioned-is-safe half is pinned by
+        ExclusiveWindowTests.ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine and by
+        ForeignThreadREADINGInsideTheWindow_IsNotAViolation. The two `never` clauses have no verifier and no detector;
+        that is what #1139 is for.
+
+### EW-01: The tick fence runs with no concurrent mutation of the structures it writes WITHOUT their protocol `[fatal]` `[silent]`
+  invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating a structure the fence is, at t, writing
+            through a path that has dropped that structure's latch or OLC validation. Concretely:
+              (a) a cluster B+Tree under a bulk VALUE REWRITE (UpdateValues -> RunBatch -> ApplyBatch)
+              (b) the EntityMap under a pre-sorted BULK BATCH (UpdateValuesBulk / InsertNewBulk)
+              (c) the per-cell spatial index, ClusterCellMap and ClusterAabbs, which the fence writes plainly
+                  throughout (no latch on any path)
   invariant under TyphonRuntime the window opens at Scheduler.TickEndCallback, so every system has completed;
             a system's own Transaction is committed and disposed in its epilogue before the tick can end
-  licences: within the window a writer of those structures may skip OLC version validation, the write latch,
-            the B-link right-walk and the epoch guard, and may use plain reads and plain counter increments on
-            disjoint partitions. This is the whole economic point of the window — roughly 15-20% on top of what
-            batching alone buys — and none of it is safe if the invariant does not hold.
-  never a side transaction that writes any of the structures above is committed while the window is open.
+  NOT_the_invariant: an ordinary latched mutation of a B+Tree or the EntityMap from another thread, while the
+            fence runs, is SAFE and always was — both run their full protocols (BTree.Insert/Remove take
+            SpinWriteLock + ValidateVersionLocked; RawValuePagedHashMap.ApplyBucketRun takes OlcLatch.TryWriteLock).
+            A StorageMode.Versioned, non-spatial entity written from an HTTP handler or an external worker touches
+            nothing else, and is concurrent by design. Stating this as a `never` is what the detector used to do and
+            it was a false positive on the engine's own guarantee -- see `verified:`.
+  licences: (a) and (b) skip OLC version validation, the write latch and the B-link right-walk; their safety comes
+            from slice boundaries snapped to leaf edges (FenceWorkItem.cs:35-36) and from the batch's bucket sort,
+            NOT from the window alone. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
+            ArchetypeClusterState.cs:9893-9900), and there the window is the ONLY thing ordering them.
+            Scope correction (2026-10-05): the epoch guard is NOT among the licences — fence workers take guards
+            (FenceExecSystem.cs:242,418,919,996) and the B+Tree / EntityMap mutators never took a per-operation one,
+            so there was never a per-op guard to shed. The "roughly 15-20%" figure is an ESTIMATE, not a
+            measurement: claude/design/Spatial/vdb-cell-grid-and-migration.md:474 says "Estimated ~15-20 %" and no
+            benchmark, trx or issue backs it. Both claims were carried here as fact and were not.
+  never a side transaction that writes a structure under (a), (b) or (c) is committed while the window is open.
         TickContext.CreateSideTransaction returns an ORDINARY transaction (TyphonRuntime.CreateSideTransactionInternal
         -> DatabaseEngine.CreateQuickTransaction), so it CAN write an indexed field and therefore mutate a B+Tree, and
         its caller owns Commit and Dispose — nothing joins it to the tick. One that touches none of those structures is
@@ -429,12 +482,20 @@ descends from this one property.
   verified: ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
             rewrite workload over 6+ ticks asserting zero foreign writers, and asserting ObservedFenceMutation too
             so a fence that wrote no guarded structure fails as loudly as one that was raced. Mutant:
-            ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught.
-            The detector is ExclusiveWindow, an assertion at the MUTATION SITES: armed on the seven typed B+Tree
-            mutators and the EntityMap's five, ALWAYS COMPILED (the merge gate runs Release, so a
-            [Conditional("DEBUG")] guard is one the gate never executes), and scoped PER ENGINE off EpochManager
-            rather than to a process-wide static — under the parallel fixtures a global would let one engine's
-            fence indict another engine's legal write.
+            ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught, which now arms the condition with
+            BTree.EnterUnlatchedRewrite before expecting the throw. The complement is pinned by
+            ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine: window open, 64 latched inserts from a foreign
+            thread, zero violations.
+            The detector is ExclusiveWindow, an assertion at the MUTATION SITES: armed on NINE typed B+Tree mutators
+            and the EntityMap's SEVEN (the "seven and five" this rule claimed were stale), ALWAYS COMPILED (the merge
+            gate runs Release, so a [Conditional("DEBUG")] guard is one the gate never executes), and scoped PER
+            ENGINE off EpochManager rather than to a process-wide static — under the parallel fixtures a global would
+            let one engine's fence indict another engine's legal write.
+            Scoped per STRUCTURE since 2026-10-05: NoteMutation takes `unlatchedHere`, and a latched mutator passes
+            its own per-instance depth (BTree._unlatchedRewriteDepth, RawValuePagedHashMap._bulkBatchDepth). A
+            fence-thread mutation still sets ObservedFenceMutation unconditionally, so the anti-vacuity pairing is
+            unaffected; only the VIOLATION narrowed. Before that, the check was "is any fence running on this
+            engine", with no idea which structure the caller held — so it rejected every off-tick commit.
             Two cheaper proxies were tried in step 3 and rejected: TransactionChain.ActiveCount counts handles that
             exist rather than threads that are mutating, and reddens 21 tests that legitimately hold a
             committed-or-idle transaction across the fence — `using var tx = ...; tx.Commit();` before the scope

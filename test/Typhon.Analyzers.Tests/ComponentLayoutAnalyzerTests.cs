@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
@@ -9,7 +9,7 @@ using NUnit.Framework;
 namespace Typhon.Analyzers.Tests;
 
 /// <summary>
-/// Tests for <see cref="ComponentLayoutAnalyzer"/> (TYPHON010 + TYPHON011). The analyzer reimplements sequential struct layout, so the cases below pin the
+/// Tests for <see cref="ComponentLayoutAnalyzer"/> (TYPHON010, TYPHON011, TYPHON013). The analyzer reimplements sequential struct layout, so the cases below pin the
 /// byte counts it reports — each expected size was measured against the real runtime with <c>Unsafe.SizeOf&lt;T&gt;</c> before being written down here.
 /// <para>
 /// TYPHON010's baseline is what the struct would measure at <c>Pack = 4</c>, rounded up to 4 — not where its last field ends, which would make the diagnostic
@@ -254,6 +254,9 @@ public struct WithStatics
     private static Task<ImmutableArray<Diagnostic>> RunDivergenceAsync(string testSource)
         => RunAnalyzerAsync(testSource, ComponentLayoutAnalyzer.MarshalDivergenceDiagnosticId);
 
+    private static Task<ImmutableArray<Diagnostic>> RunInlinePayloadAnalyzerAsync(string testSource)
+        => RunAnalyzerAsync(testSource, ComponentLayoutAnalyzer.InlineSpawnPayloadDiagnosticId);
+
     [Test]
     public async Task TwoBools_DivergeAndAreReported()
     {
@@ -448,5 +451,139 @@ public struct Outer { public int C; public Inner I; }
 
         Assert.That(diagnostics, Has.Length.EqualTo(1));
         Assert.That(diagnostics[0].GetMessage(), Does.Contain("field 'I'"));
+    }
+
+    // =====================================================================
+    // TYPHON013 - too large for ComponentValue's inline spawn payload
+    // =====================================================================
+
+    /// <summary>
+    /// The constant this analyzer compares against is the engine's, and nothing but this test holds the two copies together.
+    /// </summary>
+    /// <remarks>
+    /// <b>The analyzer cannot read the real one.</b> <c>Typhon.Analyzers</c> targets <c>netstandard2.0</c> and must not reference the assembly it analyses, so
+    /// <see cref="ComponentLayoutAnalyzer.InlineSpawnPayloadBytes"/> is a copy of <c>ComponentValue.MaxPayloadSize</c>. A copy with nothing checking it is a copy
+    /// that rots, and both directions of rot are bad: too high and the analyzer stays quiet about a component that will throw, too low and it nags about
+    /// components that fit. This test project references the engine for this one assertion.
+    /// </remarks>
+    [Test]
+    public void TheInlinePayloadConstantMatchesTheEngines()
+        => Assert.That(ComponentLayoutAnalyzer.InlineSpawnPayloadBytes, Is.EqualTo(Typhon.Engine.ComponentValue.MaxPayloadSize),
+            "the analyzer's copy of the inline spawn payload has drifted from the engine's");
+
+    /// <summary>
+    /// A component past the inline payload is reported, with the byte count and both remedies.
+    /// </summary>
+    /// <remarks>
+    /// 128 bytes of <c>long</c>, so the size is exact and owes nothing to padding - this is about the limit, not about layout.
+    /// </remarks>
+    [Test]
+    public async Task PastTheInlinePayload_ProducesDiagnostic()
+    {
+        var diagnostics = await RunInlinePayloadAnalyzerAsync(Component(@"
+[Component(""T"", 1)]
+public struct TooBig { public long A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P; }
+"));
+
+        Assert.That(diagnostics, Has.Length.EqualTo(1));
+        Assert.Multiple(() =>
+        {
+            Assert.That(diagnostics[0].GetMessage(), Does.Contain("is 128 bytes, past the 112"));
+            Assert.That(diagnostics[0].GetMessage(), Does.Contain("Split it"), "the better remedy comes first");
+            Assert.That(diagnostics[0].GetMessage(), Does.Contain("OpenMut"), "and the escape hatch is named, since the component is legal");
+            Assert.That(diagnostics[0].Severity, Is.EqualTo(DiagnosticSeverity.Warning),
+                "a component over the limit is legal through the two-step spawn, so this must be suppressible");
+        });
+    }
+
+    /// <summary>
+    /// Exactly at the limit is silent: the comparison is strictly greater than, as the engine's is.
+    /// </summary>
+    /// <remarks>
+    /// The off-by-one that matters. <c>ComponentValue.Create</c> refuses <c>sizeof(T) &gt; 112</c>, so 112 itself must spawn - and an analyzer that disagreed
+    /// with the runtime by one byte would be worse than none.
+    /// </remarks>
+    [Test]
+    public async Task ExactlyTheInlinePayload_IsSilent()
+    {
+        var diagnostics = await RunInlinePayloadAnalyzerAsync(Component(@"
+[Component(""T"", 1)]
+public struct JustFits { public long A, B, C, D, E, F, G, H, I, J, K, L, M, N; }
+"));
+
+        Assert.That(diagnostics, Is.Empty, "112 bytes is what the engine accepts, so the analyzer must accept it too");
+    }
+
+    /// <summary>An ordinary small component says nothing, which is almost every component in the repository.</summary>
+    [Test]
+    public async Task UnderTheInlinePayload_IsSilent()
+    {
+        var diagnostics = await RunInlinePayloadAnalyzerAsync(Component(@"
+[Component(""T"", 1)]
+public struct Small { public int Hp; public float Speed; }
+"));
+
+        Assert.That(diagnostics, Is.Empty);
+    }
+
+    /// <summary>
+    /// A fixed buffer counts for its whole width, which is the shape that actually tripped #1140.
+    /// </summary>
+    /// <remarks>
+    /// The component that found the bug was a 64-byte <c>String64</c> key plus a 32-byte digest, a 16-byte salt and some scalars. A size walk that measured a
+    /// <c>fixed</c> buffer as one element would have called that 69 bytes and stayed silent, so this pins the walk and not just the comparison.
+    /// </remarks>
+    [Test]
+    public async Task AFixedBufferCountsForItsWholeWidth()
+    {
+        var diagnostics = await RunInlinePayloadAnalyzerAsync(Component(@"
+public unsafe struct Key64 { public fixed byte Data[64]; }
+
+[Component(""T"", 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct Credential { public Key64 Name; public long D0, D1, D2, D3; public long S0, S1; public long Created, LastSeen; public int Iterations; }
+"));
+
+        Assert.That(diagnostics, Has.Length.EqualTo(1));
+        Assert.That(diagnostics[0].GetMessage(), Does.Contain("is 132 bytes, past the 112"),
+            "the fixed buffer must count for 64, or this component measures as 69 and the diagnostic never fires");
+    }
+
+    /// <summary>
+    /// A component that is both oversized and padded gets BOTH diagnostics, because the two remedies are independent.
+    /// </summary>
+    /// <remarks>
+    /// Splitting does not remove padding from either half, and <c>Pack</c> almost never brings a struct from over 112 to under it. Reporting one and swallowing
+    /// the other would mean the author fixes the first, rebuilds, and meets the second - which is the behaviour TYPHON011 deliberately has (it stands down while
+    /// a layout divergence is outstanding, because the padding advice would then be advice about the wrong layout) and which would be wrong here.
+    /// </remarks>
+    [Test]
+    public async Task OversizedAndPadded_ProducesBoth()
+    {
+        // 15 longs and an int: 124 bytes of field, rounded to 128 for the longs' alignment. Over the limit, and 4 bytes of avoidable padding.
+        const string source = @"
+[Component(""T"", 1)]
+public struct BigAndPadded { public long A, B, C, D, E, F, G, H, I, J, K, L, M, N, O; public int P; }
+";
+
+        var oversized = await RunInlinePayloadAnalyzerAsync(Component(source));
+        var padding = await RunAnalyzerAsync(Component(source));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oversized, Has.Length.EqualTo(1), "the size is still past the inline payload");
+            Assert.That(padding, Has.Length.EqualTo(1), "and the padding is still avoidable");
+        });
+    }
+
+    /// <summary>A struct with no <c>[Component]</c> is not this analyzer's business, however large.</summary>
+    [Test]
+    public async Task ALargePlainStruct_IsSilent()
+    {
+        var diagnostics = await RunInlinePayloadAnalyzerAsync(Component(@"
+public struct NotAComponent { public long A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P; }
+"));
+
+        Assert.That(diagnostics, Is.Empty, "only a [Component] travels through ComponentValue");
     }
 }

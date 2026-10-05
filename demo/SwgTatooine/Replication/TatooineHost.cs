@@ -10,6 +10,7 @@ using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Accounts;
 using Typhon.Subscriptions.AspNetCore;
 
 namespace SwgTatooine.Replication;
@@ -98,6 +99,11 @@ public static class TatooineHost
         // The runtime is a singleton the endpoints resolve: the WebSocket endpoint starts its transport against it on the first upgrade, and the catalog
         // endpoint serves exactly the bytes WELCOME carries.
         builder.Services.AddSingleton(runtime);
+
+        // Identity (A2). The /auth bodies are the only JSON this host serialises through a serializer rather than a Utf8JsonWriter, so they bring their own
+        // source-generated context — CreateSlimBuilder has no reflection-based resolver to fall back on.
+        builder.Services.AddAuthJson();
+
         builder.Services.AddTyphonSubscriptions(o =>
         {
             if (origins != null && origins.Length > 0)
@@ -129,6 +135,11 @@ public static class TatooineHost
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
             app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
         }
+
+        // Identity (A2), before the WebSocket route for no technical reason beyond reading order: a client signs up or logs in here, then presents the token
+        // it got on the HELLO that /ws carries. The limiter is one instance for both endpoints, so an address's allowance is shared across them — a signup
+        // flood and a login flood are the same flood.
+        app.MapAuth(runtime.Engine, new AuthRateLimiter());
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");

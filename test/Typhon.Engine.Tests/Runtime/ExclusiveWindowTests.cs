@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -150,6 +150,11 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
             using var open = window.Open();
             Assert.That(window.IsOpen, Is.True);
 
+            // The window alone is not the hazard — this scope is. It marks the tree as under the fence's bulk value rewrite, the one path that descends with no
+            // ValidateVersion, no write latch and no B-link right-walk. A foreign Add can split a leaf the rewrite's slice owns and relocate keys out from under
+            // it, which is the collision this detector exists for.
+            using var unlatched = tree.EnterUnlatchedRewrite();
+
             var thrown = OnForeignThread(epochManager, () =>
             {
                 var accessor = segment.CreateChunkAccessor();
@@ -163,11 +168,58 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
                 }
             });
 
-            Assert.That(thrown, Is.InstanceOf<InvalidOperationException>(), "a foreign write inside the window must fail loudly, not corrupt silently");
+            Assert.That(thrown, Is.InstanceOf<InvalidOperationException>(), "a foreign write into an unlatched rewrite must fail loudly, not corrupt silently");
             Assert.That(thrown.Message, Does.Contain("EW-01"));
             Assert.That(window.Violations, Is.EqualTo(1));
             Assert.That(window.FirstViolationSite, Is.EqualTo("BTree.Add"));
             Assert.That(window.FirstViolationThreadId, Is.Not.EqualTo(Environment.CurrentManagedThreadId), "the offender must be reported as the OTHER thread");
+        });
+    }
+
+    /// <summary>
+    /// A foreign latched write to a tree the fence is NOT rewriting unlatched is legal, even with the window wide open.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the false positive the detector used to produce, and it rejected the engine's own concurrency guarantee.</b> `NoteMutation` was handed a
+    /// call-site string and nothing else, so it could only ask "is a fence running somewhere on this engine" — never "is the fence touching the tree I hold".
+    /// Every latched mutator was armed, so an ordinary off-tick commit of a Versioned, non-spatial entity threw: a spawn writes the EntityMap and any indexed
+    /// field writes a B+Tree, both through their full protocols, with the fence nowhere near them. Versioned, non-spatial data is concurrent by design and this
+    /// pins that the detector agrees.
+    /// </remarks>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine()
+    {
+        OnFreshTree(static (tree, segment, epochManager) =>
+        {
+            var window = epochManager.FenceWindow;
+            window.ResetCounters();
+
+            using var open = window.Open();
+            Assert.That(window.IsOpen, Is.True, "the window IS open — that alone must not reject a latched write");
+
+            var thrown = OnForeignThread(epochManager, () =>
+            {
+                var accessor = segment.CreateChunkAccessor();
+                try
+                {
+                    for (var i = 0; i < 64; i++)
+                    {
+                        tree.Add(500_000 + i, i, ref accessor);
+                    }
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
+            });
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(thrown, Is.Null, "a latched insert is safe against a fence that is not rewriting this tree");
+                Assert.That(window.Violations, Is.Zero);
+                Assert.That(window.FirstViolationSite, Is.Null);
+            });
         });
     }
 

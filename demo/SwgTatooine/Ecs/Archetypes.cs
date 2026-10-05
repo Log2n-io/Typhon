@@ -1,4 +1,4 @@
-using Typhon.Protocol;
+﻿using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
@@ -122,4 +122,40 @@ public partial class Player : Archetype<Player>
     public static readonly Comp<PlayerSession> Session = Register<PlayerSession>();
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();
     public static readonly Comp<PlayerRealm> Realm = Register<PlayerRealm>();
+}
+
+/// <summary>
+/// An account. The demo's first non-spatial archetype, and its first indexed one.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>No placement component, which is what makes it non-SPATIAL — not non-cluster.</b> Every archetype has been
+/// cluster-backed since #666 (<c>DatabaseEngine</c>'s <c>isClusterEligible</c> is a <c>const true</c>), so this one is
+/// too: it gets clusters, an occupancy word and a cluster-indexed EntityMap entry like everything else. What a
+/// <c>…Placement</c> field buys on top is the SPATIAL index, the AABB and cluster migration, and that is the part an
+/// account has no business in — the grid is for things the world can see. The distinction is load-bearing rather than
+/// pedantic: it is exactly the line <c>EW-02</c> draws, and being on the non-spatial side is why an account can be read
+/// and written from an HTTP handler off the tick at all.
+/// </para>
+/// <para>
+/// <b>Two components, and the split is not cosmetic.</b> <see cref="Identity"/> is the name and the timestamps;
+/// <see cref="Secret"/> is the password digest. A name lookup, a listing and the last-seen stamp all read and write the first
+/// and never touch the second, so the digest does not ride along in a cluster slot, a replication frame or a Workbench grid it
+/// has no business in. The engine made the same call for its own reason — one combined component was 132 bytes, past the 112
+/// a <c>ComponentValue</c> carries inline — which is a good sign the separation was the right shape anyway.
+/// </para>
+/// <para>
+/// <b>Where this is going</b> ([11 § 1.1](../../../claude/design/SwgTatooine/11-back-office.md)): Account → Character →
+/// Avatar. Credentials here, the persistent character next, and the spatial body last. Keeping the credential half alone means
+/// an operator can delete it, and a login can read it, without touching anything the simulation walks every tick.
+/// </para>
+/// </remarks>
+[Archetype(1, "Accounts")]
+public partial class AccountArch : Archetype<AccountArch>
+{
+    /// <summary>The name and the timestamps — everything a listing or a name lookup needs.</summary>
+    public static readonly Comp<Account> Identity = Register<Account>();
+
+    /// <summary>The password credential, kept apart so no read of <see cref="Identity"/> carries it.</summary>
+    public static readonly Comp<AccountSecret> Secret = Register<AccountSecret>();
 }

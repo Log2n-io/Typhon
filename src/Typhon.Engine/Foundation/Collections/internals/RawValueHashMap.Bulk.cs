@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
@@ -205,7 +205,11 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
         where TEntry : struct
         where TUpdater : struct, IRawBulkUpdater<TKey, TEntry>
     {
-        _fenceWindow?.NoteMutation("EntityMap.UpdateValuesBulk");
+        _fenceWindow?.NoteMutation("EntityMap.UpdateValuesBulk", unlatchedHere: true);
+
+        // In flight from here: a concurrent insert can split the map and invalidate the bucket indices this batch was sorted by, which ApplyBucketRun
+        // detects and throws for. Arming the point mutators for the duration attributes that to the caller who split it.
+        using var batch = EnterBulkBatch();
 
         if (sortedByBucket.Length == 0)
         {
