@@ -4512,11 +4512,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
 
+        // Zone maps last (IXS-08, #1151): the load, the schema-migration rebuild and the WAL replay above all fill clusters without widening a zone map, so
+        // only now is every cluster that holds values its maps never saw known.
+        MarkZoneMapsUnknownAfterOpen();
+
         // Arm the checkpoint-time SPI persistence (#395 / CK-10) for the paths that did NOT go through recovery — a clean reopen, or a fresh database. From
         // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
         // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
         // SPIs in the same cycle (#715); this assignment is then a no-op for it.
         _archetypeSpiPersistArmed = true;
+    }
+
+    /// <summary>Marks every archetype's populated clusters Unknown in its zone maps (<see cref="ArchetypeClusterState.MarkActiveClustersZoneMapsUnknown"/>).</summary>
+    private void MarkZoneMapsUnknownAfterOpen()
+    {
+        var states = _archetypeStates;
+        for (var i = 0; i < (states?.Length ?? 0); i++)
+        {
+            states[i]?.ClusterState?.MarkActiveClustersZoneMapsUnknown();
+        }
     }
 
     /// <summary>
