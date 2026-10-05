@@ -3500,7 +3500,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var tasks = new Task[operations.Count];
         for (int i = 0; i < operations.Count; i++)
         {
-            tasks[i] = SavePageInternal(operations[i].memPageIndex, operations[i].length).AsTask();
+            try
+            {
+                tasks[i] = SavePageInternal(operations[i].memPageIndex, operations[i].length).AsTask();
+            }
+            catch
+            {
+                // A write reads its pages from the cache when it RUNS, not when it is issued — on Linux a pool thread runs the pwrite, often after
+                // this method has returned. Abandoned here, an issued write can outlive the page cache and copy whatever then lives at the freed
+                // address: a zeroed page landed over a good one, and the next open read a segment whose forward chain stopped there (#978).
+                WaitForIssuedWrites(tasks, i);
+                throw;
+            }
         }
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(_ =>
@@ -3529,7 +3540,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         });
         return saveTask;
     }
-    
+
+    /// <summary>
+    /// Waits for the first <paramref name="count"/> writes of a batch whose next write could not be issued, so none of them is still reading the
+    /// page cache once <see cref="SavePages"/> has thrown. Their own faults are observed and dropped: the batch failed already, and its pages keep
+    /// their writeback debt, so the next checkpoint writes them again.
+    /// </summary>
+    private static void WaitForIssuedWrites(Task[] tasks, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                tasks[i].Wait();
+            }
+            catch (AggregateException)
+            {
+                // Observed; the issuing failure is the one the caller reports.
+            }
+        }
+    }
+
     internal ValueTask SavePageInternal(int firstMemPageIndex, int length)
     {
         var pi = Slot(firstMemPageIndex);
