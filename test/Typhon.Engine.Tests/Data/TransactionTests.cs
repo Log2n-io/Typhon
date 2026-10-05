@@ -887,21 +887,98 @@ class TransactionTests : TestBase<TransactionTests>
     }
 
     /// <summary>
-    /// Rollback of an empty transaction (no operations) returns true.
-    /// State remains Created because the rollback short-circuits before the state transition.
+    /// An empty Commit() skips the commit work but still ends the transaction (TX-01, #1056). Left in Created, it accepted writes its caller believed came
+    /// after the end: they needed a second Commit() to land, or were dropped without a word by Dispose's rollback.
     /// </summary>
     [Test]
-    public void Rollback_EmptyTransaction_Succeeds()
+    [VerifiesRule("TX-01")]
+    public void Commit_EmptyTransaction_IsTerminal()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        var e1 = SpawnCompA(dbe, 10);
+        var commits = dbe.TransactionChain.CommitTotal;
+        var rollbacks = dbe.TransactionChain.RollbackTotal;
+
+        var t = dbe.CreateQuickTransaction();
+        Assert.That(t.Commit(), Is.True, "an empty commit succeeds");
+        Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Committed));
+        AssertRefusesWrites(t, e1);
+        Assert.That(t.Open(e1).Read(CompAArch.A).A, Is.EqualTo(10), "reads stay available");
+
+        Assert.That(t.Commit(), Is.False, "already committed");
+        Assert.That(t.Rollback(), Is.False, "a committed transaction cannot be rolled back");
+        t.Dispose();
+        Assert.That(dbe.TransactionChain.CommitTotal, Is.EqualTo(commits), "the empty commit stays a fast path: no commit body ran");
+        Assert.That(dbe.TransactionChain.RollbackTotal, Is.EqualTo(rollbacks), "Dispose after an empty commit rolls nothing back");
+
+        using var check = dbe.CreateQuickTransaction();
+        Assert.That(check.Open(e1).Read(CompAArch.A).A, Is.EqualTo(10));
+    }
+
+    /// <summary>The same for an empty Rollback() (#1056): it ends the transaction in Rollbacked.</summary>
+    [Test]
+    [VerifiesRule("TX-01")]
+    public void Rollback_EmptyTransaction_IsTerminal()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        var e1 = SpawnCompA(dbe, 10);
+        var commits = dbe.TransactionChain.CommitTotal;
+        var rollbacks = dbe.TransactionChain.RollbackTotal;
+
+        var t = dbe.CreateQuickTransaction();
+        Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Created));
+        Assert.That(t.Rollback(), Is.True, "Rollback of empty transaction should succeed");
+        Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Rollbacked));
+        AssertRefusesWrites(t, e1);
+
+        Assert.That(t.Commit(), Is.False, "a rolled-back transaction cannot be committed");
+        Assert.That(t.Rollback(), Is.False, "already rolled back");
+        t.Dispose();
+        Assert.That(dbe.TransactionChain.CommitTotal, Is.EqualTo(commits));
+        Assert.That(dbe.TransactionChain.RollbackTotal, Is.EqualTo(rollbacks), "the empty rollback stays a fast path: no rollback body ran");
+
+        using var check = dbe.CreateQuickTransaction();
+        Assert.That(check.Open(e1).Read(CompAArch.A).A, Is.EqualTo(10));
+    }
+
+    /// <summary>
+    /// A read-only transaction's Commit() is a no-op that succeeds, but not on one already rolled back: the finished-state check runs first (TX-01).
+    /// </summary>
+    [Test]
+    [VerifiesRule("TX-01")]
+    public void ReadOnly_RolledBack_CannotCommit()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         RegisterComponents(dbe);
         dbe.InitializeArchetypes();
 
+        using var ro = dbe.CreateReadOnlyTransaction();
+        Assert.That(ro.Rollback(), Is.True);
+        Assert.That(ro.State, Is.EqualTo(Transaction.TransactionState.Rollbacked));
+        Assert.That(ro.Commit(), Is.False, "a rolled-back transaction cannot be committed, read-only or not");
+        Assert.That(ro.Rollback(), Is.False, "already rolled back");
+    }
+
+    private static EntityId SpawnCompA(DatabaseEngine dbe, int value)
+    {
         using var t = dbe.CreateQuickTransaction();
-        Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Created));
-        Assert.That(t.Rollback(), Is.True, "Rollback of empty transaction should succeed");
-        Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Created),
-            "State remains Created — empty rollback short-circuits before state transition");
+        var a = new CompA(value);
+        var id = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+        Assert.That(t.Commit(), Is.True);
+        return id;
+    }
+
+    private static void AssertRefusesWrites(Transaction t, EntityId existing)
+    {
+        var a = new CompA(99);
+        Assert.Throws<InvalidOperationException>(() => t.Spawn<CompAArch>(CompAArch.A.Set(in a)), "Spawn");
+        Assert.Throws<InvalidOperationException>(() => t.OpenMut(existing), "OpenMut");
+        Assert.Throws<InvalidOperationException>(() => t.TryOpenMut(existing, out _), "TryOpenMut");
+        Assert.Throws<InvalidOperationException>(() => t.Destroy(existing), "Destroy");
     }
 
     // ═══════════════════════════════════════════════════════════════

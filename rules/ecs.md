@@ -672,8 +672,8 @@ caller holds decides what it may do, and the write paths rely on preconditions o
                 HEAD from a transaction that never ran `EnsureMutable` — a read-only or already finalized one included —
                 and never moved to InProgress. The value was not lost (the fence's PS-10 backstop records the page); the
                 transaction's own contract was.
-  note: `Commit()` on a transaction that did nothing returns true and leaves it in `Created`, so it still accepts a
-        writable open afterwards. That is the commit path's behaviour, not a gap in the prep.
+  note: the prep refuses a transaction only once it is finished; that an empty `Commit()` / `Rollback()` finishes it too
+        is the lifecycle's promise, TX-01 in `execution.md`, not this rule's.
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes [VerifiesRule] (the type split as an
             allowlist, no producer of `EntityRefMut` but the opens, no `_writable` left),
             EntityRefMutTests.EntityRefMut_IsExactlyOneEntityRef [VerifiesRule] (the BitCast layout),

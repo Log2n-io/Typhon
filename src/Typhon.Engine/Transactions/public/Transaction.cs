@@ -2419,9 +2419,10 @@ public unsafe partial class Transaction : EntityAccessor
         // the holdoff `using` and span try/finally inside RollbackCore (slow), this fast-path shim stays EH-free and inlinable into Dispose.
         AssertThreadAffinity();
 
-        // Nothing to do if the transaction is empty
+        // Nothing to undo if the transaction is empty, but it ends here all the same: left in Created, it kept accepting writes (TX-01, #1056)
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Rollbacked;
             return true;
         }
 
@@ -2819,6 +2820,12 @@ public unsafe partial class Transaction : EntityAccessor
     {
         AssertThreadAffinity();
 
+        // Can't commit a transaction already processed — read-only included: one that was rolled back is not committed by this call (TX-01)
+        if (State is TransactionState.Rollbacked or TransactionState.Committed)
+        {
+            return false;
+        }
+
         // Read-only transactions have nothing to commit — trivially succeed
         if (IsReadOnly)
         {
@@ -2827,8 +2834,10 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Nothing to commit if the transaction is empty, but still process deferred cleanups
         // in case this transaction (as the tail) is blocking cleanup of entities modified by others.
+        // It is committed all the same: left in Created, it kept accepting writes its caller believed came after the commit (TX-01, #1056).
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Committed;
             if (_dbe.DeferredCleanupManager.QueueSize > 0)
             {
                 var wcDeferred = ComposeWaitContext(ref ctx, TimeoutOptions.Current.TransactionChainLockTimeout);
@@ -2846,12 +2855,6 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             return true;
-        }
-
-        // Can't commit a transaction already processed
-        if (State is TransactionState.Rollbacked or TransactionState.Committed)
-        {
-            return false;
         }
 
         // ── Yield point: safe to cancel before any modifications ──
