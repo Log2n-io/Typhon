@@ -512,6 +512,9 @@ CK-08 (flush-only cycles) are later increments.
   invariant a poll wake that finds no pressure is NOT a timer tick — the durability cadence stays CheckpointIntervalMs
             however often the loop looks
   invariant threshold 0 disables the trigger, leaving timer + explicit force as the only causes
+  note: WritebackDebtPercent reads the count of set debt bits (PS-16, #1127), not a scan of every slot. At quiescence it is an upper
+        bound — a bit can outlive its debt until the next collect clears it, so pressure may start a cycle early. In flight it can trail
+        for an instant (a writer between its generation bump and its bit is not counted yet), which a 250 ms poll does not notice
   scope: CheckpointManager.CheckpointLoop, CheckpointManager.WaitMs, CheckpointManager.IsDirtyPagePressureReached,
          PagedMMF.WritebackDebtPercent, ResourceOptions.CheckpointDirtyPageThresholdPercent
   verified: CheckpointManagerTests.DirtyPagePressure_TriggersCheckpoint (interval = int.MaxValue, so a cycle at all
@@ -1369,6 +1372,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant MarkCaptured is called only after the fsync that made the sampled generation's bytes durable (CP-03)
   invariant MarkCaptured is monotonic — a stale publication never lowers CapturedGen
   invariant the generation is sampled BEFORE the page is copied, so a modification racing the capture stays owed
+  invariant the pair carries over when a slot is reused: TryAcquire reclaims only a slot whose two generations are equal, and leaves them
+            so. CapturedGen ≤ WritebackGen holds across occupants, so a capture published late for a previous occupant is a no-op
   never record the mark without recording the modification — a repeated AddByMemPageIndex takes no second mark but
         must still record the write, or a checkpoint that settled the page between the two calls loses it
   scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
@@ -1376,14 +1381,17 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
          ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
-            page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed)
+            page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed);
+            PageSlotRecordTests.ACaptureLandingAfterTheSlotWasReused_LeavesItsNextPageClean [VerifiesRule] (fails with the reset to 0 restored)
   note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty) and WriteSpatial. They record the page at the
        write (MarkPageModified), and the fence's WAL emit records every cluster page it serialises besides — as writeback debt, not as a dirty mark in a
        ChangeSet, because the serial fence SAVES its own ChangeSet and would then write data pages outside the checkpoint's WAL barrier (CK-02). Before 2026-09-23 neither did: committed values reverted to the
        on-disk image whenever an unrelated allocation evicted the page (found by the push-replication oracle; seed 9160 reverted four creatures inside a
        rock spawn), and the checkpoint never collected those pages.
   on_violation: an unrecorded modification is never written and is lost at eviction (#385, #301, #30);
-    a debt never discharged pins the page for ever (#824)
+    a debt never discharged pins the page for ever (#824). Until #1127, TryAcquire reset a reused slot's pair to 0, so a checkpoint's
+    capture landing after a SavePages had settled the page and the slot was reused set CapturedGen above the new page's WritebackGen:
+    debt nothing could discharge, the slot pinned and rewritten every cycle
   rationale: NEW 2026-08-16. Replaces the counter-floor idiom (EnsureDirtyAtLeast(memPage, 2)) that the paths without a
     ChangeSet used to protect themselves. A floor is a no-op whenever the counter already sits above it, so on exactly
     the busy pages that needed it the protection was silently absent; and it depended on flushes of a given page being
@@ -1507,7 +1515,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-15: A slot in the page directory is used only once its owner has prepared it `[fatal]` `[silent]`
   invariant a slot claimed for file page X is published (`GetOrAdd`) before it is prepared, so it carries `SlotReady == false` from its claim
             (`TryAcquire`) until its owner — the thread whose `GetOrAdd` published it — has reset `CrcVerified` and either cleared the page (not
-            on disk, PS-14) or started its read and recorded it as the slot's read task; the owner then sets `SlotReady` with a release write
+            on disk, PS-14) or started its read and recorded it in the read table, then set `ReadPending`; the owner then sets `SlotReady` with a
+            release write
   invariant every `RequestPageEpoch*` that finds a slot not ready waits — acquire reads — until it is ready (then goes on) or no longer holds
             X (its owner abandoned it, or it was reclaimed — then looks the page up again)
   invariant after tagging the slot's epoch, a requester re-validates `FilePageIndex == X && SlotReady` before using it, and only then takes it
@@ -1517,13 +1526,17 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
             replacement
   invariant an owner that throws before the slot is prepared unpublishes it first — a waiter sees it no longer holds X and looks the page
-            up again at once — then frees it. If it had started a read (only a read-task wrapper's allocation can fail after that), it frees the
-            slot only once that read has landed: it is the read's only observer, and until then the slot stays `Allocating`, which `TryAcquire`
-            never takes. It does NOT mark the slot ready: once Free it may already be another owner's unprepared slot. An owner that throws
-            after the slot is prepared (the trace scope's close) still marks it ready
+            up again at once — then frees it. If it had started a read (only an allocation can fail after that: `AsTask`, the trace
+            continuation, the read-table insert), it frees the slot only once that read has landed: it is the read's only observer, and until
+            then the slot stays `Allocating`, which `TryAcquire` never takes. It drops any read-table entry the slot has. It does NOT mark the
+            slot ready: once Free it may already be another owner's unprepared slot. An owner that throws after the slot is prepared (the trace
+            scope's close) still marks it ready
+  invariant `ReadPending` is cleared only by a thread that holds the slot against a new read: a requester after tagging and validating it,
+            `TryAcquire` under the slot's lock, or the slot's owner. The checkpoint and `SavePages`, which hold the slot by its debt, only wait
   scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, PagedMMF.WaitForSlotReady, PagedMMF.ValidateTaggedSlot,
          PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
-         PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, SlotReady
+         PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, PagedMMF.CompletePendingRead, PagedMMF.WaitForPendingRead,
+         PagedMMF.DropReadTask, SlotReady, ReadPending
   rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
     the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
     occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
@@ -1542,6 +1555,36 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, and an owner that
         fails unpublishes the slot before waiting for its read, so the bound only turns a defect into a loud `LockTimeoutException` instead
         of a hang.
+
+### PS-16: A slot that owes a writeback has its debt bit set `[fatal]` `[silent]`
+  invariant WritebackGen != CapturedGen ⟹ the slot's bit in the debt bitmap is set, wherever no writer is between its generation bump and
+            its bit: a MarkPageModified or IncrementDirty that has returned is always covered
+  invariant the bit is a hint, never the truth: eviction and every "is this page owed" decision read the generations (PS-10)
+  invariant a writer bumps WritebackGen (Interlocked, a full fence), THEN reads the bit and sets it if clear. A discharge that finds the slot
+            owing nothing clears the bit, THEN after a full fence re-reads the generations and sets the bit again if the slot owes. A
+            store-buffer pairing: of a writer and a discharge that cross, at least one sees the other
+  invariant the debt count moves only on a bit transition its mover observed (the word Interlocked.Or / And returned). It equals the set
+            bits at quiescence and may dip for an instant while a writer and a discharge cross, hence WritebackDebtPercent's clamp
+  invariant a bit with no debt behind it — two discharges crossing can leave one — is cleared by the next CollectDirtyMemPageIndices that
+            visits it, and by TryAcquire when it reclaims the slot
+  scope: PagedMMF.RaiseDebtBit, PagedMMF.ClearDebtBit, PagedMMF.SettleDebtBit, PagedMMF.MarkPageModified, PagedMMF.IncrementDirty,
+         PagedMMF.MarkCaptured, PagedMMF.CollectDirtyMemPageIndices, PagedMMF.WritebackDebtPercent, PagedMMF.TryAcquire
+  requires: PS-10 — the generations are the debt; the bit only lets the checkpoint find it
+  rationale: #1127. CollectDirtyMemPageIndices and WritebackDebtPercent scanned every slot: every checkpoint, and every 250 ms while the
+    dirty-page trigger is armed. At #945's 512 GiB (67 M slots) that is 4 GiB of reads per call. The bitmap reads one word per 64 slots
+    and visits only owed ones; the count makes the percentage O(1). A maintained counter of modifications was rejected before because it
+    drifts; this one counts bit transitions, each observed by exactly the thread that made it.
+  on_violation: a slot that owes a writeback and has no bit is never collected. Its bytes never reach the data file and it is never
+    evictable, while the checkpoint's coverage gate (CK-03) opens without it and the log behind it is recycled: the next crash loses a
+    committed write. Nothing reports it before then.
+  verified: PageSlotRecordTests [VerifiesRule]: AWriterBetweenADischargesCheckAndItsClear_LeavesTheOwedPageWithItsBit (a probe runs the
+            writer between the discharge's check and its clear; fails with the re-check removed),
+            AWriterBetweenADischargesClearAndItsReCheck_LeavesTheOwedPageWithItsBit (the other window) and
+            AModificationAfterTheSample_KeepsThePageOwedAndCollected, each also asserting count = set bits.
+            ABitWithNoDebtBehindIt_IsClearedByTheNextCollect fails with the collect's clean-up removed;
+            Collecting_VisitsOnlyTheOwedSlots_AndFindsWhatAFullScanFinds counts 3 slot visits and 4 words on a 256-slot cache and matches a
+            scan of every slot. Not staged: two discharges crossing (the source of stale bits) — its outcome, a bit with no debt, is staged
+            directly instead
 
 ---
 

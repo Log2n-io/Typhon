@@ -51,7 +51,6 @@ public class ConcurrentBitmapBenchmark
     private int[] _iList;
     private int[] _vList;
     private int _pageCount;
-    private PagedMMF.PageInfo[] _pages;
 
     [GlobalSetup]
     public void GlobalSetup()
@@ -74,7 +73,6 @@ public class ConcurrentBitmapBenchmark
         _aList = new PageActivityInfo[_pageCount];
         _iList = new int[_pageCount];
         _vList = new int[_pageCount];
-        _pages = new PagedMMF.PageInfo[_pageCount];
 
         var r = new Random(DateTime.UtcNow.Millisecond);
         for (int i = 0; i < _pageCount; i++)
@@ -84,7 +82,6 @@ public class ConcurrentBitmapBenchmark
             _aList[i] = new PageActivityInfo { AllocatedTime = at, HitCounter = hc };
             _iList[i] = hc;
             _vList[i] = i;
-            _pages[i] = new PagedMMF.PageInfo(i);
         }
 
         _aMem = _aList.ToArray();
