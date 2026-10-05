@@ -124,7 +124,10 @@ public sealed partial class TatooineSim
         // defaulted to the origin, which on this planet is open desert a long way from anything a new player could interact with.
         var capital = Map.Cities.Count > 0 ? Map.Cities[0] : default;
         var spawnY = TerrainField.Shared(_config.ContentScale).GroundAt(capital.X, capital.Z);
-        TatooineReplication.ConfigureAvatars(Dbe, new Point3F { X = capital.X, Y = spawnY, Z = capital.Z }, 0);
+        // The last two arguments are A6: how often a live avatar's position is written back, which is the bound on what a kill -9
+        // costs. Stated as seconds and turned into ticks here, so the same number means the same thing at 10 Hz and at 50 Hz.
+        TatooineReplication.ConfigureAvatars(
+            Dbe, new Point3F { X = capital.X, Y = spawnY, Z = capital.Z }, 0, _config.TickRateHz, _config.AvatarSaveIntervalS);
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

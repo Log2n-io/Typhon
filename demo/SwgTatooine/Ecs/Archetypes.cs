@@ -1,5 +1,4 @@
 ﻿using Typhon.Protocol;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 

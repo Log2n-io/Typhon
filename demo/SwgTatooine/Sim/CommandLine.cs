@@ -118,6 +118,8 @@ public static class CommandLine
             "per-player outbound budget, bytes per second; 0 is none", min: 0);
         c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
         c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
+        c.AvatarSaveIntervalS = r.Dbl(
+            "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);
         c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
         c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")

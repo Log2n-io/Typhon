@@ -441,6 +441,17 @@ public sealed class SimConfig
     /// <summary><c>--max-spectators N</c>: how many god-camera sessions are admitted at once; 0 (the default) is unlimited.</summary>
     public int MaxSpectators;
 
+    /// <summary>
+    /// <c>--avatar-save-interval S</c>: how often a live avatar's position is written back to its character, seconds; 0 disables it.
+    /// </summary>
+    /// <remarks>
+    /// <b>This number is the bound on what a hard kill costs a player</b> (A6, acceptance criterion A-5): a logout always saves, but
+    /// a <c>SIGKILL</c>, a crash or an operator stopping the instance runs no logout, so without the cadence a whole session of
+    /// walking is lost. Ten seconds is about seventy metres at the run speed — recognisable but not a session. Zero is for a
+    /// measurement run that wants the write out of its numbers, and says so by being explicit.
+    /// </remarks>
+    public double AvatarSaveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 

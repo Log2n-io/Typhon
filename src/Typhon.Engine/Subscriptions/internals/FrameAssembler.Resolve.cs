@@ -1,12 +1,12 @@
-using Typhon.Protocol;
+﻿using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
 internal sealed unsafe partial class FrameAssembler
 {
     /// <summary>
-    /// Whether <paramref name="session"/> holds <paramref name="entity"/>, which <paramref name="netId"/> names — its controlled entity, or one its COMMITTED
-    /// geometry names (SUB-16): what its client was last told, so what it may name in a command (SUB-26, design/Subscriptions/11 § 3).
+    /// Whether <paramref name="session"/> holds <paramref name="entity"/> AND knows it by <paramref name="netId"/> — its controlled entity, or one its
+    /// COMMITTED geometry names (SUB-16): what its client was last told, so what it may name in a command (SUB-26, design/Subscriptions/11 § 3).
     /// </summary>
     /// <param name="session">The session that sent the reference.</param>
     /// <param name="netId">The identity the reference carried.</param>
@@ -26,7 +26,31 @@ internal sealed unsafe partial class FrameAssembler
     /// <para><b>An entity the client learned from an event is not held</b> (11 § 3, Q3): events inform, they do not grant reach.</para>
     /// </remarks>
     internal bool Holds(SessionId session, uint netId, EntityId entity)
+        => TryHeldNetId(session, entity, out var carried) && carried == netId;
+
+    /// <summary>
+    /// The identity <paramref name="session"/> knows <paramref name="entity"/> by, when it holds it at all.
+    /// </summary>
+    /// <param name="session">The session asking.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <param name="netId">The identity that session's client was last told, or <c>0</c>.</param>
+    /// <returns><see langword="true"/> when the entity is live, replicated, and held by that session.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The inverse of <see cref="Holds"/>, and literally the same walk.</b> That method already had to read the entity's identity out
+    /// of its replica in order to compare it, so returning it instead of comparing it costs nothing and removes the second copy of the
+    /// reach rules. <c>Holds</c> is now the comparison on top of this.
+    /// </para>
+    /// <para>
+    /// <b>Session-scoped on purpose, although a netId is engine-wide.</b> The number is global — one allocator across every replicated
+    /// archetype — so an unscoped lookup would be easy to write and easy to misuse: handing a session an identity it was never shown
+    /// lets it name something outside its view, which is exactly what <c>SUB-26</c> forbids and what <c>TryResolve</c> enforces coming
+    /// the other way. Asking "what does THIS session call it" cannot be misused that way, because the answer is no when it cannot see it.
+    /// </para>
+    /// </remarks>
+    internal bool TryHeldNetId(SessionId session, EntityId entity, out uint netId)
     {
+        netId = NetIdAllocator.NoNetId;
         if (entity.IsNull || Push == null)
         {
             return false;
@@ -38,13 +62,14 @@ internal sealed unsafe partial class FrameAssembler
         {
             if (!locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
                 || !Push.TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out var carried)
-                || carried != netId)
+                || carried == NetIdAllocator.NoNetId)
             {
                 return false;
             }
 
             if (_sessions.ControlledOf(session) == entity)
             {
+                netId = carried;
                 return true;
             }
 
@@ -65,7 +90,13 @@ internal sealed unsafe partial class FrameAssembler
 
             owner.DecodeVisibility(archetype, block, slot, out var x, out var y, out var z);
             var shape = Profiles.IsWorld(profile) ? PushShape.World : Profiles.RegionOf(profile) ? PushShape.Region : PushShape.Sphere;
-            return owner.HoldsCommitted(session, shape, x, y, z);
+            if (!owner.HoldsCommitted(session, shape, x, y, z))
+            {
+                return false;
+            }
+
+            netId = carried;
+            return true;
         }
         finally
         {

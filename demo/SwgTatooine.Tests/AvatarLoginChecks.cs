@@ -51,12 +51,13 @@ internal sealed class AvatarLoginChecks
         Worlds.Delete(_dir);
     }
 
-    private SimConfig Config(bool persist = false)
+    private SimConfig Config(bool persist = false, double saveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds)
     {
         var config = Worlds.Small(_dir);
         config.Unpaced = false;
         config.TickRateHz = TickRateHz;
         config.Persist = persist;
+        config.AvatarSaveIntervalS = saveIntervalS;
         return config;
     }
 
@@ -377,7 +378,12 @@ internal sealed class AvatarLoginChecks
     public void ManyLoginsAndLogouts_LeakNothing()
     {
         const int rounds = 20;
-        using var sim = Start(Config());
+
+        // The cadence is OFF for this case, so LocationsSaved counts logouts and nothing else. With it on, the assertion below is
+        // timing-dependent: this case spins real ticks waiting on each round, and a slower run crosses the save interval and records
+        // one extra write — which it did, as 21 against 20, under the full suite but never in isolation. The cadence has its own
+        // cases; this one is about leaks.
+        using var sim = Start(Config(saveIntervalS: 0d));
         var before = Census(sim);
         var account = AnAccount(0x5006);
         var avatars = new HashSet<EntityId>();
@@ -404,11 +410,153 @@ internal sealed class AvatarLoginChecks
             Assert.That(after.Human, Is.Zero, "nothing may still be marked as driven by a session");
             Assert.That(TatooineReplication.CharactersCreated, Is.EqualTo(1), "one account has one character, however many times it logs in");
             Assert.That(CharacterCount(sim), Is.EqualTo(1));
-            Assert.That(TatooineReplication.LocationsSaved, Is.EqualTo(rounds), "every logout must have written the position back");
+            Assert.That(TatooineReplication.LocationsSaved, Is.EqualTo(rounds), "every logout must have written the position back, and only the logouts");
         });
 
         // And the account is still usable, which is what a leaked binding would prevent.
         var (_, final) = LogIn(sim, account, expectedBindings: rounds + 1);
         Assert.That(final, Is.Not.EqualTo(EntityId.Null), "the account could not log in again, so a binding leaked");
+    }
+
+    // =======================================================================
+    // A6 - the cadence, and what a kill -9 costs
+    // =======================================================================
+
+    /// <summary>Reads a character's saved position through the account index.</summary>
+    /// <param name="sim">The server.</param>
+    /// <param name="account">The account whose character to read.</param>
+    /// <returns>The saved position and realm.</returns>
+    private static (float X, float Z, ushort Realm, long SavedTicks) Saved(TatooineSim sim, EntityId account)
+    {
+        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out _, out var profile), Is.True, "the account has no character");
+        return (profile.LastPosition.X, profile.LastPosition.Z, profile.LastRealm, profile.LastSavedUtcTicks);
+    }
+
+    /// <summary>
+    /// The cadence writes a live avatar's position back WITHOUT a logout, which is what bounds a hard kill (A6).
+    /// </summary>
+    /// <remarks>
+    /// A short interval so the case costs ticks rather than seconds. The assertion is the pair: the character's saved position tracks
+    /// the avatar while it is still logged in, and the counter moved — either alone would pass against a save that happened at login
+    /// and never again.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    public void TheCadenceSavesWhileTheAvatarIsStillLoggedIn()
+    {
+        // Four ticks at 50 Hz. Rounded to ticks by ConfigureAvatars, which is why this is expressed in seconds.
+        using var sim = Start(Config(saveIntervalS: 4d / TickRateHz));
+        Assert.That(TatooineReplication.SaveIntervalSeconds, Is.GreaterThan(0d), "the cadence is disabled, so this case tests nothing");
+
+        var account = AnAccount(0x6001);
+        var (link, avatar) = LogIn(sim, account);
+        var atLogin = Saved(sim, account);
+
+        var walked = WalkAway(sim, link, avatar);
+
+        // No logout. Enough ticks that the stagger cannot miss this one session's slot.
+        _harness.Ticks(12);
+
+        var saved = Saved(sim, account);
+        var drift = MathF.Sqrt(((saved.X - walked.X) * (saved.X - walked.X)) + ((saved.Z - walked.Z) * (saved.Z - walked.Z)));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.LocationsSaved, Is.GreaterThan(0), "the cadence never ran");
+            Assert.That(saved.SavedTicks, Is.GreaterThan(atLogin.SavedTicks), "the saved stamp did not move, so nothing was written after the login");
+            Assert.That(drift, Is.LessThan(5f), $"the saved position is {drift:F2} m from where the avatar actually is");
+            Assert.That(TatooineReplication.AvatarsDestroyed, Is.Zero, "the avatar must still be logged in for this to mean anything");
+        });
+    }
+
+    /// <summary>With the cadence off, nothing is written until the logout — which is the state A6 exists to remove.</summary>
+    /// <remarks>
+    /// <b>The complement, and it is what makes the case above falsifiable.</b> If the position were being written by something other
+    /// than the cadence — the login, a stray save in the intent path — the case above would pass with the cadence deleted. This one
+    /// turns the cadence off and requires that nothing happens.
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    public void WithTheCadenceOff_NothingIsSavedUntilTheLogout()
+    {
+        using var sim = Start(Config(saveIntervalS: 0d));
+        Assert.That(TatooineReplication.SaveIntervalSeconds, Is.Zero, "the cadence must be disabled for this case");
+
+        var account = AnAccount(0x6002);
+        var (link, avatar) = LogIn(sim, account);
+        var atLogin = Saved(sim, account);
+
+        WalkAway(sim, link, avatar);
+        _harness.Ticks(30);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.LocationsSaved, Is.Zero, "something wrote the position with the cadence off");
+            Assert.That(Saved(sim, account).SavedTicks, Is.EqualTo(atLogin.SavedTicks));
+        });
+
+        // And the logout still saves, so turning the cadence off costs the cadence and nothing else.
+        link.Close(CloseCodes.Normal, "leaving");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the logout to save and destroy");
+        _harness.Ticks(2);
+
+        Assert.That(TatooineReplication.LocationsSaved, Is.EqualTo(1), "the logout must still write the position");
+    }
+
+    /// <summary>
+    /// AC A-5: a server killed with no logout costs at most the cadence's worth of walking.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The kill is modelled by disposing the simulation with the client still connected</b> — no <c>Close</c>, so no session event,
+    /// so no logout path runs. That is as close to <c>SIGKILL</c> as a fixture can get in-process: what it cannot model is losing the
+    /// WAL's unflushed tail, which is the engine's own durability contract and has its own coverage.
+    /// </para>
+    /// <para>
+    /// The assertion is deliberately one-sided. It requires that the character came back somewhere the avatar actually walked and NOT
+    /// at the spawn point — which is the failure A6 removes — rather than pinning a distance the tick rate and the run speed would make
+    /// brittle.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AKillWithNoLogoutCostsAtMostTheCadence()
+    {
+        var account = AnAccount(0x6003);
+        (float X, float Z) spawn;
+        (float X, float Y, float Z) walked;
+
+        using (var first = Start(Config(persist: true, saveIntervalS: 4d / TickRateHz)))
+        {
+            var (link, avatar) = LogIn(first, account);
+            spawn = (Where(first, avatar).X, Where(first, avatar).Z);
+            walked = WalkAway(first, link, avatar);
+
+            // Let the cadence run, then pull the plug: no Close, no logout, no clean shutdown of the session.
+            _harness.Ticks(12);
+            _harness.Release();
+        }
+
+        TatooineReplication.ResetSessionAccounting();
+        TatooineReplication.ResetIntentAccounting();
+
+        using var second = Start(Config(persist: true, saveIntervalS: 4d / TickRateHz));
+        Assert.That(second.Reopened, Is.True, "the second run did not reopen the first's database");
+
+        var (_, reborn) = LogIn(second, account);
+        var back = Where(second, reborn);
+
+        var fromWalked = MathF.Sqrt(((back.X - walked.X) * (back.X - walked.X)) + ((back.Z - walked.Z) * (back.Z - walked.Z)));
+        var fromSpawn = MathF.Sqrt(((back.X - spawn.X) * (back.X - spawn.X)) + ((back.Z - spawn.Z) * (back.Z - spawn.Z)));
+        var walkedDistance = MathF.Sqrt(((walked.X - spawn.X) * (walked.X - spawn.X)) + ((walked.Z - spawn.Z) * (walked.Z - spawn.Z)));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.CharactersCreated, Is.Zero, "the character did not survive the kill");
+            Assert.That(fromSpawn, Is.GreaterThan(walkedDistance * 0.5f),
+                $"came back {fromSpawn:F1} m from the spawn after walking {walkedDistance:F1} m — the cadence did not save, so the session's walking was lost");
+            Assert.That(fromWalked, Is.LessThan(walkedDistance),
+                "came back further from where it was killed than the spawn point is, which is not a cadence at all");
+        });
     }
 }

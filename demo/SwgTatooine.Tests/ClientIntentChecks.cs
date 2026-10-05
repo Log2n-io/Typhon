@@ -1,4 +1,5 @@
 ﻿using System;
+using SwgTatooine.World.Terrain;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -549,5 +550,195 @@ public sealed class ClientIntentChecks
             Assert.That(TatooineReplication.Intents.Applied, Is.Zero);
             Assert.That(TatooineReplication.Intents.Possessions, Is.Zero);
         });
+    }
+
+    // =======================================================================
+    // A11 - a target has to be ALIVE, not merely resolvable
+    // =======================================================================
+
+    /// <summary>
+    /// A dead target is refused, a live one is accepted, and something with no vitals is not mistaken for dead.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why "resolvable" was not enough.</b> A netId stays resolvable for as long as the session's view holds the entity, so a client
+    /// that clicks the instant something dies — or replays an old click — names a corpse. <c>SetTarget</c> accepted it, and the combat
+    /// system then carried a target it could never resolve a shot against. The refusal belongs at the intent, where it is counted and
+    /// the client is told, rather than dropped per shot downstream.
+    /// </para>
+    /// <para>
+    /// <b>The predicate is tested directly, and the one <c>&amp;&amp;</c> that calls it is not.</b> Reaching the wiring needs a netId for
+    /// a specific dead entity, and there is no server-side entity-to-netId lookup — so a case would have to brute-force
+    /// <c>TryResolve</c> over the view's dense id range from inside a tick. That is more machinery than the branch is worth; the branch
+    /// is one condition visible in review, and this pins the thing that could actually be wrong.
+    /// </para>
+    /// <para>
+    /// <b>The entities are set up before replication starts</b>, which is why a plain transaction and an explicit fence are safe here:
+    /// there is no tick running, so this is the same window <c>WorldBuilder</c> itself builds the world in. Writing a spatial
+    /// archetype while a server ticks would be the one thing <c>EW-02</c> forbids outright.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void OnlyALiveTargetIsAccepted()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        // ConfigureIntents caches the routing ids IsAliveTarget compares against; a serving run does it, a bare Initialize does not.
+        TatooineReplication.ConfigureIntents(sim.Dbe, config.WorldEdgeM, config.TickRateHz);
+
+        EntityId dead, alive, building;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var bounds = default(PlayerPlacement);
+            bounds.SetAt(0f, 0f, 0f, 1f);
+
+            var corpse = new PlayerVitals { Health = 0, MaxHealth = 1400, AttackDamage = 95 };
+            var living = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95 };
+
+            dead = tx.Spawn<Player>(Player.Bounds.Set(in bounds), Player.Vitals.Set(in corpse), Player.Realm.Set(new PlayerRealm(0)));
+            alive = tx.Spawn<Player>(Player.Bounds.Set(in bounds), Player.Vitals.Set(in living), Player.Realm.Set(new PlayerRealm(0)));
+            tx.Commit();
+        }
+
+        sim.Dbe.WriteTickFence(1);
+
+        // A building, which has no vitals at all: the world already has them, so one is borrowed rather than spawned.
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            building = EntityId.Null;
+            foreach (var cluster in tx.For<WorldObject>().GetClusterEnumerator())
+            {
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    building = cluster.GetEntityId(System.Numerics.BitOperations.TrailingZeroCount(bits));
+                    break;
+                }
+
+                if (building != EntityId.Null)
+                {
+                    break;
+                }
+            }
+        }
+
+        Assert.That(building, Is.Not.EqualTo(EntityId.Null), "the world has no WorldObject, so the no-vitals case would be vacuous");
+
+        using var read = sim.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.IsAliveTarget(read, alive), Is.True, "a living player must be targetable");
+            Assert.That(TatooineReplication.IsAliveTarget(read, dead), Is.False, "a player at zero health was accepted as a target");
+
+            // NOT false: a building is not dead, it is unshootable — which ClassifyTarget describes and the combat system refuses.
+            // Answering false here would conflate "you cannot attack a cantina" with "that thing is dead", and a client reacts to
+            // those differently.
+            Assert.That(TatooineReplication.IsAliveTarget(read, building), Is.True, "a building must not be reported as DEAD");
+
+            // An entity that never existed: gone is gone, whatever archetype its id claims.
+            Assert.That(TatooineReplication.IsAliveTarget(read, EntityId.FromRawValue(alive.RawValue | 0xFFFF_0000_0000_0000UL)), Is.False);
+        });
+    }
+
+    /// <summary>
+    /// A <c>SetTarget</c> at an entity the client CAN see but which is dead is refused — the wiring, end to end.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the case that was uncovered, and the reason it is coverable now is a new engine accessor.</b> The refusal needs a
+    /// netId for one specific dead entity, and the identity is held per entity in its replication block while the engine's only public
+    /// direction was netId to entity. <c>SubscriptionsCommands.TryNetIdOf</c> is the inverse, session-scoped so it cannot hand a client
+    /// an identity it was never shown; <c>TatooineReplication.NetIdOf</c> is the demo's line of it.
+    /// </para>
+    /// <para>
+    /// <b>Both halves, because either alone is weak.</b> A live player at the same place must be accepted and the dead one refused, from
+    /// the same client, in the same run — so the case cannot pass against a server that refuses every target, which is what an
+    /// <c>IsAliveTarget</c> returning a constant false would be.
+    /// </para>
+    /// <para>
+    /// The two targets are spawned before replication starts, which is the window <c>WorldBuilder</c> itself builds the world in: no
+    /// tick is running, so a plain transaction and an explicit fence are safe. Writing a spatial archetype while a server ticks is the
+    /// one thing <c>EW-02</c> forbids outright.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    public void ASetTargetAtADeadEntityTheClientCanSeeIsRefused()
+    {
+        var config = Config();
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+
+        // Where the avatar will be: ConfigureAvatars puts a first login at the capital, so the two targets go there to be inside its sphere.
+        var capital = sim.Map.Cities[0];
+        var ground = TerrainField.Shared(config.ContentScale).GroundAt(capital.X, capital.Z);
+
+        EntityId dead, alive;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var place = default(PlayerPlacement);
+            place.SetAt(capital.X + 3f, capital.Z + 3f, ground, 1f);
+
+            var corpse = new PlayerVitals { Health = 0, MaxHealth = 1400, AttackDamage = 95 };
+            dead = tx.Spawn<Player>(Player.Bounds.Set(in place), Player.Vitals.Set(in corpse), Player.Realm.Set(new PlayerRealm(0)));
+
+            place.SetAt(capital.X - 3f, capital.Z - 3f, ground, 1f);
+            var living = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95 };
+            alive = tx.Spawn<Player>(Player.Bounds.Set(in place), Player.Vitals.Set(in living), Player.Realm.Set(new PlayerRealm(0)));
+            tx.Commit();
+        }
+
+        sim.Dbe.WriteTickFence(1);
+
+        var harness = _harness = new SessionHarness(sim);
+        var link = harness.Connect(TatooineReplication.PlayerKind);
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+        harness.Ticks(4);
+
+        // Both must be in the client's view before either can be named, or the refusal below would be "never shown" rather than "dead".
+        SessionHarness.Until(
+            () => TatooineReplication.NetIdOf(link.Session, dead) != 0 && TatooineReplication.NetIdOf(link.Session, alive) != 0,
+            "both targets to reach the client's view");
+
+        var deadNetId = TatooineReplication.NetIdOf(link.Session, dead);
+        var aliveNetId = TatooineReplication.NetIdOf(link.Session, alive);
+        Assert.That(deadNetId, Is.Not.EqualTo(aliveNetId), "the two targets must be distinct identities");
+
+        // The LIVE one first, so a server refusing everything is caught by the accept rather than passing on the refuse.
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(aliveNetId));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsSet >= 1, "the live target to be accepted");
+        harness.Ticks(2);
+
+        var afterLive = TargetOf(sim, link.Session);
+
+        var refusedBefore = TatooineReplication.Intents.TargetsRefused;
+        link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(deadNetId));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsRefused > refusedBefore, "the dead target to be refused");
+        harness.Ticks(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(afterLive, Is.EqualTo(alive), "a live target the client was shown must be accepted");
+            Assert.That(TargetOf(sim, link.Session), Is.EqualTo(EntityId.Null), "a dead target was accepted, or did not clear the previous one");
+            Assert.That(TatooineReplication.Intents.TargetsSet, Is.EqualTo(1), "the dead target must not have been counted as set");
+        });
+    }
+
+    /// <summary>The entity a session's avatar is currently targeting.</summary>
+    /// <param name="sim">The server.</param>
+    /// <param name="session">The session.</param>
+    /// <returns>The target, or <c>EntityId.Null</c>.</returns>
+    private static EntityId TargetOf(TatooineSim sim, SessionId session)
+    {
+        var avatar = TatooineReplication.ControlledBy(sim.Dbe, session);
+        if (avatar == EntityId.Null)
+        {
+            return EntityId.Null;
+        }
+
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        return tx.For<Player>().Open(avatar).Read(Player.Session).Target;
     }
 }

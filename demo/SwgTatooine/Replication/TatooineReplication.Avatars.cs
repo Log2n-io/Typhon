@@ -1,9 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Numerics;
 using SwgTatooine.Accounts;
-using Typhon.Engine;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 
@@ -54,14 +51,28 @@ public static partial class TatooineReplication
     /// Set by <see cref="ConfigureAvatars"/> from the map rather than defaulted to the origin, which on this planet is open desert
     /// a long way from anything: a first login should arrive somewhere there is something to see.
     /// </remarks>
-    private static Point3F _defaultSpawn;
+    private static Point3F DefaultSpawn;
 
-    private static ushort _defaultSpawnRealm;
+    private static ushort DefaultSpawnRealm;
 
     /// <summary>The index over <see cref="Character.Account"/>, resolved once. See <see cref="ConfigureAvatars"/>.</summary>
-    private static IndexRef _characterByAccount;
+    private static IndexRef CharacterByAccount;
 
-    private static bool _avatarsConfigured;
+    private static bool AvatarsConfigured;
+
+    /// <summary>
+    /// How often a live avatar's position is written back to its character, in ticks (A6). Zero disables the cadence.
+    /// </summary>
+    /// <remarks>
+    /// <b>This number IS acceptance criterion A-5.</b> "Position loss on a <c>kill -9</c> is at most the cadence, stated as a
+    /// number" — so the number has to exist somewhere a reader can find, and the criterion is then arithmetic rather than a hope.
+    /// Set from <see cref="ConfigureAvatars"/> out of the tick rate, so a server at 10 Hz and one at 50 Hz save at the same
+    /// wall-clock interval rather than at the same tick count.
+    /// </remarks>
+    private static int SaveIntervalTicks;
+
+    /// <summary>The wall-clock interval the cadence was configured for, for the banner and the tests.</summary>
+    public static double SaveIntervalSeconds { get; private set; }
 
     /// <summary>Session value to the account its token named, filled on <c>Opened</c> and drained when the avatar binds.</summary>
     /// <remarks>
@@ -112,22 +123,44 @@ public static partial class TatooineReplication
     /// <param name="dbe">The engine, for the account index's handle.</param>
     /// <param name="spawn">Where a brand-new character starts.</param>
     /// <param name="realm">The realm a brand-new character starts in.</param>
+    /// <param name="tickRateHz">The server's tick rate, which turns the save interval into a tick count.</param>
+    /// <param name="saveIntervalSeconds">
+    /// How often a live avatar's position is written back (A6). Zero disables the cadence, which means a <c>kill -9</c> costs the
+    /// whole session's walking rather than this many seconds of it.
+    /// </param>
     /// <remarks>
     /// <b>Required rather than defaulted, like <see cref="ConfigureIntents"/>.</b> A server that forgot this refuses to start
     /// instead of spawning everybody at the origin — which on this planet is empty desert, and is the kind of wrong that looks
     /// like a bug in the client.
     /// </remarks>
-    public static void ConfigureAvatars(DatabaseEngine dbe, Point3F spawn, ushort realm)
+    public static void ConfigureAvatars(DatabaseEngine dbe, Point3F spawn, ushort realm, int tickRateHz, double saveIntervalSeconds = DefaultSaveIntervalSeconds)
     {
         ArgumentNullException.ThrowIfNull(dbe);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickRateHz);
+        ArgumentOutOfRangeException.ThrowIfNegative(saveIntervalSeconds);
 
         // Resolved once: an IndexRef captures a layout version and is reusable at no cost, and the alternative is resolving it per
         // login inside the tick, where the expression-tree walk GetIndexRef does would be the most expensive thing a login did.
-        _characterByAccount = dbe.GetIndexRef<Character, EntityLink<AccountArch>>(c => c.Account);
-        _defaultSpawn = spawn;
-        _defaultSpawnRealm = realm;
-        _avatarsConfigured = true;
+        CharacterByAccount = dbe.GetIndexRef<Character, EntityLink<AccountArch>>(c => c.Account);
+        DefaultSpawn = spawn;
+        DefaultSpawnRealm = realm;
+
+        // Rounded UP to one tick, so a cadence shorter than a tick saves every tick rather than every tick being skipped by an
+        // interval of zero — which `% 0` would make a divide-by-zero rather than a fast path.
+        SaveIntervalTicks = saveIntervalSeconds <= 0d ? 0 : Math.Max(1, (int)Math.Round(saveIntervalSeconds * tickRateHz));
+        SaveIntervalSeconds = SaveIntervalTicks == 0 ? 0d : (double)SaveIntervalTicks / tickRateHz;
+        AvatarsConfigured = true;
     }
+
+    /// <summary>
+    /// How much walking a hard kill costs, by default.
+    /// </summary>
+    /// <remarks>
+    /// Ten seconds, which at the run speed is about seventy metres — annoying and recognisable, rather than a lost session. The
+    /// cost is one component write per avatar per interval, and avatars are one per human, so at any population a server can
+    /// actually serve this is unmeasurable beside what the pooled crowd does every tick.
+    /// </remarks>
+    public const double DefaultSaveIntervalSeconds = 10d;
 
     /// <summary>
     /// Notes the account an opening <c>player</c> session belongs to.
@@ -171,6 +204,10 @@ public static partial class TatooineReplication
         {
             return;
         }
+
+        // A6's cadence runs on every tick, so it is ahead of the early return below: that return is for "nothing opened and nothing
+        // closed", which is almost every tick and is exactly when a live avatar's position still needs saving.
+        SaveAvatarsOnCadence(tick, subs, tx);
 
         // `Unbound` and `Seen` were filled by WalkSessions. Nothing to bind and nothing to retire is the common case by far — a
         // server spends almost every tick with a stable set of clients — and worth detecting, because tx.For<Player>() creates an
@@ -218,7 +255,7 @@ public static partial class TatooineReplication
             return;
         }
 
-        if (!_avatarsConfigured)
+        if (!AvatarsConfigured)
         {
             // A programmer error, and loud: without ConfigureAvatars there is no account index to read and no spawn point to fall
             // back on, so every login would silently create a second character at the origin.
@@ -234,8 +271,8 @@ public static partial class TatooineReplication
                 Account = account,
                 Name = (String64)DisplayNameFor(account),
                 Credits = CharacterStore.StartingCredits,
-                LastPosition = _defaultSpawn,
-                LastRealm = _defaultSpawnRealm,
+                LastPosition = DefaultSpawn,
+                LastRealm = DefaultSpawnRealm,
                 LastSavedUtcTicks = DateTime.UtcNow.Ticks,
             };
 
@@ -264,6 +301,71 @@ public static partial class TatooineReplication
     }
 
     /// <summary>
+    /// Writes live avatars' positions back to their characters on a cadence, so a hard kill costs seconds rather than a session (A6).
+    /// </summary>
+    /// <param name="tick">The tick context, for its number.</param>
+    /// <param name="subs">Unused today; held so a future cadence can report rather than only count.</param>
+    /// <param name="tx">The tick's transaction.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a cadence exists at all.</b> A logout saves, and a logout is the happy path; a process killed with <c>SIGKILL</c> — or
+    /// an instance an operator stops, or a crash — runs no logout, so without this a player's whole session of walking is lost. The
+    /// bound on that loss is <see cref="SaveIntervalSeconds"/>, which is what makes acceptance criterion A-5 a number rather than a
+    /// hope.
+    /// </para>
+    /// <para>
+    /// <b>STAGGERED by session, which is the only interesting line here.</b> Saving every avatar on the same tick would put one
+    /// component write per live player into a single tick every interval — a sawtooth in the tick time, and the busiest tick of every
+    /// interval would be the one a measurement happened to notice. Offsetting by the session value spreads them over the interval,
+    /// so the cost is flat and each avatar is still saved exactly once per interval.
+    /// </para>
+    /// <para>
+    /// <b>No dirty check, deliberately.</b> A standing-still avatar is written as often as a running one. The alternative is a
+    /// comparison against the saved position, which costs a read of the character to avoid a write of the character — and the write
+    /// is one component on an archetype nothing walks. The saved <c>LastSavedUtcTicks</c> moving while a player stands still is also
+    /// the truthful record: that position WAS current at that moment.
+    /// </para>
+    /// </remarks>
+    private static void SaveAvatarsOnCadence(TickContext tick, SubscriptionsCommands subs, Transaction tx)
+    {
+        _ = subs;
+        if (SaveIntervalTicks == 0 || BoundPlayer.Count == 0)
+        {
+            return;
+        }
+
+        ArchetypeAccessor<Player> players = default;
+        ArchetypeAccessor<CharacterArch> characters = default;
+        var opened = false;
+
+        foreach (var (sessionValue, avatar) in BoundPlayer)
+        {
+            // The stagger: each session's save tick is its own residue of the interval, so two sessions save on the same tick only
+            // when their values are congruent modulo it.
+            if ((tick.TickNumber + sessionValue) % SaveIntervalTicks != 0)
+            {
+                continue;
+            }
+
+            if (!CharacterOfSession.TryGetValue(sessionValue, out var character))
+            {
+                continue;
+            }
+
+            if (!opened)
+            {
+                // Opened lazily and NOT disposed — the tick's transaction owns both. Lazily because on most ticks the stagger means
+                // no session is due, and an accessor pair per tick for nothing is the cost this method must not have.
+                players = tx.For<Player>();
+                characters = tx.For<CharacterArch>();
+                opened = true;
+            }
+
+            SaveAvatarLocation(players, characters, avatar, character);
+        }
+    }
+
+    /// <summary>
     /// Saves and destroys the avatar of every session that is no longer open.
     /// </summary>
     /// <param name="tx">The tick's transaction.</param>
@@ -281,7 +383,7 @@ public static partial class TatooineReplication
         }
 
         Retired.Clear();
-        foreach (var (sessionValue, avatar) in BoundPlayer)
+        foreach (var (sessionValue, _) in BoundPlayer)
         {
             if (!Seen.Contains(sessionValue))
             {
@@ -396,7 +498,7 @@ public static partial class TatooineReplication
         profile = default;
 
         var key = unchecked((long)account.RawValue);
-        using var found = tx.EnumerateIndex<Character, long>(_characterByAccount, key, key);
+        using var found = tx.EnumerateIndex<Character, long>(CharacterByAccount, key, key);
         if (!found.MoveNext())
         {
             return false;
@@ -509,6 +611,8 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _loginsRefusedDuplicate, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedAnonymous, 0);
         System.Threading.Interlocked.Exchange(ref _locationsSaved, 0);
-        _avatarsConfigured = false;
+        AvatarsConfigured = false;
+        SaveIntervalTicks = 0;
+        SaveIntervalSeconds = 0d;
     }
 }

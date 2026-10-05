@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -306,6 +306,147 @@ unsafe class TryResolveTests : TestBase<TryResolveTests>
             Assert.That(commands.TryResolveAny(session, otherNetId, out var any), Is.True, "TryResolveAny ignores the view");
             Assert.That(any, Is.EqualTo(other));
             Assert.That(commands.TryResolve(session, 0x7FFF_FFFF, out _), Is.False, "an identity nothing holds");
+        });
+    }
+
+    // =======================================================================
+    // TryNetIdOf - the inverse, which must agree with TryResolve exactly
+    // =======================================================================
+
+    /// <summary>
+    /// <c>TryNetIdOf</c> names exactly the entities <c>TryResolve</c> accepts, and names them by the identity replication gave them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The oracle is <c>TryResolve</c> itself, over the whole population.</b> The two are inverses across one session's view, so the
+    /// set they agree on is the assertion — not a sampled entity, and not the count. An implementation that answered for everything
+    /// replicated rather than for everything HELD would pass a spot check and fail this, which is the mistake worth catching: handing a
+    /// client an identity it was never shown lets it name something outside its view, which is exactly what SUB-26 forbids coming the
+    /// other way.
+    /// </para>
+    /// <para>
+    /// The unscoped identity comes from the harness, which reads the replica directly — so this also pins that the scoped answer is the
+    /// SAME number, not a per-session renaming.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-26")]
+    public void TryNetIdOfNamesExactlyWhatTryResolveAccepts()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(TryNetIdOfNamesExactlyWhatTryResolveAccepts));
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(100.3, 100.7, 0));
+        Run(harness, session, 4);
+
+        var commands = harness.Subscriptions.Commands;
+        var resolvable = new HashSet<EntityId>();
+        var nameable = new HashSet<EntityId>();
+        var disagreed = new List<string>();
+
+        foreach (var id in ids)
+        {
+            var unscoped = harness.NetIdOf(id);
+            if (unscoped != 0 && commands.TryResolve(session, unscoped, out _))
+            {
+                resolvable.Add(id);
+            }
+
+            if (commands.TryNetIdOf(session, id, out var scoped))
+            {
+                nameable.Add(id);
+                if (scoped != unscoped)
+                {
+                    disagreed.Add($"{id}: scoped {scoped} vs replica {unscoped}");
+                }
+            }
+            else if (scoped != 0)
+            {
+                disagreed.Add($"{id}: refused but handed back {scoped}");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(resolvable, Is.Not.Empty, "the session holds nothing, so this case would pass against a method that always says no");
+            Assert.That(resolvable, Is.Not.EquivalentTo(ids), "the session holds EVERYTHING, so a method ignoring the view would also pass");
+            Assert.That(nameable, Is.EquivalentTo(resolvable), "what a session can name must be exactly what it can resolve");
+            Assert.That(disagreed, Is.Empty);
+        });
+    }
+
+    /// <summary>A session's controlled entity can be named wherever it is, matching <c>TryResolve</c>'s own exception for it.</summary>
+    /// <remarks>
+    /// The controlled entity resolves outside the view — a session drives its own body whether or not its geometry currently covers it —
+    /// so the inverse has to agree, or an application could not name to a client the one entity it certainly knows about.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-26")]
+    public void TheControlledEntityCanAlwaysBeNamed()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(TheControlledEntityCanAlwaysBeNamed));
+        var session = harness.OpenSessions(1, "near")[0];
+
+        // Far from the controlled entity, so it is outside the session's own sphere.
+        var controlled = ids[^1];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0, 0, 0));
+        harness.Sessions.SetControlled(session, controlled);
+        Run(harness, session, 4);
+
+        var commands = harness.Subscriptions.Commands;
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.TryNetIdOf(session, controlled, out var netId), Is.True, "a session must be able to be told the identity of its own body");
+            Assert.That(netId, Is.Not.Zero);
+            Assert.That(commands.TryResolve(session, netId, out var back), Is.True, "and that identity must resolve back");
+            Assert.That(back, Is.EqualTo(controlled));
+        });
+    }
+
+    /// <summary>A destroyed entity, a never-replicated one and a closed session are all refused with a zero identity.</summary>
+    /// <remarks>
+    /// <b>Each one is a different early return, and <c>out</c> must be zero on all of them.</b> A caller that forwards the identity to a
+    /// client without checking the boolean would otherwise send 0 sometimes and a stale number other times, and only one of those is
+    /// obviously wrong at the far end.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-26")]
+    public void TheRefusalsHandBackNoIdentity()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var ids = Populate(dbe);
+        using var harness = Harness(dbe, nameof(TheRefusalsHandBackNoIdentity));
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(100.3, 100.7, 0));
+        Run(harness, session, 4);
+
+        var commands = harness.Subscriptions.Commands;
+
+        // One the session certainly holds, so the fixture is not asserting over a session that holds nothing.
+        var held = ids.Find(id => commands.TryNetIdOf(session, id, out _));
+        Assert.That(held, Is.Not.EqualTo(default(EntityId)), "the session holds nothing");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(held);
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(++_tick);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.TryNetIdOf(session, held, out var gone), Is.False, "a destroyed entity must not be nameable");
+            Assert.That(gone, Is.Zero);
+
+            Assert.That(commands.TryNetIdOf(session, EntityId.Null, out var nothing), Is.False);
+            Assert.That(nothing, Is.Zero);
+
+            Assert.That(commands.TryNetIdOf(default, ids[0], out var noSession), Is.False, "a session that was never open must be refused");
+            Assert.That(noSession, Is.Zero);
         });
     }
 }

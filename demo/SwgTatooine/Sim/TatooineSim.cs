@@ -3,7 +3,6 @@ using System.IO;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 

@@ -300,6 +300,55 @@ public static partial class TatooineReplication
     /// </summary>
     public const string PlayerProfile = "player-lite";
 
+    /// <summary>
+    /// What a session with something to RENDER is served: <see cref="PlayerProfile"/>'s shape plus the buildings (A7).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A player who cannot see buildings is standing in an empty desert that happens to stop them walking.</b> The world's towns
+    /// are <c>WorldObject</c>s, and <see cref="PlayerProfile"/> does not carry them — correctly, for what it was built for: its
+    /// sessions were headless measurement clients that rendered nothing, and the comment on <see cref="SpectateProfile"/> explains
+    /// at length why an extra archetype on a MOVING sphere is not free. So the buildings go on a profile of their own and the
+    /// measurement profile keeps its numbers.
+    /// </para>
+    /// <para>
+    /// <b>The cost is accepted and is written down rather than discovered later:</b> about 0.7 extra cell-queries per tick per
+    /// moving session, because the crescent sweep queries every archetype in the set over every cell the sphere newly covers. For a
+    /// human that is the right trade — they are one per person, not one per population.
+    /// </para>
+    /// <para>
+    /// <b>Identical in content to <see cref="SpectateProfile"/>, and NOT merged with it.</b> They are the same shape for different
+    /// reasons: a spectator rides somebody else's entity and a player drives its own, and <c>Spectate</c>'s own commentary turns on
+    /// what <c>Control</c> leaks to a watcher. The day a <c>Player</c> declares an <c>[Owner]</c> field those two diverge — the
+    /// spectator must stop seeing it and the player must not — and one shared name would make that a rename under pressure.
+    /// </para>
+    /// </remarks>
+    public const string HumanProfile = "human";
+
+    /// <summary>
+    /// Which profile a <c>player</c> session is given: <see cref="HumanProfile"/> by default, <see cref="PlayerProfile"/> for a measurement run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It is one setting for every player session, and that is forced by what a bot is.</b> Phase B's bots connect as
+    /// <c>player</c> and the server must not be able to tell them from a person, so it cannot serve them a cheaper profile — the
+    /// moment it could, the thing that distinguishes them would be the profile they got. So either everybody pays for buildings or
+    /// nobody does.
+    /// </para>
+    /// <para>
+    /// <b>The default is to pay, because the browser is what the phase is for.</b> The switch exists for the measurement runs whose
+    /// published CPU numbers were all taken on <see cref="PlayerProfile"/>: changing the profile under them would make every figure
+    /// before this change incomparable with every figure after it, and that is a worse outcome than one flag. A run that sets it is
+    /// stating that it wants the old shape, which is exactly what a comparison needs.
+    /// </para>
+    /// <para>
+    /// The honest long answer is that detail level belongs to the CLIENT — a real client says what it renders, and a bot asking for
+    /// no buildings is indistinguishable from a person on low settings. That needs a field in <c>HELLO</c>, which is A8's wire and
+    /// not this.
+    /// </para>
+    /// </remarks>
+    public static string PlayerProfileName { get; set; } = HumanProfile;
+
     /// <summary>The profile a camera riding an entity is served: <see cref="PlayerProfile"/>'s shape plus the buildings. See its declaration for why it is
     /// a separate profile and not a flag on the player's.</summary>
     public const string SpectateProfile = "spectate";
@@ -533,6 +582,27 @@ public static partial class TatooineReplication
     /// </remarks>
     public static EntityId SubjectOf(SessionId session) => _pushCommands?.ControlledOf(session) ?? EntityId.Null;
 
+    /// <summary>
+    /// The <c>netId</c> a session's client knows an entity by, or <c>0</c> when it cannot see it.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <returns>The identity, or <c>0</c>.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The inverse of what a command does, and the demo has wanted it since A11.</b> Everything else here goes the other way — a
+    /// client names a <c>netId</c> and the server resolves it. Naming an entity TO a client is what a GM tool, a tutorial pointing at a
+    /// quest giver, or a test driving a command at a specific entity all need.
+    /// </para>
+    /// <para>
+    /// <b>Read through the cached commands surface, exactly as <see cref="SubjectOf"/> is.</b> Both read committed replication state —
+    /// what the session's last published frame carried — which is the state a system reads and is stable between ticks. It answers 0
+    /// before the first tick of a run, because there is no surface to ask yet.
+    /// </para>
+    /// </remarks>
+    public static uint NetIdOf(SessionId session, EntityId entity)
+        => _pushCommands != null && _pushCommands.TryNetIdOf(session, entity, out var netId) ? netId : 0u;
+
     /// <summary>The sessions whose subject died this tick, collected before any is released because releasing writes to <see cref="Spectators"/>.</summary>
     private static readonly List<SessionId> Dead = [];
 
@@ -651,6 +721,7 @@ public static partial class TatooineReplication
         Dead.Clear();
         MaxClients = 0;
         MaxSpectators = 0;
+        PlayerProfileName = HumanProfile;
     }
 
     /// <summary>A refusal for a full house, counted.</summary>
@@ -916,6 +987,24 @@ public static partial class TatooineReplication
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });
 
+        // A7: what a session with something to RENDER is served — the player's own shape plus the buildings. Declared separately from
+        // SpectateProfile despite being identical today; see HumanProfile for why they are kept apart, and for the sweep cost this
+        // accepts. Declared unconditionally rather than only when PlayerProfileName selects it, because the catalog a client
+        // negotiates against is compiled from these declarations: a profile that appeared only in some runs would change the catalog
+        // hash between them, and that hash is what a client checks it is talking to the same server with.
+        subs.Profile(HumanProfile, p =>
+        {
+            p.Detection(detection)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .AroundControlled()
+                .Of<Player>()
+                .Of<CityNpc>()
+                .Of<Creature>()
+                .Of<WorldObject>();
+            p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
+            p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
+        });
+
         // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
         // SWG-09's first event: the blow a client draws a line for. Routed to whoever knows either end rather than by
         // position, because that is exactly the set of sessions with something to draw it between.
@@ -958,7 +1047,7 @@ public static partial class TatooineReplication
             .Coalesce(CommandCoalesce.LatestPerSession)
             .Rate(30, 60)
             .Roles(SessionRole.Player)
-            .Precheck(static (in MoveTo m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
+            .Precheck(static (in m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
             .Field(m => m.X, Codec.F32, "x")
             .Field(m => m.Z, Codec.F32, "z"));
         subs.Command<MoveDir>(c => c
@@ -968,7 +1057,7 @@ public static partial class TatooineReplication
             // Finiteness only. The speed class is deliberately NOT checked here: the engine's own contract for a pre-check is that it "rejects the impossible,
             // not the disallowed", and which classes this server grants is policy that lives with the entitlement in TrySpeedFor. Checking it here made the
             // system's refusal counter unreachable by any client — so the code claimed to count something it never could.
-            .Precheck(static (in MoveDir m) => float.IsFinite(m.Heading))
+            .Precheck(static (in m) => float.IsFinite(m.Heading))
             .Field(m => m.Heading, Codec.F16, "heading")
             .Field(m => m.SpeedClass, Codec.U8, "speedClass"));
         subs.Command<SetTarget>(c => c
@@ -1098,7 +1187,7 @@ public static partial class TatooineReplication
                 // carries none and nothing is recorded, which is what keeps it out of the avatar binding entirely.
                 NoteOpenedSession(e.Session, e.AppData);
 
-                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfileName);
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfileName : GodProfileName);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
                     request.SetBudget(PlayerBudgetBytesPerSecond);
@@ -1944,7 +2033,11 @@ public static partial class TatooineReplication
 
             // TryResolve, not TryResolveAny: a client may only name what it was shown (SUB-26). A refusal is not an error — the entity may have left since the
             // command was sent — so the target is cleared and counted rather than the session being closed.
-            if (subs.TryResolve(command.Session, command.Value.NetId, out var target))
+            //
+            // A11 adds the second half: resolvable is not the same as ALIVE. A netId stays resolvable for as long as the session's view holds it, so a client
+            // that clicks the moment something dies — or replays the click — names a corpse, and the combat system would then carry a target it can never
+            // resolve a shot against. Refused here, where the refusal is counted and the client is told, rather than silently dropped per shot downstream.
+            if (subs.TryResolve(command.Session, command.Value.NetId, out var target) && IsAliveTarget(tx, target))
             {
                 owner.Target = target;
 
@@ -2149,6 +2242,47 @@ public static partial class TatooineReplication
     private static ushort _creatureRouting;
     private static ushort _lairRouting;
     private static ushort _playerRouting;
+
+    /// <summary>
+    /// Whether an entity is something that can still be shot at: it exists, and whatever vitals it has are above zero (A11).
+    /// </summary>
+    /// <param name="tx">A transaction to read through — the tick's, in the one place this is used for real.</param>
+    /// <param name="target">The entity a client named.</param>
+    /// <returns><see langword="false"/> when the target is gone or dead.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>By archetype, because health lives on a different component in each.</b> A player's is <c>PlayerVitals</c>, a creature's
+    /// <c>CreatureVitals</c>, a lair's <c>LairVitals</c>; there is no shared interface to read, and inventing one for three call
+    /// sites would be an abstraction over a switch.
+    /// </para>
+    /// <para>
+    /// <b>Anything that is not one of the three answers TRUE, and that is deliberate.</b> A city NPC or a building has no vitals and
+    /// is not dead — it is simply not shootable, which <see cref="ClassifyTarget"/> already describes and the combat system already
+    /// refuses. Answering false here would conflate "you cannot attack a cantina" with "that thing is dead", and the client's two
+    /// reactions to those are different.
+    /// </para>
+    /// </remarks>
+    public static bool IsAliveTarget(Transaction tx, EntityId target)
+    {
+        var routing = target.ArchetypeId;
+
+        if (routing == _playerRouting)
+        {
+            return tx.For<Player>().TryOpen(target, out var player) && player.Read(Player.Vitals).Health > 0;
+        }
+
+        if (routing == _creatureRouting)
+        {
+            return tx.For<Creature>().TryOpen(target, out var creature) && creature.Read(Creature.Vitals).Health > 0;
+        }
+
+        if (routing == _lairRouting)
+        {
+            return tx.For<CreatureLair>().TryOpen(target, out var lair) && lair.Read(CreatureLair.Vitals).Health > 0;
+        }
+
+        return true;
+    }
 
     /// <summary>Which of the shootable archetypes an entity belongs to, for <c>PlayerSession.TargetKind</c> (SWG-02).</summary>
     /// <param name="target">The entity a client named.</param>
