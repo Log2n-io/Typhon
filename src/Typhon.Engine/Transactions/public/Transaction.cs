@@ -1454,6 +1454,13 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
+    /// Whether <paramref name="element"/> is this transaction's pending revision: isolated, stamped with this transaction's TSN, and carrying
+    /// <paramref name="contentChunkId"/> (0 for a delete).
+    /// </summary>
+    private bool IsOwnPendingEntry(in CompRevStorageElement element, int contentChunkId) =>
+        element.IsolationFlag && element.TSN == TSN && element.ComponentChunkId == contentChunkId;
+
+    /// <summary>
     /// Rolls back a single component revision: frees content chunks, voids revision entries, and enqueues for deferred cleanup.
     /// </summary>
     /// <returns><c>true</c> if the component was created (rev table chunk freed — caller must remove from cache); <c>false</c> otherwise.</returns>
@@ -1464,47 +1471,83 @@ public unsafe partial class Transaction : EntityAccessor
         ref var compRevInfo = ref context.CompRevInfo;
 
         ref var compRevTableAccessor = ref info.CompRevTableAccessor;
-        var componentSegment = info.CompContentSegment;
         var revTableSegment = info.CompRevTableSegment;
 
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
-        // Get the chunk storing the revision we want to roll back as well as the index of the element
-        var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-
-        // Validate CurRevisionIndex — chain compaction by another transaction's cleanup may have
-        // shifted entry positions since our read. Best-effort (no lock).
-        if (elementHandle.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
-        {
-            var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
-            if (fixedIndex >= 0)
-            {
-                compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
-            }
-        }
-
-        // Free the chunk storing the content (if any)
-        if (compRevInfo.CurCompContentChunkId != 0)
-        {
-            componentSegment.FreeChunk(compRevInfo.CurCompContentChunkId);
-        }
-
-        // If we roll back a created component, we must delete the revision table chunk
+        // Every chunk freed here is freed exactly once: this is the only owner (CleanupEcsState frees no Versioned chunk), and each branch disarms the
+        // entry after freeing, so a rollback re-run by Dispose after a throw part-way through finds nothing left to free.
         if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
+            // A created component owns its revision table chunk too. It was never published, so the chain is this transaction's alone and needs no lock.
+            // CC-aware: the rolled-back value's ComponentCollection buffers go with it. Chunk id 0 is a no-op for both frees, which is what disarms the entry.
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
             revTableSegment.FreeChunk(firstChunkId);
+            compRevInfo.CurCompContentChunkId = 0;
+            compRevInfo.CompRevTableFirstChunkId = 0;
 
             // Early exit: the RevTable chunk is gone — continuing would access freed memory.
             return true;
         }
 
-        // In case of update or delete, mark void the revision entry we added
+        // In case of update or delete, void the revision entry we added — under the chain's exclusive lock. Without it, a cleanup on another thread can
+        // compact the chain between finding our entry and voiding it, and the void lands on whatever moved into that position (#1161); and VoidElement
+        // rewrites the header's ItemCount, which AddCompRev and cleanup also write under this lock. The wait is unbounded: rollback must complete, and a
+        // timeout thrown part-way would leave the transaction in the chain pinning MinTSN. It cannot deadlock — this thread holds no other chain lock
+        // while it waits, and every holder (AddCompRev, a cleanup's try-lock, a handler commit's PREPARE→PUBLISH) releases without waiting on a rollback.
+        var ownEntryVoided = false;
         if ((compRevInfo.Operations & (ComponentInfo.OperationType.Updated | ComponentInfo.OperationType.Deleted)) != 0)
         {
-            compRev.VoidElement(elementHandle);
+            ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            var ownsLock = !header.Control.IsLockedByCurrentThread;
+            if (ownsLock)
+            {
+                header.Control.EnterExclusiveAccess(ref WaitContext.Null);
+            }
+
+            try
+            {
+                // Our entry is isolated, stamped with our TSN, and carries our content chunk (0 for a delete). A compaction since we added it moves it but
+                // never drops it (cleanup keeps isolated entries), so a miss at the recorded position means a search. Either way the candidate must pass
+                // the same test: FindRevisionIndexByChunkId matches a content chunk alone, and when the copy-on-write threw between flagging Updated and
+                // adding the entry, the chunk recorded here is still the committed head's.
+                var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
+                var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+                if (!IsOwnPendingEntry(elementHandle.Element, compRevInfo.CurCompContentChunkId))
+                {
+                    var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, firstChunkId,
+                        compRevInfo.CurCompContentChunkId, TSN);
+                    if (fixedIndex >= 0)
+                    {
+                        compRevInfo.CurRevisionIndex = fixedIndex;
+                        elementHandle = compRev.GetRevisionElement(fixedIndex);
+                    }
+                }
+
+                if (IsOwnPendingEntry(elementHandle.Element, compRevInfo.CurCompContentChunkId))
+                {
+                    compRev.VoidElement(elementHandle);
+                    ownEntryVoided = true;
+                }
+            }
+            finally
+            {
+                if (ownsLock)
+                {
+                    ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+                    lockHeader.Control.ExitExclusiveAccess();
+                }
+            }
         }
+
+        // Free the content chunk only once it is proven ours and no longer referenced by the chain. Not finding our entry means not knowing whose chunk it
+        // is, and a leak is the safe side of that. CC-aware — the copy-on-write AddRef'd every ComponentCollection buffer it cloned
+        // (EcsVersionedCopyOnWrite), so the rollback releases them. Disarm the entry: a re-run skips Read entries.
+        if (ownEntryVoided)
+        {
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
+        }
+        compRevInfo.Operations = ComponentInfo.OperationType.Read;
 
         // Enqueue for deferred cleanup
         _deferredEnqueueBatch ??= new List<DeferredCleanupManager.CleanupEntry>(16);

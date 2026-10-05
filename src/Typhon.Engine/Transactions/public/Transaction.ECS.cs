@@ -3870,14 +3870,23 @@ public unsafe partial class Transaction
         }
     }
 
-    /// <summary>Clean up ECS-specific state on transaction reset/dispose. Frees orphaned chunks on rollback.</summary>
+    /// <summary>Clean up ECS state on transaction reset (pooling). Releases the collection buffers of rolled-back SingleVersion/Transient spawns.</summary>
+    /// <remarks>
+    /// Frees no Versioned chunk. The rollback that <c>Dispose</c> always runs first is their only owner: <c>RollbackComponent</c> frees each spawn's content
+    /// and revision-table chunks and each copy-on-write chunk. This method used to free them again for every non-committed state, Rollbacked included — a
+    /// double free, and not a harmless one: between the rollback and this pool reset other threads keep allocating, so the chunk freed twice was often another
+    /// entity's committed revision by then, and the next allocation handed it out a third time: two entities, one payload (#696). It was also never a
+    /// reliable reclaimer, since a transaction dropped instead of pooled is never reset.
+    /// </remarks>
     internal void CleanupEcsState()
     {
-        // Rollback freeing below calls FreeContentChunk, which creates a ChunkAccessor and therefore needs an epoch scope.
-        // Entering one here is cheap and nesting-safe; on a committed transaction the freeing blocks are skipped, only the tail clears run.
+        // ReleaseCollectionBuffers below creates a ChunkAccessor and therefore needs an epoch scope.
+        // Entering one here is cheap and nesting-safe; on a committed transaction the release block is skipped, only the tail clears run.
         using var epochGuard = EpochGuard.Enter(_epochManager);
 
-        // If transaction was NOT committed, free component chunks for spawned entities.
+        // Dispose resets only a committed, rolled-back or never-mutated transaction: a rollback that throws leaves Dispose before the chain removal.
+        System.Diagnostics.Debug.Assert(State != TransactionState.InProgress, "CleanupEcsState: reset of a transaction whose rollback did not complete");
+
         // Entity was never inserted into EntityMap, so no EntityMap.Remove needed.
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)
         {
@@ -3898,26 +3907,8 @@ public unsafe partial class Transaction
                 {
                     var table = engineState.SlotToComponentTable[slot];
 
-                    if (table.StorageMode == StorageMode.Versioned)
-                    {
-                        // Versioned: free componentChunkId from SpawnEntry + compRev chain from SingleCache
-                        int chunkId = entry.VerLoc[slot];
-                        if (chunkId > 0)
-                        {
-                            // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it.
-                            DeferredCleanupManager.FreeContentChunk(table, chunkId);
-                        }
-
-                        var compType = meta._slotToComponentType[slot];
-                        if (_componentInfos.TryGetValue(compType, out var info) && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
-                        {
-                            if (cri.CompRevTableFirstChunkId > 0)
-                            {
-                                table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
-                            }
-                        }
-                    }
-                    else
+                    // Versioned: reclaimed by the rollback (see remarks).
+                    if (table.StorageMode != StorageMode.Versioned)
                     {
                         // SV/Transient: nothing to free — since #839 the payload is a slot in the transaction's spawn arena, which the reset drops wholesale.
                         // But the CC-aware half of the old FreeContentChunk call still has to happen: a rolled-back spawn that populated a ComponentCollection
@@ -3928,36 +3919,6 @@ public unsafe partial class Transaction
                         {
                             DeferredCleanupManager.ReleaseCollectionBuffers(
                                 table, new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Rollback Versioned writes (copy-on-write): free chunks allocated by AddCompRev
-        if (State != TransactionState.Committed && _componentInfos.Count > 0)
-        {
-            foreach (var kvp in _componentInfos)
-            {
-                var info = kvp.Value;
-                if (info.ComponentTable.StorageMode != StorageMode.Versioned)
-                {
-                    continue;
-                }
-
-                if (info.SingleCache != null)
-                {
-                    foreach (var cacheKvp in info.SingleCache)
-                    {
-                        var cri = cacheKvp.Value;
-
-                        // Free copy-on-write chunks (Updated but not Created — Created chunks are freed above)
-                        if ((cri.Operations & ComponentInfo.OperationType.Updated) != 0 &&
-                            (cri.Operations & ComponentInfo.OperationType.Created) == 0 &&
-                            cri.CurCompContentChunkId > 0)
-                        {
-                            // CC-aware free: release the cloned ComponentCollection buffer of the rolled-back COW chunk (the committed head keeps its own).
-                            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
                         }
                     }
                 }

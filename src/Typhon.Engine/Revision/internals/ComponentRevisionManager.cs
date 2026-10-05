@@ -331,7 +331,9 @@ internal ref struct ComponentRevisionManager
                 // Copy entry to compacted output
                 curDestElements[curDestIndexInChunk++] = enumerator.Current;
                 tempFirstHeader[0].ItemCount++;
-                if (!enumerator.Current.IsolationFlag)
+                // LCRI names the newest COMMITTED entry. A void (a rolled-back entry left mid-chain) is not isolated either, and pointing LCRI at it makes the
+                // conflict check read TSN 0 and the handler read "committed" data from chunk 0.
+                if (!enumerator.Current.IsolationFlag && !enumerator.Current.IsVoid)
                 {
                     tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
                 }

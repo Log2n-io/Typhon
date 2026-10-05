@@ -969,9 +969,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Rollback Stress Test
 
-    // QUARANTINE (#696): entity value is a stale intermediate after concurrent rollbacks.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#696): entities ended with ANOTHER entity's value — a rolled-back write's chunk was freed twice, by Rollback and again by the pool reset,
+    // after another write had taken it (fixed, TransactionTests.Rollback_*_ThenDisposed*). Residual ~1 run in 8: a ±1 lost update, gone in every run with
+    // #1158's publish fix applied — un-quarantine once #1158 lands.
+    // NOT re-suppressed with [Ignore], which would hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Tests that rollbacks correctly restore state under concurrent load.
     /// </summary>
@@ -1843,9 +1844,12 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Multi-Entity Transaction Chaos Tests
 
-    // QUARANTINE (#696): conserved sum violated — the engine hands the conflict handler a (Read, Committing) pair that do not correspond (2 bad deltas), so units are CREATED, not misattributed.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#696): conserved sum violated. Two causes. (1) Cross-entity payloads from the rollback double free — fixed. (2) Still open, #1146: a
+    // revision is stamped with its writer's CREATION TSN, so an older writer committing between this transaction's Read and its first Write becomes visible
+    // to the write-time chain walk; ReadCommitSequence then includes that commit, no conflict is detected, and the value computed from the Read overwrites
+    // it — the "bad deltas" are the same mismatch seen by the handler. Also: handler commits lock chains in write order, so two opposite transfers deadlock
+    // until the 5 s RevisionChainLockTimeout and land in `errors`.
+    // NOT re-suppressed with [Ignore], which would hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Bank transfer test: N entities each start with value 1000. Threads perform atomic transfers
     /// (decrement src, increment dst) in single transactions. Readers verify the global invariant:

@@ -35,10 +35,23 @@ internal ref struct ComponentRevision
     internal void AddCompRev(long tsn, bool isDelete)
         => ComponentRevisionManager.AddCompRev(_info, ref _compRevInfo, tsn, _uowId, isDelete);
     internal int AllocCompRevStorage(long tsn, long pk) => ComponentRevisionManager.AllocCompRevStorage(_info, tsn, _uowId, _firstChunkId, pk);
+    /// <summary>
+    /// Voids a rolled-back entry, then drops the void entries at the END of the chain. Caller holds the chain's exclusive lock.
+    /// </summary>
+    /// <remarks>
+    /// Only the tail may shrink. <c>ItemCount</c> bounds the range [FirstItemIndex, FirstItemIndex + ItemCount): decrementing it for an entry that is NOT
+    /// last does not remove that entry, it removes the LAST one — a later transaction's entry, often its committed head, which every walk then stops seeing
+    /// and the next append overwrites (#696). A void left in the middle is harmless: walks skip it and cleanup reclaims it. A void left at the tail is not:
+    /// cleanup takes it for the newest kept entry and frees the committed sentinel before it, so the loop trims every trailing void, not just this one.
+    /// </remarks>
     public void VoidElement(ComponentRevisionManager.ElementRevisionHandle elementRevisionHandle)
     {
-        ref var firstHeader = ref _accessor.GetChunk<CompRevStorageHeader>(_firstChunkId, true);
-        --firstHeader.ItemCount;
         elementRevisionHandle.Element.Void();
+
+        ref var firstHeader = ref _accessor.GetChunk<CompRevStorageHeader>(_firstChunkId, true);
+        while (firstHeader.ItemCount > 1 && GetRevisionElement((short)(firstHeader.FirstItemIndex + firstHeader.ItemCount - 1)).Element.IsVoid)
+        {
+            --firstHeader.ItemCount;
+        }
     }
 }

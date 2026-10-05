@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Typhon.Engine.Tests;
@@ -856,6 +857,392 @@ class TransactionTests : TestBase<TransactionTests>
             var result = t.Open(e1).Read(CompAArch.A);
             Assert.That(result.A, Is.EqualTo(42));
         }
+    }
+
+    /// <summary>
+    /// A rolled-back update frees its copy-on-write chunk once. The pool reset of the disposed transaction used to free it a second time, by which point
+    /// another transaction's write had been handed that chunk — so the reset freed a committed revision's payload, the next write took it, and two entities
+    /// read one payload (#696).
+    /// </summary>
+    [Test]
+    public void Rollback_Updated_ThenDisposedAfterAnotherWrite_DoesNotFreeThatWritesChunk()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e1, e2;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a1 = new CompA(1);
+            var a2 = new CompA(2);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a1));
+            e2 = t.Spawn<CompAArch>(CompAArch.A.Set(in a2));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        var t1 = dbe.CreateQuickTransaction();
+        int rolledBackChunk;
+        try
+        {
+            t1.Open(e1).Read(CompAArch.A);
+            ref var w1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+            w1 = new CompA(10);
+            rolledBackChunk = ContentChunkAt(dbe, e1, 1);
+            Assert.That(t1.Rollback(), Is.True);
+
+            {
+                using var t2 = dbe.CreateQuickTransaction();
+                t2.Open(e2).Read(CompAArch.A);
+                ref var w2 = ref t2.OpenMut(e2).Write(CompAArch.A);
+                w2 = new CompA(20);
+                Assert.That(t2.Commit(), Is.True);
+            }
+            Assert.That(ContentChunkAt(dbe, e2, 1), Is.EqualTo(rolledBackChunk), "precondition: e2's update reuses the chunk the rollback freed");
+        }
+        finally
+        {
+            t1.Dispose();
+        }
+        Assert.That(IsContentChunkAllocated(dbe, rolledBackChunk), Is.True, "the rolled-back transaction's reset freed e2's committed payload");
+
+        {
+            using var t3 = dbe.CreateQuickTransaction();
+            t3.Open(e1).Read(CompAArch.A);
+            ref var w3 = ref t3.OpenMut(e1).Write(CompAArch.A);
+            w3 = new CompA(30);
+            Assert.That(t3.Commit(), Is.True);
+        }
+
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e2).Read(CompAArch.A).A, Is.EqualTo(20), "e2 reads e1's payload");
+        Assert.That(tr.Open(e1).Read(CompAArch.A).A, Is.EqualTo(30));
+    }
+
+    /// <summary>The spawn half of the same double free: a rolled-back spawn's content chunk was freed by the rollback, then by the pool reset (#696).</summary>
+    [Test]
+    public void Rollback_Created_ThenDisposedAfterAnotherSpawn_DoesNotFreeThatSpawnsChunk()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        var t1 = dbe.CreateQuickTransaction();
+        EntityId e2;
+        int e2Chunk;
+        try
+        {
+            var a1 = new CompA(1);
+            var e1 = t1.Spawn<CompAArch>(CompAArch.A.Set(in a1));
+            var rolledBackChunk = ContentChunkAt(dbe, e1, 0);
+            Assert.That(t1.Rollback(), Is.True);
+
+            {
+                using var t2 = dbe.CreateQuickTransaction();
+                var a2 = new CompA(2);
+                e2 = t2.Spawn<CompAArch>(CompAArch.A.Set(in a2));
+                Assert.That(t2.Commit(), Is.True);
+            }
+            e2Chunk = ContentChunkAt(dbe, e2, 0);
+            Assert.That(e2Chunk, Is.EqualTo(rolledBackChunk), "precondition: e2's spawn reuses the chunk the rollback freed");
+        }
+        finally
+        {
+            t1.Dispose();
+        }
+        Assert.That(IsContentChunkAllocated(dbe, e2Chunk), Is.True, "the rolled-back spawn's reset freed e2's committed payload");
+
+        EntityId e3;
+        {
+            using var t3 = dbe.CreateQuickTransaction();
+            var a3 = new CompA(3);
+            e3 = t3.Spawn<CompAArch>(CompAArch.A.Set(in a3));
+            Assert.That(t3.Commit(), Is.True);
+        }
+
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e2).Read(CompAArch.A).A, Is.EqualTo(2), "e2 reads e3's payload");
+        Assert.That(tr.Open(e3).Read(CompAArch.A).A, Is.EqualTo(3));
+    }
+
+    /// <summary>
+    /// Rolling back a revision that is NOT the chain's last must not shrink the chain. Voiding used to decrement <c>ItemCount</c> unconditionally, which
+    /// drops the LAST entry from the range — here the later transaction's committed update — so every read went back to the value before it (#696).
+    /// </summary>
+    [Test]
+    public void Rollback_Updated_OfANonLastRevision_KeepsTheLaterCommit()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e1;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(100);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using var t1 = dbe.CreateQuickTransaction();
+        t1.Open(e1).Read(CompAArch.A);
+        ref var w1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+        w1 = new CompA(101);
+
+        {
+            using var t2 = dbe.CreateQuickTransaction();
+            t2.Open(e1).Read(CompAArch.A);
+            ref var w2 = ref t2.OpenMut(e1).Write(CompAArch.A);
+            w2 = new CompA(102);
+            Assert.That(t2.Commit(), Is.True);
+        }
+
+        Assert.That(t1.Rollback(), Is.True);
+
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e1).Read(CompAArch.A).A, Is.EqualTo(102), "the later committed update vanished when the earlier transaction rolled back");
+    }
+
+    /// <summary>
+    /// The last rollback of a chain whose tail is [void, own entry] must drop BOTH. Left with a trailing void, cleanup takes the void for the newest kept
+    /// entry and frees the committed sentinel before it — the entity loses its value.
+    /// </summary>
+    [Test]
+    public void Rollback_Updated_LeavingTrailingVoids_TrimsThemAll()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e1;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(100);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        {
+            using var t1 = dbe.CreateQuickTransaction();
+            using var t2 = dbe.CreateQuickTransaction();
+            t1.Open(e1).Read(CompAArch.A);
+            ref var w1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+            w1 = new CompA(101);
+            t2.Open(e1).Read(CompAArch.A);
+            ref var w2 = ref t2.OpenMut(e1).Write(CompAArch.A);
+            w2 = new CompA(102);
+
+            Assert.That(t1.Rollback(), Is.True);                      // mid-chain void: the chain keeps its 3 entries
+            Assert.That(ChainHeader(dbe, e1).ItemCount, Is.EqualTo(3));
+            Assert.That(t2.Rollback(), Is.True);                      // tail rollback: its entry AND the void before it go
+            Assert.That(ChainHeader(dbe, e1).ItemCount, Is.EqualTo(1), "a trailing void survived the last rollback");
+        }                                                            // disposing the tail runs the deferred cleanup of e1's chain
+
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e1).Read(CompAArch.A).A, Is.EqualTo(100));
+    }
+
+    /// <summary>
+    /// A cleanup that compacts the chain between a write and its rollback moves the pending entry. The rollback must find it by its content chunk, void
+    /// it and free its chunk — and leave the committed head alone.
+    /// </summary>
+    [Test]
+    public void Rollback_Updated_AfterCompactionMovedTheEntry_VoidsItsOwnEntry()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        // The held tail blocks cleanup until it commits, so the chain keeps [10, 20] and the write lands at index 2.
+        var tail = dbe.CreateQuickTransaction();
+        EntityId e1;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(10);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(t.Commit(), Is.True);
+        }
+        {
+            using var t = dbe.CreateQuickTransaction();
+            ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+            w = new CompA(20);
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using var t1 = dbe.CreateQuickTransaction();
+        t1.Open(e1).Read(CompAArch.A);
+        ref var w1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+        w1 = new CompA(30);
+        var ownChunk = ContentChunkAt(dbe, e1, 2);
+        var headChunk = ContentChunkAt(dbe, e1, 1);
+
+        Assert.That(tail.Commit(), Is.True);                         // the tail drains the deferred cleanup: [10, 20, own] → [20, own]
+        tail.Dispose();
+        Assert.That(ContentChunkAt(dbe, e1, 1), Is.EqualTo(ownChunk), "precondition: the compaction moved the pending entry from index 2 to 1");
+
+        Assert.That(t1.Rollback(), Is.True);
+
+        Assert.That(ChainHeader(dbe, e1).ItemCount, Is.EqualTo(1));
+        Assert.That(ContentChunkAt(dbe, e1, 0), Is.EqualTo(headChunk));
+        Assert.That(IsContentChunkAllocated(dbe, ownChunk), Is.False, "the rolled-back entry's chunk leaked");
+        Assert.That(IsContentChunkAllocated(dbe, headChunk), Is.True);
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e1).Read(CompAArch.A).A, Is.EqualTo(20));
+    }
+
+    /// <summary>
+    /// A rollback leaves a void mid-chain when a later entry follows it. Cleanup must not take that void for the last committed entry: LCRI pointing at it
+    /// makes the conflict check read TSN 0 and the handler read "committed" data from chunk 0.
+    /// </summary>
+    [Test]
+    public void Cleanup_WithAVoidMidChain_LastCommitRevisionIndexStaysOnTheCommittedEntry()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e1;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(100);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(t.Commit(), Is.True);
+        }
+        var headChunk = ContentChunkAt(dbe, e1, 0);
+
+        using var tA = dbe.CreateQuickTransaction();
+        using var tB = dbe.CreateQuickTransaction();
+        using var tC = dbe.CreateQuickTransaction();
+        foreach (var (t, v) in new[] { (tA, 101), (tB, 102), (tC, 103) })
+        {
+            t.Open(e1).Read(CompAArch.A);
+            ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+            w = new CompA(v);
+        }
+        Assert.That(tB.Rollback(), Is.True);                          // [head, A pending, void, C pending]
+
+        var table = dbe.GetComponentTable<CompA>();
+        using (var guard = EpochGuard.Enter(dbe.EpochManager))
+        {
+            var root = ComponentRevisionManager.EnumerateVersionedChainHeads(table, e1.ArchetypeId)[(long)e1.RawValue];
+            var cs = dbe.MMF.CreateChangeSet();
+            var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
+            var content = table.ComponentSegment.CreateChunkAccessor(cs);
+            ComponentRevisionManager.CleanUpUnusedEntriesCore(table, root, tA.TSN, ref rev, ref content);
+            rev.Dispose();
+            content.Dispose();
+            cs.SaveChanges();
+        }
+
+        var header = ChainHeader(dbe, e1);
+        Assert.That(header.ItemCount, Is.EqualTo(4), "precondition: the cleanup kept every entry");
+        Assert.That(ContentChunkAt(dbe, e1, header.LastCommitRevisionIndex), Is.EqualTo(headChunk), "LCRI does not name the committed head");
+    }
+
+    /// <summary>
+    /// Rollback must complete. Its chain-lock wait is unbounded: a timeout thrown part-way would leave the transaction in the chain pinning MinTSN, and the
+    /// Dispose re-run would free what the first pass already freed. Staged: this thread holds the chain lock; the rollback, on its own thread with an
+    /// already-expired deadline, provably reaches the wait (the lock's contention flag) and must still be waiting — not faulted — until the lock is released.
+    /// </summary>
+    [Test]
+    public void Rollback_WithAnExpiredDeadline_WaitsForTheChainLockInsteadOfThrowing()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId e1;
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var a = new CompA(100);
+            e1 = t.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using var written = new ManualResetEventSlim();
+        using var go = new ManualResetEventSlim();
+        var rollback = Task.Run(() =>
+        {
+            using var t1 = dbe.CreateQuickTransaction();
+            t1.Open(e1).Read(CompAArch.A);
+            ref var w1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+            w1 = new CompA(101);
+            written.Set();
+            go.Wait();
+            var ctx = UnitOfWorkContext.FromTimeout(TimeSpan.Zero);
+            return t1.Rollback(ref ctx);
+        });
+        written.Wait();
+
+        var table = dbe.GetComponentTable<CompA>();
+        using (var guard = EpochGuard.Enter(dbe.EpochManager))
+        {
+            var root = ComponentRevisionManager.EnumerateVersionedChainHeads(table, e1.ArchetypeId)[(long)e1.RawValue];
+            var accessor = table.CompRevTableSegment.CreateChunkAccessor();
+            ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+            header.Control.EnterExclusiveAccess(ref WaitContext.Null);
+            try
+            {
+                go.Set();
+                var spin = new SpinWait();
+                while (!header.Control.WasContended && !rollback.IsCompleted)
+                {
+                    spin.SpinOnce(-1);
+                }
+                Assert.That(rollback.Wait(TimeSpan.FromMilliseconds(100)), Is.False, "the rollback gave up on the chain lock instead of waiting for it");
+            }
+            finally
+            {
+                header.Control.ExitExclusiveAccess();
+                accessor.Dispose();
+            }
+        }
+
+        Assert.That(rollback.Wait(TimeSpan.FromSeconds(5)), Is.True);
+        Assert.That(rollback.Result, Is.True);
+        Assert.That(ChainHeader(dbe, e1).ItemCount, Is.EqualTo(1));
+        using var tr = dbe.CreateQuickTransaction();
+        Assert.That(tr.Open(e1).Read(CompAArch.A).A, Is.EqualTo(100));
+    }
+
+    /// <summary>The content chunk of the entry at <paramref name="revisionIndex"/> in <paramref name="e"/>'s CompA revision chain.</summary>
+    private static int ContentChunkAt(DatabaseEngine dbe, EntityId e, short revisionIndex)
+    {
+        var table = dbe.GetComponentTable<CompA>();
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var root = ComponentRevisionManager.EnumerateVersionedChainHeads(table, e.ArchetypeId)[(long)e.RawValue];
+        var accessor = table.CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            return ComponentRevisionManager.GetRevisionElement(ref accessor, root, revisionIndex).Element.ComponentChunkId;
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>A copy of the header of <paramref name="e"/>'s CompA revision chain.</summary>
+    private static CompRevStorageHeader ChainHeader(DatabaseEngine dbe, EntityId e)
+    {
+        var table = dbe.GetComponentTable<CompA>();
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var root = ComponentRevisionManager.EnumerateVersionedChainHeads(table, e.ArchetypeId)[(long)e.RawValue];
+        var accessor = table.CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            return accessor.GetChunk<CompRevStorageHeader>(root);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    private static bool IsContentChunkAllocated(DatabaseEngine dbe, int chunkId)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        return dbe.GetComponentTable<CompA>().ComponentSegment.IsChunkAllocated(chunkId);
     }
 
     /// <summary>
