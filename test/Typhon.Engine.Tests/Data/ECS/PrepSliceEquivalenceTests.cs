@@ -196,8 +196,8 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
             // The entity's TAG as well as (chunk, slot): the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the
             // ordering contract is checked structurally within each arm. The reason given here used to be that two engines place a seeded spawn into
-            // different slots; that was the reopen RunArmOn now prevents (#946). Over fresh files the two queues measured equal element for element, in
-            // 900 contended W = 8 runs, but only the multiset and the per-arm order are asserted.
+            // different slots; that was the reopen RunArmOn now prevents (#946). Over fresh files the two queues are equal element for element, and
+            // AssertArmMatchesSerialCore asserts that too; the tag comparison stays because it is the one that says WHICH entities disagree.
             var accessor = state.ClusterSegment.CreateChunkAccessor();
             try
             {
@@ -498,6 +498,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
             Assert.That(Crossings(arm.Queue), Is.EquivalentTo(Crossings(serial.Queue)),
                 () => $"W={w}: the same entities must cross to the same cells whichever path detected them. {QueueDelta(arm.Queue, serial.Queue)}");
+            // AC-7 as written (#946): both arms start from the same fresh file and place the seeded spawn identically, so the queue is the serial one
+            // element for element — same (chunk, slot), same order, including the order inside one destination cell that TH-01 admits from.
+            Assert.That(arm.Queue, Is.EqualTo(serial.Queue), $"W={w}: the queue must be the serial queue element for element");
             Assert.That(IsInDrainOrder(arm.Queue), Is.True,
                 $"W={w}: the prefix Migrate slices must be in drain order — ascending destination cell (#910's sort, which the slice planner carves on), "
                 + "and inside one cell the order the detector appends in and the slices' crossings are concatenated in (TH-01 admits the first N)");
