@@ -1079,7 +1079,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant when dirty slot evicted from ChunkAccessor 16-slot cache,
     ACW decrement deferred until CommitChanges() or Dispose()
   scope: ChunkAccessor.CommitChanges; ChangeSet.DeferEviction / FlushDeferredEvictions (the deferral queue
-         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28)
+         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28); ChunkBasedSegment.ReturnWarmAccessor /
+         ReturnWarmSiblingAccessor / ExitBatchMode (a cached warm accessor drops its renter's set once flushed, or its
+         next cold rent flushes the deferrals of whoever owns the set next — #946)
+  verified: ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn (four cases, one per drop site;
+            removing any one drop reddens exactly its case)
   on_violation: early decrement allows checkpoint to snapshot page
     while caller still holds OLC write lock on evicted slot's node;
     same corruption as CP-11
@@ -1360,9 +1364,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     downstream "not found in PK index" in Versioned copy-on-write); the failed chunks are drained, so the system processes a fraction of its entities
     with nothing reported (#1116: 12 to 192 of 600 per tick)
   scope: UnitOfWork.CreateConcurrentTransaction, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
-         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation
+         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation, ChunkBasedSegment.ReturnWarmAccessor / ReturnWarmSiblingAccessor /
+         ExitBatchMode (a [ThreadStatic] warm accessor must not keep the set past its rent: the set's owner hands it on — #946)
   verified: ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
-            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail
+            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail.
+            ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn covers the warm caches (see CP-12)
 
 ### PS-10: A page's writeback debt is discharged only by a durable write `[fatal][silent]`
   invariant every path that modifies a page's bytes records it (MarkPageModified, or IncrementDirty which implies it)

@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Numerics;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
@@ -44,7 +46,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     private static ClMigPos PointAt(float x, float y, int tag) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Tag = tag };
 
-    /// <summary>One engine per DI scope, over the data file <see cref="RunArmOn"/> has just deleted, so the arms can run inside one test.</summary>
+    /// <summary>One engine per DI scope, so the arms can run inside one test; each over a fresh data file (see <see cref="RunArmOn"/>).</summary>
     private static DatabaseEngine SetupEngine(IServiceScope scope)
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -170,10 +172,13 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
     private Outcome RunArmOn(int workerCount, bool checkZoneMaps = false)
     {
-        // A fresh data file per arm (#946). A second CreateScope() in one test REOPENS the database the first scope closed — the WAL is per scope, the data
-        // file is not — so the arm under test used to start from the serial arm's persisted world with a second spawn on top of it, and every defect of
-        // close-and-reopen surfaced here as a Prep disagreement.
+        // A fresh data file per arm (#946). A second CreateScope() in one test REOPENS the database the first scope closed after a clean shutdown — the WAL
+        // is per scope, the data file is not — so the arm under test used to start from the serial arm's persisted world with a second spawn on top of it,
+        // and a defect of close-and-reopen failed here as if Prep had (a buffer lock found held after the reopen, reported on #946). The delete swallows
+        // its errors, so whether it happened is checked: a silent failure would bring the reopen back.
         ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        var bundle = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BundleDirectory;
+        Assert.That(Directory.Exists(bundle) || File.Exists(bundle), Is.False, $"the previous arm's database at {bundle} was not deleted");
         using var scope = ServiceProvider.CreateScope();
         var dbe = SetupEngine(scope);
         var ids = Spawn(dbe);
@@ -191,7 +196,8 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
             // The entity's TAG as well as (chunk, slot): the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the
             // ordering contract is checked structurally within each arm. The reason given here used to be that two engines place a seeded spawn into
-            // different slots; that was the reopen RunArmOn now prevents (#946) — over fresh files the two queues are equal element for element.
+            // different slots; that was the reopen RunArmOn now prevents (#946). Over fresh files the two queues measured equal element for element, in
+            // 900 contended W = 8 runs, but only the multiset and the per-arm order are asserted.
             var accessor = state.ClusterSegment.CreateChunkAccessor();
             try
             {

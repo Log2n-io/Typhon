@@ -109,6 +109,9 @@ public class ChangeSet
         }
     }
 
+    /// <summary>Deferred eviction decrements not yet flushed. Diagnostic; read only by the thread that owns the set.</summary>
+    internal int DeferredEvictionCount => _deferredEvictions?.Count ?? 0;
+
     /// <summary>
     /// Flush all deferred eviction decrements (SlotRefCount + ACW for dirty slots).
     /// Called by <see cref="ChunkAccessor{PersistentStore}.CommitChanges"/> and <see cref="ChunkAccessor{PersistentStore}.Dispose"/>.

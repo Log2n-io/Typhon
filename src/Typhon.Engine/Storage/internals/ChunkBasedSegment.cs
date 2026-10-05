@@ -1031,6 +1031,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         // Cold path: different segment or epoch changed
         if (cache.Segment != null)
         {
+            // The dispose commits through the accessor's ChangeSet, which outside batch mode its last return dropped (#946).
+            Debug.Assert(cache.SuppressCommitChanges || cache.Accessor.ChangeSet == null, "an idle warm accessor still holds its last renter's ChangeSet");
             cache.Accessor.Dispose();
         }
         cache.Accessor = new ChunkAccessor<TStore>(this, _store, _epochManager, changeSet);
@@ -1161,6 +1163,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
         if (cache.Segment != null)
         {
+            Debug.Assert(cache.SuppressCommitChanges || cache.Accessor.ChangeSet == null,
+                "an idle warm sibling accessor still holds its last renter's ChangeSet");
             cache.Accessor.Dispose();
         }
         cache.Accessor = new ChunkAccessor<TStore>(this, _store, _epochManager, changeSet);
