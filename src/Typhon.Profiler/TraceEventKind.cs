@@ -818,7 +818,7 @@ public enum TraceEventKind : byte
 
     // ── Storage:ChunkSegment (instant) ──
 
-    /// <summary>ChunkBasedSegment.Grow. Payload: <c>stride: i32, oldCap: i32, newCap: i32</c>.</summary>
+    /// <summary>ChunkBasedSegment.GrowChunkCapacity. Payload: <c>stride: i32, oldCap: i32, newCap: i32</c>.</summary>
     StorageChunkSegmentGrow = 169,
 
     // ── Storage:FileHandle (instant, op variant) ──

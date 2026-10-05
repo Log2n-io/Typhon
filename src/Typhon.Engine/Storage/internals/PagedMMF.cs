@@ -33,6 +33,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // tiny cache sets an explicit size under TestMode, which bypasses this floor.
     internal const int MinimumMemPageCount = 1024;
 
+    /// <summary>
+    /// Test-only: fill every page cache with <c>0xA5</c> the moment it is allocated. Set once per process, before any engine exists
+    /// (the test assembly's warm-up does it), and never changed afterwards.
+    /// </summary>
+    /// <remarks>
+    /// The cache block is not zeroed (PS-14): a page the engine does not read from disk is cleared when its slot is assigned, so the
+    /// block's initial content is undefined. A fresh multi-MiB allocation nevertheless reads zero on every supported platform, which
+    /// would hide any code that still relies on it. Poisoning makes "undefined" non-zero in every test engine, so such a dependency
+    /// fails instead of passing by accident.
+    /// </remarks>
+    internal static bool PoisonCacheForProcess;
+
     #region Events
 
     internal event EventHandler CreatingEvent;
@@ -338,6 +350,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// crash mid-write; otherwise the real <c>RandomAccess.Write</c> proceeds. Null in production.</summary>
     internal Action<int> PageWriteInterceptor { get; set; }
 
+    /// <summary>Test hook (PS-15): invoked on a cache miss with the file page index just before the claimed slot is published in the page directory.
+    /// Null in production.</summary>
+    internal Action<int> MissBeforePublishProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked by a slot's owner right after publishing it, before preparing it. Null in production.</summary>
+    internal Action<int> MissAfterPublishProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked by a slot's owner right after starting the disk read, before handing it to the slot. Null in production.</summary>
+    internal Action<int> MissAfterReadStartProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked when a requester starts waiting on a slot that is not ready yet. Null in production.</summary>
+    internal Action<int> SlotNotReadyWaitProbe { get; set; }
+
     /// <summary>Test hook: invoked at each <see cref="FlushToDisk"/> fsync barrier (records the durability boundary for crash simulation). Null in production.</summary>
     internal Action FlushToDiskInterceptor { get; set; }
 
@@ -462,8 +487,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             LogSmallPageCache(Logger, cacheSize / (1024UL * 1024UL), RecommendedMinimumCacheSize / (1024UL * 1024UL));
         }
 
-        MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, true, 64);
+        // Not zeroed (PS-14): a page that is not read from disk is cleared when its slot is assigned, so nothing depends on the
+        // block's initial content, and a whole-block clear would make every page resident at startup.
+        MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, false, 64);
         _memPagesAddr = MemPages.DataAsPointer;
+        if (PoisonCacheForProcess)
+        {
+            NativeMemory.Fill(_memPagesAddr, (nuint)cacheSize, 0xA5);
+        }
 
         // Create the Memory Page info table
         MemPagesCount = (int)(cacheSize >> PageSizePow2);
@@ -958,27 +989,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             var pi = _memPagesInfo[memPageIndex];
 
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
+
             // Tag the page with the current epoch (atomic max — never go backward)
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            // Handle Allocating state from cache miss — transition to Idle
-            // (must come AFTER epoch tag so the page is protected before becoming evictable)
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            // Race detection: page may have been evicted between FetchPageToMemory and epoch tag
-            if (pi.FilePageIndex != filePageIndex)
+            // Race detection: the page may have been evicted, or be being reclaimed, between FetchPageToMemory and the epoch tag (PS-15). Also takes
+            // a freshly prepared slot out of Allocating.
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;  // Retry
             }
@@ -1016,23 +1047,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             var pi = _memPagesInfo[memPageIndex];
 
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
+
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            if (pi.FilePageIndex != filePageIndex)
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;
             }
@@ -1071,23 +1103,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             var pi = _memPagesInfo[memPageIndex];
 
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
+
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            if (pi.FilePageIndex != filePageIndex)
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;
             }
@@ -1181,42 +1214,244 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         using var fetchScope = TyphonEvent.BeginPageCacheFetch(filePageIndex);
 
         // Page is not cached, we assign an available Memory Page to it
-        if (!AllocateMemoryPage(filePageIndex, out memPageIndex, timeout, cancellationToken))
+        if (!AllocateMemoryPage(filePageIndex, out memPageIndex, out var owner, timeout, cancellationToken))
         {
             return false;
         }
 
-        // Reset CRC verification flag — page is freshly loaded, needs re-verification
-        _memPagesInfo[memPageIndex].CrcVerified = false;
-
-        // Load the page from disk, if it's stored there already. (won't be the case for new pages)
-        // The load is async and not part of the returned task but stored in the PageInfo.
-        // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
-        var pageOffset = MapReadOffset(filePageIndex);
-        var loadPage = (pageOffset + PageSize) <= _fileSize;
-        if (loadPage)
+        // PS-15: another thread published this file page first. Its slot is its to prepare; the caller waits for it to be ready.
+        if (!owner)
         {
-            ++_metrics.ReadFromDiskCount;
+            return true;
+        }
 
-            using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
+        // We own the slot, published but not ready: nobody else uses it until SlotReady is set below, and no other miss can bring this file page
+        // into the cache meanwhile, so the read-or-clear decision below is not raced by one.
+        var pi = _memPagesInfo[memPageIndex];
+        var readStarted = false;
+        var prepared = false;
+        ValueTask<int> readTask = default;
+        Task<int> readAsTask = null;
+        try
+        {
+            MissAfterPublishProbe?.Invoke(filePageIndex);
 
-            var pi = _memPagesInfo[memPageIndex];
-            var readTask = RandomAccess.ReadAsync(_fileHandle, MemPages.DataAsMemory.Slice(memPageIndex * PageSize, PageSize), pageOffset, cancellationToken);
+            // Reset CRC verification flag — page is freshly loaded, needs re-verification
+            pi.CrcVerified = false;
 
-            // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskReadCompleted). When the DiskRead kickoff span was itself
-            // suppressed (SpanId == 0), there's nothing to correlate with, so skip the wrap. When the completion kind is suppressed,
-            // skip the wrap — producer hot path stays allocation-free by default.
-            if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
+            // Load the page from disk, if it's stored there already. (won't be the case for new pages)
+            // The load is async and not part of the returned task but stored in the PageInfo.
+            // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
+            var pageOffset = MapReadOffset(filePageIndex);
+            var loadPage = (pageOffset + PageSize) <= _fileSize;
+            if (loadPage)
             {
-                var state = new PageCacheReadCompletionState(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex);
-                var wrapped = readTask.AsTask().ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                pi.SetIOReadTask(new ValueTask<int>(wrapped));
+                ++_metrics.ReadFromDiskCount;
+
+                using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
+
+                readTask = RandomAccess.ReadAsync(_fileHandle, MemPages.DataAsMemory.Slice(memPageIndex * PageSize, PageSize), pageOffset,
+                    cancellationToken);
+                readStarted = true;
+                MissAfterReadStartProbe?.Invoke(filePageIndex);
+
+                // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskReadCompleted). When the DiskRead kickoff span was itself
+                // suppressed (SpanId == 0), there's nothing to correlate with, so skip the wrap. When the completion kind is suppressed,
+                // skip the wrap — producer hot path stays allocation-free by default.
+                if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
+                {
+                    var state = new PageCacheReadCompletionState(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex);
+                    readAsTask = readTask.AsTask();
+                    var wrapped = readAsTask.ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    pi.SetIOReadTask(new ValueTask<int>(wrapped));
+                }
+                else
+                {
+                    pi.SetIOReadTask(readTask);
+                }
+
+                // The read task is published in the slot: from here on it is the slot's to observe, and only the trace scope's close is left.
+                prepared = true;
             }
             else
             {
-                pi.SetIOReadTask(readTask);
+                // PS-14: a page that is not read from disk reads as zero. The slot holds whatever its previous occupant left, or a never-used slot's
+                // undefined content. The seqlock counter goes to 0 with the rest, the value TryAcquire already gave it.
+                unsafe
+                {
+                    NativeMemory.Clear(GetMemPageAddress(memPageIndex), PageSize);
+                }
+
+                // TryAcquire drops only a read task that completed successfully: a faulted one left by the previous occupant would otherwise be
+                // rethrown to this new page's requesters.
+                pi.ResetIOCompletionTask();
+                prepared = true;
             }
+        }
+        catch when (!prepared)
+        {
+            // The slot was not prepared, so it goes back (PS-15). Only a read-task wrapper's allocation can fail after the read starts, and then
+            // nothing else holds the read: this thread is its only observer, and must see it land before the slot is freed.
+            AbandonUnpreparedSlot(filePageIndex, memPageIndex, pi, readStarted, readTask, readAsTask);
+            throw;
+        }
+        finally
+        {
+            // PS-15: ready. A release: whoever reads true sees the reset CRC flag, the read task or the cleared bytes. Also when only the trace
+            // scope's close threw: the slot was prepared by then.
+            if (prepared)
+            {
+                Volatile.Write(ref pi.SlotReady, true);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// PS-15: undoes a published slot whose owner failed before preparing it. It is unpublished first, so a requester waiting on it sees at once that
+    /// the slot no longer holds this file page and looks the page up again, without waiting on the disk. If the owner had started a read, the slot is
+    /// freed only once that read has landed (<see cref="WaitForOrphanedRead"/>); meanwhile it stays Allocating, which <see cref="TryAcquire"/> never
+    /// takes. SlotReady is deliberately left false: once the slot is Free another thread may claim it, and a late "ready" would then mark that
+    /// thread's unprepared slot ready.
+    /// </summary>
+    private void AbandonUnpreparedSlot(int filePageIndex, int memPageIndex, PageInfo pi, bool readStarted, ValueTask<int> readTask, Task<int> readAsTask)
+    {
+        _memPageIndexByFilePageIndex.TryRemove(new KeyValuePair<int, int>(filePageIndex, memPageIndex));
+        Volatile.Write(ref pi.FilePageIndex, -1);
+
+        if (readStarted)
+        {
+            WaitForOrphanedRead(readTask, readAsTask);
+        }
+
+        pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+        pi.PageState = PageState.Free;
+        pi.ResetIOCompletionTask();
+        pi.ResetClockSweepCounter();
+        pi.StateSyncRoot.ExitExclusiveAccess();
+        Interlocked.Increment(ref _metrics.FreeMemPageCount);
+        _metrics.TotalMemPageAllocatedCount--;
+    }
+
+    /// <summary>
+    /// PS-15: waits for a disk read whose owner failed before handing it to the slot, so the slot is not freed while the read can still write into it.
+    /// The read is observed through whichever form the owner last held: <paramref name="readAsTask"/> once it was converted (the value task is then
+    /// consumed), the value task otherwise. Unbounded, like every other wait on a page read. The read's own outcome is dropped, since the caller
+    /// rethrows the failure that got here, but the wait is never swallowed: should it throw (a host interrupting the thread), the slot stays
+    /// Allocating and unpublished — lost to the cache until restart, but never handed out under a read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void WaitForOrphanedRead(ValueTask<int> readTask, Task<int> readAsTask)
+    {
+        var waiter = new AdaptiveWaiter();
+        if (readAsTask != null)
+        {
+            while (!readAsTask.IsCompleted)
+            {
+                waiter.Wait();
+            }
+
+            try
+            {
+                // Observes a faulted read, so it is not reported again as an unobserved task exception. The property builds an AggregateException,
+                // which can fail on an exhausted heap: the read is over either way.
+                _ = readAsTask.Exception;
+            }
+            catch
+            {
+                // Nothing to do: the read has landed.
+            }
+            return;
+        }
+
+        while (true)
+        {
+            bool done;
+            try
+            {
+                done = readTask.IsCompleted;
+            }
+            catch (InvalidOperationException)
+            {
+                // A stale token: AsTask consumed the value task, which it does only once the read is complete, then failed to allocate its result.
+                return;
+            }
+
+            if (done)
+            {
+                break;
+            }
+            waiter.Wait();
+        }
+
+        try
+        {
+            // Consumes the value task, which hands a pooled read operation back to the file handle.
+            readTask.GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // The read failed, or was consumed by AsTask as above: either way it is over, and its outcome no longer matters.
+        }
+    }
+
+    /// <summary>
+    /// PS-15: waits until the slot a requester found in the page directory is ready (<c>true</c>), or no longer holds <paramref name="filePageIndex"/>
+    /// (<c>false</c>: its owner abandoned it, or it was evicted and reclaimed — the caller looks the page up again). The owner's preparation is a few
+    /// microseconds with no wait of its own, and an owner that fails unpublishes the slot before waiting on anything, so the bound only guards against
+    /// a defect.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool WaitForSlotReady(PageInfo pi, int filePageIndex)
+    {
+        SlotNotReadyWaitProbe?.Invoke(filePageIndex);
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.PageCacheLockTimeout);
+        var waiter = new AdaptiveWaiter();
+        while (true)
+        {
+            if (Volatile.Read(ref pi.FilePageIndex) != filePageIndex)
+            {
+                return false;
+            }
+
+            if (Volatile.Read(ref pi.SlotReady))
+            {
+                return true;
+            }
+
+            if (!waiter.Wait(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("PageCache/SlotReady", TimeoutOptions.Current.PageCacheLockTimeout);
+            }
+        }
+    }
+
+    /// <summary>
+    /// PS-15: re-validates a slot after the caller has tagged its epoch, then lets a freshly prepared slot leave Allocating. The tag (an epoch CAS, a
+    /// full fence) and <see cref="TryAcquire"/>'s "withdraw ready, fence, re-check the epoch" make a Dekker pair: if the slot is being reclaimed, at
+    /// least one side sees the other, so either TryAcquire backs off or this returns <c>false</c> and the caller looks the page up again. The
+    /// Allocating → Idle flip happens under the slot's lock so the owner and a released waiter cannot both make it.
+    /// </summary>
+    private bool ValidateTaggedSlot(PageInfo pi, int filePageIndex)
+    {
+        if (Volatile.Read(ref pi.FilePageIndex) != filePageIndex || !Volatile.Read(ref pi.SlotReady))
+        {
+            return false;
+        }
+
+        // Handle Allocating state from cache miss — transition to Idle. Only now: after the epoch tag, so the page is protected before it becomes
+        // evictable, and after the slot is known ready, so nobody flips an owner's unprepared slot.
+        if (pi.PageState == PageState.Allocating)
+        {
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            if (pi.PageState == PageState.Allocating)
+            {
+                pi.PageState = PageState.Idle;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            }
+            pi.StateSyncRoot.ExitExclusiveAccess();
         }
 
         return true;
@@ -1240,6 +1475,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     /// <param name="filePageIndex">The file page index to mount to memory</param>
     /// <param name="memPageIndex">The index of the memory page for the requested file page if the call is successful.</param>
+    /// <param name="owner">
+    /// <c>true</c> when this call claimed and published the slot: the caller must prepare it and mark it ready (PS-15). <c>false</c> when another
+    /// thread published the same file page first: <paramref name="memPageIndex"/> is that thread's slot, which the caller must not touch.
+    /// </param>
     /// <param name="timeout">The time (in tick) the method should wait to return successfully.</param>
     /// <param name="cancellationToken">An optional cancellation token for the user to cancel the call.</param>
     /// <returns><c>true</c> if the call succeeded, <paramref name="memPageIndex"/> will be valid. <c>false</c> if the operation was cancelled or time out
@@ -1248,15 +1487,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// This method will enter a wait cycle if no Memory Page is available, it will wait and loop until it finds one.
     /// Use the clock-sweep algorithm to find a free Memory Page.
     /// </remarks>
-    private bool AllocateMemoryPage(int filePageIndex, out int memPageIndex, long timeout = Timeout.Infinite, CancellationToken cancellationToken = default)
+    private bool AllocateMemoryPage(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
+        CancellationToken cancellationToken = default)
     {
         using var scope = TyphonEvent.BeginPageCacheAllocatePage(filePageIndex);
-        return AllocateMemoryPageCore(filePageIndex, out memPageIndex, timeout, cancellationToken);
+        return AllocateMemoryPageCore(filePageIndex, out memPageIndex, out owner, timeout, cancellationToken);
     }
 
-    private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, long timeout = Timeout.Infinite, CancellationToken cancellationToken = default)
+    private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
+        CancellationToken cancellationToken = default)
     {
         var bpCtx = new BackpressureContext("Storage/PagedMMF/AllocateMemoryPage", TimeoutOptions.Current.PageCacheBackpressureTimeout);
+        owner = false;
 
         while (true)
         {
@@ -1439,7 +1681,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
             }
 
-            // There might have been a concurrent allocation for this FilePage, so we Get or Add and check which MemPage is set
+            MissBeforePublishProbe?.Invoke(filePageIndex);
+
+            // Publish. From here a concurrent request for the same file page finds this slot, but it is not ready (PS-15) until the caller, which
+            // owns it, has prepared it. There might have been a concurrent allocation for this FilePage, so we Get or Add and check which MemPage is set
             var newMemPageIndex = _memPageIndexByFilePageIndex.GetOrAdd(filePageIndex, memPageIndex);
 
             // If the returned one is different, another thread beat us, we need to clean up what we did here and consider the other one
@@ -1453,10 +1698,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 pi.ResetClockSweepCounter();
                 pi.StateSyncRoot.ExitExclusiveAccess();
 
+                // PS-15: the winner owns that slot and prepares it. We must not read into it, reset its CRC flag or replace its read task.
                 memPageIndex = newMemPageIndex;
+                owner = false;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);   // TryAcquire took it when it claimed our slot, which is Free again
                 _metrics.TotalMemPageAllocatedCount--;
+                return true;
             }
 
+            owner = true;
             return true;
         }
     }
@@ -1500,14 +1750,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 info.ResetIOCompletionTask();
             }
 
+            // PS-15: withdraw "ready" BEFORE re-checking the epoch, with a full fence between the two. A requester tags AccessEpoch (a full-fence CAS)
+            // and then re-reads SlotReady and FilePageIndex, so one of us sees the other: either the re-check below finds the requester's tag and
+            // backs off, or the requester finds the slot not ready and looks the page up again. Without it, a tag landing between the re-check and the
+            // FilePageIndex reset below would hand the requester a slot that is being reclaimed. Restored on every back-off.
+            var wasReady = Volatile.Read(ref info.SlotReady);
+            Volatile.Write(ref info.SlotReady, false);
+            Interlocked.MemoryBarrier();
+
             // We need to check the state again, because another thread might have changed between the first and second pass
             if (info.PageState is PageState.Free or PageState.Idle)
             {
                 // Re-check all protection layers under lock (may have changed since first pass)
                 if (info.PageState == PageState.Idle &&
                     (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasWritebackDebt(info.MemPageIndex)
-                     || info.AccessEpoch >= minActiveEpoch))
+                     || Volatile.Read(ref info.AccessEpoch) >= minActiveEpoch))
                 {
+                    Volatile.Write(ref info.SlotReady, wasReady);
                     return false;
                 }
 
@@ -1535,6 +1794,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // claim, and the first N modifications to a freshly loaded page would then look durable when they are not.
                 Volatile.Write(ref info.WritebackGen, 0);
                 Volatile.Write(ref info.CapturedGen, 0);
+                // PS-15: SlotReady stays false (withdrawn above) until the new owner has prepared the slot — written before the owner publishes it,
+                // so nobody who finds it there can see an older "ready".
                 info.PageState = PageState.Allocating;
                 Interlocked.Decrement(ref _metrics.FreeMemPageCount);
                 Debug.Assert(info.ExclusiveLatchDepth == 0);
@@ -1543,6 +1804,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
             else
             {
+                Volatile.Write(ref info.SlotReady, wasReady);
                 return false;
             }
         }

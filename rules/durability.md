@@ -1325,7 +1325,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
   scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.Grow (its local set, released in a finally)
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally)
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
             throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected
   on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
@@ -1458,7 +1458,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
          IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
          failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
-         publishes), ChunkBasedSegment.Grow
+         publishes), ChunkBasedSegment.GrowChunkCapacity
   on_violation: a page-cache back-pressure timeout, or any other throw, mid-grow leaves the directory listing pages the segment never adopted
                 and the old tail linked into them. Nothing notices while the process runs, since the next grow rewrites both; if it stops first,
                 the shutdown checkpoint persists them and the next open's strict load throws "integrity check failed at Load" (measured:
@@ -1472,8 +1472,76 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
         thrown; the pages then leak, which corrupts nothing since nothing references them.
   note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
-        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.Grow's own bookkeeping after `base.Grow` has published
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
         (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
+
+### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
+  invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is ready (PS-15)
+            — its owner clears it after publishing it in the page directory, while no other thread may use it, so the "not on disk" decision
+            is taken when nothing else can bring the page in
+  invariant every page a segment is given is cleared in full before any of it is written, header included: each data page, the root and
+            every new map-extension page, including the one that holds only the terminating 0. Its page number may be reused from a deleted
+            segment, so the slot holds that page's bytes — resident, or read back from disk — and the slot clear above never runs for it
+  invariant two header counters survive that clear: the seqlock `ModificationCounter`, and `ChangeRevision`, so a reused page number's
+            revision never goes backwards (`PageSectorFooter` stamps each sector with its low 16 bits). Not claimed: that the next stamp
+            differs from every stale sector — a checkpoint bumps only its staging copy (CP-08), so the live revision can trail the disk's
+  invariant the page-cache block itself is never zeroed: a slot's content before it is first assigned is undefined
+  scope: PagedMMF.FetchPageToMemoryOnMiss, LogicalSegment.InitHeader, LogicalSegment.InitDataPages,
+         LogicalSegment.CreateOrGrow, PagedMMF.PoisonCacheForProcess
+  rationale: a slot handed to a new page holds its previous occupant's bytes, and two directory sites used to clear only the 192-byte
+    header before writing a few entries; data pages of a segment created without a clear got nothing. Whatever the caller does not
+    write survives — and the clear has to come before the slot is ready, because a new page has no read task a second requester would
+    wait on.
+  on_violation: unrelated page content — component data, index keys, string-table bytes — reaches the data file inside a page's unwritten
+    part, and `StampPageForWrite` CRCs the whole page, so it reloads as valid content. A disclosure into the file, its backups and copies;
+    two logically identical databases differ byte for byte. Not `[fatal]`: no write is lost and no reader faults.
+  verified: PageInitialContentTests.ANewPageInANeverUsedSlot_ReadsAsZero [VerifiesRule] (the slot is poisoned, so a missing clear reads
+            0xA5, not zero) and ANewPageInARecycledSlot_ReadsAsZero (a slot that held a 0x5A page); SegmentPageInitialContentTests covers a
+            reused page number as a data page, as a root (in memory and reloaded from disk) and as the terminator-only map page, and
+            AReusedDataPage_KeepsItsChangeRevision the surviving revision. Each fails with its fix removed (#1126)
+  note: `PagedMMF.PoisonCacheForProcess`, set once by the test assembly, fills every test page cache with 0xA5 at allocation. A fresh
+        multi-MiB allocation reads zero on every supported platform, so without it a reader of undefined content would pass by accident.
+  note: the block is not zeroed so that a large cache does not become resident at startup; #945 builds on this.
+  note: known gap, open. A directory pair's twin is never cleared, and a reused twin's old image can win at open (#1129).
+
+### PS-15: A slot in the page directory is used only once its owner has prepared it `[fatal]` `[silent]`
+  invariant a slot claimed for file page X is published (`GetOrAdd`) before it is prepared, so it carries `SlotReady == false` from its claim
+            (`TryAcquire`) until its owner — the thread whose `GetOrAdd` published it — has reset `CrcVerified` and either cleared the page (not
+            on disk, PS-14) or started its read and recorded it as the slot's read task; the owner then sets `SlotReady` with a release write
+  invariant every `RequestPageEpoch*` that finds a slot not ready waits — acquire reads — until it is ready (then goes on) or no longer holds
+            X (its owner abandoned it, or it was reclaimed — then looks the page up again)
+  invariant after tagging the slot's epoch, a requester re-validates `FilePageIndex == X && SlotReady` before using it, and only then takes it
+            out of `Allocating`, under `StateSyncRoot`. The tag (a full-fence CAS, or an acquire read when no CAS is needed) pairs with
+            `TryAcquire`, which withdraws `SlotReady` and fences BEFORE re-checking the epoch, and restores it when it backs off: of a reclaim and
+            a tag that race, at least one sees the other, so the reclaim backs off or the requester retries — never a slot being reclaimed
+  invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
+            replacement
+  invariant an owner that throws before the slot is prepared unpublishes it first — a waiter sees it no longer holds X and looks the page
+            up again at once — then frees it. If it had started a read (only a read-task wrapper's allocation can fail after that), it frees the
+            slot only once that read has landed: it is the read's only observer, and until then the slot stays `Allocating`, which `TryAcquire`
+            never takes. It does NOT mark the slot ready: once Free it may already be another owner's unprepared slot. An owner that throws
+            after the slot is prepared (the trace scope's close) still marks it ready
+  scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, PagedMMF.WaitForSlotReady, PagedMMF.ValidateTaggedSlot,
+         PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
+         PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, SlotReady
+  rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
+    the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
+    occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
+  on_violation: (1) a requester uses the page before its read lands — on `main` it silently got zeros (a stored CRC of 0 skips
+    verification): `PrepSliceEquivalenceTests` under 6 concurrent processes failed 22 of 60 with 2 001 index entries missing; with the test
+    poison it is a CRC failure on 0xA5 bytes, or a lock word that looks held (a 10 s `SegmentAllocation/LockBuffer` timeout); (2) the loser's
+    second read overwrites the winner's slot after a writer changed it — a lost write, a seqlock counter left odd, a false CRC failure
+  verified: PageSlotPublicationTests [VerifiesRule]: ARequesterOfAPublishedSlot_WaitsUntilItsOwnerHasStartedTheRead (the owner is held
+            between publishing and preparing; a second requester must still be waiting, then see the disk content),
+            TheLoserOfAConcurrentMiss_LeavesTheWinnersSlotAlone (a loser held before publishing must not overwrite a write made after the
+            winner's read, and the page is read once), AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck and
+            AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128). Contended:
+            `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of 60 with this rule held. Two
+            parts have no deterministic test and are argued above: the reclaim/tag pairing (covered by that stress run), and the owner waiting
+            for its started read before freeing the slot (a real file read cannot be held in flight)
+  note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, and an owner that
+        fails unpublishes the slot before waiting for its read, so the bound only turns a defect into a loud `LockTimeoutException` instead
+        of a hang.
 
 ---
 

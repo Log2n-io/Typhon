@@ -604,7 +604,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         Span<int> compPages = stackalloc int[ComponentSegmentStartingSize];
         compStore.AllocatePages(ref compPages, 0, null);
         TransientComponentSegment = new ChunkBasedSegment<TransientStore>(em, compStore, ComponentTotalSize);
-        TransientComponentSegment.Create(PageBlockType.None, StorageSegmentKind.Component, compPages, false);
+        TransientComponentSegment.Create(PageBlockType.None, StorageSegmentKind.Component, compPages);
 
         // Default index segment (for PK B+Tree and non-String64 secondary indexes). Allocate-before-construct, see note above.
         _transientDefaultIndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
@@ -612,7 +612,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         Span<int> idxPages = stackalloc int[MainIndexSegmentStartingSize];
         idxStore.AllocatePages(ref idxPages, 0, null);
         TransientDefaultIndexSegment = new ChunkBasedSegment<TransientStore>(em, idxStore, sizeof(Index64Chunk));
-        TransientDefaultIndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, idxPages, false);
+        TransientDefaultIndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, idxPages);
 
         // String64 index segment. Allocate-before-construct, see note above.
         _transientString64IndexStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
@@ -620,7 +620,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         Span<int> s64Pages = stackalloc int[MainIndexSegmentStartingSize];
         s64Store.AllocatePages(ref s64Pages, 0, null);
         TransientString64IndexSegment = new ChunkBasedSegment<TransientStore>(em, s64Store, sizeof(IndexString64Chunk));
-        TransientString64IndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, s64Pages, false);
+        TransientString64IndexSegment.Create(PageBlockType.None, StorageSegmentKind.Index, s64Pages);
 
         BuildIndexedFieldInfo(false);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);

@@ -18,7 +18,6 @@ namespace Typhon.Engine.Internals;
 internal enum PageClearMode
 {
     None = 0,
-    Header = 1,
     WholePage = 2
 }
 
@@ -250,10 +249,10 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             : 1 + ((pageCount - RootHeaderIndexSectionCount + NextHeadersIndexSectionCount - 1) / NextHeadersIndexSectionCount);
 
     /// <summary>
-    /// Initializes data pages [<paramref name="from"/>, end) of <paramref name="filePageIndices"/>: header, optional clear, and each page's forward
-    /// link to the next, the last one ending the chain.
+    /// Initializes data pages [<paramref name="from"/>, end) of <paramref name="filePageIndices"/>: a full clear (except the root), the header, and
+    /// each page's forward link to the next, the last one ending the chain.
     /// </summary>
-    private unsafe void InitDataPages(PageBlockType type, Span<int> filePageIndices, int from, bool clear, ChangeSet changeSet, long epoch)
+    private unsafe void InitDataPages(PageBlockType type, Span<int> filePageIndices, int from, ChangeSet changeSet, long epoch)
     {
         // Use unchecked access: these are new pages about to be fully overwritten (cleared + header init).
         // In WAL mode, CRC verification may fail because the growth path doesn't write WAL/FPI records, so evicted pages would have stale CRCs with
@@ -265,15 +264,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             var memPageIdx = RequestExclusiveForGrow(pageIndex, epoch, false);
             var page = _store.GetPage(memPageIdx);
 
-            if (clear)
-            {
-                var offset = page.IsRoot ? RootHeaderIndexSectionLength : 0;
-                page.RawData<byte>(offset, PagedMMF.PageRawDataSize - offset).Clear();
-            }
-
+            // PS-14: every data page is cleared in full, header included. Its page number may be reused from a deleted segment, so the slot holds
+            // that page's bytes (resident, or just read back from disk) and the clear on slot assignment never runs for it. The root (i == 0, a
+            // Create only) is the exception: its raw data is the directory the directory pass has just written, after clearing it.
             InitHeader(
                 page.Address,
-                PageClearMode.None,
+                i == 0 ? PageClearMode.None : PageClearMode.WholePage,
                 PageBlockFlags.IsLogicalSegment | (i == 0 ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None),
                 type,
                 1,
@@ -411,13 +407,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// Grows the logical segment to the specified new length.
     /// </summary>
     /// <param name="newLength">The new length (must be greater than current length).</param>
-    /// <param name="clearNewPages">Whether to clear the content of newly allocated pages.</param>
     /// <param name="changeSet">Optional change set for tracking modifications.</param>
     /// <remarks>
     /// This method is thread-safe. Concurrent reads of existing pages remain valid during growth.
     /// The <see cref="_pages"/> field is volatile, ensuring visibility of the new array after growth.
     /// </remarks>
-    public void Grow(int newLength, bool clearNewPages, ChangeSet changeSet = null)
+    public void Grow(int newLength, ChangeSet changeSet = null)
     {
         lock (_growLock)
         {
@@ -439,7 +434,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             _store.AllocatePages(ref newPagesAsSpan, curPages.Length, changeSet);
 
             int noNextMap = 0;
-            CreateOrGrow(PageBlockType.None, newPages, curPages.Length, ref noNextMap, clearNewPages, changeSet, releaseNewPagesOnFailure: true);
+            CreateOrGrow(PageBlockType.None, newPages, curPages.Length, ref noNextMap, changeSet, releaseNewPagesOnFailure: true);
 
             // Phase 5: Storage:Segment:Grow event. Use the first page id as a stable segment identifier.
             TyphonEvent.EmitStorageSegmentGrow(newPages[0], oldLen, newLength);
@@ -471,14 +466,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         return (pi + 1, off);
     }
 
-    internal bool Create(PageBlockType type, StorageSegmentKind kind, int filePageIndex, bool clear, ChangeSet changeSet = null)
+    internal bool Create(PageBlockType type, StorageSegmentKind kind, int filePageIndex, ChangeSet changeSet = null)
     {
         Span<int> ids = stackalloc int[1];
         ids[0] = filePageIndex;
-        return Create(type, kind, ids, clear, changeSet);
+        return Create(type, kind, ids, changeSet);
     }
 
-    internal virtual bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
+    internal virtual bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, ChangeSet changeSet = null)
     {
         // Directory-only root (v4): the root page holds only the segment's page directory and carries no data, so every segment
         // needs at least one data page beyond it (a 1-page segment would have ChunkCountRootPage==0 → zero usable chunks).
@@ -497,12 +492,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             TyphonEvent.EmitStorageSegmentCreate(filePageIndices[0], filePageIndices.Length);
         }
         int noNextMap = 0;
-        return CreateOrGrow(type, filePageIndices, 0, ref noNextMap, clear, changeSet);
+        return CreateOrGrow(type, filePageIndices, 0, ref noNextMap, changeSet);
     }
 
     // releaseNewPagesOnFailure: true when this call owns filePageIndices[growFrom..] and must give them back if it fails before publishing (a Grow);
     // false when the caller manages them: a Create's pages, or the occupancy grow's reserved page.
-    internal unsafe bool CreateOrGrow(PageBlockType type, Span<int> filePageIndices, int growFrom, ref int nextMap, bool clear, ChangeSet changeSet,
+    internal unsafe bool CreateOrGrow(PageBlockType type, Span<int> filePageIndices, int growFrom, ref int nextMap, ChangeSet changeSet,
         bool releaseNewPagesOnFailure = false)
     {
         var epoch = _store.EpochManager.GlobalEpoch;
@@ -581,7 +576,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     _store.GetOrAllocateDirectoryTwin(mapIndices[m], changeSet);
                 }
 
-                InitDataPages(type, filePageIndices, growFrom, clear, changeSet, epoch);
+                InitDataPages(type, filePageIndices, growFrom, changeSet, epoch);
 
                 // Count a pin only once it is taken: `pinned[pinnedCount++] = PinForPublish(…)` would count it before the call, and a throw would then
                 // release a slot this grow never pinned.
@@ -631,14 +626,15 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 int memPageIdx = -1;
                 var isPageDirty = false;
 
-                // If it's a new page, initialize it (skip CRC — page will be fully overwritten)
+                // If it's a new page, initialize it (skip CRC — page will be fully overwritten). WholePage, not Header (PS-14): the directory below
+                // fills only the entries in range plus a terminator, and the page may be a reused page number still holding a deleted page's bytes.
                 if (isNewPage)
                 {
                     memPageIdx = RequestExclusiveForGrow(curMapPageIndex, epoch, false);
                     page = _store.GetPage(memPageIdx);
                     hasPage = true;
 
-                    InitHeader(page.Address, PageClearMode.Header,
+                    InitHeader(page.Address, PageClearMode.WholePage,
                         PageBlockFlags.IsLogicalSegment | (isFirstPage ? PageBlockFlags.IsLogicalSegmentRoot : PageBlockFlags.None),
                         type, 1, MetadataReservedBytes(isFirstPage), ChunkStrideForGeometry);
                     isPageDirty = true;
@@ -696,7 +692,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                         {
                             var endMemIdx = RequestExclusiveForGrow(mapIndices[curIndexMapIndex + 1], epoch, false);
                             var endPage = _store.GetPage(endMemIdx);
-                            InitHeader(endPage.Address, PageClearMode.Header, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(false),
+                            // WholePage (PS-14): this page receives a single int, so everything else on it must not carry a previous occupant's bytes.
+                            InitHeader(endPage.Address, PageClearMode.WholePage, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(false),
                                 ChunkStrideForGeometry);
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
@@ -784,7 +781,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             {
                 // A Create's root is both its directory and its data page 0, and the directory pass above re-stamped the root's header, so the
                 // data-page fields go on after it.
-                InitDataPages(type, filePageIndices, 0, clear, changeSet, epoch);
+                InitDataPages(type, filePageIndices, 0, changeSet, epoch);
             }
         }
         catch (Exception failure) when (!publishing)
@@ -1024,19 +1021,20 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     {
         ref var header = ref Unsafe.AsRef<PageBaseHeader>(pageAddr + PageBaseHeader.Offset);
 
-        if (clearMode == PageClearMode.Header)
+        if (clearMode == PageClearMode.WholePage)
         {
-            // Preserve ModificationCounter across clear — it's the seqlock counter managed by TryLatchPageExclusive/UnlatchPageExclusive. Zeroing it while
-            // the page is latched leaves the counter odd after unlatch, causing CopyPageWithSeqlock to spin forever.
+            // Two counters survive the clear.
+            // - ModificationCounter: the seqlock counter managed by TryLatchPageExclusive/UnlatchPageExclusive. Zeroing it while the page is latched
+            //   leaves the counter odd after unlatch, causing CopyPageWithSeqlock to spin forever.
+            // - ChangeRevision: PageSectorFooter stamps every sector with its low 16 bits. A page number reused from a deleted segment arrives with
+            //   its old revision (resident, or read back from disk); keeping it means a file page's revision never goes backwards. It does not
+            //   make the next stamp differ from every stale sector: a checkpoint bumps only its staging copy (CP-08), so the live revision can
+            //   trail the one on disk.
             var savedModCounter = header.ModificationCounter;
-            new Span<byte>(pageAddr, PagedMMF.PageHeaderSize).Clear();
-            header.ModificationCounter = savedModCounter;
-        }
-        else if (clearMode == PageClearMode.WholePage)
-        {
-            var savedModCounter = header.ModificationCounter;
+            var savedChangeRevision = header.ChangeRevision;
             new Span<byte>(pageAddr, PagedMMF.PageSize).Clear();
             header.ModificationCounter = savedModCounter;
+            header.ChangeRevision = savedChangeRevision;
         }
 
         header.Flags = flags;

@@ -60,7 +60,10 @@ public class PagedMMFOptions
     /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>
     public ulong DatabaseCacheSize { get; set; } = DefaultCacheSizeBytes;
-    /// <summary>When <c>true</c>, fills newly-allocated pages with a recognizable debug pattern (development/testing). Default <c>false</c>.</summary>
+    /// <summary>
+    /// When <c>true</c>, fills a page-cache slot with a recognizable debug pattern when it is assigned. Default <c>false</c>. No longer observable
+    /// (PS-14, #1126): a page not read from disk is cleared right after, and a page read from disk is overwritten by the read.
+    /// </summary>
     public bool PagesDebugPattern { get; set; }
 
     /// <summary>
