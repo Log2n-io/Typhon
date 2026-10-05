@@ -98,14 +98,14 @@ internal static class RevisionChainReader
     /// which is what makes this safe where a full optimistic chain walk is not), then validates:
     /// <list type="bullet">
     /// <item>No exclusive holder before AND after the data reads — every chain mutator that can produce a torn read (AddCompRev, cleanup compaction,
-    /// conflict-path prepare/publish) runs under the exclusive chain lock.</item>
+    /// prepare and publish — the publish takes the lock itself since #1158, AP-05) runs under the exclusive chain lock.</item>
     /// <item>Header quad (FirstItemIndex/ItemCount/ChainLength/LCRI), CommitSequence and the 12 element bytes re-read unchanged — catches a locked
-    /// mutator session that ran entirely between the two probes, and the lock-FREE publish pass (AP-03: TSN re-stamp + IsolationFlag flip + CS/LCRI
-    /// bump). If every compared byte is unchanged, the value read IS the current consistent state, so returning it is correct even if transient
-    /// states existed in between.</item>
+    /// mutator session that ran entirely between the two probes, a publish among them (TSN re-stamp + IsolationFlag flip + CS/LCRI bump). If every
+    /// compared byte is unchanged, the value read IS the current consistent state, so returning it is correct even if transient states existed in
+    /// between.</item>
     /// </list>
-    /// The lock-free publish can never mutate an entry this path ACCEPTS: publish targets its transaction's isolated entry, and an isolated (or torn
-    /// mid-flip) element is rejected here and falls back to the locked walk.
+    /// A publish can never mutate an entry this path ACCEPTS: publish targets its transaction's isolated entry, and an isolated (or torn mid-flip)
+    /// element is rejected here and falls back to the locked walk.
     /// <para>Memory ordering: EVERY load in this method is a <see cref="Volatile"/>.Read — volatile loads are program-ordered among themselves, which is
     /// exactly the seqlock requirement (probe → data → re-probe must execute in order). That makes the path correct on arm64 (each load is an ldar);
     /// on x64 they compile to plain movs (TSO). Do not "optimize" any of them to plain loads: a single plain data read could sink below the

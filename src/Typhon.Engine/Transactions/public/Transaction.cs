@@ -1821,32 +1821,90 @@ public unsafe partial class Transaction : EntityAccessor
     {
         var info = e.Info;
         ref var compRevTableAccessor = ref info.CompRevTableAccessor;
+        _dbe.PublishComponentProbe?.Invoke(info.ComponentTable, e.FirstChunkId);
 
-        // Reconstruct the revision handle from the coordinates resolved in PREPARE (no locking walk — AP-03) and clear IsolationFlag (THE publication act).
-        var elementHandle = new ComponentRevisionManager.ElementRevisionHandle(ref compRevTableAccessor, e.ElementChunkId, e.ElementIsFirst, e.ElementIndexInChunk);
-        elementHandle.Commit(TSN);
-
-        // LCRI / CommitSequence bookkeeping — header field writes (under the retained handler lock when LockHeld).
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
-        header.LastCommitRevisionIndex = Math.Max(e.LastCommitRevisionIndex, e.CurRevisionIndex);
-        if (!e.Created)
+
+        // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here
+        // a cleanup on another thread can compact this chain: CleanUpUnusedEntries rewrites every kept entry from index 0, the still-isolated one included.
+        // Stamping the coordinates PREPARE recorded then cleared IsolationFlag on whatever had moved there — often the previous committed entry, re-stamped
+        // with this TSN — and left this transaction's own entry isolated, invisible to every reader for good.
+        //
+        // The wait is unbounded, so publish stays non-throwing (AP-03), and it ends: a cleanup only ever TRIES the lock, another publish holds it for a few
+        // writes and one slot copy, and a conflict-handler transaction holding it from its PREPARE releases it at the end of its own publish — or, if it is
+        // itself waiting on a chain this transaction holds, when its bounded PREPARE wait times out and it rolls back. Readers hold it SHARED while they walk
+        // a chain that has a pending entry, and AccessControlSmall gives a waiting writer no preference: an entity read without pause can delay this publish
+        // for as long as the reads overlap. It does not deadlock — a reader holds no lock this transaction waits for — but the delay is not bounded.
+        var lockTaken = false;
+        if (!e.LockHeld)
         {
-            header.CommitSequence++;
+            var unbounded = new WaitContext(Deadline.Infinite, default);
+            header.Control.EnterExclusiveAccess(ref unbounded);
+            lockTaken = true;
         }
 
-        // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration).
-        if (e.ClusterCopyPending)
+        try
         {
-            PublishClusterVersionedSlot(e);
-        }
+            // Reconstruct the revision handle from the coordinates resolved in PREPARE. Held since PREPARE (handler path), the lock kept every compaction
+            // out and they are exact. Otherwise they are trusted only while they still name this transaction's pending entry: the root chunk outlives every
+            // compaction, but an overflow chunk may have been freed and reissued still holding a stale copy of the entry, so its coordinates are never trusted.
+            var revisionIndex = e.CurRevisionIndex;
+            var elementHandle = new ComponentRevisionManager.ElementRevisionHandle(ref compRevTableAccessor, e.ElementChunkId, e.ElementIsFirst,
+                e.ElementIndexInChunk);
+            if (!e.LockHeld && !_dbe.PublishTrustsPrepareCoordinatesForTest
+                && (!e.ElementIsFirst || !IsThisTransactionsPendingEntry(elementHandle.Element, e.CurCompContentChunkId)))
+            {
+                // The lock this thread holds makes the walk take no lock of its own.
+                var found = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, e.FirstChunkId, e.CurCompContentChunkId, TSN);
+                if (found < 0)
+                {
+                    // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
+                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing is published: no stamp, no LCRI, no
+                    // cluster copy. The commit is lost either way; this keeps it from taking a neighbour down with it, and says so.
+                    Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
+                    _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
+                    return;
+                }
 
-        // Release the per-entity revision-chain lock retained by PrepareComponent (handler path).
-        if (e.LockHeld)
+                revisionIndex = found;
+                elementHandle = ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, e.FirstChunkId, found);
+            }
+
+            elementHandle.Commit(TSN);   // THE publication act: TSN stamp + IsolationFlag clear
+
+            // LCRI / CommitSequence bookkeeping, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it. Read from
+            // the live header: a compaction since PREPARE renumbered the entries, and under a lock held since PREPARE it is the recorded value anyway.
+            var previousLastCommit = header.LastCommitRevisionIndex;
+            header.LastCommitRevisionIndex = Math.Max(previousLastCommit, revisionIndex);
+            if (!e.Created)
+            {
+                header.CommitSequence++;
+            }
+
+            // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
+            // is the newest committed one. Two transactions updating one entity can publish in the opposite order to their revisions; copying outside the
+            // lock let the older one land last, leaving the slot behind the chain's HEAD, and let two copies interleave into one slot.
+            if (e.ClusterCopyPending && revisionIndex >= previousLastCommit)
+            {
+                PublishClusterVersionedSlot(e);
+            }
+        }
+        finally
         {
-            ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
-            lockHeader.Control.ExitExclusiveAccess();
+            // Both forms released here: the one taken above, and the one PrepareComponent retained (handler path), which nothing else releases.
+            if (lockTaken || e.LockHeld)
+            {
+                header.Control.ExitExclusiveAccess();
+            }
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="element"/> is this transaction's still-pending revision: isolated, and carrying the content chunk it committed — or, for a
+    /// delete, no chunk and this transaction's TSN, the same identity <see cref="ComponentRevisionManager.FindRevisionIndexByChunkId"/> matches on.
+    /// </summary>
+    private bool IsThisTransactionsPendingEntry(in CompRevStorageElement element, int contentChunkId) =>
+        element.IsolationFlag && (contentChunkId != 0 ? element.ComponentChunkId == contentChunkId : element.ComponentChunkId == 0 && element.TSN == TSN);
 
     /// <summary>
     /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.

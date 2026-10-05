@@ -5691,6 +5691,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal static bool DisableOccupancyRederiveForTest;
 
     /// <summary>
+    /// Test hook: runs in <c>Transaction.PublishComponent</c> on the committing thread, after the WAL append and before the publication acts, with the
+    /// component table and the entity's revision-chain root — the window in which another thread's cleanup can compact the chain (#1158). Per engine, so a
+    /// fixture using it stays parallel-safe. Null in production.
+    /// </summary>
+    internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
+    /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool PublishTrustsPrepareCoordinatesForTest { get; set; }
+
+    /// <summary>The impossible branch of AP-05, logged rather than published through: see <c>Transaction.PublishComponent</c>.</summary>
+    [LoggerMessage(LogLevel.Error,
+        "Commit TSN {tsn}: the {component} revision it prepared is no longer in its chain (root chunk {firstChunkId}); the revision was not published")]
+    internal partial void LogPublishEntryNotFound(string component, int firstChunkId, long tsn);
+
+    /// <summary>
     /// Whether this archetype's EntityMap can be fully re-derived from persisted data on a crash. True for cluster archetypes (the cluster slots persist
     /// EntityKeys[N] + EnabledBits[C] + the live OccupancyBits — fully self-describing) and for non-cluster archetypes whose non-Transient slots are all
     /// Versioned (chain heads carry every location). False only for the rare non-cluster archetype that still owns a SingleVersion slot (reachable via a
