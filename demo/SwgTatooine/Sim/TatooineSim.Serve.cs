@@ -119,6 +119,12 @@ public sealed partial class TatooineSim
         // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01). Required rather than defaulted, so a
         // path that forgot it would refuse to start rather than clamp to the wrong world silently.
         TatooineReplication.ConfigureIntents(Dbe, _config.WorldEdgeM, _config.TickRateHz);
+
+        // Where a first login arrives (A5): the capital's centre, on the ground, in planet 0. Taken from the map rather than
+        // defaulted to the origin, which on this planet is open desert a long way from anything a new player could interact with.
+        var capital = Map.Cities.Count > 0 ? Map.Cities[0] : default;
+        var spawnY = TerrainField.Shared(_config.ContentScale).GroundAt(capital.X, capital.Z);
+        TatooineReplication.ConfigureAvatars(Dbe, new Point3F { X = capital.X, Y = spawnY, Z = capital.Z }, 0);
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

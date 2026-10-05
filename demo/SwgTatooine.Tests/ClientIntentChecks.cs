@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -409,15 +409,24 @@ public sealed class ClientIntentChecks
     }
 
     /// <summary>
-    /// A player whose client leaves goes back to the simulation, rather than standing still for ever.
+    /// An avatar whose client leaves is DESTROYED, rather than left standing in the world for ever.
     /// </summary>
     /// <remarks>
-    /// The failure this rules out is quiet and permanent: a possessed player that nobody releases is skipped by <c>PlayerThink</c> and has no client to send it
-    /// an intent, so it stands where it was left for the life of the process, still in every awareness query and still costing the fence nothing. Over a day of
-    /// connections the world fills with them.
+    /// <para>
+    /// <b>This case was inverted by A5, and the old assertion is worth recording.</b> It used to require that the player went back
+    /// to the simulation as <c>ControllerKind.InProcess</c>, because a session was handed a body out of the pooled crowd and had to
+    /// give it back. An avatar is not borrowed — it is spawned for the session and belongs to nothing else — so going back to the
+    /// simulation would leave an ownerless body standing where its client left it, which is the leak the old assertion was guarding
+    /// against in the only form it could then take.
+    /// </para>
+    /// <para>
+    /// The failure ruled out is the same one and is still quiet and permanent: a body nobody drives and nobody destroys stays in
+    /// every awareness query and every spatial walk for the life of the process. Over a day of connections the world fills with them.
+    /// This is the half of acceptance criterion A-9 that one login and one logout can show.
+    /// </para>
     /// </remarks>
     [Test]
-    public void APlayerWhoseClientLeavesGoesBackToTheSimulation()
+    public void AnAvatarWhoseClientLeavesIsDestroyed()
     {
         var config = Config();
         using var sim = new TatooineSim(config);
@@ -425,22 +434,20 @@ public sealed class ClientIntentChecks
 
         var harness = _harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.PlayerKind);
-        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed");
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
         var entity = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session must have been given a body to start with");
 
         link.Close(CloseCodes.Normal, "leaving");
-        SessionHarness.Until(() => TatooineReplication.Intents.Releases >= 1, "the player to be given back by a tick");
+        SessionHarness.Until(() => TatooineReplication.AvatarsDestroyed >= 1, "the avatar to be destroyed by a tick");
         harness.Ticks(2);
 
         using var tx = sim.Dbe.CreateQuickTransaction();
-        var opened = tx.For<Player>().Open(entity);
-        var kind = opened.Read(Player.Control).Kind;
-        var owner = opened.Read(Player.Session);
         Assert.Multiple(() =>
         {
-            Assert.That(kind, Is.EqualTo(ControllerKind.InProcess), "the player is still possessed by a session that has gone");
-            Assert.That(owner.Controller, Is.Zero);
-            Assert.That(owner.Target, Is.EqualTo(EntityId.Null));
+            Assert.That(tx.For<Player>().TryOpen(entity, out _), Is.False, "the avatar outlived its session");
+            Assert.That(TatooineReplication.ControlledBy(sim.Dbe, link.Session), Is.EqualTo(EntityId.Null),
+                "and nothing is marked as controlled by a session that has gone");
         });
     }
 

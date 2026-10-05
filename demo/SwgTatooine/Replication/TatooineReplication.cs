@@ -281,7 +281,7 @@ public struct RealmNews
 /// compiler treats "no change group" as an error rather than as a shape.
 /// </para>
 /// </remarks>
-public static class TatooineReplication
+public static partial class TatooineReplication
 {
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
     public const string GodProfile = "god-world";
@@ -636,6 +636,14 @@ public static class TatooineReplication
         System.Threading.Volatile.Write(ref _pendingSpectators, 0);
         System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
         System.Threading.Interlocked.Exchange(ref _refusedUnauthenticated, 0);
+        ResetAvatarAccounting();
+        BoundPlayer.Clear();
+        BoundIds.Clear();
+        Unbound.Clear();
+        Seen.Clear();
+        Retired.Clear();
+        System.Threading.Interlocked.Exchange(ref _possessions, 0);
+        System.Threading.Interlocked.Exchange(ref _releases, 0);
         System.Threading.Interlocked.Exchange(ref _kicksStaged, 0);
         Kicked.Clear();
         Spectators.Clear();
@@ -1024,7 +1032,9 @@ public static class TatooineReplication
     {
         if (BindOpenedSessions(tick))
         {
-            PossessPlayers(tick);
+            // A5: the session's own avatar, spawned at its character's saved position, rather than the first free player out of the
+            // pooled crowd. See TatooineReplication.Avatars.cs for why that distinction is the whole requirement.
+            BindAvatars(tick);
             ApplyIntents(tick);
         }
     }
@@ -1083,6 +1093,11 @@ public static class TatooineReplication
                 // RecountSessions. Clamped at zero: a reservation whose session never opened leaks one place until the next admission, which is the safe
                 // direction, and a decrement that ran twice would be the unsafe one.
                 Release(ref player ? ref _pendingClients : ref _pendingSpectators);
+
+                // A5: the account Admit proved, taken from the event because AppData reaches the tick nowhere else. A god session
+                // carries none and nothing is recorded, which is what keeps it out of the avatar binding entirely.
+                NoteOpenedSession(e.Session, e.AppData);
+
                 var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfileName);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
@@ -1756,126 +1771,13 @@ public static class TatooineReplication
         }
     }
 
-    /// <summary>
-    /// Hands each player session a player of its own to control, takes it back when the session goes, and marks both on the entity.
-    /// </summary>
-    /// <param name="tick">The tick context.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>The claim is made once per session, not per tick.</b> The engine centres the session's sphere on the entity from then on
-    /// (<c>AroundControlled</c>), so there is no per-tick walk of every player and no <c>Place</c>. See <see cref="BoundPlayer"/> for what re-picking per tick
-    /// cost when this method used to do it.
-    /// </para>
-    /// <para>
-    /// <b>What SWG-01 added is the mark on the ENTITY.</b> The claim table alone tells the session which player it drives; it does not tell the simulation to
-    /// stop driving that player. <c>PlayerControl.Kind</c> is that, and it is written here — the one place that knows both when a claim is made and when it is
-    /// given back — rather than inferred anywhere from the table, which only this system may read.
-    /// </para>
-    /// </remarks>
-    private static void PossessPlayers(TickContext tick)
-    {
-        var subs = tick.Subscriptions;
-        var tx = tick.Transaction;
-        if (subs == null || tx == null)
-        {
-            return;
-        }
-
-        // `Unbound` and `Seen` were filled by WalkSessions, one walk of the open sessions for this tick rather than one per consumer. There were two, each
-        // with an ordinal string compare per session per tick, to produce facts a single pass already has in hand.
-        //
-        // Nothing to claim and nothing to release is the common case by far — a server spends almost every tick with a stable set of clients — and it is worth
-        // detecting, because `tx.For<Player>()` is not free: it creates an EntityMap accessor and pre-warms the component table.
-        if (Unbound.Count == 0 && BoundPlayer.Count == Seen.Count)
-        {
-            return;
-        }
-
-        // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
-        // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
-        var accessor = tx.For<Player>();
-
-        // A player for every session that does not hold one yet, handed over once with Control: the engine centres the session's sphere on it from then
-        // on (AroundControlled), so there is no per-tick walk of every player and no Place.
-        var cursor = 0;
-        if (Unbound.Count > 0)
-        {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0 && cursor < Unbound.Count)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-                    // The EntityId rather than the raw long the span carries, because the claim has to be opened for writing on RELEASE as well as on claim
-                    // and an EntityId cannot be reconstructed from a raw value outside the engine.
-                    var entity = cluster.GetEntityId(slot);
-                    if (BoundIds.Contains(entity))
-                    {
-                        continue;
-                    }
-
-                    var session = Unbound[cursor++];
-                    BoundPlayer[session.Value] = entity;
-                    BoundIds.Add(entity);
-                    subs.Session(session).Control(entity);
-
-                    // The mark that stops PlayerThink driving it. Written through OpenMut rather than into this cluster's span because the span is read-only
-                    // here and, more to the point, a possession is one entity: opening it says so, and sets the dirty bit the fence and the projection read.
-                    if (accessor.TryOpenMut(entity, out var possessed))
-                    {
-                        var control = possessed.Read(Player.Control);
-                        control.Kind = ControllerKind.Human;
-                        possessed.Set(Player.Control, control);
-                        var owner = possessed.Read(Player.Session);
-                        owner.Controller = session.Value;
-                        owner.Target = EntityId.Null;
-                        possessed.Set(Player.Session, owner);
-                        Normalise(ref possessed);
-                        System.Threading.Interlocked.Increment(ref _possessions);
-                    }
-                }
-
-                if (cursor >= Unbound.Count)
-                {
-                    break;
-                }
-            }
-        }
-
-        // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
-        // point a new session is bound to nothing and sees nothing.
-        Retired.Clear();
-        foreach (var (sessionValue, entity) in BoundPlayer)
-        {
-            if (!Seen.Contains(sessionValue))
-            {
-                Retired.Add(sessionValue);
-                BoundIds.Remove(entity);
-
-                // Back to the simulation. Without this a player whose client left would stand still for ever: possessed, so PlayerThink skips it, and with
-                // nobody left to send it an intent. Zero throughout is the resting state, which is also what a freshly spawned player has.
-                if (accessor.TryOpenMut(entity, out var released))
-                {
-                    var controlCopy = released.Read(Player.Control);
-                    controlCopy.Kind = ControllerKind.InProcess;
-                    released.Set(Player.Control, controlCopy);
-                    var owner = released.Read(Player.Session);
-                    owner.Controller = 0u;
-                    owner.Target = EntityId.Null;
-                    released.Set(Player.Session, owner);
-                    Normalise(ref released);
-                    System.Threading.Interlocked.Increment(ref _releases);
-                }
-            }
-        }
-
-        for (var i = 0; i < Retired.Count; i++)
-        {
-            BoundPlayer.Remove(Retired[i]);
-        }
-    }
+    // PossessPlayers lived here until A5. It handed each session the first FREE player out of the pooled crowd, which is why
+    // logging out and back in landed on whatever body happened to be unclaimed — the one thing "log in and be where you were"
+    // cannot tolerate. Its replacement spawns a body for the session instead: TatooineReplication.Avatars.cs, BindAvatars.
+    //
+    // What came with it and did NOT survive: the cluster walk looking for an unheld player, and BoundIds' job of telling a free
+    // player from a taken one across that walk. BoundIds is still written, because ControlledBy's scan and the measurement checks
+    // read "is this entity held by a session", but nothing searches for a gap in it any more.
 
     /// <summary>
     /// Brings a player to a standstill with no half-finished activity, at both ends of a possession.
@@ -1897,17 +1799,15 @@ public static class TatooineReplication
     /// </remarks>
     private static void Normalise(ref EntityRefMut player)
     {
-        var state = player.Read(Player.State);
+        ref var state = ref player.Write(Player.State);
         state.Activity = PlayerActivity.Idle;
         state.ActivityTicks = 0;
         state.ShuttleFrom = -1;
         state.ShuttleDest = -1;
-        player.Set(Player.State, state);
 
-        var move = player.Read(Player.Move);
+        ref var move = ref player.Write(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
-        player.Set(Player.Move, move);
     }
 
     // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1995,12 +1895,11 @@ public static class TatooineReplication
                 continue;
             }
 
-            var move = player.Read(Player.Move);
+            ref var move = ref player.Write(Player.Move);
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
             SteerTo(ref move, ref player, subs);
-            player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
@@ -2019,14 +1918,13 @@ public static class TatooineReplication
 
             // A heading is turned into a destination one second of travel away rather than into a velocity, so that this and MoveTo leave the player in the
             // same state and PlayerMove needs to know nothing about which one sent it. A held key re-sends every frame, and each one renews the second.
-            var move = player.Read(Player.Move);
+            ref var move = ref player.Write(Player.Move);
             var place = player.Read(Player.Bounds);
             move.SpeedMps = speed;
             var reach = MathF.Max(speed, 1f);
             move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
             move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
             SteerTo(ref move, ref player, subs);
-            player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
@@ -2037,11 +1935,10 @@ public static class TatooineReplication
                 continue;
             }
 
-            var owner = player.Read(Player.Session);
+            ref var owner = ref player.Write(Player.Session);
             if (command.Value.NetId == 0u)
             {
                 owner.Target = EntityId.Null;
-                player.Set(Player.Session, owner);
                 continue;
             }
 
@@ -2062,7 +1959,6 @@ public static class TatooineReplication
                 owner.Target = EntityId.Null;
                 System.Threading.Interlocked.Increment(ref _targetsRefused);
             }
-            player.Set(Player.Session, owner);
         }
 
         // SWG-09. What a client says becomes a Chat heard by whoever is near enough IN THE SPEAKER'S REALM — the speaker's
@@ -2140,7 +2036,7 @@ public static class TatooineReplication
         // the code rather than of two implementations happening to agree.
         var moving = SimBridge.Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTickForIntents, place.X, place.Z, move.DestX, move.DestZ);
 
-        var state = player.Read(Player.State);
+        ref var state = ref player.Write(Player.State);
 
         // A player going nowhere is Idle, not Travelling. `Activity` is replicated, so getting this wrong tells every client watching that a standing player is
         // running — which is the one visible consequence in the whole intent path, and a stop is the commonest intent there is.
@@ -2148,7 +2044,6 @@ public static class TatooineReplication
 
         // Zero, because a possessed player has no server-side timer: see the remarks on ApplyIntents.
         state.ActivityTicks = 0;
-        player.Set(Player.State, state);
         subs.Replicate(in player);
     }
 

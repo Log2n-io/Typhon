@@ -350,28 +350,43 @@ internal sealed class SessionHarness
     }
 
     /// <summary>
-    /// The account a <c>player</c> link is minted a token for when a case does not name one.
+    /// Hands out a fresh synthetic account id, so two <c>player</c> links are two different people.
     /// </summary>
+    /// <returns>An account id no other link in this process has used.</returns>
     /// <remarks>
-    /// <b>It does not have to exist, and that is a property of A3 rather than a shortcut here.</b> <c>Admit</c> validates the
+    /// <para>
+    /// <b>DISTINCT per link since A5, and sharing one was a real failure.</b> Every player session used to be minted a token for
+    /// account 1, which was harmless while a session was handed a pooled player — and became visible the moment a login spawned an
+    /// avatar, because one account may only be in the world once (<c>AccountAlreadyPlayingCloseCode</c>). Two sessions sharing an
+    /// account meant the second was refused, and a case asking for two players waited for ever.
+    /// </para>
+    /// <para>
+    /// <b>The account does not have to exist, and that is a property of A3 rather than a shortcut.</b> <c>Admit</c> validates the
     /// token's signature and expiry and carries the account id through as <c>AppData</c>; it never resolves the entity, because the
-    /// hook runs on the transport thread with no transaction to resolve it in. Binding an avatar to the account is A5's job, in the
-    /// tick, where a non-existent account is the thing that fails. So every case that only needs a <i>session</i> gets one without
-    /// also needing a signup.
+    /// hook runs on the transport thread with no transaction to resolve it in. A5's bind reads the account's CHARACTER through an
+    /// index and creates one when there is none, which works for an account id nothing else has heard of. So a case that only needs
+    /// a session gets one without also needing a signup — and a case that wants the real thing passes its own account.
+    /// </para>
+    /// <para>
+    /// Process-wide rather than per harness, so two fixtures in one process cannot collide on an id either.
+    /// </para>
     /// </remarks>
-    private static readonly EntityId SyntheticAccount = EntityId.FromRawValue(1);
+    private static EntityId NextSyntheticAccount()
+        => EntityId.FromRawValue((ulong)Interlocked.Increment(ref _syntheticAccounts));
+
+    private static long _syntheticAccounts;
 
     /// <summary>Connects one client and completes its handshake.</summary>
     /// <param name="kind">The session kind: <c>god</c> or <c>player</c>.</param>
     /// <param name="account">
-    /// The account a <c>player</c>'s token names; <see cref="SyntheticAccount"/> when not given. Ignored for <c>god</c>, which is
-    /// anonymous by design.
+    /// The account a <c>player</c>'s token names; a fresh one from <see cref="NextSyntheticAccount"/> when not given. Ignored for
+    /// <c>god</c>, which is anonymous by design.
     /// </param>
     /// <returns>The link, whose <see cref="FakeLink.Sent"/> is what the client received.</returns>
     public FakeLink Connect(string kind, EntityId? account = null)
     {
         var token = string.Equals(kind, TatooineReplication.PlayerKind, StringComparison.Ordinal)
-            ? AuthToken.Mint(account ?? SyntheticAccount)
+            ? AuthToken.Mint(account ?? NextSyntheticAccount())
             : "opaque";
 
         return ConnectWithToken(kind, token);
