@@ -2,7 +2,6 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 

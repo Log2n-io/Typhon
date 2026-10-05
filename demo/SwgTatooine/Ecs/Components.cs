@@ -1,6 +1,5 @@
 ﻿using System.Runtime.InteropServices;
 using Typhon.Protocol;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 

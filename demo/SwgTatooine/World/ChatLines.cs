@@ -1,4 +1,3 @@
-using System;
 using Typhon.Protocol;
 
 namespace SwgTatooine;
