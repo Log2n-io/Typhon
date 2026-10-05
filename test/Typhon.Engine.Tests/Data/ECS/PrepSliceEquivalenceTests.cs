@@ -44,7 +44,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     private static ClMigPos PointAt(float x, float y, int tag) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Tag = tag };
 
-    /// <summary>One engine per DI scope: every arm gets a fresh in-memory world, and the arms can run inside one test.</summary>
+    /// <summary>One engine per DI scope, over the data file <see cref="RunArmOn"/> has just deleted, so the arms can run inside one test.</summary>
     private static DatabaseEngine SetupEngine(IServiceScope scope)
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -170,6 +170,10 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
     private Outcome RunArmOn(int workerCount, bool checkZoneMaps = false)
     {
+        // A fresh data file per arm (#946). A second CreateScope() in one test REOPENS the database the first scope closed — the WAL is per scope, the data
+        // file is not — so the arm under test used to start from the serial arm's persisted world with a second spawn on top of it, and every defect of
+        // close-and-reopen surfaced here as a Prep disagreement.
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
         using var scope = ServiceProvider.CreateScope();
         var dbe = SetupEngine(scope);
         var ids = Spawn(dbe);
@@ -185,9 +189,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                 return;
             }
 
-            // The entity's TAG as well as (chunk, slot): two engines in one process neither place a seeded spawn into the same slots nor number entities
-            // from the same id, so the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the ordering contract
-            // is checked structurally within each arm.
+            // The entity's TAG as well as (chunk, slot): the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the
+            // ordering contract is checked structurally within each arm. The reason given here used to be that two engines place a seeded spawn into
+            // different slots; that was the reopen RunArmOn now prevents (#946) — over fresh files the two queues are equal element for element.
             var accessor = state.ClusterSegment.CreateChunkAccessor();
             try
             {
