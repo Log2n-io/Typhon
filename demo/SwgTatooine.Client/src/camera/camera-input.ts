@@ -135,6 +135,21 @@ export class CameraInput {
     this.abort.abort();
   }
 
+  /**
+   * The key codes currently held, as a read-only view of the live set (A9).
+   *
+   * <b>The live set, not a copy.</b> This is read once per frame by the intent sender, and a copy per frame would allocate
+   * sixty Sets a second to hand back two members. Read-only in the type so a caller cannot mutate what the listeners own.
+   *
+   * <b>No arbitration with the camera is needed, which is worth stating because it looks like it would be.</b> A playing
+   * session is in eye mode, and {@link update} already leaves W/A/S/D alone there — it was written that way for the
+   * spectator ("a spectator does not drive"), and a player is the same shape. The camera keeps Q/E/R/F and the zoom, which
+   * is what a player needs of it.
+   */
+  get heldKeys(): ReadonlySet<string> {
+    return this.keys;
+  }
+
   /** Applies held keys for `dt` seconds. */
   update(dt: number): void {
     const keys = this.keys;

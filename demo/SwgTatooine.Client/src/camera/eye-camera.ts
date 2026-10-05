@@ -32,6 +32,15 @@ const MAX_PITCH = (85 * Math.PI) / 180;
 export const MAX_EYE_DISTANCE_M = 30;
 
 /**
+ * Where a player's camera starts: behind and a little above the avatar (A10).
+ *
+ * Third person by default because a player has a body to see — first person on a character you have just created tells you
+ * nothing about it. Four metres is close enough that the avatar fills a useful part of the frame and far enough that the
+ * ground ahead is visible, which is what walking needs.
+ */
+export const DEFAULT_THIRD_PERSON_M = 4;
+
+/**
  * How fast the view settles. Looser than the map camera's 14: a followed entity changes heading abruptly — an NPC
  * turning a corner, a creature snapping to a new target — and a stiff camera makes that a jolt in the viewer's neck.
  */
@@ -108,6 +117,20 @@ export class EyeCamera {
     if (!this.placed) {
       this.jumpTo(x, y, z, this.yaw);
     }
+  }
+
+  /**
+   * Sets the distance the camera settles at, in metres, clamped to the rig's bounds.
+   *
+   * @param metres 0 for first person, up to {@link MAX_EYE_DISTANCE_M}.
+   *
+   * @remarks
+   * The GOAL rather than the current distance, so this glides like every other change to the rig rather than cutting. Its
+   * one caller sets a player's starting distance once per avatar; everything after that is the viewer's wheel through
+   * {@link zoomBy}, which is why this does not need to be called per frame and must not be.
+   */
+  setDistance(metres: number): void {
+    this.goalDistance = clamp(metres, 0, MAX_EYE_DISTANCE_M);
   }
 
   /** Free-look. Yaw is unbounded and wraps naturally; pitch stops short of vertical. */

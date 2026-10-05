@@ -1,6 +1,7 @@
 import { DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
 import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
+import { useSessionStore } from '../state/session-store';
 import { useStats } from '../state/stats-store';
 import { useUi, type Population } from '../state/ui-store';
 import { sourceKindFrom } from './Viewport';
@@ -22,6 +23,11 @@ const LIVE = sourceKindFrom(window.location.search) === 'live';
  */
 export function Toolbar() {
   const ui = useUi();
+
+  // Narrowly selected, like the stats below: the session store changes on a login and a kick and nothing else, but the
+  // toolbar re-renders often enough that subscribing to the whole store would be a needless dependency.
+  const accountName = useSessionStore((s) => s.grant?.name ?? null);
+  const logOut = useSessionStore((s) => s.logOut);
 
   // Selected NARROWLY. Stats are published four times a second and the whole snapshot changes each time, so subscribing
   // to it re-rendered the toolbar — and the radius slider under the user's thumb — at that rate. These three change only
@@ -46,6 +52,20 @@ export function Toolbar() {
   return (
     <div className="panel toolbar">
       <div className="toolbar-title">Typhon · Live World</div>
+
+      {/* Who this tab is, and the way out (A8). Shown only for a logged-in session: the god camera is anonymous and has
+          nothing to log out of, which is the one tool that has to work on a box nobody has an account on. */}
+      {accountName !== null && (
+        <section>
+          <h3>Account</h3>
+          <div className="session-row">
+            <span className="session-name">{accountName}</span>
+            <button type="button" onClick={logOut}>
+              Log out
+            </button>
+          </div>
+        </section>
+      )}
 
       <section>
         <h3>{LIVE ? `World (${sourceName ?? 'connecting…'})` : 'World (mock server)'}</h3>
@@ -151,7 +171,8 @@ export function Toolbar() {
         </div>
         {LIVE ? (
           <div className="hint">
-            The engine over <code>/ws</code>. Add <code>?source=mock</code> to the URL for the browser-side mock.
+            The engine over <code>/ws</code>. Add <code>?source=mock</code> for the browser-side mock, or{' '}
+            <code>?as=god</code> for the anonymous god camera — both skip the login screen, which is the point of them.
             {ui.maxViewRadius !== null && ui.maxViewRadius > 0
               ? ` This server honours a radius up to ${ui.maxViewRadius} m.`
               : ''}

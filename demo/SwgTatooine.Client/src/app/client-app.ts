@@ -41,18 +41,14 @@ import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
 import { styleFor } from '../render/styles';
-import {
-  RenderOrigin,
-  extractFrustumPlanes,
-  invertMatrix4,
-  rayGroundT,
-  unprojectRay,
-} from '../render/view-math';
+import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
+import { intentChanged, movementIntent, REFRESH_MS, stopAfter, type MoveIntent } from './player-intent';
+import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
 
@@ -256,8 +252,36 @@ export class ClientApp {
   /** The selection's altitude and facing, for the eye camera (CLI3D-10). */
   private selectedY = 0;
   private selectedHeading = 0;
+
+  /**
+   * The EYE SUBJECT's evaluated position, which since A10 is not the selection's.
+   *
+   * <b>A slot of its own, because a player's camera rides their avatar while the selection is whatever they clicked.</b>
+   * Both used to be evaluated into `selectedX/Y/Z/Heading`, the eye subject second — so for a playing session the
+   * selection marker and its label were drawn at the player's own body, with the player's own label, whatever they had
+   * clicked. The god camera never saw it, because there the two subjects are the same entity.
+   */
+  private eyeX = 0;
+  private eyeZ = 0;
+  private eyeY = 0;
+  private eyeHeading = 0;
   /** Whose eyes the eye camera is in; 0 for nobody. A change is a cut, not a glide. */
   private eyeSubject = 0;
+
+  /** The movement intent last sent, so an unchanged one is not re-sent every frame (A9). */
+  private lastIntent: MoveIntent | null = null;
+
+  /** When it was sent, so a held key is refreshed before the server's destination is reached. */
+  private lastIntentMs = 0;
+
+  /**
+   * Whether the camera has been put behind the avatar for this session yet (A10).
+   *
+   * <b>Once per session, not once per frame.</b> The default has to be third person — A10 says so, and first person on a
+   * body you have just created tells you nothing about it — but it must be a STARTING point rather than a value the app
+   * keeps restoring, or the wheel and the camera-mode button would both snap back on the next frame.
+   */
+  private playerCameraReady = false;
 
   /**
    * The realm the scene is currently set up for: what {@link adoptSourceRealm} compares against each frame.
@@ -332,7 +356,17 @@ export class ClientApp {
       this.cssSize,
       {
         onClick: (x, y) => {
-          useUi.getState().select(this.pickAt(x, y));
+          const netId = this.pickAt(x, y);
+          useUi.getState().select(netId);
+
+          // A9: clicking something is also how a player attacks it. The selection and the target move together on
+          // purpose — the inspector shows what you clicked and the avatar shoots at it, which is one gesture and one
+          // mental model. The server refuses a netId this session was never shown and one whose entity is dead, so a
+          // click on empty ground (0) is a legitimate clear rather than something to filter here.
+          const live = this.source;
+          if (live !== null && live.canPlay) {
+            live.setTarget(netId);
+          }
         },
         onManualMove: () => {
           if (useUi.getState().follow) {
@@ -716,6 +750,53 @@ export class ClientApp {
   }
 
   /**
+   * Sends the movement intent the held keys mean, when it has changed or is due a refresh (A9).
+   *
+   * @param source The live session.
+   * @param nowMs The frame's clock.
+   * @param steering Whether the keys are the avatar's this frame — true in eye mode, false in map mode where they pan the camera.
+   *
+   * @remarks
+   * <b>Two reasons to send, and both are needed.</b> A CHANGE — a new heading, a new speed class, the stop that ends a run —
+   * must go at once or the avatar does the wrong thing for as long as the key is held. A REFRESH must go because the server
+   * turns a heading into a destination one second of travel away: an intent that stopped being re-sent would simply be
+   * reached, and the avatar would halt while the key was still down.
+   *
+   * <b>The heading is the camera's yaw AFTER this frame's update.</b> Taken before it, every intent would be a frame behind
+   * the view the person is steering by — which at sixty frames a second is invisible standing still and clearly wrong while
+   * turning.
+   *
+   * <b>`steering: false` is not the same as not calling this.</b> It reads as "the keys are not mine this frame", which still owes
+   * the avatar a stop if it was moving — so switching to the map camera mid-run halts the character instead of leaving it walking
+   * off under a camera that is no longer behind it.
+   */
+  private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
+    const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw) : null;
+    if (intent === null) {
+      // The keys are up. If the avatar was moving it must be TOLD to stop — the server is steering towards a destination a second
+      // of travel ahead, so silence lets the character walk on for about five metres after the key came up.
+      const stop = stopAfter(this.lastIntent);
+      if (stop !== null) {
+        source.moveDir(stop.heading, stop.speedClass);
+        this.lastIntentMs = nowMs;
+      }
+
+      // Cleared either way, so a standing session sends nothing at all and the next press reads as a change rather than as a
+      // repeat the refresh window would have swallowed for up to a third of a second.
+      this.lastIntent = null;
+      return;
+    }
+
+    if (!intentChanged(intent, this.lastIntent) && nowMs - this.lastIntentMs < REFRESH_MS) {
+      return;
+    }
+
+    source.moveDir(intent.heading, intent.speedClass);
+    this.lastIntent = intent;
+    this.lastIntentMs = nowMs;
+  }
+
+  /**
    * Runs the realm fade's clock, and writes it back only when it moved.
    *
    * <b>Only on a change.</b> The store is a zustand store React subscribes to, so publishing an identical object every
@@ -880,20 +961,60 @@ export class ClientApp {
       this.mapCamera.follow(this.selectedX, this.selectedZ);
     }
 
-    // Eye mode rides the selection; without one there is nothing to ride, so it falls back to the map rather than
+    // A10: a PLAYING session's eye camera rides the avatar the server gave it — `selfNetId`, from the `SELF` block, which
+    // is what `Control` fills — and not the selection. Clicking something must not move the camera off your own body; the
+    // selection stays what the inspector shows and what `SetTarget` names. A god camera keeps riding its selection, which
+    // is what CLI3D-10 built this for.
+    const live = this.source;
+    const playing = live !== null && live.canPlay && live.selfNetId !== 0;
+    const eyeNetId = playing ? live.selfNetId : ui.selectedNetId;
+
+    // Into the eye subject's OWN slot when it is not the selection. Sharing one slot drew the selection marker and its
+    // label on the player's own avatar, because the eye subject was evaluated second and overwrote it.
+    const haveEyeSubject = playing ? this.locateEyeSubject(eyeNetId) : hasSelection;
+
+    // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
+    // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
+    // ONCE, so the camera-mode button and the wheel still belong to the viewer afterwards.
+    if (playing && haveEyeSubject && !this.playerCameraReady) {
+      this.playerCameraReady = true;
+      this.eyeCamera.setDistance(DEFAULT_THIRD_PERSON_M);
+      if (ui.cameraMode !== 'eye') {
+        ui.setCameraMode('eye');
+        ui = useUi.getState();
+      }
+    }
+
+    // Eye mode rides that subject; without one there is nothing to ride, so it falls back to the map rather than
     // stranding the viewer at the origin (CLI3D-10).
-    const inEye = ui.cameraMode === 'eye' && hasSelection;
+    const inEye = ui.cameraMode === 'eye' && haveEyeSubject;
     if (inEye) {
-      if (this.eyeSubject !== ui.selectedNetId) {
-        this.eyeSubject = ui.selectedNetId;
-        this.eyeCamera.jumpTo(this.selectedX, this.selectedY, this.selectedZ, this.selectedHeading);
+      // A god camera rides its selection, so the two slots hold the same subject and either would do; a player's camera
+      // must read the eye slot, which is the only one holding the avatar.
+      const camX = playing ? this.eyeX : this.selectedX;
+      const camY = playing ? this.eyeY : this.selectedY;
+      const camZ = playing ? this.eyeZ : this.selectedZ;
+      if (this.eyeSubject !== eyeNetId) {
+        this.eyeSubject = eyeNetId;
+        this.eyeCamera.jumpTo(camX, camY, camZ, playing ? this.eyeHeading : this.selectedHeading);
       } else {
-        this.eyeCamera.follow(this.selectedX, this.selectedY, this.selectedZ);
+        this.eyeCamera.follow(camX, camY, camZ);
       }
 
       this.eyeCamera.update(dt);
     } else {
       this.eyeSubject = 0;
+    }
+
+    // A9: the held keys, in the camera's frame, as a movement intent. After the camera has settled this frame, so the
+    // heading is the facing the viewer can actually see rather than the previous frame's.
+    //
+    // Gated on IN EYE and not merely on playing, because the heading is the eye camera's yaw. A10 leaves the camera-mode button to
+    // the viewer, and in map mode that yaw is whatever it was when the viewer left eye mode — nothing updates it — while W/A/S/D
+    // belong to the map camera's pan. Sending then walked the avatar along a stale facing the person could not see, in response to
+    // keys they were using for something else.
+    if (playing) {
+      this.sendMovementIntent(live, now, inEye);
     }
 
     // The map camera orbits the ground under its target, so it needs the terrain height there BEFORE it recomputes its eye.
@@ -971,7 +1092,14 @@ export class ClientApp {
       // Place names are the PLANET's: they are Tatooine's towns, and in a room or in space they name somewhere the
       // viewer is not. The selection's tag below is realm-agnostic and stays either way.
       if (this.profile.kind === 'planet') {
-        this.labels.update(matrix, view.originX, view.originZ, this.cssSize.width, this.cssSize.height, this.profile.ground);
+        this.labels.update(
+          matrix,
+          view.originX,
+          view.originZ,
+          this.cssSize.width,
+          this.cssSize.height,
+          this.profile.ground,
+        );
       } else {
         this.labels.hidePlaces();
       }
@@ -1096,6 +1224,58 @@ export class ClientApp {
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
   private locateSelected(netId: number): boolean {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    this.selectedX = this.evalX;
+    this.selectedZ = this.evalZ;
+    // Altitude and heading, for the eye camera (CLI3D-10). A still entity keeps the heading it last had, the way the
+    // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
+    this.selectedY = this.evalY;
+    this.selectedHeading = headingOf(this.evalVx, this.evalVz, this.selectedHeading);
+    if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== this.evalArchetype) {
+      this.selectionTextNetId = netId;
+      this.selectionTextArchetype = this.evalArchetype;
+      this.selectionText = `${this.archetypes.label(this.evalArchetype)} #${netId}`;
+    }
+
+    return true;
+  }
+
+  /**
+   * Evaluates the EYE SUBJECT's position into {@link eyeX}/{@link eyeY}/{@link eyeZ}/{@link eyeHeading}.
+   *
+   * @param netId The entity the camera is riding — a player's own avatar, or the god camera's selection.
+   * @returns Whether it was found and has a position.
+   *
+   * @remarks
+   * Separate from {@link locateSelected} rather than sharing its slot, and it deliberately does NOT touch
+   * {@link selectionText}: the label belongs to whatever the viewer clicked. See {@link eyeX}.
+   */
+  private locateEyeSubject(netId: number): boolean {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    this.eyeX = this.evalX;
+    this.eyeZ = this.evalZ;
+    this.eyeY = this.evalY;
+    this.eyeHeading = headingOf(this.evalVx, this.evalVz, this.eyeHeading);
+    return true;
+  }
+
+  /**
+   * Interpolates one netId's placement for this frame into the `eval*` fields.
+   *
+   * @param netId The entity.
+   * @returns Whether it is here and has a position.
+   *
+   * @remarks
+   * Fields rather than a returned object, so two subjects per frame cost no allocation. Written and read within one
+   * frame step and never held across one.
+   */
+  private evaluate(netId: number): boolean {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
       return false;
@@ -1107,22 +1287,25 @@ export class ClientApp {
       return false;
     }
 
-    evaluateSlot(store, slotOf(location), this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
-    const selected = this.placement.read(store.dims, this.scratch, 0);
-    this.selectedX = selected.x;
-    this.selectedZ = selected.z;
-    // Altitude and heading, for the eye camera (CLI3D-10). A still entity keeps the heading it last had, the way the
-    // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
-    this.selectedY = altitudeOf(altitudeField(store), slotOf(location), selected, this.field);
-    this.selectedHeading = headingOf(selected.vx, selected.vz, this.selectedHeading);
-    if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== archetype) {
-      this.selectionTextNetId = netId;
-      this.selectionTextArchetype = archetype;
-      this.selectionText = `${this.archetypes.label(archetype)} #${netId}`;
-    }
-
+    const slot = slotOf(location);
+    evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+    const read = this.placement.read(store.dims, this.scratch, 0);
+    this.evalX = read.x;
+    this.evalZ = read.z;
+    this.evalVx = read.vx;
+    this.evalVz = read.vz;
+    this.evalY = altitudeOf(altitudeField(store), slot, read, this.field);
+    this.evalArchetype = archetype;
     return true;
   }
+
+  /** {@link evaluate}'s output: one subject's interpolated placement, valid until the next call. */
+  private evalX = 0;
+  private evalZ = 0;
+  private evalY = 0;
+  private evalVx = 0;
+  private evalVz = 0;
+  private evalArchetype = -1;
 
   private publishStats(ui: UiState, nearRadius: number): void {
     const source = this.source?.stats;

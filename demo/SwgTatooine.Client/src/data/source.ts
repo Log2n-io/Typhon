@@ -115,6 +115,19 @@ interface MutableDebugView {
   geometry: PushGeometry | null;
 }
 
+/**
+ * The movement classes the server grants, mirroring `SpeedClasses` on the server.
+ *
+ * Mirrored rather than read from the catalog because the catalog carries the FIELD (`speedClass`, a `u8`) and not its
+ * admissible values — so this is the one place the client's idea of them lives, and a value the server does not grant is
+ * refused and counted rather than silently clamped.
+ */
+export const SpeedClass = {
+  stop: 0,
+  walk: 1,
+  run: 2,
+} as const;
+
 export interface DataSource {
   start(): void;
   dispose(): void;
@@ -193,6 +206,37 @@ export interface DataSource {
    * `SELF` — that is what `Control` is for — so the client re-finds its subject by being told rather than by guessing.
    */
   readonly selfNetId: number;
+  /**
+   * Whether this session may send the movement and targeting intents: a `player` whose catalog declares them (A9).
+   *
+   * <b>False for the god camera, and the engine is what says so.</b> The intents are declared `Roles(SessionRole.Player)`,
+   * so a spectator's are refused on the wire before any system sees them — this flag is how the client avoids sending
+   * what it knows will be refused, not a second opinion about who may play.
+   */
+  readonly canPlay: boolean;
+  /**
+   * Walks the avatar towards a point on the ground (`MoveTo`).
+   *
+   * <b>A destination, not a velocity, and the server picks the speed.</b> That is what makes a speed hack impossible by
+   * construction rather than by a check: the only number a client contributes is where it wants to go, which the server
+   * clamps to the world and then approaches one tick of travel at a time.
+   */
+  moveTo(x: number, z: number): void;
+  /**
+   * Walks the avatar in a direction (`MoveDir`).
+   *
+   * @param heading Radians, measured from +X towards +Z — the same frame the server integrates in.
+   * @param speedClass One of {@link SpeedClass}; anything else is refused and counted by the server.
+   *
+   * <b>A CLASS, not a speed.</b> Same reason as {@link moveTo}: the client says "run", the server decides what running is.
+   */
+  moveDir(heading: number, speedClass: number): void;
+  /**
+   * Names the entity the avatar is attacking, or 0 to clear (`SetTarget`).
+   *
+   * An ask, not a change: the server refuses a netId this session was never shown, and one whose entity is dead.
+   */
+  setTarget(netId: number): void;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -208,6 +252,14 @@ export interface TyphonSourceOptions {
   /** The clock render time comes from; the source feeds it every frame. */
   readonly clock: Clock;
   readonly events: EventSink;
+  /**
+   * Called when the session ends, with the close code and the server's reason.
+   *
+   * <b>The code is the only thing that tells a retry from a re-login</b>, and A3 added one that needs it: `4102` means the
+   * token was not accepted, so presenting it again loops; `4103` means the account is already playing, so presenting it
+   * again is exactly right once the other client has gone. The SDK has always reported both and this demo discarded them.
+   */
+  readonly onClosed?: (code: number, reason: string) => void;
   /** The application-declared session kind handed to the server's admission hook. Default `god`. */
   readonly kind?: string;
   readonly token?: string;
@@ -242,6 +294,12 @@ export class TyphonSource implements DataSource {
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
   private spectateCommand: MessagePlan | null = null;
+
+  private moveToCommand: MessagePlan | null = null;
+
+  private moveDirCommand: MessagePlan | null = null;
+
+  private setTargetCommand: MessagePlan | null = null;
   /** The sequence of the `Spectate` still awaiting an answer, or -1. */
   private pendingSpectateSeq = -1;
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
@@ -297,8 +355,16 @@ export class TyphonSource implements DataSource {
         onMessage: (message, recvMs) => {
           this.recorder?.record(message, recvMs);
         },
-        onClose: () => {
+        onClose: (close) => {
           this.onClose();
+
+          // Not reported when this client asked for the close. The SDK's reconnect hands `onClose` up before it checks its own
+          // `running` flag, so `dispose()` — which is what logging out and unmounting the viewport both do — arrived here as an
+          // ordinary close with code 1000. The store then recorded "the server closed the session (1000)" AFTER `logOut` had
+          // cleared it, and the login screen showed a clean logout as a refusal.
+          if (!this.disposed) {
+            this.options.onClosed?.(close.code, close.reason);
+          }
         },
       },
     });
@@ -389,11 +455,16 @@ export class TyphonSource implements DataSource {
     return null;
   }
 
+  /** Whether {@link dispose} has been called, so a close this client asked for is not reported as the server's. */
+  private disposed = false;
+
   start(): void {
     this.client.start();
   }
 
   dispose(): void {
+    // Set BEFORE stop(), because stop() synchronously drives the close callback above.
+    this.disposed = true;
     this.ping?.stop();
     this.client.stop();
 
@@ -465,6 +536,41 @@ export class TyphonSource implements DataSource {
   /** Whether this session may ask to ride an entity: the catalog declares the command. */
   get canSpectate(): boolean {
     return this.spectateCommand !== null;
+  }
+
+  /** Whether this session may play: the catalog declares the movement intents (A9). */
+  get canPlay(): boolean {
+    return this.moveToCommand !== null && this.moveDirCommand !== null;
+  }
+
+  /** @inheritdoc */
+  moveTo(x: number, z: number): void {
+    if (this.moveToCommand === null) {
+      return;
+    }
+
+    // No sequence kept, unlike ViewRealm and Spectate. Those two are asks whose refusal the client must notice, because
+    // each changes the session's whole view; a dropped step is answered by the next one 16 ms later, and a client that
+    // reacted to one would flicker on every rate limit.
+    this.commands?.enqueue(this.moveToCommand, { x, z });
+  }
+
+  /** @inheritdoc */
+  moveDir(heading: number, speedClass: number): void {
+    if (this.moveDirCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass });
+  }
+
+  /** @inheritdoc */
+  setTarget(netId: number): void {
+    if (this.setTargetCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.setTargetCommand, { netId });
   }
 
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
@@ -558,6 +664,12 @@ export class TyphonSource implements DataSource {
     this.pauseCommand = plan.commandByName('SetPaused');
     this.viewRealmCommand = plan.commandByName('ViewRealm');
     this.spectateCommand = plan.commandByName('Spectate');
+
+    // A9's three. Absent from a god session's catalog view the same way Spectate is absent from a player's: the engine
+    // compiles what a role may send, so `canPlay` below is the engine's answer rather than the client's guess.
+    this.moveToCommand = plan.commandByName('MoveTo');
+    this.moveDirCommand = plan.commandByName('MoveDir');
+    this.setTargetCommand = plan.commandByName('SetTarget');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null

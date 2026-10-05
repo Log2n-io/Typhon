@@ -8,6 +8,7 @@ import { RealmFade } from './RealmFade';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
 import { useRealms } from '../state/realm-store';
+import { useSessionStore } from '../state/session-store';
 import { useUi } from '../state/ui-store';
 
 /**
@@ -19,6 +20,27 @@ import { useUi } from '../state/ui-store';
  * a server and the only source with a latency slider.
  */
 export type SourceKind = 'live' | 'mock';
+
+/**
+ * Whether this run needs an account at all.
+ *
+ * @param search `window.location.search`.
+ * @returns Whether the login screen is the only way in.
+ *
+ * @remarks
+ * <b>Two runs legitimately have no account, and A8's gate shut both out.</b> The mock source never contacts a server, so requiring a
+ * login to reach it means the one path that works with nothing running needs something running. The god camera is the diagnostic
+ * tool: it is the thing you point at a box to find out what is wrong with it, which is exactly when nobody has signed up yet, and the
+ * server admits it anonymously on purpose (A3). Both are explicit in the URL, so neither is a way to slip past the gate by accident
+ * — a player session still has to log in, because the server refuses a `player` with no valid token.
+ */
+export function needsAccount(search: string): boolean {
+  if (sourceKindFrom(search) === 'mock') {
+    return false;
+  }
+
+  return new URLSearchParams(search).get('as') !== 'god';
+}
 
 /** The mock's ceiling: it clamps nothing, so this is only how far the slider goes. */
 const MOCK_MAX_VIEW_RADIUS_M = 4000;
@@ -41,7 +63,24 @@ export function websocketUrl(location: { protocol: string; host: string }): stri
   return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
 }
 
-function factoryFor(kind: SourceKind): SourceFactory {
+/**
+ * Builds the source for a run.
+ *
+ * @param kind `mock` or `live`.
+ * @param token The bearer token A2 minted, or `null` to connect as the god camera.
+ * @returns The factory the app drives.
+ *
+ * @remarks
+ * <b>The token is what decides the session KIND, and that is the whole of A8's wire.</b> With one, the session is a
+ * `player`: it is admitted against the account the token names, is given an avatar, and may send the movement intents. The
+ * god camera stays reachable with no token at all — it is the one tool that has to work on a box nobody has an account on
+ * — which is why this takes a nullable token rather than requiring one.
+ */
+function factoryFor(
+  kind: SourceKind,
+  token: string | null,
+  onClosed: (code: number, reason: string) => void,
+): SourceFactory {
   if (kind === 'mock') {
     return (context, ui) =>
       new MockSource({
@@ -58,7 +97,13 @@ function factoryFor(kind: SourceKind): SourceFactory {
       url: websocketUrl(window.location),
       clock: context.clock,
       events: context.events,
-      kind: 'god',
+      // A player when this tab is logged in, the god camera otherwise. The server refuses a `player` with no valid token
+      // (A3), so these two have to move together — hence one expression rather than two options set in two places.
+      kind: token === null ? 'god' : 'player',
+      // Spread rather than `token: token ?? undefined`: under exactOptionalPropertyTypes an optional property may be
+      // ABSENT or a string, and never present-and-undefined, so the god camera must omit the key instead of nulling it.
+      ...(token === null ? {} : { token }),
+      onClosed,
       altitudeM: ui.viewRadius,
       onRealmRefused: () => {
         // The one thing that will ever say the crossing is not coming: the realm never changes, so no frame ends the
@@ -80,6 +125,11 @@ export function Viewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
+  // The token the session will present. In the dependency list below, so logging in as somebody else tears the session
+  // down and builds a new one rather than leaving a socket authenticated as the previous account.
+  const token = useSessionStore((s) => s.grant?.token ?? null);
+  const noteClosed = useSessionStore((s) => s.noteClosed);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
@@ -88,7 +138,7 @@ export function Viewport() {
     }
 
     const kind = sourceKindFrom(window.location.search);
-    const app = new ClientApp(canvas, overlay, factoryFor(kind));
+    const app = new ClientApp(canvas, overlay, factoryFor(kind, token, noteClosed));
     app.start();
 
     // The mock honours whatever it is asked for, so its ceiling is simply the largest the slider offers — stated, not
@@ -143,7 +193,9 @@ export function Viewport() {
 
       app.dispose();
     };
-  }, []);
+    // `token` and `noteClosed`: a login, a logout or a login as somebody else must tear this session down and build a
+    // new one. Leaving them out would keep a socket authenticated as the previous account after the UI had moved on.
+  }, [token, noteClosed]);
 
   return (
     <div className="viewport">
