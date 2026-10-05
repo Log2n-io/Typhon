@@ -610,6 +610,177 @@ internal sealed class CollectionDurabilityTests
     }
 
     /// <summary>
+    /// A collection buffer a checkpoint consolidated is still its entity's after a hard crash, and the allocator does not hand it out again (#770, RB-06).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The checkpoint is the point. Without one, recovery replays every collection from the log and allocates each buffer afresh, so the handles it writes
+    /// and the allocator it draws them from agree by construction — which is why <see cref="Collections_SurviveAHardCrash"/> could never see this. With
+    /// one, the entities come back from the data file, holding handles into a pool the reopen has to find again.
+    /// </para>
+    /// <para>
+    /// The second seed is the collision probe: same element type, so the same pool. A handle it receives that a recovered entity also holds means one buffer
+    /// now has two owners — and the recovered entity's content is re-read AFTER that seed, because the overwrite is the observable consequence.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("RB-06")]
+    public void CheckpointedCollections_SurviveAHardCrash_AndAreNotReissued()
+    {
+        int segmentRoot;
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True,
+                "the checkpoint must consolidate the seed — otherwise recovery replays it from the log and this test degenerates into the no-checkpoint one");
+            segmentRoot = dbe.GetComponentCollectionSegment<int>().RootPageIndex;
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            Assert.That(dbe.GetComponentCollectionSegment<int>().RootPageIndex, Is.EqualTo(segmentRoot),
+                "the reopen must reload the collection segment the checkpoint consolidated — a fresh one is an empty allocator over handles it never issued");
+            AssertRecoveredContent(dbe, versioned, single);
+
+            var recovered = CollectionHandlesOf(dbe, versioned, single);
+            var (freshVersioned, freshSingle) = SeedBoth(dbe);
+            var fresh = CollectionHandlesOf(dbe, freshVersioned, freshSingle);
+
+            Assert.That(recovered, Is.Unique, "two recovered entities share one collection buffer");
+            Assert.That(fresh, Is.Unique, "two post-recovery entities were handed the same collection buffer");
+            Assert.That(fresh.Intersect(recovered), Is.Empty,
+                "RB-06: a post-recovery allocation re-issued a buffer a recovered entity still holds — one buffer, two owners. Recovered: "
+                + string.Join(",", recovered) + "; fresh: " + string.Join(",", fresh));
+
+            AssertRecoveredContent(dbe, versioned, single);
+            AssertRecoveredContent(dbe, freshVersioned, freshSingle);
+        }
+    }
+
+    /// <summary>
+    /// The pool directory never reaches disk ahead of the segment it names: a cycle that fails after recording it, an unrelated meta flip, then a hard
+    /// crash, must still reopen (#770).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The segment under test is one nobody saved. A collection accessor over an element type no registered component declares creates its pool segment on
+    /// the spot, with its pages only dirty in the cache — the same shape the registration LOAD path produces with its null change set. Only a checkpoint
+    /// writes those pages, so only a checkpoint that covered them may publish the directory entry naming them.
+    /// </para>
+    /// <para>
+    /// The failure is staged through <c>InFlightCommitFloor</c>, which the cycle consults after the cycle-start hook and before collecting pages, so the
+    /// cycle has taken its directory snapshot and then writes nothing. The explicit <c>SaveBootstrap</c> stands for every other meta writer — a seal that
+    /// timed out followed by <c>PersistNextFreeTsn</c>, a realm or schema save, an occupancy reservation — each of which serializes the whole bootstrap.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    public void CollectionPoolDirectory_IsNotPublishedAheadOfItsSegment()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the seed must be consolidated before the staging");
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                var unsaved = default(ComponentCollection<Pair16>);
+                using var cca = tx.CreateComponentCollectionAccessor(ref unsaved);
+            }
+
+            dbe.CheckpointManager.InFlightCommitFloor = static () => throw new InvalidOperationException("staged: the cycle fails after its cycle-start hook");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.False, "the staged cycle must not cover anything");
+
+            dbe.MMF.SaveBootstrap();
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            AssertRecoveredContent(dbe, versioned, single);
+        }
+    }
+
+    /// <summary>
+    /// A pool segment created after the directory was first published reaches the durable directory with the next covered cycle, and a crash reopens it in
+    /// place (#770) — the branch where the pool has grown since the last publication.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void CollectionPoolDirectory_GrownPool_IsPublishedByTheNextCoveredCycle()
+    {
+        int grownRoot;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            SeedBoth(dbe);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the first publication must happen");
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                var grown = default(ComponentCollection<Pair16>);
+                using var cca = tx.CreateComponentCollectionAccessor(ref grown);
+            }
+
+            grownRoot = dbe.GetComponentCollectionSegment<Pair16>().RootPageIndex;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the cycle that owes the grown pool must cover");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            Assert.That(dbe.GetComponentCollectionSegment<Pair16>().RootPageIndex, Is.EqualTo(grownRoot),
+                "a segment added after the first publication must be in the directory the next covered cycle persisted, not re-allocated at reopen");
+        }
+    }
+
+    /// <summary>A 16-byte element no registered component uses, so its collection pool segment is created ad hoc and never saved by a registration.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Pair16
+    {
+        public long A;
+        public long B;
+    }
+
+    /// <summary>Every entity's collection handle, Versioned first then SingleVersion, in the order given.</summary>
+    private static List<int> CollectionHandlesOf(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
+    {
+        var handles = new List<int>();
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in versioned)
+        {
+            handles.Add(tx.Open(id).Read(CcVersionedArch.C).Items._bufferId);
+        }
+
+        foreach (var id in single)
+        {
+            handles.Add(tx.Open(id).Read(CcSingleArch.C).Items._bufferId);
+        }
+
+        return handles;
+    }
+
+    /// <summary>
     /// Applying the same recovery window TWICE converges — AP-12, proven by actually re-applying it.
     /// </summary>
     /// <remarks>

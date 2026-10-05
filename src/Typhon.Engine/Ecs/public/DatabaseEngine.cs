@@ -843,6 +843,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
     private MigrationRegistry _migrationRegistry;
 
+    /// <summary>How many collection-pool segments the durable directory last recorded (<see cref="PublishCollectionPool"/>); the pool only grows.</summary>
+    private int _publishedCollectionPoolCount = -1;
+
+    /// <summary>The directory <see cref="StageCollectionPool"/> took at cycle start, for that cycle's covered flip; null when nothing is owed.</summary>
+    private (int Stride, int RootPageIndex)[] _stagedCollectionPool;
+
+    /// <summary>The pool size <see cref="_stagedCollectionPool"/> was taken at.</summary>
+    private int _stagedCollectionPoolCount;
+
     // ══════════════════════════════════════════════════════════════════════════════
     // Spatial grid (issue #229 — Phase 1+2). One global grid shared by every spatial archetype.
     // Configured once via ConfigureSpatialGrid before InitializeArchetypes.
@@ -1960,14 +1969,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Persist per-archetype segment SPIs at every checkpoint so a consolidated cluster/EntityMap base is reachable on reopen after a hard crash
         // (#395). Idempotent and skip-unchanged, so a steady-state cycle is nearly free. Runs at cycle start (before the barrier) so its WAL records +
         // dirty pages ride the same cycle. Armed at the end of InitializeArchetypes, or on the crash path just before the recovery seal, so the seal
-        // records the SPIs of the base it consolidates (#715, CK-10); never earlier, while segments are still being rebuilt. #395.
+        // records the SPIs of the base it consolidates (#715, CK-10); never earlier, while segments are still being rebuilt. #395. The component-collection
+        // pool's directory is staged by the same hook and published only by the covered flip of the same cycle (#770).
         CheckpointManager.PersistDurableMetadataHook = () =>
         {
             if (_archetypeSpiPersistArmed)
             {
                 PersistArchetypeState();
+                StageCollectionPool();
             }
         };
+        CheckpointManager.PublishOnCoveredFlipHook = PublishCollectionPool;
         // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish.
         CheckpointManager.InFlightCommitFloor = () => TransactionChain.LowestInFlightLsn();
         CheckpointManager.Start();
@@ -2996,24 +3008,97 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.Bootstrap.SetLong(BK_LastTickFenceLSN, _lastTickFenceLSN);
         }
 
-        // Persist every component-collection segment (stride → root page). Only FieldR1 had a dedicated key before; the rest (e.g. the String64 collection
-        // backing ArchetypeR1.ComponentNames) were re-allocated fresh on reopen, orphaning the originals — a page leak that also left those pages Unknown in
-        // storage introspection. Persisting the whole pool lets the reopen reload them in place.
-        var collections = _componentCollectionSegmentByStride;
-        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
-        var collectionIndex = 0;
-        foreach (var kv in collections)
-        {
-            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
-            collectionIndex++;
-        }
-
         MMF.SaveBootstrap(cs);
 
         MMF.UnlatchPageExclusive(memPageIdx);
 
         cs.SaveChanges();
         MMF.FlushToDisk();
+
+        // Persist every component-collection segment (stride → root page). Only FieldR1 had a dedicated key before; the rest (e.g. the String64 collection
+        // backing ArchetypeR1.ComponentNames) were re-allocated fresh on reopen, orphaning the originals — a page leak that also left those pages Unknown in
+        // storage introspection. Persisting the whole pool lets the reopen reload them in place. Every covered checkpoint publishes it too
+        // (StageCollectionPool / PublishCollectionPool). Last, in a flip of its own: the pages written just above can include a pool segment no checkpoint
+        // covered, and the directory must not reach disk ahead of the segment it names (#770).
+        MMF.MutateBootstrapAndPersist(() => WriteCollectionDirectory(CollectionPoolDirectory()));
+    }
+
+    /// <summary>
+    /// Stages the component-collection pool's directory for this checkpoint cycle's covered flip to publish, when the pool has grown since the last
+    /// publication. Runs at cycle start, before the barrier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The collection-pool half of CK-10 (#770). The directory used to be written only by <see cref="PersistEngineState"/>, at clean shutdown. A checkpoint
+    /// consolidated the collection buffers and the rows holding their handles, but not the pointer to the segment the buffers live in, so a hard crash
+    /// reopened without it: the reopen allocated a fresh, empty segment for the stride, every checkpointed handle resolved into it and read back empty, and
+    /// the first allocations re-issued those same handles to new owners (RB-06, DC-01).
+    /// </para>
+    /// <para>
+    /// Staged here and published by <see cref="PublishCollectionPool"/>, never written into the bootstrap at cycle start. A segment in the pool now was
+    /// created before this cycle collects its dirty pages, so only this cycle's covered flip follows the write of every segment the snapshot names. Written
+    /// into the bootstrap any sooner, the entry would ride whichever meta flip came first — after a gated or failed cycle, a timed-out recovery seal, a schema
+    /// save — and could name a segment whose pages no checkpoint had written, which leaves the database unopenable after the next crash.
+    /// </para>
+    /// </remarks>
+    private void StageCollectionPool()
+    {
+        var count = _componentCollectionSegmentByStride.Count;
+        Debug.Assert(count >= _publishedCollectionPoolCount, "the component-collection pool only grows");
+        if (count == _publishedCollectionPoolCount)
+        {
+            _stagedCollectionPool = null;
+            return;
+        }
+
+        _stagedCollectionPool = CollectionPoolDirectory();
+        _stagedCollectionPoolCount = count;
+    }
+
+    /// <summary>
+    /// Writes the directory <see cref="StageCollectionPool"/> took into the bootstrap. Runs under the meta lock inside a covered cycle's CheckpointLSN flip,
+    /// which persists it.
+    /// </summary>
+    private void PublishCollectionPool()
+    {
+        var staged = _stagedCollectionPool;
+        if (staged == null)
+        {
+            return;
+        }
+
+        WriteCollectionDirectory(staged);
+        _publishedCollectionPoolCount = _stagedCollectionPoolCount;
+        _stagedCollectionPool = null;
+    }
+
+    /// <summary>The component-collection segment pool as directory entries, stride → root page.</summary>
+    private (int Stride, int RootPageIndex)[] CollectionPoolDirectory()
+    {
+        var directory = new List<(int Stride, int RootPageIndex)>(_componentCollectionSegmentByStride.Count);
+        foreach (var kv in _componentCollectionSegmentByStride)
+        {
+            // A failed load or allocation leaves a null in the pool. There is nothing to point at, and throwing here would fail every checkpoint cycle over
+            // a stride whose own accessors fail anyway.
+            if (kv.Value != null)
+            {
+                directory.Add((kv.Key, kv.Value.RootPageIndex));
+            }
+        }
+
+        return [.. directory];
+    }
+
+    /// <summary>Writes <paramref name="directory"/> into the bootstrap as <c>collection.count</c> / <c>collection.{i}</c>; the caller persists it.</summary>
+    private void WriteCollectionDirectory((int Stride, int RootPageIndex)[] directory)
+    {
+        var bootstrap = MMF.Bootstrap;
+        for (var i = 0; i < directory.Length; i++)
+        {
+            bootstrap.Set($"collection.{i}", BootstrapDictionary.Value.FromInt2(directory[i].Stride, directory[i].RootPageIndex));
+        }
+
+        bootstrap.SetInt(BK_CollectionCount, directory.Length);
     }
 
     /// <summary>

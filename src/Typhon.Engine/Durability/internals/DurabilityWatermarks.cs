@@ -1,3 +1,5 @@
+using System;
+
 namespace Typhon.Engine.Internals;
 
 /// <summary>
@@ -40,8 +42,16 @@ internal static class DurabilityWatermarks
     /// Advances the checkpoint-LSN watermark (preserving the clean-shutdown flag) and flips the meta pair — the
     /// generation flip is the atomic, fsynced commit point (CK-05). Called by the checkpoint cycle.
     /// </summary>
-    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn)
-        => mmf.MutateBootstrapAndPersist(() => Write(mmf, checkpointLsn, Read(mmf).CleanShutdown));
+    /// <param name="mmf">The file whose meta pair is flipped.</param>
+    /// <param name="checkpointLsn">The new watermark.</param>
+    /// <param name="withTheSameFlip">Further bootstrap writes that must become durable in this flip and no earlier — run under the meta lock, before
+    /// the watermark is written; <see langword="null"/> for none.</param>
+    internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn, Action withTheSameFlip = null)
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            withTheSameFlip?.Invoke();
+            Write(mmf, checkpointLsn, Read(mmf).CleanShutdown);
+        });
 
     /// <summary>Sets the clean-shutdown flag (preserving the checkpoint LSN) and persists the meta page atomically (CK-05).</summary>
     internal static void SetCleanShutdown(ManagedPagedMMF mmf, bool cleanShutdown)

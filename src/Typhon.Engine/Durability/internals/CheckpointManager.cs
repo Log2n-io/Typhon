@@ -107,6 +107,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     internal Action PersistDurableMetadataHook { get; set; }
 
     /// <summary>
+    /// Wired by <see cref="DatabaseEngine"/>. Invoked under the meta lock inside a COVERED cycle's CheckpointLSN flip (step 7), so the bootstrap entries
+    /// it writes become durable in that flip and never in an earlier one: not after a gated or failed cycle, and not through another writer's meta flip
+    /// first. For pointers to pages this cycle wrote — a pointer published sooner can name pages no checkpoint has written yet (#770). Null until wired.
+    /// </summary>
+    internal Action PublishOnCoveredFlipHook { get; set; }
+
+    /// <summary>
     /// Wired by <see cref="DatabaseEngine"/> to <see cref="TransactionChain.LowestInFlightLsn"/>: the first LSN of any commit still between its WAL
     /// append and the end of its publish, <see cref="long.MaxValue"/> for none. The cycle keeps CheckpointLSN below it (CK-13): those
     /// records' page effects are not in memory yet, so no page the cycle writes can hold them. Null in fixtures with no transactions.
@@ -791,8 +798,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 }
 
                 // Step 7: Advance CheckpointLSN in the meta-pair watermark block + fsync — to barrierLsn (the post-flush durable high-water established at
-                // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
-                DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
+                // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03). The same flip publishes what the cycle-start hook staged for it.
+                DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn, PublishOnCoveredFlipHook);
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
 
                 // Step 8: Recycle WAL segments

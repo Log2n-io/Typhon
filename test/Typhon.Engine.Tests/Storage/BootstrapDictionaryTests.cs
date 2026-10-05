@@ -255,6 +255,85 @@ unsafe class BootstrapDictionaryTests
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Concurrency — the bootstrap has writers on several threads (#770)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Inserting new keys on one thread, while another overwrites an existing key and a third serializes, must lose nothing and throw nothing.
+    /// </summary>
+    /// <remarks>
+    /// The engine's shape: the checkpoint thread adds the collection-pool directory (new keys, so the table resizes), the page allocator overwrites
+    /// <c>OccupancyReserved</c> from whichever thread grows a segment, and a meta flip serializes the whole dictionary. An overwrite that lands during a resize
+    /// can be lost — a stale reserved page is allocator corruption — and a serializer that enumerates through an insert throws.
+    /// </remarks>
+    [Test]
+    [CancelAfter(10_000)]
+    public void ConcurrentInsertOverwriteAndSerialize_LoseNothing()
+    {
+        const int rounds = 20;
+        const int inserts = 256;
+
+        for (var round = 0; round < rounds; round++)
+        {
+            var dict = new BootstrapDictionary();
+            dict.SetInt("OccupancyReserved", 0);
+            Exception failure = null;
+            using var start = new System.Threading.Barrier(3);
+            var lastOverwrite = 0;
+
+            var inserter = new System.Threading.Thread(() =>
+            {
+                start.SignalAndWait();
+                for (var i = 0; i < inserts; i++)
+                {
+                    dict.SetInt($"collection.{i}", i);
+                }
+            });
+            var overwriter = new System.Threading.Thread(() =>
+            {
+                start.SignalAndWait();
+                for (var v = 1; v <= inserts; v++)
+                {
+                    dict.SetInt("OccupancyReserved", v);
+                    lastOverwrite = v;
+                }
+            });
+            var serializer = new System.Threading.Thread(() =>
+            {
+                start.SignalAndWait();
+                try
+                {
+                    byte* page = stackalloc byte[8192];
+                    for (var i = 0; i < inserts / 8; i++)
+                    {
+                        dict.WriteTo(page, 8192);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+
+            inserter.Start();
+            overwriter.Start();
+            serializer.Start();
+            inserter.Join();
+            overwriter.Join();
+            serializer.Join();
+
+            Assert.That(failure, Is.Null, $"round {round}: serializing the dictionary while another thread wrote it threw");
+            Assert.That(dict.GetInt("OccupancyReserved", -1), Is.EqualTo(lastOverwrite), $"round {round}: the last overwrite was lost to a concurrent insert");
+            for (var i = 0; i < inserts; i++)
+            {
+                Assert.That(dict.GetInt($"collection.{i}", -1), Is.EqualTo(i), $"round {round}: inserted key collection.{i} was lost");
+            }
+
+            Assert.That(dict.Count, Is.EqualTo(inserts + 1), $"round {round}: entry count");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Helper
     // ═══════════════════════════════════════════════════════════════════════
 

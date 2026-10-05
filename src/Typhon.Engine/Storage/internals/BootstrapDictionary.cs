@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
 using JetBrains.Annotations;
 
 namespace Typhon.Engine.Internals;
@@ -192,47 +193,103 @@ public class BootstrapDictionary
 
     private readonly Dictionary<string, Value> _entries = new();
 
-    /// <summary>Number of entries in the dictionary.</summary>
-    public int Count => _entries.Count;
+    /// <summary>
+    /// Guards <see cref="_entries"/>. The bootstrap has writers on several threads — the checkpoint thread records the collection-pool directory, the page
+    /// allocator overwrites the occupancy reservation from whichever thread grows a segment, schema and realm saves run on theirs — and a meta flip serializes
+    /// the whole dictionary. A plain <see cref="Dictionary{TKey,TValue}"/> loses an overwrite that lands during a concurrent insert's resize, and its
+    /// enumerator throws through any write (#770). Every access is cold — open, registration, a checkpoint flip — so one lock costs nothing that matters.
+    /// </summary>
+    private readonly Lock _sync = new();
 
-    /// <summary>All keys in the dictionary.</summary>
-    public IEnumerable<string> Keys => _entries.Keys;
+    /// <summary>Number of entries in the dictionary.</summary>
+    public int Count
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _entries.Count;
+            }
+        }
+    }
+
+    /// <summary>A snapshot of all keys in the dictionary.</summary>
+    public IEnumerable<string> Keys
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return [.. _entries.Keys];
+            }
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Read/Write API
     // ═══════════════════════════════════════════════════════════════════════
 
-    public void Set(string key, Value value) => _entries[key] = value;
+    public void Set(string key, Value value)
+    {
+        lock (_sync)
+        {
+            _entries[key] = value;
+        }
+    }
 
-    public bool TryGet(string key, out Value value) => _entries.TryGetValue(key, out value);
+    public bool TryGet(string key, out Value value)
+    {
+        lock (_sync)
+        {
+            return _entries.TryGetValue(key, out value);
+        }
+    }
 
-    public Value Get(string key) => _entries.TryGetValue(key, out var value) ? value : throw new KeyNotFoundException($"Bootstrap key '{key}' not found");
+    public Value Get(string key) => TryGet(key, out var value) ? value : throw new KeyNotFoundException($"Bootstrap key '{key}' not found");
 
-    public bool ContainsKey(string key) => _entries.ContainsKey(key);
+    public bool ContainsKey(string key)
+    {
+        lock (_sync)
+        {
+            return _entries.ContainsKey(key);
+        }
+    }
 
-    public void Remove(string key) => _entries.Remove(key);
+    public void Remove(string key)
+    {
+        lock (_sync)
+        {
+            _entries.Remove(key);
+        }
+    }
 
-    public void Clear() => _entries.Clear();
+    public void Clear()
+    {
+        lock (_sync)
+        {
+            _entries.Clear();
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Convenience setters
     // ═══════════════════════════════════════════════════════════════════════
 
-    public void SetBool(string key, bool value) => _entries[key] = Value.FromBool(value);
-    public void SetInt(string key, int value) => _entries[key] = Value.FromInt(value);
-    public void SetLong(string key, long value) => _entries[key] = Value.FromLong(value);
-    public void SetDateTime(string key, DateTime value) => _entries[key] = Value.FromDateTime(value);
-    public void SetString(string key, string value) => _entries[key] = Value.FromString(value);
+    public void SetBool(string key, bool value) => Set(key, Value.FromBool(value));
+    public void SetInt(string key, int value) => Set(key, Value.FromInt(value));
+    public void SetLong(string key, long value) => Set(key, Value.FromLong(value));
+    public void SetDateTime(string key, DateTime value) => Set(key, Value.FromDateTime(value));
+    public void SetString(string key, string value) => Set(key, Value.FromString(value));
 
     // ═══════════════════════════════════════════════════════════════════════
     // Convenience getters (with defaults)
     // ═══════════════════════════════════════════════════════════════════════
 
-    public int GetInt(string key, int defaultValue = 0) => _entries.TryGetValue(key, out var v) ? v.AsInt : defaultValue;
+    public int GetInt(string key, int defaultValue = 0) => TryGet(key, out var v) ? v.AsInt : defaultValue;
 
-    public long GetLong(string key, long defaultValue = 0) => _entries.TryGetValue(key, out var v) ? v.AsLong : defaultValue;
+    public long GetLong(string key, long defaultValue = 0) => TryGet(key, out var v) ? v.AsLong : defaultValue;
 
-    public bool GetBool(string key, bool defaultValue = false) => _entries.TryGetValue(key, out var v) ? v.AsBool : defaultValue;
+    public bool GetBool(string key, bool defaultValue = false) => TryGet(key, out var v) ? v.AsBool : defaultValue;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Serialization — write to byte stream
@@ -243,6 +300,14 @@ public class BootstrapDictionary
     /// [StreamLength:2B] [entries...] [0xFF]
     /// </summary>
     public unsafe int WriteTo(byte* dest, int maxBytes)
+    {
+        lock (_sync)
+        {
+            return WriteToCore(dest, maxBytes);
+        }
+    }
+
+    private unsafe int WriteToCore(byte* dest, int maxBytes)
     {
         byte* start = dest;
         byte* limit = dest + maxBytes - 1;  // reserve 1 byte for 0xFF sentinel
@@ -292,6 +357,14 @@ public class BootstrapDictionary
     /// <summary>Calculate the total serialized size in bytes.</summary>
     public int CalculateSize()
     {
+        lock (_sync)
+        {
+            return CalculateSizeCore();
+        }
+    }
+
+    private int CalculateSizeCore()
+    {
         int size = 2 + 1; // 2B header + 1B sentinel
         foreach (var kvp in _entries)
         {
@@ -310,6 +383,14 @@ public class BootstrapDictionary
     /// Deserialize the dictionary from a byte stream. Clears existing entries.
     /// </summary>
     public unsafe void ReadFrom(byte* src, int maxBytes)
+    {
+        lock (_sync)
+        {
+            ReadFromCore(src, maxBytes);
+        }
+    }
+
+    private unsafe void ReadFromCore(byte* src, int maxBytes)
     {
         _entries.Clear();
 

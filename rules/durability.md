@@ -279,8 +279,10 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
        on the bug list; (b) durable-first — checkpoint ordering for protected pages (CK-05 A/B slot pairing). #389 chose
        (a): the handle is zeroed out of the log and the collection's full content is emitted behind the Slot record, so
        replay rebuilds the buffer and re-points the handle.
-  note OUT OF SCOPE, both real and tracked separately: (1) the VSBS free-list is not restored at recovery (RB-06) — it
-       restarts empty and re-issues handles live recovered entities still hold; (2) schema-catalog collections stay
+  note OUT OF SCOPE, both real and tracked separately: (1) the VSBS allocator after recovery (RB-06, #770 — partly
+       fixed, see that rule's audit row): the segment's chunk bitmap is durable, but the directory that finds the segment
+       was written only at clean shutdown, so a hard crash after a checkpoint reopened an empty segment under checkpointed
+       handles; (2) schema-catalog collections stay
        checkpoint-only by design, because SaveInSystemSchema / PersistSchemaChanges / PersistNewArchetypes construct
        their accessors OUTSIDE any transaction and so have no commit to ride. The second is a decision, not an oversight;
        it is stated here so the next reader does not re-file it.
@@ -2028,13 +2030,14 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        | `NextFreeTSN` | `ScrubVersionedChains` + `RecoveryDriver` | ✅ RB-05 |
        | `ArchetypeEngineState.NextEntityKey` | `RebuildEntityMaps*` (persisted base) + `RecoveryDriver` (replayed window) | ✅ fixed #697 / #705 |
        | WAL LSN (`WalCommitBuffer._lsnBase`) | `DatabaseEngine.InitializeWal` via `Math.Max(lastValidLSN, checkpointLsn)` | 🔴 **#712** — both terms are 0 when the prior session crashed without checkpointing, because WAL v2 recovery has not run yet at that point; the writer restarts at 1 and collides with the window it is about to replay |
-       | VSBS buffer free-list | — | 🔴 **#770** — restarts from empty, re-issuing handles live recovered entities still hold. Retargeted from #389 on 2026-08-11: #389 fixed collection CONTENT redo and explicitly does not touch this allocator, so leaving the pointer on a closed issue would have read as fixed |
+       | VSBS buffer allocator (collection segment chunk occupancy) | the segment's own L0 bitmap, reloaded with the segment (`ChunkBasedSegment.Load`); the pool directory that finds the segment, staged by `DatabaseEngine.StageCollectionPool` at each armed cycle's start and published only by that cycle's covered CheckpointLSN flip (`PublishCollectionPool`) | 🟡 **#770 partly fixed** — the bitmap was always durable; the directory (`collection.count` / `collection.{i}`) was written only at clean shutdown, so a hard crash after a checkpoint reopened a FRESH segment for the stride: checkpointed handles read back empty and the first allocations re-issued them (`CollectionDurabilityTests.CheckpointedCollections_SurviveAHardCrash_AndAreNotReissued`). STILL OPEN: catalog collections (`ArchetypeR1.ComponentNames`, String64 pool) are saved outside any transaction before the hook is armed, so a database that crashes before its first covered armed cycle reopens that pool fresh under durable catalog rows |
        | Cluster slot cursors | derived from the cluster occupancy at rebuild | ✅ |
 
-       The two open rows are the same defect shape as #697, on different allocators. #697's own acceptance asked
+       The #712 and #770 rows are the same defect shape as #697, on different allocators. #697's own acceptance asked
        for this audit precisely because fixing one instance says nothing about the others.
   scope: RecoveryDriver (window watermarks), DatabaseEngine.RebuildEntityMaps* / InitializeWal (persisted base),
-         RecoveryApplier.MaxEntityKeyByArchetype (the window's entity-key half)
+         RecoveryApplier.MaxEntityKeyByArchetype (the window's entity-key half), DatabaseEngine.StageCollectionPool /
+         DatabaseEngine.PublishCollectionPool (the collection-segment directory)
   on_violation: an identifier is re-issued to a second object while the first is still live → the first is
                 silently overwritten (entity key), or its records are discarded as already-consolidated (LSN).
 ### RB-07: A rebuild whose primary data cannot satisfy the constraint must still open the database `[fatal]`
