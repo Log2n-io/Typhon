@@ -24,14 +24,16 @@ public sealed partial class TatooineSim
     /// </summary>
     /// <param name="port">The port to listen on.</param>
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/>.</param>
+    /// <param name="bindAddress">The address to bind, or <see langword="null"/> for loopback.</param>
+    /// <param name="origins">Origins a browser may connect from; required when <paramref name="bindAddress"/> is not loopback.</param>
     /// <returns>A task that completes when the host has stopped.</returns>
-    public async Task ServeAsync(int port, string clientRoot)
+    public async Task ServeAsync(int port, string clientRoot, string bindAddress = null, string[] origins = null)
     {
         StartReplication();
         try
         {
             await TatooineHost
-                .ServeAsync(_runtime, port, clientRoot, realmsJson: RealmDirectoryJson(), realmInventory: RealmInventoryJson)
+                .ServeAsync(_runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress)
                 .ConfigureAwait(false);
         }
         finally

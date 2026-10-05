@@ -82,24 +82,13 @@ New-Item -ItemType Directory -Force $db | Out-Null
 
 # Set or clear, never leave alone — see -Live. The marker only changes the server's startup wording from "a variable you
 # may not know about" to "the launcher did this"; the engine never reads it.
-# All four, including TRACE and ENABLED, which this script never sets: the server treats either as a request, so a stale
-# one left by swg-serve.ps1 -Trace would keep this script's "unprofiled run" profiled.
-$env:TYPHON__PROFILER__LIVE = if ($Live -gt 0) { "$Live" } else { $null }
-$env:TYPHON__PROFILER__BINDADDRESS = if ($BindAddress) { $BindAddress } else { $null }
-$env:TYPHON__PROFILER__TRACE = $null
-$env:TYPHON__PROFILER__ENABLED = $null
-$env:TYPHON_SWG_PROFILER_LAUNCHER = if ($Live -gt 0) { 'scripts/swg-client.ps1 -Live' } else { $null }
+# The same shared implementation swg-serve.ps1 uses; see lib/swg-profiler-env.ps1 for the contract and why it is shared.
+. (Join-Path $PSScriptRoot 'lib/swg-profiler-env.ps1')
+Set-SwgProfilerEnv -Live $Live -BindAddress $BindAddress -Launcher 'scripts/swg-client.ps1 -Live'
 
 Write-Host ''
 Write-Host "  http://localhost:$Port" -ForegroundColor Green
 Write-Host "  http://localhost:$Port/?source=mock   (the browser-side mock, no engine)" -ForegroundColor DarkGray
-if ($Live -gt 0) {
-    $where = if ($BindAddress) { $BindAddress } else { '127.0.0.1' }
-    Write-Host "  profiler: attach the Workbench to ${where}:$Live" -ForegroundColor Yellow
-    if ($BindAddress -and $BindAddress -ne '127.0.0.1' -and $BindAddress -ne 'localhost') {
-        Write-Host "  WARNING: $BindAddress is not loopback - this publishes your telemetry, unauthenticated." -ForegroundColor Red
-    }
-}
 Write-Host ''
 
 & $exe --serve $Port --pop $Pop --god-region $GodRegion --db-dir $db

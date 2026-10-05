@@ -161,6 +161,14 @@ public static class CommandLine
         c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
         c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
 
+        r.Group("hosting — only with --serve");
+        c.BindAddress = r.Str("--bind", c.BindAddress, "address the web host binds; loopback when unset, 0.0.0.0 for every interface", "<addr>");
+        // Comma-separated, not repeatable: this parser refuses a flag given twice (a corrected A/B arm used to run the value it was meant to replace), and
+        // --sweep-worlds sets the house pattern for a list. Split in Validate so the help text shows the raw form.
+        var origins = r.Str("--origin", null, "origins a browser may connect from, comma-separated. Required when --bind is not loopback", "<url,url>");
+        c.ClientDirectory = r.Str("--client-dir", c.ClientDirectory, "directory of built client files to serve; the repo's dist/ when unset", "<path>");
+        c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
         // REFUSED by Program when the profiler is not already on, because no host can switch its own profiler on: the engine's master gate is baked before Main
         // runs. See ProfilerArgs for the mechanism and scripts/swg-serve.ps1 for the equivalent that works. A flag that is listed and refused with instructions
@@ -222,6 +230,37 @@ public static class CommandLine
         {
             throw new ArgumentException($"--db-name must be a bare file name with no directory and no invalid characters; got '{c.DatabaseName}'. "
                 + "Use --db-dir for the directory.");
+        }
+
+        // A hosting flag without --serve is a command line that cannot do what it says: there is no host to bind, no origin to admit and no client to serve.
+        // Refused rather than ignored, which is this parser's whole character (SWG-07).
+        if (c.ServePort == 0 && (c.BindAddress != null || c.Origins.Length > 0 || c.ClientDirectory != null))
+        {
+            throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>.");
+        }
+
+        // The address and the origin pairing, checked HERE rather than where the host binds. Both used to be: the host's own version throws from inside the DI
+        // options callback, which runs after the world is built — so a command line that could never serve spent a second and a half building a world first.
+        // A cross-flag check that a parse can make is a parse's job (SWG-07).
+        if (c.BindAddress != null)
+        {
+            if (!System.Net.IPAddress.TryParse(c.BindAddress.Trim(), out var bind))
+            {
+                throw new ArgumentException($"--bind '{c.BindAddress}' is not an IP address. Use 127.0.0.1 for local only, or 0.0.0.0 for every interface.");
+            }
+
+            if (!System.Net.IPAddress.IsLoopback(bind) && c.Origins.Length == 0)
+            {
+                throw new ArgumentException($"--bind {bind} is reachable from the network, so --origin <url> is required: allowing any origin there would let "
+                    + "any page a visitor opens drive this server from their browser.");
+            }
+        }
+
+        if (c.ClientDirectory != null && !System.IO.Directory.Exists(c.ClientDirectory))
+        {
+            // Checked here rather than left to the host, which skips a missing directory silently: a deployment whose payload unpacked wrong would serve a
+            // WebSocket and no page, and the operator would be looking at the browser.
+            throw new ArgumentException($"--client-dir '{c.ClientDirectory}' does not exist.");
         }
 
         if (c.ServePort == 0)

@@ -69,27 +69,10 @@ Write-Host "Building SwgTatooine ($Configuration)..." -ForegroundColor Cyan
 & dotnet build (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.csproj') -c $Configuration --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
 
-# Set or clear, never leave alone — leaving them alone is what made a profiled shell contaminate every later run in it.
-# ALL FOUR, including ENABLED, which this script never sets: the server treats it as a request, so a stale one keeps
-# collection on and leaves this script's "unprofiled run" profiled anyway.
-$env:TYPHON__PROFILER__LIVE = if ($Live -gt 0) { "$Live" } else { $null }
-$env:TYPHON__PROFILER__BINDADDRESS = if ($BindAddress) { $BindAddress } else { $null }
-$env:TYPHON__PROFILER__TRACE = if ($Trace) { $Trace } else { $null }
-$env:TYPHON__PROFILER__ENABLED = $null
-
-# Tells the server that the variables above are this run's, not the shell's history, so its startup line reports a source
-# instead of warning about a stale variable. The engine never reads it.
-$env:TYPHON_SWG_PROFILER_LAUNCHER = if ($Live -gt 0 -or $Trace) { 'scripts/swg-serve.ps1 -Live' } else { $null }
-
-if ($Live -gt 0)
-{
-    $where = if ($BindAddress) { $BindAddress } else { '127.0.0.1' }
-    Write-Host "Profiler: attach the Workbench to ${where}:$Live" -ForegroundColor Yellow
-    if ($BindAddress -and $BindAddress -ne '127.0.0.1' -and $BindAddress -ne 'localhost')
-    {
-        Write-Host "  WARNING: $BindAddress is not loopback — this publishes your telemetry, unauthenticated." -ForegroundColor Red
-    }
-}
+# One shared implementation, because two copies of this contract drifted: this script cleared TYPHON__PROFILER__TRACE and
+# swg-client.ps1 did not, so -Trace here leaked into an "unprofiled" run there.
+. (Join-Path $PSScriptRoot 'lib/swg-profiler-env.ps1')
+Set-SwgProfilerEnv -Live $Live -BindAddress $BindAddress -Trace $Trace -Launcher 'scripts/swg-serve.ps1 -Live'
 
 # A database of its own, under TEMP, so a launcher run never competes with a measurement run's database — and so the two
 # launchers have one policy between them rather than one each.

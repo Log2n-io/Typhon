@@ -49,16 +49,28 @@ public static class ProfilerStatus
     /// </remarks>
     public static bool MustRefuse(in ProfilerArgs.Requested requested) => requested.AskedByFlag;
 
-    /// <summary>Describes the profiler's resolved state for the startup banner.</summary>
-    /// <param name="requested">What <see cref="ProfilerArgs.Scan"/> read from the command line and the environment.</param>
+    /// <summary>Describes the profiler's resolved state for the startup banner, reading the engine's own gate.</summary>
+    /// <param name="requested">What <see cref="ProfilerArgs.From"/> read from the command line and the environment.</param>
     /// <returns>One line, never empty.</returns>
     /// <remarks>
     /// The engine decides whether the profiler is on; this only explains why. Asking <see cref="TelemetryConfig"/> rather than re-deriving the answer from the
     /// same inputs is deliberate: two resolutions of one question drift, and the one printed would be the one nobody tested.
     /// </remarks>
-    public static string Describe(in ProfilerArgs.Requested requested)
+    public static string Describe(in ProfilerArgs.Requested requested) => Describe(TelemetryConfig.ProfilerActive, requested);
+
+    /// <summary>Describes the profiler's resolved state for a caller that supplies the gate.</summary>
+    /// <param name="profilerActive">Whether the engine's profiler is on — <c>TelemetryConfig.ProfilerActive</c> in production.</param>
+    /// <param name="requested">What <see cref="ProfilerArgs.From"/> read.</param>
+    /// <returns>One line, never empty.</returns>
+    /// <remarks>
+    /// <b>The gate is a parameter so that neither branch of this method is dead in a test.</b> <c>TelemetryConfig.ProfilerActive</c> is baked once per process
+    /// from the file and environment layer, and this suite runs unprofiled, so a test of the one-argument overload can only ever reach the "off" branch — the
+    /// "ON" wording would be asserted nowhere. Taking the gate as an argument costs one parameter at the single production call site and makes both branches
+    /// real assertions.
+    /// </remarks>
+    public static string Describe(bool profilerActive, in ProfilerArgs.Requested requested)
     {
-        if (!TelemetryConfig.ProfilerActive)
+        if (!profilerActive)
         {
             // Said even when nothing asked for profiling, because no line at all is indistinguishable from an older build that never printed one — and this
             // line's whole job is to let a reader tell a profiled run from an unprofiled one at a glance.

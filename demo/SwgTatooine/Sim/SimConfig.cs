@@ -317,6 +317,39 @@ public sealed class SimConfig
     // before any engine type is touched, is what writes it. They live in SimConfig anyway so that `--help` lists them and the strict parse accepts them from
     // one declaration, as it does for every other flag (SWG-07).
 
+    // ── Hosting ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>--bind</c>: the address the web host binds, or <see langword="null"/> for loopback.
+    /// </summary>
+    /// <remarks>
+    /// <b>Loopback is the default, and it is a change.</b> The host used to call <c>ListenAnyIP</c> unconditionally, so
+    /// <c>--serve 8080</c> on a laptop published the world to whatever network the laptop was on. That is survivable
+    /// while a session can only watch; it stops being survivable the day there is an account to create. Exposing the
+    /// server is now something an operator says out loud.
+    /// </remarks>
+    public string BindAddress;
+
+    /// <summary>
+    /// <c>--origin</c>: origins a browser may connect from, comma-separated. Empty allows any, which is refused on a non-loopback bind.
+    /// </summary>
+    /// <remarks>
+    /// Any origin is right for a dev box, where the Vite port is not the server's. On a reachable bind it would let any
+    /// page a visitor opens drive this server from their browser, so there it is required rather than defaulted.
+    /// </remarks>
+    public string[] Origins = [];
+
+    /// <summary>
+    /// <c>--client-dir</c>: where the built browser client is, or <see langword="null"/> to look for it in the repository.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this a published server serves no client at all.</b> The fallback walks up from the binary looking for
+    /// <c>demo/SwgTatooine.Client/dist</c>, which exists in a dev tree and in no deployment — so the artefact
+    /// <c>scripts/publish-swg.ps1</c> builds would answer 404 for the root and leave nothing but a WebSocket. The flag is
+    /// what the deployed unit passes.
+    /// </remarks>
+    public string ClientDirectory;
+
     /// <summary>
     /// <c>--live</c>: the TCP port the profiler serves the Workbench on; 0 is off.
     /// </summary>

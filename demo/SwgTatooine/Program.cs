@@ -107,7 +107,10 @@ internal static class Program
         // end.
         if (config.ServePort > 0)
         {
-            sim.ServeAsync(config.ServePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
+            // --client-dir first: DefaultClientRoot walks up from the binary for demo/SwgTatooine.Client/dist, which is a dev tree's layout and
+            // no deployment's.
+            var clientRoot = config.ClientDirectory ?? TatooineSim.DefaultClientRoot(AppContext.BaseDirectory);
+            sim.ServeAsync(config.ServePort, clientRoot, config.BindAddress, config.Origins).GetAwaiter().GetResult();
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");

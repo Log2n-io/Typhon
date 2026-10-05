@@ -126,19 +126,31 @@ public static class ProfilerArgs
     /// <summary>Reads what the parsed command line and the current environment ask of the profiler.</summary>
     /// <param name="config">The already-parsed command line; its three profiler fields are the authority on what was typed.</param>
     /// <returns>What was asked for, and by whom.</returns>
-    public static Requested From(SimConfig config)
+    public static Requested From(SimConfig config) => From(config, Environment.GetEnvironmentVariable);
+
+    /// <summary>Reads what the command line and a supplied environment ask of the profiler.</summary>
+    /// <param name="config">The already-parsed command line.</param>
+    /// <param name="environment">Reads an environment variable by name.</param>
+    /// <returns>What was asked for, and by whom.</returns>
+    /// <remarks>
+    /// <b>The environment is a parameter so that the four inherited fields are drivable without mutating the process.</b> A test that set a real variable would
+    /// leak it into every fixture running after it in the same process, so the alternative was leaving this mapping uncovered — and the failure it would hide is
+    /// a silent one: swap two of these variable names and the startup line blames the wrong setting, with nothing failing.
+    /// </remarks>
+    public static Requested From(SimConfig config, Func<string, string> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(environment);
 
         return new Requested
         {
             LivePort = config.ProfilerLivePort,
             BindAddress = config.ProfilerBindAddress,
             TracePath = config.ProfilerTracePath,
-            InheritedLive = Environment.GetEnvironmentVariable(LiveVariable),
-            InheritedTrace = Environment.GetEnvironmentVariable(TraceVariable),
-            InheritedEnabled = Environment.GetEnvironmentVariable(EnabledVariable),
-            Launcher = SanitiseLauncher(Environment.GetEnvironmentVariable(LauncherVariable)),
+            InheritedLive = environment(LiveVariable),
+            InheritedTrace = environment(TraceVariable),
+            InheritedEnabled = environment(EnabledVariable),
+            Launcher = SanitiseLauncher(environment(LauncherVariable)),
         };
     }
 

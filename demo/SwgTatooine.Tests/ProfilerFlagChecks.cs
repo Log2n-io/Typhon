@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Engine;
 
@@ -297,6 +298,76 @@ public sealed class ProfilerFlagChecks
             Assert.That(rubbish, Does.Contain($"live on port {ProfilerArgs.DefaultLivePort}"), "the port the engine will really listen on");
             Assert.That(rubbish, Does.Contain("is not a port"), "and the value to go and fix");
             Assert.That(rubbish, Does.Contain("yes"));
+        });
+    }
+
+    /// <summary>Both wordings of the startup line are real, because the gate is a parameter rather than a static read.</summary>
+    /// <remarks>
+    /// The "ON" branch is unreachable through the one-argument overload in this suite — the engine's gate bakes once per
+    /// process and these tests run unprofiled — so it would be asserted nowhere. One extra parameter at the single
+    /// production call site buys both branches.
+    /// </remarks>
+    [Test]
+    public void BothWordingsOfTheStartupLineAreAsserted()
+    {
+        var inherited = new ProfilerArgs.Requested { InheritedLive = "9100" };
+
+        var off = ProfilerStatus.Describe(profilerActive: false, inherited);
+        var on = ProfilerStatus.Describe(profilerActive: true, inherited);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(off, Does.StartWith("profiling off"));
+            Assert.That(off, Does.Contain(ProfilerArgs.LiveVariable), "and how to turn it on");
+            Assert.That(on, Does.StartWith("profiling ON"));
+            Assert.That(on, Does.Contain("live on port 9100"), "the port it is really on");
+            Assert.That(on, Does.Contain("NOT by this command line"), "and that nothing on this line asked for it");
+        });
+    }
+
+    /// <summary>Each environment variable lands in its own field, which is the mapping nothing else would catch.</summary>
+    /// <remarks>
+    /// Driven through the environment-reader seam rather than the real environment: a test that set a real variable would
+    /// leak it into every fixture running after it in the same process. Swap two of these names and the startup line
+    /// blames the wrong setting with nothing failing, which is exactly the kind of defect that needs a test rather than a
+    /// reading.
+    /// </remarks>
+    [Test]
+    public void EachVariableLandsInItsOwnField()
+    {
+        var env = new Dictionary<string, string>
+        {
+            [ProfilerArgs.LiveVariable] = "9100",
+            [ProfilerArgs.TraceVariable] = "run.typhon-trace",
+            [ProfilerArgs.EnabledVariable] = "true",
+            [ProfilerArgs.LauncherVariable] = "scripts/swg-serve.ps1 -Live",
+        };
+
+        var r = ProfilerArgs.From(CommandLine.Parse([]), name => env.GetValueOrDefault(name));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(r.InheritedLive, Is.EqualTo("9100"));
+            Assert.That(r.InheritedTrace, Is.EqualTo("run.typhon-trace"));
+            Assert.That(r.InheritedEnabled, Is.EqualTo("true"));
+            Assert.That(r.Launcher, Is.EqualTo("scripts/swg-serve.ps1 -Live"));
+            Assert.That(r.AskedByEnvironment, Is.True);
+            Assert.That(r.AskedByFlag, Is.False, "the environment asking is not the command line asking");
+        });
+    }
+
+    /// <summary>An empty environment leaves every inherited field null, so nothing is reported as asked for.</summary>
+    [Test]
+    public void AnEmptyEnvironmentAsksForNothing()
+    {
+        var r = ProfilerArgs.From(CommandLine.Parse([]), _ => null);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(r.AskedByEnvironment, Is.False);
+            Assert.That(r.FromLauncher, Is.False);
+            Assert.That(r.EffectiveLivePort, Is.Zero);
+            Assert.That(ProfilerStatus.Describe(profilerActive: false, r), Does.StartWith("profiling off"));
         });
     }
 }
