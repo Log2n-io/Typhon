@@ -357,6 +357,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Test hook (PS-15): invoked by a slot's owner right after publishing it, before preparing it. Null in production.</summary>
     internal Action<int> MissAfterPublishProbe { get; set; }
 
+    /// <summary>Test hook (PS-15): invoked by a slot's owner right after starting the disk read, before handing it to the slot. Null in production.</summary>
+    internal Action<int> MissAfterReadStartProbe { get; set; }
+
     /// <summary>Test hook (PS-15): invoked when a requester starts waiting on a slot that is not ready yet. Null in production.</summary>
     internal Action<int> SlotNotReadyWaitProbe { get; set; }
 
@@ -1226,6 +1229,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // into the cache meanwhile, so the read-or-clear decision below is not raced by one.
         var pi = _memPagesInfo[memPageIndex];
         var readStarted = false;
+        var prepared = false;
+        ValueTask<int> readTask = default;
+        Task<int> readAsTask = null;
         try
         {
             MissAfterPublishProbe?.Invoke(filePageIndex);
@@ -1244,9 +1250,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                 using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
 
-                var readTask = RandomAccess.ReadAsync(_fileHandle, MemPages.DataAsMemory.Slice(memPageIndex * PageSize, PageSize), pageOffset,
+                readTask = RandomAccess.ReadAsync(_fileHandle, MemPages.DataAsMemory.Slice(memPageIndex * PageSize, PageSize), pageOffset,
                     cancellationToken);
                 readStarted = true;
+                MissAfterReadStartProbe?.Invoke(filePageIndex);
 
                 // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskReadCompleted). When the DiskRead kickoff span was itself
                 // suppressed (SpanId == 0), there's nothing to correlate with, so skip the wrap. When the completion kind is suppressed,
@@ -1254,7 +1261,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
                 {
                     var state = new PageCacheReadCompletionState(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex);
-                    var wrapped = readTask.AsTask().ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
+                    readAsTask = readTask.AsTask();
+                    var wrapped = readAsTask.ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
                         TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                     pi.SetIOReadTask(new ValueTask<int>(wrapped));
                 }
@@ -1262,6 +1270,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 {
                     pi.SetIOReadTask(readTask);
                 }
+
+                // The read task is published in the slot: from here on it is the slot's to observe, and only the trace scope's close is left.
+                prepared = true;
             }
             else
             {
@@ -1275,32 +1286,47 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // TryAcquire drops only a read task that completed successfully: a faulted one left by the previous occupant would otherwise be
                 // rethrown to this new page's requesters.
                 pi.ResetIOCompletionTask();
+                prepared = true;
             }
         }
-        catch when (!readStarted)
+        catch when (!prepared)
         {
-            // Nothing is in flight into the slot, so it can go back. Unpublish it and wake anyone waiting on it: they see it is no longer this
-            // file page's slot and look the page up again (PS-15). Once the read has started only an allocation (the read-task wrappers) can fail;
-            // the slot must not be freed under an in-flight read, so it then stays not ready and a waiter fails loudly on its bound.
-            AbandonUnpreparedSlot(filePageIndex, memPageIndex, pi);
+            // The slot was not prepared, so it goes back (PS-15). Only a read-task wrapper's allocation can fail after the read starts, and then
+            // nothing else holds the read: this thread is its only observer, and must see it land before the slot is freed.
+            AbandonUnpreparedSlot(filePageIndex, memPageIndex, pi, readStarted, readTask, readAsTask);
             throw;
         }
+        finally
+        {
+            // PS-15: ready. A release: whoever reads true sees the reset CRC flag, the read task or the cleared bytes. Also when only the trace
+            // scope's close threw: the slot was prepared by then.
+            if (prepared)
+            {
+                Volatile.Write(ref pi.SlotReady, true);
+            }
+        }
 
-        // PS-15: ready. A release: whoever reads true sees the reset CRC flag, the read task or the cleared bytes.
-        Volatile.Write(ref pi.SlotReady, true);
         return true;
     }
 
     /// <summary>
-    /// PS-15: undoes a published slot whose owner failed before starting its read — unpublishes it and frees it. A requester waiting on it stops
-    /// waiting when it sees the slot no longer holds this file page, and looks the page up again. SlotReady is deliberately left false: once the slot
-    /// is Free another thread may claim it, and a late "ready" would then mark that thread's unprepared slot ready.
+    /// PS-15: undoes a published slot whose owner failed before preparing it. It is unpublished first, so a requester waiting on it sees at once that
+    /// the slot no longer holds this file page and looks the page up again, without waiting on the disk. If the owner had started a read, the slot is
+    /// freed only once that read has landed (<see cref="WaitForOrphanedRead"/>); meanwhile it stays Allocating, which <see cref="TryAcquire"/> never
+    /// takes. SlotReady is deliberately left false: once the slot is Free another thread may claim it, and a late "ready" would then mark that
+    /// thread's unprepared slot ready.
     /// </summary>
-    private void AbandonUnpreparedSlot(int filePageIndex, int memPageIndex, PageInfo pi)
+    private void AbandonUnpreparedSlot(int filePageIndex, int memPageIndex, PageInfo pi, bool readStarted, ValueTask<int> readTask, Task<int> readAsTask)
     {
         _memPageIndexByFilePageIndex.TryRemove(new KeyValuePair<int, int>(filePageIndex, memPageIndex));
-        pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
         Volatile.Write(ref pi.FilePageIndex, -1);
+
+        if (readStarted)
+        {
+            WaitForOrphanedRead(readTask, readAsTask);
+        }
+
+        pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
         pi.PageState = PageState.Free;
         pi.ResetIOCompletionTask();
         pi.ResetClockSweepCounter();
@@ -1310,9 +1336,72 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
+    /// PS-15: waits for a disk read whose owner failed before handing it to the slot, so the slot is not freed while the read can still write into it.
+    /// The read is observed through whichever form the owner last held: <paramref name="readAsTask"/> once it was converted (the value task is then
+    /// consumed), the value task otherwise. Unbounded, like every other wait on a page read. The read's own outcome is dropped, since the caller
+    /// rethrows the failure that got here, but the wait is never swallowed: should it throw (a host interrupting the thread), the slot stays
+    /// Allocating and unpublished — lost to the cache until restart, but never handed out under a read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void WaitForOrphanedRead(ValueTask<int> readTask, Task<int> readAsTask)
+    {
+        var waiter = new AdaptiveWaiter();
+        if (readAsTask != null)
+        {
+            while (!readAsTask.IsCompleted)
+            {
+                waiter.Wait();
+            }
+
+            try
+            {
+                // Observes a faulted read, so it is not reported again as an unobserved task exception. The property builds an AggregateException,
+                // which can fail on an exhausted heap: the read is over either way.
+                _ = readAsTask.Exception;
+            }
+            catch
+            {
+                // Nothing to do: the read has landed.
+            }
+            return;
+        }
+
+        while (true)
+        {
+            bool done;
+            try
+            {
+                done = readTask.IsCompleted;
+            }
+            catch (InvalidOperationException)
+            {
+                // A stale token: AsTask consumed the value task, which it does only once the read is complete, then failed to allocate its result.
+                return;
+            }
+
+            if (done)
+            {
+                break;
+            }
+            waiter.Wait();
+        }
+
+        try
+        {
+            // Consumes the value task, which hands a pooled read operation back to the file handle.
+            readTask.GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // The read failed, or was consumed by AsTask as above: either way it is over, and its outcome no longer matters.
+        }
+    }
+
+    /// <summary>
     /// PS-15: waits until the slot a requester found in the page directory is ready (<c>true</c>), or no longer holds <paramref name="filePageIndex"/>
     /// (<c>false</c>: its owner abandoned it, or it was evicted and reclaimed — the caller looks the page up again). The owner's preparation is a few
-    /// microseconds with no wait of its own, so the bound only guards against a defect.
+    /// microseconds with no wait of its own, and an owner that fails unpublishes the slot before waiting on anything, so the bound only guards against
+    /// a defect.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool WaitForSlotReady(PageInfo pi, int filePageIndex)

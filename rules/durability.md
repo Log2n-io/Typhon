@@ -1516,11 +1516,14 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             a tag that race, at least one sees the other, so the reclaim backs off or the requester retries — never a slot being reclaimed
   invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
             replacement
-  invariant an owner that throws before its read starts unpublishes the slot and frees it; a waiter sees it no longer holds X and looks the
-            page up again. It does NOT mark the slot ready: once Free it may already be another owner's unprepared slot
+  invariant an owner that throws before the slot is prepared unpublishes it first — a waiter sees it no longer holds X and looks the page
+            up again at once — then frees it. If it had started a read (only a read-task wrapper's allocation can fail after that), it frees the
+            slot only once that read has landed: it is the read's only observer, and until then the slot stays `Allocating`, which `TryAcquire`
+            never takes. It does NOT mark the slot ready: once Free it may already be another owner's unprepared slot. An owner that throws
+            after the slot is prepared (the trace scope's close) still marks it ready
   scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, PagedMMF.WaitForSlotReady, PagedMMF.ValidateTaggedSlot,
-         PagedMMF.AbandonUnpreparedSlot, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked, PagedMMF.RequestPageEpochNoSweep,
-         PagedMMF.TryAcquire, SlotReady
+         PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
+         PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, SlotReady
   rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
     the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
     occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
@@ -1531,14 +1534,14 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   verified: PageSlotPublicationTests [VerifiesRule]: ARequesterOfAPublishedSlot_WaitsUntilItsOwnerHasStartedTheRead (the owner is held
             between publishing and preparing; a second requester must still be waiting, then see the disk content),
             TheLoserOfAConcurrentMiss_LeavesTheWinnersSlotAlone (a loser held before publishing must not overwrite a write made after the
-            winner's read, and the page is read once) and AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck. Each fails with its part of the
-            fix removed (#1128). Contended: `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of
-            60 with this rule held. The reclaim/tag pairing has no deterministic test: it is argued above and covered only by that stress
-  note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, so the bound only
-        turns a defect into a loud `LockTimeoutException` instead of a hang.
-  note: one gap is accepted. If allocating the read-task wrappers fails AFTER the read has started (out of memory, or the telemetry scope's
-        Dispose), the slot cannot be freed under an in-flight read and is never made ready: every later request for that file page times out
-        and the slot stays in `Allocating` — the page is unusable until the engine restarts.
+            winner's read, and the page is read once), AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck and
+            AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128). Contended:
+            `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of 60 with this rule held. Two
+            parts have no deterministic test and are argued above: the reclaim/tag pairing (covered by that stress run), and the owner waiting
+            for its started read before freeing the slot (a real file read cannot be held in flight)
+  note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, and an owner that
+        fails unpublishes the slot before waiting for its read, so the bound only turns a defect into a loud `LockTimeoutException` instead
+        of a hang.
 
 ---
 

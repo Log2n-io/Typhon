@@ -203,6 +203,57 @@ class PageSlotPublicationTests
         Assert.That(secondResult.AllOnDisk, Is.True, "the waiter looks the page up again, reads it itself and sees it as it is on disk");
     }
 
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("PS-15")]
+    public void AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck()
+    {
+        var filePageIndex = StagePageOnDisk();
+
+        using var scope = _serviceProvider.CreateScope();
+        var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        Assert.That(mmf.TryGetPageResidency(filePageIndex, out _, out _), Is.False, "precondition: the page is not in this cache yet");
+
+        // Stands in for a read-task wrapper failing to allocate: the read is in flight, not yet handed to the slot.
+        var failingThread = new int[1];
+        using var ownerReading = new ManualResetEventSlim();
+        using var secondWaits = new ManualResetEventSlim();
+        mmf.MissAfterReadStartProbe = fp =>
+        {
+            if (fp == filePageIndex && Environment.CurrentManagedThreadId == Volatile.Read(ref failingThread[0]))
+            {
+                ownerReading.Set();
+                secondWaits.Wait(5_000);
+                throw new InjectedOwnerFault();
+            }
+        };
+        mmf.SlotNotReadyWaitProbe = fp =>
+        {
+            if (fp == filePageIndex)
+            {
+                secondWaits.Set();
+            }
+        };
+
+        var readsBefore = mmf.GetMetrics().ReadFromDiskCount;
+        var owner = Task.Run(() =>
+        {
+            Volatile.Write(ref failingThread[0], Environment.CurrentManagedThreadId);
+            return RequestAndRead(mmf, filePageIndex);
+        });
+        Assert.That(ownerReading.Wait(5_000), Is.True, "precondition: the owner started its read and is about to fail");
+
+        var second = Task.Run(() => RequestAndRead(mmf, filePageIndex));
+
+        Assert.That(() => owner.GetAwaiter().GetResult(), Throws.TypeOf<InjectedOwnerFault>(), "the owner's failure reaches its caller");
+        Assert.That(secondWaits.IsSet, Is.True, "precondition: the second requester was waiting on the failed owner's slot");
+        // A slot left not ready would release the waiter only on the 5 s page-cache lock timeout, with an exception.
+        Assert.That(second.Wait(3_000), Is.True, "the waiter is released once the failed owner gives its slot back");
+        var secondResult = second.GetAwaiter().GetResult();
+        Assert.That(secondResult.AllOnDisk, Is.True, "the waiter looks the page up again, reads it itself and sees it as it is on disk");
+        Assert.That(mmf.GetMetrics().ReadFromDiskCount - readsBefore, Is.EqualTo(2), "the failed owner's read, then the waiter's own");
+    }
+
     private sealed class InjectedOwnerFault : Exception;
 
     /// <summary>
