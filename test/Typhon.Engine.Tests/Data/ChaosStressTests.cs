@@ -773,7 +773,28 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         var current = txn.Open(targetEntity).Read(CompAArch.A);
                         if (current.A != initial.A)
                         {
-                            errors.Add($"Reader {readerId}: MVCC violation! Expected {initial.A}, got {current.A}");
+                            // Capture the state that tells the two candidate causes APART, because the bare "expected 0, got 1" this used to report cannot:
+                            // it fires about once a month on a 4-vCPU nightly and 0/28 times on a 32-thread box, so whatever one occurrence records is all
+                            // anyone will have to work from. Either the snapshot was trimmed under the reader — TSN below RetainedMinTSN, which per SNAP-01
+                            // (rules/concurrency.md) surfaces as a WRONG VALUE rather than a SnapshotExpiredException for a Transaction, because
+                            // EntityAccessor.ThrowIfSnapshotExpired only throws for a PointInTimeAccessor — or the chain walk resolved a revision newer than
+                            // the snapshot, which is a visibility defect somewhere other than the optimistic fast path (that path's seqlock re-validates
+                            // every load, so it is not the suspect). TSN vs the retention floor is what separates them.
+                            // Defensive on purpose: this branch fires roughly once a month, and losing that one occurrence to an exception raised while
+                            // describing it would be worse than the bare message. The detail is insurance, so it must not be able to destroy the evidence.
+                            string detail;
+                            try
+                            {
+                                var retained = dbe.TransactionChain.RetainedMinTSN;
+                                detail = $"[read #{i} of {readsPerReader}, readerTSN {txn.TSN}, retainedMinTSN {retained}, "
+                                    + $"trimmedUnderReader {txn.TSN < retained}, writerCommits {writerCounts.Values.Sum()}]";
+                            }
+                            catch (Exception ex)
+                            {
+                                detail = $"[detail capture failed: {ex.GetType().Name}: {ex.Message}]";
+                            }
+
+                            errors.Add($"Reader {readerId}: MVCC violation! Expected {initial.A}, got {current.A} {detail}");
                         }
                         Thread.Sleep(5);
                     }
