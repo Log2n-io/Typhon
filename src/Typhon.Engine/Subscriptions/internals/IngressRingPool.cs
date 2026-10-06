@@ -181,7 +181,7 @@ internal sealed unsafe class IngressRingPool : ResourceNode, IMemoryResource
 
     /// <inheritdoc />
     /// <remarks>The slabs are children of this node and are accounted separately; this covers only the pool's own tables.</remarks>
-    public int EstimatedMemorySize
+    public long EstimatedMemorySize
     {
         get
         {

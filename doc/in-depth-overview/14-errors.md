@@ -183,7 +183,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 |---|---|---|
 | 0 | Unspecified | `Unspecified = 0` |
 | 1xxx | Transaction | `TransactionTimeout = 1002`, `SnapshotExpired = 1003` |
-| 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007` |
+| 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007`, `InvalidDatabaseBundle = 2008`, `PageCacheAllocationFailed = 2009` |
 | 3xxx | Schema / Component | `SchemaValidation = 3001`, `SchemaMigration = 3002` |
 | 4xxx | Index | `UniqueConstraintViolation = 4001` |
 | 5xxx | Query | (reserved) |

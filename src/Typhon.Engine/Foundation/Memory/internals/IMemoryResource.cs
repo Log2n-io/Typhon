@@ -16,5 +16,5 @@ public interface IMemoryResource : IResource
     /// <remarks>
     /// If the type has children resources, they must NOT be considered for the computation of this estimated size.
     /// </remarks>
-    int EstimatedMemorySize { get; }
+    long EstimatedMemorySize { get; }
 }

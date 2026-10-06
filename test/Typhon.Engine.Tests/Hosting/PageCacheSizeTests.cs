@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -55,7 +56,6 @@ public class PageCacheSizeTests
         Assert.That(PagedMMFOptions.PageSizeBytes, Is.EqualTo(8 * 1024));
         Assert.That(PagedMMFOptions.MinimumCacheSizeBytes, Is.EqualTo(8UL * Mib));
         Assert.That(PagedMMFOptions.DefaultCacheSizeBytes, Is.EqualTo(256UL * Mib));
-        Assert.That(PagedMMFOptions.MaximumCacheSizeBytes, Is.EqualTo(2048UL * Mib - 8192), "2 GiB minus one page: the largest page multiple an int holds");
         Assert.That(new PagedMMFOptions().DatabaseCacheSize, Is.EqualTo(PagedMMFOptions.DefaultCacheSizeBytes));
     }
 
@@ -75,19 +75,55 @@ public class PageCacheSizeTests
         Assert.That(o.IsValid, Is.True, "TestMode must allow a sub-8MiB cache for eviction-stress tests");
     }
 
-    [Test]
-    public void CacheSize_AboveOneIntSizedAllocation_FailsValidation()
+    [TestCase(2048UL)]
+    [TestCase(4096UL)]
+    [TestCase(512UL * 1024)]
+    public void CacheSize_PastTheOldTwoGibCeiling_PassesValidation(ulong mib)
     {
-        // The cache is one allocation whose size is an int. The check used to allow 4 GiB, so every size from 2 GiB passed it and then threw at startup,
-        // from the allocator.
-        var o = new PagedMMFOptions { DatabaseName = "cache_db", DatabaseDirectory = _dir, DatabaseCacheSize = PagedMMFOptions.MaximumCacheSizeBytes };
-        Assert.That(o.IsValid, Is.True, "the largest size the allocation can hold must pass");
+        // #945: no configured ceiling. Validation is structural; what the host grants is the allocation's to decide, at startup.
+        var o = new PagedMMFOptions { DatabaseName = "cache_db", DatabaseDirectory = _dir, DatabaseCacheSize = mib * Mib };
+        Assert.That(o.IsValid, Is.True, $"{mib} MiB");
+    }
 
-        o.DatabaseCacheSize = 2048UL * Mib;
-        Assert.That(o.IsValid, Is.False, "2 GiB does not fit the int-sized allocation: it must fail validation, not the allocation");
+    [Test]
+    public void CacheSize_PastTheSlotIndexRange_OrNotAPageMultiple_FailsValidation()
+    {
+        var o = new PagedMMFOptions { DatabaseName = "cache_db", DatabaseDirectory = _dir, DatabaseCacheSize = (ulong)int.MaxValue * 8192 };
+        Assert.That(o.IsValid, Is.True, "2^31 - 1 pages, the largest slot index range");
 
-        o.DatabaseCacheSize = 4096UL * Mib;
-        Assert.That(o.IsValid, Is.False, "4 GiB, the limit the check used to allow, must fail validation");
+        o.DatabaseCacheSize = ((ulong)int.MaxValue + 1) * 8192;
+        Assert.That(o.IsValid, Is.False, "one page more: a slot index is an int");
+
+        o.DatabaseCacheSize = 4096UL * Mib + 4096;
+        Assert.That(o.IsValid, Is.False, "not a page multiple");
+    }
+
+    [Test]
+    public void ACacheTheHostCannotGrant_IsANamedStartupError()
+    {
+        // 15 TiB: beyond the commit limit on Windows, and beyond RAM + swap under Linux's default overcommit heuristic. The block is never touched,
+        // so a host that does grant it (overcommit = 1) costs nothing either.
+        using var registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "CacheGrant" });
+        var allocator = new MemoryAllocator(registry, new MemoryAllocatorOptions());
+        const ulong size = 15UL << 40;
+        LargePinnedMemoryBlock granted = null;
+        try
+        {
+            granted = PagedMMF.AllocateCacheBlock(allocator, registry.Allocation, size);
+        }
+        catch (StorageException e)
+        {
+            Assert.That(e.ErrorCode, Is.EqualTo(TyphonErrorCode.PageCacheAllocationFailed));
+            Assert.That(e.Message, Does.Contain("DatabaseCacheSize").And.Contain($"{size:N0}"), "names the setting and the size");
+            Assert.That(e.InnerException, Is.InstanceOf<OutOfMemoryException>());
+            return;
+        }
+        finally
+        {
+            granted?.Dispose();
+        }
+
+        Assert.Inconclusive("this host granted 15 TiB (overcommit always on): nothing to refuse");
     }
 
     [Test]

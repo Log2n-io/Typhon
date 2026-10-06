@@ -169,7 +169,7 @@ static class SpawnBurstProfile
     /// </param>
     private static void RunArm(string label, int arm, bool deferred)
     {
-        // 1.5 GiB. Not more: the option refuses anything above 2 GiB minus a page, because the cache is one allocation sized in an int (ENG-13 / #945).
+        // 1.5 GiB: the size this profile was calibrated at. The 2 GiB ceiling it once had to respect is gone (#945).
         var dcs = 1536L * 1024 * 1024;
         var sc = new ServiceCollection();
         sc.AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))

@@ -1563,6 +1563,51 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
         references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
         (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
+### PS-12: A mem-page's address is computed in 64 bits, never in `int` `[fatal]` `[silent]`
+  invariant ∀ expression of the form `memPagesBaseAddr + (memPageIndex × PageSize)`: the product is
+            evaluated as `long` — `memPageIndex * (long)PageSize` — never as `int × int`
+  invariant an `int` product is exact only while `memPageIndex < 262 144` (2 GiB ÷ 8 KiB), so a narrow
+            product is a LATENT defect whose trigger is the configured cache size, not the code path
+  scope: PagedMMF.SavePages, PagedMMF.GetMemPageAddress, PagedMMF.WritePagesForCheckpoint,
+         ChunkAccessor.GetMemPageIndexFromSlot
+  rationale: the page cache is one contiguous native block addressed as `base + index × PageSize`.
+    `PageSize` is an `int` constant and `MemPageIndex` is an `int` field, so their product is an `int`
+    unless one side is widened — and the compiler gives no warning for it. Past 262 143 pages the product
+    wraps negative, and `byte* + int` sign-extends, so the pointer lands up to 2 GiB BELOW the cache base,
+    in memory the engine does not own.
+  on_violation: a wild-pointer WRITE, not a read. Both `SavePages` sites do `++headerAddr->ChangeRevision`
+    — a 4-byte read-modify-write at the foreign address — and then `StampPageForWrite` over 8 KiB of it.
+    An access violation if that page is unmapped; silent heap corruption if it is mapped. This is the
+    structural write path: bootstrap, schema write, segment grow, v1 replay.
+  verified: PageCacheAddressArithmeticTests.AMemPageOffsetPastTwoGibIsComputedIn64Bits [VerifiesRule] —
+            asserts the offset for `memPageIndex` 262 144 is 2 147 483 648, and that the narrow `int`
+            product it replaced wraps to −2 147 483 648, so the test fails if the widening is removed;
+            TheFirstPagePastTwoGib_IsAddressedAtItsSixtyFourBitOffset_ByTheIOWindows does the same for the disk
+            I/O path's window; LargePageCacheTests (nightly) writes and reads back pages past index 262 143 of a
+            real 3 GiB cache
+  note: the 2 GiB − 8 KiB cache-size ceiling is what kept this unreachable. It was fixed BEFORE the ceiling
+        went (#945: S1 here, the ceiling in S7), deliberately: until then the ceiling was the only thing
+        standing between this expression and live heap corruption.
+
+### PS-13: The page cache is one contiguous native block, and a page address maps back to its slot exactly `[fatal]` `[silent]`
+  invariant the cache is ONE allocation: slot i's page is at `MemPagesBaseAddress + i × PageSize`, for every i in [0, MemPagesCount)
+  invariant `MemPageIndexOfRawData(GetMemPageAddress(i) + PageHeaderSize, MemPagesBaseAddress) == i`, for every i: the reverse map is two
+            instructions of pointer arithmetic, with no search and no table
+  invariant the disk I/O path addresses the same bytes: each page's window slice (`PageCacheWindow.PageMemory`) starts at
+            `GetMemPageAddress(i)`, and a write run never leaves its window
+  scope: PagedMMF.MemPagesBaseAddress, PagedMMF.GetMemPageAddress, PagedMMF.MemPageIndexOfRawData, PagedMMF.AllocateCacheBlock,
+         ChunkAccessor.GetMemPageIndexFromSlot, PersistentStore.MemPagesBaseAddress, PageCacheWindow.PageMemory, PageCacheWindow.PageRunMemory
+  rationale: #945. The cache passed 2 GiB as one 64-bit block with 1 GiB windows for the two async I/O paths, rather than as several blocks,
+    because ChunkAccessor recovers a page's slot from its address on every first write, commit, latch and unlatch of a B+Tree page. Split
+    into blocks, that map needs a search (20-30× slower) or a per-accessor index table (+128 B on the hottest struct). This rule writes the
+    design's load-bearing assumption down, so that "just split it into blocks" fails a rule instead of corrupting accounting silently.
+  on_violation: a wrong slot index on the write path: the dirty counter, the active-writer count and the seqlock counter of ANOTHER page
+    move (PS-05, CP-13, SL-*), so a page is evicted while written, or written out half-modified, or its checkpoint skipped. Nothing fails at
+    the faulty line; the damage surfaces later as a torn page or a lost write.
+  verified: PageCacheContiguityTests.EveryPage_MapsBackToItsSlot_AndTheIOWindowsAgreeOnItsAddress [VerifiesRule] (every slot of a real cache;
+            eight windows under the small-window nightly); LargePageCacheTests.AThreeGibCache_WritesAndReadsBackPagesPastTheOldBoundary
+            checks the map at a slot past index 262 143 of a real 3 GiB cache (nightly)
+
 ### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
   invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is ready (PS-15)
             — its owner clears it after publishing it in the page directory, while no other thread may use it, so the "not on disk" decision
@@ -1617,6 +1662,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
          PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, PagedMMF.CompletePendingRead, PagedMMF.WaitForPendingRead,
          PagedMMF.DropReadTask, SlotReady, ReadPending
+  requires: PS-17 — the directory publishes one slot per page, and its lookups are hints the requester validates
   rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
     the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
     occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
@@ -1665,6 +1711,36 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             Collecting_VisitsOnlyTheOwedSlots_AndFindsWhatAFullScanFinds counts 3 slot visits and 4 words on a 256-slot cache and matches a
             scan of every slot. Not staged: two discharges crossing (the source of stale bits) — its outcome, a bit with no debt, is staged
             directly instead
+
+### PS-17: The page directory publishes at most one slot per file page, and a lookup is only a hint `[fatal]` `[silent]`
+  invariant at most one slot is published for a file page: `GetOrAdd` links a slot under its bucket's lock only if no slot in the chain
+            holds the page, and otherwise returns that slot, which the caller takes untouched (PS-15)
+  invariant a slot's key — its own FilePageIndex — changes only while the slot is in no chain: its owner writes it just before `GetOrAdd`,
+            and it is reset only after `TryRemove`. So under a bucket's lock every key in its chain is stable
+  invariant `TryRemove(X, S)` unlinks S and nothing else, and leaves S's own link intact, so a reader paused on S finishes its walk down
+            the rest of the old chain
+  invariant `TryGet(X)` returns a slot only after reading that slot's key equal to X, and the caller validates the slot after tagging it
+            (PS-15): a lookup is a hint. "Absent" is exact: an empty bucket read with acquire, or a chain walked under the bucket's lock. A
+            walk that followed links without the lock never answers "absent" by itself
+  invariant no managed reference per entry: the buckets are one native block, and the chains run through the slot records
+            (`DirectoryNext`)
+  scope: PageDirectory.TryGet, PageDirectory.GetOrAdd, PageDirectory.TryRemove, PagedMMF.AllocateMemoryPageCore, PagedMMF.TryAcquire,
+         PagedMMF.AbandonUnpreparedSlot, DirectoryNext
+  rationale: #1136. The directory was a ConcurrentDictionary: one managed node per resident page, 67 M at #945's 512 GiB target for every
+    gen-2 collection to mark. Chaining through the slot records needs no node, no tombstone and no rehash, and a hit reads the bucket and
+    then the slot record it was about to read anyway. Its one subtlety is that a slot moves between chains when it is reused: a lock-free
+    reader paused on it would follow the slot into its new chain and miss the page it was looking for.
+  on_violation: (1) two slots published for one page: two copies of it diverge, and the one written last to disk wins — a lost write;
+    (2) another slot's mapping removed: a resident page becomes unreachable and a second copy is loaded beside it; (3) "absent" for a
+    resident page: its requester evicts a page for nothing and, with the cache exhausted, can time out on back-pressure for a page it
+    already has. None of them reports itself.
+  verified: PageDirectoryTests [VerifiesRule]: ConcurrentMissesOnOnePage_ConvergeOnOneSlot (8 threads × 300 pages, one winner each),
+            AReaderPausedOnANodeThatMovesToAnotherChain_StillFindsThePage (a probe reclaims the node and publishes it in another bucket
+            between the reader's key read and its link read; fails without the locked confirmation) and
+            AReaderChasingReusedNodes_Ends_AndFindsThePage (two nodes moved to the chain's head forever: the step bound ends the walk).
+            APublishedPage_IsAlwaysFound_WhileOtherSlotsChurnThroughItsChain (two threads churn slots through its bucket while two read;
+            fails, unstaged, without the locked confirmation). EveryPublishedPage_IsFound_AndRemovingOneSlot_UnpublishesOnlyIt fails
+            with a remove that ignores the slot (#1136)
 
 ---
 

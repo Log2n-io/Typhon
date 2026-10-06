@@ -165,7 +165,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     public long EstimatedBytes => ((long)_generations.Length * 2L) + ((long)_nextFree.Length * 4L) + (_leased.Length * 8L) + 64L;
 
     /// <inheritdoc />
-    public int EstimatedMemorySize
+    public long EstimatedMemorySize
     {
         get
         {

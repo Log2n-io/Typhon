@@ -127,7 +127,7 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
 
     /// <inheritdoc />
     /// <remarks>Bookkeeping only. The slabs are children of this node and are accounted separately, per the interface contract.</remarks>
-    public int EstimatedMemorySize => 64 + (_slabs.Count * IntPtr.Size);
+    public long EstimatedMemorySize => 64 + (_slabs.Count * IntPtr.Size);
 
     /// <summary>
     /// Takes a block from the free list, growing by one slab when it is empty. The returned block's header is zeroed; its entries are not — they are
