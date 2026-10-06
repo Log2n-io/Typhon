@@ -1788,10 +1788,17 @@ public partial class DatabaseEngine
                                 // A multi-value leaf holds a VSBS buffer id, not an entity location: a plain Move would overwrite it with the
                                 // raw clusterLocation and every entity at that key would vanish from the index (issue #659). MoveValue moves
                                 // just this entity's element and returns its new id, which goes back into the cluster's elementId tail.
-                                // Fetched forWrite only on this branch; the mutation that triggered shadowing already dirtied the page.
                                 var writableBase = primaryAccessor.GetChunkAddress(clusterChunkId, true);
                                 var elementIdPtr = (int*)(writableBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
                                 *elementIdPtr = field.Index.MoveValue(&oldKey, fieldPtr, *elementIdPtr, clusterLocation, ref idxAccessor, out _, out _);
+
+                                // The new id is a write to the cluster page, and it must be recorded as one (PS-10, #1171). The accessor here holds
+                                // no ChangeSet (a Prep slice's never does), so its dirty flag only blocks a checkpoint while the slice runs. Whatever
+                                // the shadowed write recorded may have been written back since. Unrecorded, the page went clean the moment the slice
+                                // released it: Migrate's own loads could evict it before the fence's WAL emit recorded it, Migrate then read the old
+                                // id from the reloaded image, its location update named a chunk that no longer held the element and was dropped, and
+                                // the index kept the entity at the slot it had left.
+                                clusterState.NoteClusterPageModified(clusterChunkId);
                             }
                             else
                             {
