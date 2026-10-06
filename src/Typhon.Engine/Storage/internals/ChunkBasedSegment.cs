@@ -225,51 +225,142 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         return true;
     }
 
-    internal override bool Load(int filePageIndex)
+    internal override bool Load(int filePageIndex) => Load(filePageIndex, null);
+
+    /// <summary>
+    /// Loads the segment rooted at <paramref name="filePageIndex"/>: its directory, then its allocator — from <paramref name="summary"/> when one fits,
+    /// reading no data page, else by scanning every page's chunk bitmap.
+    /// </summary>
+    /// <param name="filePageIndex">The segment's root page.</param>
+    /// <param name="summary">
+    /// What the last clean close recorded for this segment (<see cref="ManagedPagedMMF.TakeChunkSummary"/>), or <c>null</c>. Used only when its page count
+    /// matches the directory just read and its count fits the capacity; anything else is a summary that does not describe this segment, and the scan runs.
+    /// </param>
+    /// <remarks>
+    /// The scan is what a healthy open must not do (#1143): one page read per data page, each page tagged with a bare epoch snapshot and so held in the
+    /// cache until the epoch advances, which deadlocks the open once a segment outgrows the cache. It still runs after a crash, where the summary is never
+    /// trusted, and there it carries the chain-versus-directory cross-check that used to run on every load (#382): see <see cref="ScanForAllocatorState"/>.
+    /// </remarks>
+    internal bool Load(int filePageIndex, ChunkSegmentSummary summary)
     {
         if (!base.Load(filePageIndex))
         {
             return false;
         }
 
-        // Rebuild allocator state from L0 bitmaps (source of truth)
-        var epoch = _store.EpochManager.GlobalEpoch;
         var length = Length;
         _capacity = ComputeCapacity(length);
-        _allocatedCount = 0;
         _nextPage = new int[length];
         Array.Fill(_nextPage, NOT_IN_LIST);
-
-        // Build forward chain of pages with free space
-        int lastInList = -1;
         _freeHead = EMPTY_PAGE;
+
+        if (summary != null && summary.PageCount == length && summary.AllocatedCount <= _capacity)
+        {
+            _allocatedCount = summary.AllocatedCount;
+            var lastInList = -1;
+            for (var i = 0; i < length; i++)
+            {
+                if (summary.HasRoom(i))
+                {
+                    LinkAtTail(i, ref lastInList);
+                }
+            }
+
+            LoadedFromSummary = true;
+            return true;
+        }
+
+        ScanForAllocatorState(filePageIndex);
+        return true;
+    }
+
+    /// <summary>Whether the last <see cref="Load(int, ChunkSegmentSummary)"/> rebuilt the allocator from a summary rather than by reading the pages.</summary>
+    internal bool LoadedFromSummary { get; private set; }
+
+    /// <summary>
+    /// Rebuilds the allocator from the chunk bitmaps, the source of truth: reads every page. Checks each page's forward link against the directory as the
+    /// page goes by, at no extra read.
+    /// </summary>
+    /// <remarks>
+    /// The page directory and the forward chain (<see cref="LogicalSegmentHeader.LogicalSegmentNextRawDataPBID"/>) are written by separate code paths during
+    /// a grow, so a disagreement means one write did not reach the disk — the shape an interrupted checkpoint leaves. The check is positional, as the grow's
+    /// own post-condition is: page <c>i</c> must link to directory entry <c>i+1</c>, the last to 0. It throws <see cref="InvalidOperationException"/>, which
+    /// on the crash path <see cref="ManagedPagedMMF.TryLoadChunkBasedSegment"/> turns into a fresh allocation that WAL replay rebuilds (RB-01, #395).
+    /// </remarks>
+    private void ScanForAllocatorState(int filePageIndex)
+    {
+        var epoch = _store.EpochManager.GlobalEpoch;
+        var length = Length;
+        var pages = Pages;
+        _allocatedCount = 0;
+        var lastInList = -1;
 
         for (int i = 0; i < length; i++)
         {
             var maxChunks = i == 0 ? _rootChunkCount : _otherChunkCount;
             var bitmapLongs = i == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
             var page = GetPage(i, epoch, out _);
-            var metadata = page.MetadataReadOnly<long>();
 
+            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+            var expected = (i + 1) < length ? pages[i + 1] : 0;
+            if (next != expected)
+            {
+                throw new InvalidOperationException(
+                    $"ChunkBasedSegment integrity check failed at load: root={filePageIndex} kind={Kind} length={length} — page[{i}] (file page {pages[i]}) "
+                    + $"links to {next}, its directory says {expected}. Signature of a lost write: the directory append or the forward-chain pointer of a "
+                    + "grow did not persist before the previous close.");
+            }
+
+            var metadata = page.MetadataReadOnly<long>();
             var popcount = CountAllocatedBits(metadata, bitmapLongs, maxChunks);
             _allocatedCount += popcount;
 
             if (popcount < maxChunks) // page has free space
             {
-                _nextPage[i] = EMPTY_PAGE; // mark as tail
-                if (lastInList >= 0)
-                {
-                    _nextPage[lastInList] = i;
-                }
-                else
-                {
-                    _freeHead = i;
-                }
-                lastInList = i;
+                LinkAtTail(i, ref lastInList);
+            }
+        }
+    }
+
+    /// <summary>Appends page <paramref name="pageIndex"/> to the free list being built at load, single-threaded.</summary>
+    private void LinkAtTail(int pageIndex, ref int lastInList)
+    {
+        _nextPage[pageIndex] = EMPTY_PAGE; // mark as tail
+        if (lastInList >= 0)
+        {
+            _nextPage[lastInList] = pageIndex;
+        }
+        else
+        {
+            _freeHead = pageIndex;
+        }
+        lastInList = pageIndex;
+    }
+
+    /// <summary>
+    /// The allocator state a clean close records for the next open (<see cref="ChunkSummaryFile"/>): the allocated count and which pages are in the free
+    /// list. Must run with nothing allocating or freeing — the close calls it after the final flush.
+    /// </summary>
+    /// <remarks>
+    /// The free list is a hint, not the truth: a page can be in it and full (allocation unlinks exhausted pages lazily) or, after a rare race, have room and
+    /// be out of it until <see cref="RebuildFreeList"/> runs. The summary records exactly what the running engine had, so a reopened engine behaves as this
+    /// one would have, and the count — exact by construction — is what callers read.
+    /// </remarks>
+    internal ChunkSegmentSummary CaptureSummary()
+    {
+        var length = Length;
+        var nextPage = _nextPage;
+        var words = new ulong[ChunkSegmentSummary.WordCount(length)];
+        var n = Math.Min(length, nextPage.Length);
+        for (var i = 0; i < n; i++)
+        {
+            if (nextPage[i] != NOT_IN_LIST)
+            {
+                words[i >> 6] |= 1UL << (i & 63);
             }
         }
 
-        return true;
+        return new ChunkSegmentSummary(RootPageIndex, length, _allocatedCount, words);
     }
 
     /// <summary>
@@ -675,6 +766,23 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         if (_allocatedCount < _capacity)
         {
             RebuildFreeList();
+            if (Volatile.Read(ref _freeHead) != EMPTY_PAGE)
+            {
+                pass = 0;
+                goto restart;
+            }
+
+            // The bitmaps hold no free chunk, yet the count says some are free: the count is short. It is exact by construction while the engine runs,
+            // so only a chunk summary that recorded it wrong can do this (CS-05). Grow, as a full segment would, instead of rebuilding the same empty list
+            // for ever. A race with an allocation that has set its bit and not yet counted it lands here too, and costs one unneeded growth.
+            lock (_growLock)
+            {
+                if (Volatile.Read(ref _freeHead) == EMPTY_PAGE && !GrowChunkCapacity(changeSet: changeSet))
+                {
+                    ThrowHelper.ThrowResourceExhausted("Storage/ChunkBasedSegment/AllocateChunk", ResourceType.Memory, _allocatedCount, _capacity);
+                }
+            }
+
             pass = 0;
             goto restart;
         }

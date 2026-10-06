@@ -281,6 +281,13 @@ public static class DatabaseRepair
             backupPath = CopyBundle(resolved);
         }
 
+        // Every step below writes the data file under the nonce of the last clean close, so the chunk summary that close wrote would stop describing
+        // it while still being trusted (#1143). Deleting it is lossless: the next open reads the pages, and its clean close writes a new one.
+        if (!dryRun && plan.Steps.Count > 0)
+        {
+            File.Delete(Path.Combine(resolved, ChunkSummaryFile.FileName));
+        }
+
         for (var i = 0; i < plan.Steps.Count; i++)
         {
             var step = plan.Steps[i];

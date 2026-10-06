@@ -3854,11 +3854,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen).
-    /// Scans cluster occupancy bitmaps to rebuild <see cref="ActiveClusterIds"/> and <see cref="FreeClusterHead"/>.
+    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen). Rebuilds <see cref="ActiveClusterIds"/> and
+    /// <see cref="FreeClusterHead"/> from <paramref name="summary"/> when one fits the segment, reading nothing; otherwise by scanning every cluster's
+    /// occupancy word.
     /// </summary>
+    /// <param name="layout">Precomputed cluster layout (shared by both segments).</param>
+    /// <param name="segment">The persisted PersistentStore cluster segment.</param>
+    /// <param name="transientSegment">Fresh TransientStore segment for Transient components. Default (null) if no Transient.</param>
+    /// <param name="transientStore">TransientStore instance to keep alive. Null if no Transient.</param>
+    /// <param name="summary">
+    /// What the last clean close recorded for this segment (<see cref="ManagedPagedMMF.TakeClusterSummary"/>), or <c>null</c>. The scan is what a healthy
+    /// open must not do (#1143): it reads one page per cluster page, most of a database's file.
+    /// </param>
     public static ArchetypeClusterState CreateFromExisting(ArchetypeClusterInfo layout, ChunkBasedSegment<PersistentStore> segment,
-        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null)
+        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null, ClusterListSummary summary = null)
     {
         Debug.Assert(segment != null || transientSegment != null, "At least one cluster segment must be provided");
         var capacity = segment?.ChunkCapacity ?? transientSegment.ChunkCapacity;
@@ -3879,8 +3888,79 @@ internal sealed unsafe partial class ArchetypeClusterState
             _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
 
-        state.RebuildActiveList();
+        if (!state.TryLoadActiveList(summary))
+        {
+            state.RebuildActiveList();
+        }
+
         return state;
+    }
+
+    /// <summary>Whether <see cref="CreateFromExisting"/> took the active-cluster list from the close's summary rather than by reading the clusters.</summary>
+    internal bool ActiveListLoadedFromSummary { get; private set; }
+
+    /// <summary>
+    /// Rebuilds the active list from <paramref name="summary"/> when it describes this state's cluster segment and every id fits the segment; reads no
+    /// page. Ids are taken through <see cref="AddToActiveList"/> in ascending order, so the state is the one <see cref="RebuildActiveList"/> would build.
+    /// </summary>
+    private bool TryLoadActiveList(ClusterListSummary summary)
+    {
+        var segment = ClusterSegment;
+        if (summary == null || segment == null || summary.RootPageIndex != segment.RootPageIndex)
+        {
+            return false;
+        }
+
+        // Parse guarantees ascending ids from 1 and a head among them; what it cannot know is the segment. A list longer than the allocated count or an id
+        // past the capacity describes some other segment, and is refused rather than trusted.
+        var ids = summary.ActiveClusterIds;
+        if (ids.Length > segment.AllocatedChunkCount || (ids.Length > 0 && ids[^1] >= segment.ChunkCapacity))
+        {
+            return false;
+        }
+
+        ActiveClusterCount = 0;
+        for (var i = 0; i < ids.Length; i++)
+        {
+            AddToActiveList(ids[i]);
+        }
+
+        FreeClusterHead = summary.FreeClusterHead;
+        ActiveListLoadedFromSummary = true;
+        return true;
+    }
+
+    /// <summary>
+    /// The active-cluster list a clean close records for the next open (<see cref="ClusterListSummary"/>), or <c>null</c> when there is none to record
+    /// faithfully: no persistent cluster segment, drained clusters the fence has not freed yet, or a list that is not a set. A <c>null</c> costs that
+    /// archetype a scan at the next open, never data.
+    /// </summary>
+    /// <remarks>Reads no page: the list is the running engine's own. The close calls it with nothing spawning, destroying or draining.</remarks>
+    internal ClusterListSummary CaptureClusterSummary()
+    {
+        var segment = ClusterSegment;
+        if (segment == null || _drainedCount != 0)
+        {
+            return null;
+        }
+
+        var ids = ActiveClusterIds.AsSpan(0, ActiveClusterCount).ToArray();
+        Array.Sort(ids);
+        for (var i = 0; i < ids.Length; i++)
+        {
+            if (ids[i] < 1 || (i > 0 && ids[i] == ids[i - 1]))
+            {
+                return null;
+            }
+        }
+
+        var head = FreeClusterHead;
+        if (head != -1 && Array.BinarySearch(ids, head) < 0)
+        {
+            head = -1;
+        }
+
+        return new ClusterListSummary(segment.RootPageIndex, head, ids);
     }
 
     /// <summary>

@@ -1091,20 +1091,21 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         _pages = pages.ToArray();
 
-        // Structural integrity invariant: the data-page forward chain (LogicalSegmentNextRawDataPBID) must reach exactly as many pages as the persisted Page
-        // Directory enumerates. The two are written by independent code paths in CreateOrGrow — the chain pointer is updated per-page in the data-page-init
-        // loop and on the old tail; the Directory entries are written into root/extension-map raw-data sections. A mismatch means one of the two writes lost
-        // durability across a crash / checkpoint race, leaving a structurally inconsistent segment that would silently lose addressing of some pages. We
-        // throw early at Load rather than let the corruption propagate. Zero storage cost — both fields already exist; cost is O(N) page-header reads per
-        // segment on Open, paid once.
-        var chainCount = WalkForwardChainPageCount(epoch);
-        if (chainCount != _pages.Length)
+        // Every directory lists at least the root itself, so an empty one is a root page that was never written — what a checkpoint interrupted before the
+        // root landed leaves behind its SPI. The chain walk that used to run below caught it by accident (its first step, RootPageIndex, threw); without a
+        // throw the segment would load as zero pages and fail far from the cause, and the crash path could not replace it (TryLoadChunkBasedSegment, RB-01).
+        if (_pages.Length == 0)
         {
             throw new InvalidOperationException(
-                $"LogicalSegment integrity check failed at Load: root={filePageIndex} kind={_kind} directory={_pages.Length} chain={chainCount} " +
-                $"(diff={chainCount - _pages.Length:+0;-#}). Signature of a lost-write durability bug — either the directory append or the " +
-                $"forward-chain pointer didn't persist before the previous close.");
+                $"LogicalSegment load failed: root={filePageIndex} kind={_kind} — the root page lists no page, not even itself: it was never written.");
         }
+
+        // The directory only: a page per 2 000 entries. The cross-check of the directory against the data pages' forward chain (a lost-write detector, #382)
+        // is NOT made here. It reads every data page, and it used to, on every open, under the open's one epoch: O(database) reads, every page pinned until the
+        // open ended, so a database larger than its page cache could not be opened (#1143). On the crash path a chunk-based segment checks its links during
+        // the free-chunk scan it makes then (ChunkBasedSegment.ScanForAllocatorState). Otherwise the check is the offline scanner's, at Quick depth and deeper
+        // — not at the default Spine depth — and a mismatch found by open-time verification refuses the open unless recovery will rebuild the segment
+        // (DatabaseIntegrityException.RefusesOpen).
 
         // Phase 5: Storage:Segment:Load event.
         TyphonEvent.EmitStorageSegmentLoad(filePageIndex, _pages.Length);
@@ -1118,7 +1119,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// </summary>
     /// <remarks>
     /// Pure integrity-check helper — read-only, no allocations. Caller must be inside an <see cref="EpochGuard"/> scope (or pass an epoch known to be live).
-    /// Used by <see cref="Load"/> as the chain↔directory cross-check that catches lost-write durability bugs at the earliest moment.
+    /// No longer called by <see cref="Load"/> (#1143): tests and storage introspection use it to cross-check the chain against the directory.
     /// </remarks>
     internal int WalkForwardChainPageCount(long epoch)
     {

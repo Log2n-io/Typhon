@@ -343,6 +343,13 @@ public class DatabaseEngineOptions
     public ResourceOptions Resources { get; set; } = new();
 
     /// <summary>
+    /// Repair only (<c>typhon repair</c>, <c>DerivedStructureRegeneration</c>): open on the crash path even after a clean close, so the rebuild net
+    /// regenerates every derived structure, and ignore the chunk summary. Before #1143 every reopen of a database with WAL segments on disk took the
+    /// crash path, and repair-by-reopen relied on it; a clean open now rebuilds nothing (CS-06).
+    /// </summary>
+    internal bool ForceCrashRecoveryAtOpen { get; set; }
+
+    /// <summary>
     /// Lock acquisition timeout configuration for all engine subsystems.
     /// </summary>
     public TimeoutOptions Timeouts { get; set; } = new();
@@ -392,6 +399,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private readonly IResource                  _durabilityNode;
     private WalRecoveryResult                   _lastRecoveryResult;
     internal TransientOptions                   TransientOptions => _options.Transient;
+    internal string                             WalDirectory => _options.Wal?.WalDirectory;
     internal WalRecoveryResult                  LastRecoveryResult => _lastRecoveryResult;
 
     // ReSharper disable once ConvertToAutoProperty MUST KEEP _logger for SourceGen to generate the log properly
@@ -668,11 +676,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// assert it is exercising the LOAD path (<c>FindInDirectory</c>) and not the create-and-rebuild path, which resolves keys differently (#657).</summary>
     internal int LastOpenClusterIndexRebuildCount;
 
-    /// <summary>True when WAL segment files exist at open (a crash left a recovery window). Captured ONCE in <see cref="InitializeArchetypes"/> before any
-    /// ComponentTable loads. Gates the crash-path secondary-index clear+rebuild (RB-01): the load ctors read it to clear+recreate indexes fresh (torn-safe),
+    /// <summary>True when the previous session did not close cleanly and left WAL segment files: a crash left a recovery window. WAL files alone are not
+    /// enough — they survive a clean close, and treating them as a crash ran the whole recovery pipeline on every open (#1143). Captured ONCE in the
+    /// constructor, before any ComponentTable loads. Gates the crash-path secondary-index clear+rebuild (RB-01): the load ctors read it to clear+recreate
+    /// indexes fresh (torn-safe),
     /// and <see cref="RunWalV2Recovery"/> reads the SAME flag to fire the Phase-5 rebuild — so clear and rebuild always agree (clearing without rebuilding would
     /// leave indexes empty). Distinct from <see cref="_headsTrusted"/>, which can be false on a clean migration reopen with no WAL window (indexes load normally).</summary>
-    internal bool WalFilesPresentAtOpen { get; private set; }
+    internal bool CrashRecoveryAtOpen { get; private set; }
 
     /// <summary>Gates the checkpoint-time <c>PersistArchetypeState</c> hook (#395 / CK-10). False while segments are still being opened or rebuilt;
     /// set true on the crash path just before the recovery seal, so the seal records the SPIs of the base it consolidates (#715), and at the end of
@@ -1710,7 +1720,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Resolve the WAL directory to {bundle}/wal when the caller left it null (the bundle-format default). This MUST run HERE — before
         // InitializeUowRegistry() below — because the reopen path reads _options.Wal.WalDirectory to decide whether WAL segments are present and recovery must
-        // run (WalFilesPresentAtOpen). Deriving it later (in InitializeWalManager) would leave that read seeing null, silently skipping crash recovery under
+        // run (CrashRecoveryAtOpen). Deriving it later (in InitializeWalManager) would leave that read seeing null, silently skipping crash recovery under
         // the default config. Keeps each database's WAL private to its .typhon bundle; an explicit WalDirectory is honored as-is. (This writes back into
         // _options.Wal — safe because every DI path resolves ONE engine per DatabaseEngineOptions instance, and two databases each get their own
         // provider/options; sharing one options across two engines is not a supported path.)
@@ -1831,6 +1841,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             StatisticsWorker = null;
 
             Logger?.LogInformation("Engine disposing: CheckpointManager");
+            // An open that did not complete closes as a crash (CS-04): no final cycle either. It would flush the half-built session's pages and, with the
+            // SPI hook armed, persist its half-built archetype table — #1147 again, through the checkpoint.
+            if (_archetypeInitIncomplete && _constructed)
+            {
+                CheckpointManager?.PrepareCrashStop();
+            }
+
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down
             CheckpointManager?.Dispose();
             CheckpointManager = null;
@@ -1843,8 +1860,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // PersistArchetypeState would persist EntityMap state — both would smuggle committed data onto disk that a real crash would have lost, masking the
             // dependency on WAL replay. The clean-shutdown marker is likewise never written. Only what is already fsynced (prior checkpoints + WAL) survives.
             // `_constructed` short-circuits a failed open (see the field docs): there is nothing to persist, and trying would bury the construction exception
-            // under a teardown fault.
-            if (!_simulateHardCrash && _constructed)
+            // under a teardown fault. `_archetypeInitIncomplete` does the same for an open that failed after the constructor, in InitializeArchetypes: it
+            // closes as a crash, because persisting a half-built archetype table orphans data and flags it clean (#1147).
+            if (!_simulateHardCrash && _constructed && !_archetypeInitIncomplete)
             {
                 Logger?.LogInformation("Engine disposing: PersistArchetypeState");
                 // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
@@ -1861,7 +1879,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
                 if (!SimulateUncleanShutdownForTest)
                 {
-                    MarkCleanShutdown();
+                    // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
+                    // flushed it, and the flag and the summary's nonce flip together.
+                    MarkCleanShutdown(WriteChunkSummary());
                 }
             }
 
@@ -1958,7 +1978,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // wanted. CRASH path → stay in RecoveryOnly through the v2 recovery: the ComponentTable index clear (at registration) and RunWalV2Recovery's
         // apply/scrub/rebuild load persisted pages, and a torn index/occupancy page must NOT throw before the rebuild net replaces it (RB-01/CK-09) — FPI has been
         // retired (increment D), so there is no on-load repair fallback. InitializeArchetypes restores the configured mode after RunWalV2Recovery completes.
-        MMF.SetPageChecksumVerification(WalFilesPresentAtOpen ? PageChecksumVerification.RecoverySuspect : _options.Resources.PageChecksumVerification);
+        MMF.SetPageChecksumVerification(CrashRecoveryAtOpen ? PageChecksumVerification.RecoverySuspect : _options.Resources.PageChecksumVerification);
 
         CheckpointManager = new CheckpointManager(MMF, UowRegistry, WalManager, _options.Resources, EpochManager, StagingBufferPool, _durabilityNode,
             initialCheckpointLsn, () => _lastTickFenceLSN);
@@ -2261,14 +2281,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _cleanShutdownAtOpen = DurabilityWatermarks.ReadCleanShutdown(MMF);
             _checkpointLsnAtOpen = checkpointLSN;
 
+            _failedOpenAtOpen = DurabilityWatermarks.ReadFailedOpen(MMF);
+
+            // #1143: before the first chunk-segment load (LoadSystemSchemaR1, next in the ctor), so every segment the open loads can rebuild its allocator
+            // from what the last clean close recorded instead of reading all of its pages. After an unclean close the summary is never consulted.
+            if (_cleanShutdownAtOpen && !_options.ForceCrashRecoveryAtOpen)
+            {
+                AdoptChunkSummary();
+            }
+
             // CS-02: durably clear the on-disk flag HERE, before returning from the ctor — i.e. before ANY mutation this session. Registration runs schema
             // migration and PersistSchemaChanges (see InitializeArchetypes), so clearing it later (as this used to, inside InitializeArchetypes) left a window
             // where a crash mid-registration kept the flag set: the next open then saw cleanShutdown=1 with no migration of its own, trusted the half-migrated
             // Versioned HEADs and skipped RebuildVersionedHeadFromChain — serving stale HEADs silently (#583). The trust decision is unaffected: it reads the
             // captured _cleanShutdownAtOpen above, not the disk.
-            if (_cleanShutdownAtOpen)
+            // The summary's nonce goes with the flag, in the same flip: it may not outlive the session that read it (CS-05). The same flip sets the
+            // failed-open marker, which only a completed open clears: an open that dies before then, anywhere, leaves it set (CS-04).
+            if (_cleanShutdownAtOpen || _failedOpenAtOpen)
             {
-                DurabilityWatermarks.SetCleanShutdown(MMF, false);
+                DurabilityWatermarks.BeginOpenAfterCleanClose(MMF);
             }
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
@@ -2287,10 +2318,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             if (walSegmentsPresent)
             {
-                // A crash left a WAL window. Gate the crash-path secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component
-                // registration builds the ComponentTables — so the clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the
-                // matching Phase-5 rebuild, so clear and rebuild always agree.
-                WalFilesPresentAtOpen = true;
+                // WAL segments on disk are NOT evidence of a crash: they survive a clean close. Only an unclean close leaves a window to recover (#1143) —
+                // after a clean one the final checkpoint and data flush made the data file current before the flag was set (CS-01). Gate the crash-path
+                // secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component registration builds the ComponentTables — so the
+                // clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the matching Phase-5 rebuild, so clear and rebuild always
+                // agree. The scan below still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier
+                // (LOG-08).
+                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || _options.ForceCrashRecoveryAtOpen;
 
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
@@ -3023,6 +3057,101 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// The active-cluster list the last clean close recorded for <paramref name="segment"/>, or <c>null</c>. Only when the segment's own allocator
+    /// entry was used: an entry the load refused says the file does not match the summary there, and the cluster list is no better (#1143).
+    /// </summary>
+    private ClusterListSummary TakeClusterSummaryFor(ChunkBasedSegment<PersistentStore> segment)
+    {
+        var summary = MMF.TakeClusterSummary(segment.RootPageIndex);
+        return segment.LoadedFromSummary ? summary : null;
+    }
+
+    /// <summary>Diagnostic + test oracle: how the last open's read of the chunk summary ended (#1143); <c>NotConsulted</c> after an unclean close.</summary>
+    internal ChunkSummaryReadResult LastOpenChunkSummaryResult = ChunkSummaryReadResult.NotConsulted;
+
+    /// <summary>
+    /// Reads the chunk summary the last clean close wrote and hands it to the data file's chunk-segment loads (#1143). Called only after a clean close.
+    /// Any outcome but a verified file leaves the loads on their scan, so a missing, stale or damaged file costs time and nothing else.
+    /// </summary>
+    private void AdoptChunkSummary()
+    {
+        var path = MMF.ChunkSummaryPath;
+        var contents = ChunkSummaryFile.TryRead(path, DurabilityWatermarks.ReadChunkSummaryNonce(MMF), out var result);
+        LastOpenChunkSummaryResult = result;
+        MMF.AdoptChunkSummary(contents);
+
+        switch (result)
+        {
+            case ChunkSummaryReadResult.Loaded:
+                break;
+            case ChunkSummaryReadResult.Invalid:
+            case ChunkSummaryReadResult.Unreadable:
+                LogChunkSummaryRejected(result, path);
+                break;
+            default:
+                LogChunkSummaryNotUsed(result, path);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Writes the chunk summary for the next open and returns its nonce, or 0 when it could not be written — the next open then scans, which is slower and
+    /// otherwise harmless, so a failure here must not fail the close.
+    /// </summary>
+    private ulong WriteChunkSummary()
+    {
+        var path = MMF.ChunkSummaryPath;
+        var nonce = (ulong)Random.Shared.NextInt64(1, long.MaxValue);
+        try
+        {
+            MMF.WriteChunkSummary(nonce, CaptureClusterSummaries());
+            return nonce;
+        }
+        catch (Exception e)
+        {
+            // Any failure, not just I/O: the summary is optional and the close must reach the data flush, the WAL and the file handles (CS-05).
+            LogChunkSummaryWriteFailed(e, path);
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Every archetype's active-cluster list, for the chunk summary. An archetype with none to record is left out and scans at the next open.
+    /// </summary>
+    private List<ClusterListSummary> CaptureClusterSummaries()
+    {
+        var list = new List<ClusterListSummary>();
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return list;
+        }
+
+        for (var i = 0; i < states.Length; i++)
+        {
+            var summary = states[i]?.ClusterState?.CaptureClusterSummary();
+            if (summary != null)
+            {
+                list.Add(summary);
+            }
+        }
+
+        return list;
+    }
+
+    [LoggerMessage(LogLevel.Information,
+        "Open: chunk summary not used ({result}, {path}) — chunk segments rebuild their allocators by reading every page")]
+    private partial void LogChunkSummaryNotUsed(ChunkSummaryReadResult result, string path);
+
+    [LoggerMessage(LogLevel.Warning,
+        "Open: chunk summary rejected ({result}, {path}) — the file is damaged or unreadable; chunk segments rebuild their allocators by reading every page")]
+    private partial void LogChunkSummaryRejected(ChunkSummaryReadResult result, string path);
+
+    [LoggerMessage(LogLevel.Warning,
+        "Close: the chunk summary could not be written ({path}); the next open will read every chunk-segment page to rebuild its allocators")]
+    private partial void LogChunkSummaryWriteFailed(Exception exception, string path);
+
+    /// <summary>
     /// Records the clean-shutdown flag so the next open can trust the persisted Versioned-component HEAD values and skip
     /// the O(entities) <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> walk. Sets
     /// <see cref="BK_CleanShutdown"/> = 1 and fsyncs it on its own. The flag is deliberately NOT keyed on the checkpoint LSN watermark
@@ -3035,9 +3164,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// is only durable once every cluster page whose HEADs it vouches for is already durable, so a torn close leaves the
     /// flag unwritten and the next open conservatively rebuilds. See rules/durability.md (CS-01).
     /// </remarks>
-    private void MarkCleanShutdown()
+    private void MarkCleanShutdown(ulong chunkSummaryNonce)
     {
-        DurabilityWatermarks.SetCleanShutdown(MMF, true);
+        DurabilityWatermarks.MarkCleanShutdown(MMF, chunkSummaryNonce);
         var checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         LogCleanShutdownMarked(checkpointLsn);
         LogWalWatermarksSnapshot("close", checkpointLsn);
@@ -3728,6 +3857,69 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     public void InitializeArchetypes()
     {
+        // Cleared only by a run that returns: one that throws leaves the engine half-built, and DisposeCore then closes it as a crash (#1147).
+        _archetypeInitIncomplete = true;
+
+        // A repeat call (#790) rebuilds _archetypeStates from scratch: until it completes, a checkpoint must not persist the half-built table's segment
+        // pointers. The crash path re-arms before its seal and the end of the core arms it for steady state.
+        _archetypeSpiPersistArmed = false;
+        try
+        {
+            InitializeArchetypesCore();
+        }
+        finally
+        {
+            // The summary describes the file only as the last close left it: nothing after this open may use it, whether the open completed or not.
+            MMF.ReleaseChunkSummary();
+        }
+
+        _archetypeInitIncomplete = false;
+
+        // The open the marker guards has completed: from here a crash is an ordinary one, whose recovery may replace a torn segment (CS-04). Set at the
+        // start of the open (BeginOpenAfterCleanClose) and cleared only now, so an open that dies before this point leaves it for the next one.
+        if ((_cleanShutdownAtOpen || _failedOpenAtOpen) && !_failedOpenCleared)
+        {
+            DurabilityWatermarks.ClearFailedOpen(MMF);
+            _failedOpenCleared = true;
+        }
+    }
+
+    /// <summary>Whether this session cleared the failed-open marker its open set (once, at the first completed <see cref="InitializeArchetypes"/>).</summary>
+    private bool _failedOpenCleared;
+
+    /// <summary>
+    /// Whether this open's segment loads may replace a segment that fails to load with a fresh one for WAL replay to refill (RB-01, #395): only after an
+    /// unclean close, and not when the last session was an open that failed after a clean close (#1147). After a clean close the WAL holds nothing to
+    /// refill it from — which is also true of a repair's forced recovery open (<see cref="DatabaseEngineOptions.ForceCrashRecoveryAtOpen"/>): it takes
+    /// the crash path to rebuild derived structures, and must not empty a damaged segment on the way.
+    /// </summary>
+    internal bool TolerateTornSegmentsAtOpen => CrashRecoveryAtOpen && !_cleanShutdownAtOpen && !_failedOpenAtOpen;
+
+    /// <summary>
+    /// Whether the last session was an open after a clean close that never completed (<see cref="DurabilityWatermarks.BeginOpenAfterCleanClose"/>).
+    /// </summary>
+    private bool _failedOpenAtOpen;
+
+    /// <summary>
+    /// Set while <see cref="InitializeArchetypes"/> runs and left set when it throws. <see cref="DisposeCore"/> then skips every final-persistence step, as
+    /// a crash would (#1147).
+    /// </summary>
+    /// <remarks>
+    /// A failed open is disposed by its host (<c>TyphonBuilderExtensions</c>, <c>DatabaseEngine.Open</c>), and a full close from there persisted the
+    /// archetype table as far as the open had built it: an archetype whose cluster state was never built was written with no cluster segment, orphaning
+    /// every entity it held, and the clean flag then told the next open to trust that. Skipping the persistence leaves the flag cleared (CS-02 cleared it
+    /// at open), so the next open recovers from the log instead.
+    /// </remarks>
+    private bool _archetypeInitIncomplete;
+
+    /// <summary>
+    /// Test seam (#1147): invoked by <see cref="InitializeArchetypes"/> for each archetype after its entity map is set up and before its cluster state is
+    /// built, so a fixture can fail an open at the point that leaves an archetype half-built. Null in production: one null check per archetype per open.
+    /// </summary>
+    internal Action<ushort> ArchetypeClusterInitProbe { get; set; }
+
+    private void InitializeArchetypesCore()
+    {
         ArchetypeRegistry.Freeze();
 
         // Open-time latency instrumentation (#diagnose-open): the three reopen rebuilds below are O(entities) and run on
@@ -4007,7 +4199,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             bool isFreshAllocation;
             if (!hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0
-                && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, WalFilesPresentAtOpen))
+                && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, TolerateTornSegmentsAtOpen))
             {
                 // Reload existing EntityMap from persisted segment (O(1) reopen)
                 var em = RawValuePagedHashMap<long, PersistentStore>.Open(loadedSegment, 256, meta._entityRecordSize);
@@ -4052,6 +4244,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _archetypeStates[meta.ArchetypeId].MembershipViews =
                 _membershipByCatalog[meta.ArchetypeId] ??= new ArchetypeMembershipRegistry();
 
+            // Between the entity map and the cluster state: an open that fails here leaves the archetype half-built, the shape #1147 persisted.
+            ArchetypeClusterInitProbe?.Invoke(meta.ArchetypeId);
+
             // Create or reload ClusterState for cluster-eligible archetypes.
             if (isClusterEligible)
             {
@@ -4092,7 +4287,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // is worse than starting empty because it looks like data. Fall through to a fresh allocation; RebuildClusterFromChains re-places the
                     // entities and RebuildVersionedHeadFromChain refills the slots (#671).
                     var loaded = !isPureTransient && !hasMigratedSlot && MMF.TryLoadChunkBasedSegment(
-                        clusterPersisted.Arch.ClusterSegmentSPI, clusterLayout.ClusterStride, out loadedCluster, WalFilesPresentAtOpen);
+                        clusterPersisted.Arch.ClusterSegmentSPI, clusterLayout.ClusterStride, out loadedCluster, TolerateTornSegmentsAtOpen);
 
                     // TransientStore segment always created fresh on reopen (Transient data doesn't survive restart)
                     ChunkBasedSegment<TransientStore> transientClusterSegment = default;
@@ -4105,7 +4300,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     if (loaded)
                     {
                         using var clusterEpoch = EpochGuard.Enter(EpochManager);
-                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(clusterLayout, loadedCluster, transientClusterSegment, transientClusterStore));
+                        var clusterState = AttachCellTreeFactory(ArchetypeClusterState.CreateFromExisting(clusterLayout, loadedCluster,
+                            transientClusterSegment, transientClusterStore, TakeClusterSummaryFor(loadedCluster)));
                         _archetypeStates[meta.ArchetypeId].ClusterState = clusterState;
 
                         // Sync TransientSegment chunk IDs with PersistentStore's active clusters
@@ -4164,7 +4360,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // built from FINAL head data and this block runs BEFORE RunWalV2Recovery. Rebuilding here would index pre-apply state — an index that
                         // is confidently wrong rather than merely stale. Mirrors ComponentTable.BuildIndexedFieldInfo / RebuildSecondaryIndexes for the
                         // per-ComponentTable home.
-                        var crashPath = WalFilesPresentAtOpen;
+                        var crashPath = CrashRecoveryAtOpen;
                         var loadIndexes = false;
                         ChunkBasedSegment<PersistentStore> indexSegment;
                         // A component that GAINED an index cannot have its TREES loaded: BuildIndexSlot passes one `load` flag for every indexed field of the
@@ -4189,7 +4385,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
 
                         if (indexSPI > 0 && MMF.TryLoadChunkBasedSegment(indexSPI, 256 /* sizeof(Index64Chunk) */, 
-                                out var loadedIdx, crashPath))
+                                out var loadedIdx, TolerateTornSegmentsAtOpen))
                         {
                             indexSegment = loadedIdx;
                             loadIndexes = !crashPath && !hasNewIndex;
@@ -4213,7 +4409,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         ChunkBasedSegment<PersistentStore> string64IndexSegment = null;
                         if (ArchetypeHasIndexedString64Field(slotToTable))
                         {
-                            if (s64SPI > 0 && MMF.TryLoadChunkBasedSegment(s64SPI, Unsafe.SizeOf<IndexString64Chunk>(), out var loadedS64, crashPath))
+                            if (s64SPI > 0 && MMF.TryLoadChunkBasedSegment(s64SPI, Unsafe.SizeOf<IndexString64Chunk>(), out var loadedS64,
+                                    TolerateTornSegmentsAtOpen))
                             {
                                 string64IndexSegment = loadedS64;
                             }
@@ -4513,7 +4710,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Recovery is now complete — restore the configured CRC verification mode (deferred to RecoveryOnly at open on the crash path, see
         // InitializeCheckpointManager) so normal operation gets on-load corruption detection again.
-        if (WalFilesPresentAtOpen)
+        if (CrashRecoveryAtOpen)
         {
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
@@ -4541,17 +4738,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// Runs <see cref="RecoveryDriver"/> over the retained WAL segments after archetype initialization. Applies every committed
-    /// record past the persisted CheckpointLSN through the engine's own write primitives (P1.2). Guarded on WAL files existing,
-    /// so a clean reopen (recycled WAL) skips it entirely.
+    /// record past the persisted CheckpointLSN through the engine's own write primitives (P1.2). Guarded on <see cref="CrashRecoveryAtOpen"/>,
+    /// so a clean reopen skips it entirely, WAL files on disk or not (#1143).
     /// </summary>
     private void RunWalV2Recovery()
     {
         var walDir = _options.Wal?.WalDirectory;
-        if (!WalFilesPresentAtOpen)
+        if (!CrashRecoveryAtOpen)
         {
             return;
         }
 
+        LastOpenRanCrashRecovery = true;
         long checkpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
@@ -4703,15 +4901,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        // A clean shutdown consolidated the bitmap on its way out, so there is nothing to heal and the persisted copy is authoritative. WalFilesPresentAtOpen —
-        // the flag that brought us here — means "WAL segments exist on disk", which a clean shutdown does not preclude, so on its own it is not a statement
-        // that this session is recovering from a crash (#771). Checked here rather than by narrowing WalFilesPresentAtOpen itself: that flag also gates
-        // the RB-01 secondary-index clear+rebuild and the page-checksum mode, and those two must keep agreeing by reading one flag.
-        if (DurabilityWatermarks.ReadCleanShutdown(MMF))
-        {
-            return;
-        }
-
+        // Crash path only: the caller runs under CrashRecoveryAtOpen, which is false after a clean close — the bitmap was consolidated on the way out and
+        // the persisted copy is authoritative. #771 guarded this method by reading the on-disk clean flag here, but CS-02 has already cleared that flag by
+        // now, so the guard never fired and every open with WAL files on disk re-derived. The gate now sits at the source, for every recovery step (#1143).
         var owned = BuildOwnedPageBitmap(out _, out var unresolvedPersistedSpis);
 
         // CK-09 adopts this bitmap WHOLESALE — a full replacement, not a read-then-diff — so every page it fails to attribute is written as free. That is only
@@ -4982,9 +5174,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // and the crash rebuild derives its entries from cluster occupancy, which on that fresh cluster is empty. It would "rebuild" the map to nothing and
             // `continue` past RebuildClusterFromChains below, the only pass that re-places the entities. Every entity of the archetype would be gone.
             //
-            // This is not a crash-only path: WalFilesPresentAtOpen is true whenever *.wal files exist, and they survive a CLEAN shutdown — so it is every
-            // reopen after a schema change on a disk-backed WAL, i.e. every production one. It stayed invisible because TestBase defaults to InMemoryWalFileIO,
-            // which leaves the WAL directory empty and the whole branch unentered (regression test: MigratingReopen_OnDiskWal_PreservesEntities).
+            // This used to be reached on every reopen after a schema change on a disk-backed WAL, i.e. every production one: the gate meant "*.wal files
+            // exist", and they survive a CLEAN shutdown. It stayed invisible because TestBase defaults to InMemoryWalFileIO, which leaves the WAL directory
+            // empty and the whole branch unentered (regression test: MigratingReopen_OnDiskWal_PreservesEntities). The gate now requires an unclean close
+            // (#1143); the migration exclusion stays, because a crash can still precede a migrating open.
             if (WillRebuildEntityMapOnCrash(meta) && !HasMigratedSlot(state))
             {
                 RebuildEntityMapOnCrash(meta, state);
@@ -5168,7 +5361,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        if (!MMF.TryLoadChunkBasedSegment(entityMapSpi, stride, out var oldSegment, WalFilesPresentAtOpen))
+        if (!MMF.TryLoadChunkBasedSegment(entityMapSpi, stride, out var oldSegment, TolerateTornSegmentsAtOpen))
         {
             return;
         }
@@ -5252,7 +5445,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        if (!MMF.TryLoadChunkBasedSegment(persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride, out var oldSegment, WalFilesPresentAtOpen))
+        if (!MMF.TryLoadChunkBasedSegment(persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride, out var oldSegment, TolerateTornSegmentsAtOpen))
         {
             ThrowHelper.ThrowInvalidOp(
                 $"Archetype '{meta.Name}' has a SingleVersion component and a schema migration, but its pre-migration cluster segment (SPI "
@@ -5314,7 +5507,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                 try
                 {
-                    // tolerateTorn: true unconditionally, not gated on WalFilesPresentAtOpen like every other load in this file. Those loads gate on it because
+                    // tolerateTorn: true unconditionally, not gated on CrashRecoveryAtOpen like every other load in this file. Those loads gate on it because
                     // they go on to READ the segment and a torn one must not be trusted; this one wants nothing but the page list, and a segment we are about
                     // to delete has no content left to be wrong about.
                     if (MMF.TryLoadChunkBasedSegment(rootPageIndex, stride, out _, true))
@@ -5683,6 +5876,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// RecordsScanned-only assertion hides a recovery that never applies). Default when no crash recovery ran this open.</summary>
     internal RecoveryDriver.Result LastWalV2RecoveryResult;
 
+    /// <summary>Diagnostic + test oracle: whether the last open ran the crash-recovery pipeline (replay, scrub, index and spatial rebuild, seal, occupancy
+    /// re-derive). False after a clean close even when WAL files are on disk (#1143).</summary>
+    internal bool LastOpenRanCrashRecovery;
+
     /// <summary>Diagnostic: the checkpoint-LSN threshold used by the last WAL v2 recovery (records at/below it are skipped as already-consolidated). Test-observable so a
     /// regression can assert the recovery window's record LSNs sit ABOVE it (the post-reopen-window-loss class: a reopened session whose record LSNs fall below a prior
     /// session's persisted CheckpointLSN is silently dropped).</summary>
@@ -5798,7 +5995,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// hash-directory pointers are garbage — so nothing may read it. Single predicate shared by the rebuild gate and the deferral it drives, so the two
     /// can never disagree about which archetypes have an untrusted map.
     /// </summary>
-    private bool WillRebuildEntityMapOnCrash(ArchetypeMetadata meta) => WalFilesPresentAtOpen && IsEntityMapRebuildable(meta) && !DisableEntityMapRebuildForTest;
+    private bool WillRebuildEntityMapOnCrash(ArchetypeMetadata meta) => CrashRecoveryAtOpen && IsEntityMapRebuildable(meta) && !DisableEntityMapRebuildForTest;
 
     internal bool IsEntityMapRebuildable(ArchetypeMetadata meta)
     {
@@ -5881,13 +6078,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return SnapshotEnabledBits(state.EntityMap);
     }
 
-    /// <summary>Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/>.</summary>
+    /// <summary>
+    /// Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/> it can reach. The map is one an open is about to replace and may be
+    /// torn, so the walk is the damage-tolerant one: the optimistic walk retried a torn bucket forever (#1143 exposed it).
+    /// </summary>
     private static Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
     {
         var snapshot = new Dictionary<long, ushort>();
         var accessor = map.Segment.CreateChunkAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
-        map.ForEachEntry(ref accessor, ref action);
+        map.ForEachEntryQuiescent(ref accessor, ref action);
         accessor.Dispose();
         return snapshot;
     }
@@ -6036,7 +6236,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// crash (D1): post-recovery there are no readers of pre-crash snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap
     /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
     /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
-    /// Invoked only on the crash path (WAL files present); a clean reopen keeps its chains for lazy cleanup.
+    /// Invoked only on the crash path (CrashRecoveryAtOpen: WAL segments present and an unclean close); a clean reopen keeps its chains for lazy cleanup.
     /// </summary>
     private void ScrubVersionedChains()
     {

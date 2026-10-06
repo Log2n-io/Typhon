@@ -658,6 +658,81 @@ internal static class DamageKit
         return false;
     }
 
+    /// <summary>
+    /// Shortens one segment's forward data-page chain by a page: its second-to-last page now links to 0, so the chain stops one page short of the
+    /// directory — the shape a grow leaves when its chain pointer did not reach the disk (CHK-SEG-05, #382).
+    /// </summary>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="segmentRoot">Receives the damaged segment's root page.</param>
+    /// <param name="kind">Only a segment of this kind; <c>null</c> for the first segment long enough.</param>
+    /// <param name="root">Only the segment rooted at this page; 0 for any.</param>
+    internal static DamageRecord ShortenForwardChain(string bundlePath, out int segmentRoot, StorageSegmentKind? kind = null, int root = 0)
+    {
+        var (seg, damagedPage) = FindChainToDamage(bundlePath, kind, root);
+        segmentRoot = seg;
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, ((long)damagedPage * IntegrityConstants.PageSize) + PageImage.NextRawDataPageOffset, 0) };
+        ranges.AddRange(RestampPage(bundlePath, damagedPage));
+
+        return new DamageRecord(
+            "D-chain(shortened)",
+            $"the segment rooted at page {segmentRoot} now ends its forward chain one page before its directory does",
+            ranges,
+            [SegmentChecks.DirectoryChain],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
+    /// <summary>
+    /// Closes one segment's forward chain on itself: its last page now links back to the root, so the chain never ends — the shape an engine walking it
+    /// would loop on forever (CHK-SEG-06, fatal).
+    /// </summary>
+    internal static DamageRecord LoopForwardChain(string bundlePath, out int segmentRoot)
+    {
+        int last;
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            (segmentRoot, _) = FindChainToDamage(source, null, 0);
+            last = new SegmentWalker(source).WalkSegment(segmentRoot).Pages[^1];
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, ((long)last * IntegrityConstants.PageSize) + PageImage.NextRawDataPageOffset, segmentRoot) };
+        ranges.AddRange(RestampPage(bundlePath, last));
+
+        return new DamageRecord(
+            "D-chain(loop)",
+            $"the segment rooted at page {segmentRoot} now links its last page back to its root",
+            ranges,
+            [SegmentChecks.DirectoryTraversal],
+            IntegrityVerdict.Unopenable,
+            RepairIsLossless: false);
+    }
+
+    private static (int Root, int SecondToLastPage) FindChainToDamage(string bundlePath, StorageSegmentKind? kind, int root)
+    {
+        using var source = new OfflineBundlePageSource(bundlePath);
+        return FindChainToDamage(source, kind, root);
+    }
+
+    private static (int Root, int SecondToLastPage) FindChainToDamage(IPageSource source, StorageSegmentKind? kind, int root)
+    {
+        var walker = new SegmentWalker(source);
+        foreach (var r in SweepRoots(source))
+        {
+            if (root != 0 && r != root)
+            {
+                continue;
+            }
+
+            var seg = walker.WalkSegment(r);
+            if (seg.DirectoryComplete && seg.Pages.Count >= 3 && (kind == null || seg.Kind == kind))
+            {
+                return (r, seg.Pages[^2]);
+            }
+        }
+
+        throw new InvalidOperationException($"no {kind?.ToString() ?? "any"} segment of three pages or more{(root != 0 ? $" at page {root}" : "")}");
+    }
+
     /// <summary>Every segment root the physical sweep finds — the list every pointer is validated against.</summary>
     private static List<int> SweepRoots(IPageSource source)
     {
