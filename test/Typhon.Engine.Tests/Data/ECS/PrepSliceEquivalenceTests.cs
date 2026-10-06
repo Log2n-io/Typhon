@@ -376,6 +376,50 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     [VerifiesRule("CR-01")]
     public void ParallelFence_AtOneWorker_IsNotSliced_AndMatchesTheSerialFence() => AssertArmMatchesSerial(1, expectSlices: false);
 
+    /// <summary>
+    /// The element id a sliced Prep writes into a cluster's tail (the tag's index move, step ③) survives the page cache evicting every page it may evict
+    /// between Prep and Migrate. Unrecorded, the write was lost with the page: Migrate read the old id, its location update named a chunk that no longer held
+    /// the element and was dropped, and the index kept the entity at the slot it had left (#1171).
+    /// </summary>
+    /// <remarks>
+    /// Found because #1143 stopped the open from reading the whole file: the cache stayed cold, the fence's own loads evicted pages, and the fixture's
+    /// second arm lost entries in every run. The eviction here is what made it certain: every Idle page with no writer, no slot reference, no debt and no
+    /// live epoch goes, which is exactly what the cache is allowed to do at that point.
+    /// </remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("PS-10")]
+    public void AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = SetupEngine(scope);
+        var ids = Spawn(dbe);
+        dbe.WriteTickFence(1);
+
+        var evicted = 0;
+        var cs = ClusterStateOf(dbe);
+        ArchetypeClusterState.PrepQueueProbe = (state, _) =>
+        {
+            if (ReferenceEquals(state, cs))
+            {
+                evicted += dbe.MMF.EvictEvictablePagesForTest();
+            }
+        };
+
+        try
+        {
+            RunParallel(dbe, 2, ids, new Outcome());
+        }
+        finally
+        {
+            ArchetypeClusterState.PrepQueueProbe = null;
+        }
+
+        Assert.That(evicted, Is.GreaterThan(0), "premise: the cache evicted pages between Prep and Migrate");
+        IndexDataOracle.AssertIndexAgreesWithData<ClMigUnit>(dbe, "after a fence whose cache evicted every evictable page between Prep and Migrate");
+    }
+
     [Test]
     [CancelAfter(120_000)]
     [Property("CacheSize", 64 * 1024 * 1024)]

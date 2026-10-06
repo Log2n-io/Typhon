@@ -1576,6 +1576,35 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Slot read tasks currently recorded. Test seam: the table holds only reads not yet observed.</summary>
     internal int ReadTaskCountForTests => _readTasks.Count;
 
+    /// <summary>
+    /// Test seam: evicts every page the cache may evict right now — Idle, no slot reference, no active writer, not dirty, no writeback debt, no live
+    /// epoch tag (<see cref="TryAcquire"/>'s own rules) — and leaves the slots Free. The cache does this one page at a time under pressure; doing it all at
+    /// once makes a write that was not recorded (PS-10) disappear deterministically instead of whenever an allocation happens to take its page.
+    /// </summary>
+    /// <returns>The number of pages evicted.</returns>
+    internal int EvictEvictablePagesForTest()
+    {
+        var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        var evicted = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            var pi = Slot(i);
+            if (pi.PageState != PageState.Idle || !TryAcquire(i, minActiveEpoch))
+            {
+                continue;
+            }
+
+            // TryAcquire left it Allocating for a new owner; there is none, so hand it back as Free, as the lost-race path of AllocateMemoryPageCore does.
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            pi.PageState = PageState.Free;
+            pi.StateSyncRoot.ExitExclusiveAccess();
+            Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            evicted++;
+        }
+
+        return evicted;
+    }
+
     /// <summary>Read-table lookups a requester has made on this thread. Test seam: a hit on an observed read makes none. Per thread, so
     /// counting costs no shared write.</summary>
     [ThreadStatic]
