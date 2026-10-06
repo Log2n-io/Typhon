@@ -670,8 +670,8 @@ caller holds decides what it may do, and the write paths rely on preconditions o
   on_violation: before #997 one `EntityRef` served both kinds of open, told apart by a `_writable` flag checked only
                 when `CheckConfig.Enabled` (off by default). With checks off, `Open(id).Write(...)` wrote in place into
                 HEAD from a transaction that never ran `EnsureMutable` — a read-only or already finalized one included —
-                and never moved to InProgress. The value was not lost (the fence's PS-10 backstop records the page); the
-                transaction's own contract was.
+                and never moved to InProgress. Nothing recorded the page before the fence, so an eviction lost the value (#1172); the
+                transaction's own contract was broken too.
   note: `Commit()` on a transaction that did nothing returns true and leaves it in `Created`, so it still accepts a
         writable open afterwards. That is the commit path's behaviour, not a gap in the prep.
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes [VerifiesRule] (the type split as an

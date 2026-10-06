@@ -1444,17 +1444,26 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle,
          ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
          ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
-         DatabaseEngine.DrainClusterShadowSlots
+         DatabaseEngine.DrainClusterShadowSlots, EntityRefMut.Write, EntityAccessor.NoteSvInPlacePageWrite, PagedMMF.MemPageIndexOf,
+         DatabaseEngine.MarkClusterSlotDirty, ArchetypeClusterState.RebuildIndexesFromData
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
             page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed);
             PageSlotRecordTests.ACaptureLandingAfterTheSlotWasReused_LeavesItsNextPageClean [VerifiesRule] (fails with the reset to 0 restored);
-            PrepSliceEquivalenceTests.AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage [VerifiesRule] (evicts every evictable page between
-            Prep and Migrate; fails with the drain's page record removed)
+            PrepSliceEquivalenceTests.AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage [VerifiesRule] (a checkpoint settles the writes' own
+            records, then every evictable page goes between Prep and Migrate; fails 5 of 5 with the drain's page record removed);
+            InPlaceClusterWriteSurvivalTests.CommittedPointWritesSurviveEviction [VerifiesRule] (both Write overloads; 400 of 400 committed point writes
+            revert with the write's page record removed, and the by-type case fails with only its own record removed)
+  note a SingleVersion point write (EntityRefMut.Write) records its page at Write (#1172), by address with no page lookup (MemPageIndexOf), since it runs
+       once per written component. Before #1172 nothing recorded it: a committed value reverted whenever the cache evicted the page before the next fence.
+       The caller stores through the returned ref afterwards. That is safe while the resolving chunk accessor still maps the page dirty, which keeps the
+       checkpoint from copying it. OPEN (#1176): a store after that accessor released the page (an archetype switch, or 31 other pages) can land after a
+       checkpoint copied and settled the page, and then reverts at eviction
   note the fence's shadow drain writes an AllowMultiple field's new element id into the cluster tail through the slice's accessor, which holds no
        ChangeSet, and records the page at that write (#1171). The WAL emit's record comes later, at Finalize: in between, Migrate's own loads can evict a
        page nothing marks, and the element id went with it — Migrate read the old id, its location update was dropped, and the index kept the entity at
        the slot it had left
-  note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty) and WriteSpatial. They record the page at the
+  note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty, or by DatabaseEngine.MarkClusterSlotDirty),
+       WriteSpatial, and the index rebuild's element-id writes (RebuildIndexesFromData, once per cluster). They record the page at the
        write (MarkPageModified), and the fence's WAL emit records every cluster page it serialises besides — as writeback debt, not as a dirty mark in a
        ChangeSet, because the serial fence SAVES its own ChangeSet and would then write data pages outside the checkpoint's WAL barrier (CK-02). Before 2026-09-23 neither did: committed values reverted to the
        on-disk image whenever an unrelated allocation evicted the page (found by the push-replication oracle; seed 9160 reverted four creatures inside a
