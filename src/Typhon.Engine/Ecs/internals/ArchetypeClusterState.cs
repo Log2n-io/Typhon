@@ -10361,6 +10361,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Marks every cluster that holds entities as holding values its zone maps never saw (#1151). Called once, at the end of an open, after every path that
+    /// fills a cluster without widening a zone map: the load itself, the schema-migration rebuild (<c>RebuildClusterFromChains</c>) and WAL replay
+    /// (<c>RecoveryApplier</c>).
+    /// </summary>
+    /// <remarks>
+    /// Zone maps are not persisted and the open does not scan the data to rebuild them, so a cluster holding entities after an open holds values its maps
+    /// never saw. Marked Unknown it is never pruned, and a later widen cannot narrow it to the one value it carries and hide the cluster's other rows from
+    /// scans. A recompute at the tick fence bounds it again. Transient slots too: the Transient columns of a reopened cluster hold defaults nothing widened
+    /// in. Marking where the maps are built (<c>InitializeIndexes</c>) was too early: recovery and the migration rebuild fill clusters after it.
+    /// </remarks>
+    internal void MarkActiveClustersZoneMapsUnknown()
+    {
+        var activeIds = ReadActiveClusterList(out var activeCount);
+        if (activeCount > 0)
+        {
+            MarkZoneMapsUnknown(IndexSlots, activeIds.AsSpan(0, activeCount));
+            MarkZoneMapsUnknown(TransientIndexSlots, activeIds.AsSpan(0, activeCount));
+        }
+    }
+
+    private static void MarkZoneMapsUnknown<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ReadOnlySpan<int> clusterChunkIds) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return;
+        }
+
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            var fields = ixSlots[s].Fields;
+            for (var f = 0; f < (fields?.Length ?? 0); f++)
+            {
+                fields[f].ZoneMap?.MarkUnknown(clusterChunkIds);
+            }
+        }
+    }
+
+    /// <summary>
     /// Builds one component slot's index metadata + B+Trees against <paramref name="defaultSegment"/> / <paramref name="string64Segment"/>.
     /// </summary>
     /// <remarks>

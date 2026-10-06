@@ -196,14 +196,78 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   scope: `Transaction.PublishComponent` / `PublishClusterVersionedSlot` (component publish); `FlushEcsPendingOperations` /
          `FinalizeSpawns` (spawn publish)
   status: **PARTIAL.** Component publish is non-throwing — the revision handle is reconstructed in publish from coordinates
-          captured in PREPARE (no locking `GetRevisionElement` walk), and the publish acts are field writes + memcpy; the publish
-          drain releases each retained lock exactly once via a drain cursor. **RESIDUAL:** the spawn publish (`FinalizeSpawns`)
+          captured in PREPARE, re-checked under the chain lock taken with an UNBOUNDED wait (AP-05), and the publish acts are
+          field writes + memcpy; the publish drain releases each retained lock exactly once via a drain cursor. The wait cannot
+          deadlock, but it is not bounded either: readers walking a chain with a pending entry hold the lock shared, and
+          AccessControlSmall gives a waiting writer no preference. **RESIDUAL:** the spawn publish (`FinalizeSpawns`)
           can still throw on allocation (cluster `ClaimSlot` grow, EntityMap `InsertNew` grow, index B+Tree node alloc under
           page-cache backpressure). Full closure is P2-entangled — the clean sentinel-`BornTSN` flip is blocked for cluster by
           the SoA occupancy-based iteration (it would leak prepared, not-yet-published spawns to bulk SoA scans), so eliminating
           spawn-publish throws requires pre-growing all spawn segments before Append and/or unbounded-watchdog insert locks.
           Tracked: **#396** (to be done with the P2 cluster-durability rework)
   on_violation: partial publish with no compensation (TXW-8 class)
+
+### AP-04: Every byte a publish writes is owed to the disk `[fatal]` `[silent]`
+  invariant ∀ page p a commit writes through its cluster accessor — in PUBLISH the Versioned HEAD copy into the cluster slot and a
+            Commit-discipline staged value, in PREPARE an AllowMultiple element id: after the write, p owes a writeback
+            (WritebackGen ≠ CapturedGen) until a durable write discharges it
+  invariant the commit's cluster accessor carries the transaction's ChangeSet, like its index accessors
+  note a dirty write through an accessor WITHOUT a ChangeSet owes nothing, and that is by design for the in-place SingleVersion writes made
+       through the transaction's own cluster accessor: their durability is the tick fence's (cluster-page-durability.md). Making every such
+       write owe its page at write time was tried and rejected — the page is then collected while the writer still holds it, and checkpoint
+       cycles gate on it (CommittedDisciplineRecoveryTests turned red). The publish is different: it runs after the append, as the last act
+       of a commit nothing else will make durable
+  rationale: the cluster accessor had no ChangeSet, so marking a slot dirty only toggled ActiveChunkWriters. The page owed nothing: no
+             checkpoint and no close wrote it, the cache could evict it and reload the old bytes, and the fence does not help — it
+             stopped emitting Versioned slots in #559. A clean reopen then trusted the stale HEAD (CS-03): Path-B scans and bulk
+             iteration returned the old value while point reads, which walk the chain, returned the new one (#1159)
+  scope: Transaction.EnsureClusterCommitAccessors, Transaction.PublishClusterVersionedSlot, Transaction.PublishStagedEntry
+  on_violation: a committed update vanishes from the cluster slot across a clean reopen or an eviction — silently, while the revision
+                chain and the index keep the new value
+  verified: VersionedPublishDurabilityTests.AVersionedUpdate_OnACleanPage_IsWrittenAndSurvivesACleanReopen [VerifiesRule];
+            mutant VersionedPublishDurabilityTests.APublishThroughAnAccessorWithoutAChangeSet_LeavesThePageClean [RuleMutant]
+
+### AP-05: A publish stamps the entry it prepared, wherever it now is `[fatal]` `[silent]`
+  invariant the publication acts on a revision chain — TSN stamp + IsolationFlag clear, LastCommitRevisionIndex, CommitSequence —
+            run under the chain's exclusive lock: the one PREPARE retained (conflict-handler path), else one PUBLISH takes with an
+            unbounded wait (so AP-03 still holds — no bounded timeout, nothing to throw)
+  invariant under a lock retained from PREPARE no compaction can have run, and the recorded coordinates are exact. Otherwise they
+            are used only while they still name this transaction's pending entry (isolated, and its content chunk — or, for a
+            delete, no chunk and its TSN); else the entry is found again by that identity, under the same lock. A root-chunk slot
+            can be checked in place: a compaction rewrites the root chunk whole and zeroes what it vacates. An overflow chunk's
+            coordinates are never trusted: compaction may have freed and reissued the chunk with a stale copy of the entry in it
+  invariant an entry that cannot be found is not published at all — no stamp, no LCRI, no CommitSequence, no cluster copy —
+            and the loss is logged (DatabaseEngine.LogPublishEntryNotFound). Compaction keeps isolated entries, so only an unlocked
+            writer elsewhere can cause it (#1161); stamping the recorded slot anyway would publish another transaction's entry
+  rationale: without a handler PREPARE holds no chain lock, and a deferred cleanup on another thread could compact the chain
+             between PREPARE and PUBLISH — CleanUpUnusedEntriesCore rewrites every kept entry from index 0, the pending one
+             included. The publish stamped the recorded position: it committed whatever had moved there (often the previous
+             revision, re-stamped with the new TSN) and left its own entry isolated forever. The commit returned success and no
+             reader ever saw it; under last-writer-wins the next read-modify-write built on the old value. Measured before the fix:
+             ~1 read in 200 stale at 4 threads. A stamp landing in a reissued overflow chunk that had become another chain's root
+             overwrote that chain's header (its indexes and item count), seen as lock timeouts on that chain (#1158)
+  scope: Transaction.PublishComponent, Transaction.IsThisTransactionsPendingEntry, ComponentRevisionManager.CleanUpUnusedEntriesCore,
+         ComponentRevisionManager.FindRevisionIndexByChunkId
+  on_violation: a committed revision is invisible to every later reader, silently — lost updates, and corrupted neighbouring
+                chain state when the stale position belongs to a reissued chunk
+  verified: VersionedPublishCompactionRaceTests: ACompactionBetweenPrepareAndPublish_LeavesTheCommitVisible (overflow chunk),
+            ..._InTheRootChunk_LeavesTheCommitVisible, ..._OfADestroy_LeavesTheEntityGone (the race staged on one thread through
+            DatabaseEngine.PublishComponentProbe; each also checks no entry stays isolated, LCRI and CommitSequence) [VerifiesRule];
+            mutant APublishThatTrustsItsPrepareCoordinates_LosesTheCommit, root and overflow [RuleMutant];
+            SerializedReadModifyWrites_AcrossThreads_AlwaysSeeThePreviousCommit (the shape found)
+
+### AP-06: The cluster slot holds the newest committed revision `[fatal]` `[silent]`
+  invariant a publish copies its value into the entity's cluster slot only under the chain's exclusive lock (AP-05), and only when
+            its revision is the newest committed one: its index ≥ the chain's LastCommitRevisionIndex before its own stamp
+  invariant so two publishes of one entity never copy concurrently, and the slot never moves back to an older revision
+  rationale: two transactions may update one entity concurrently — without a handler each prepares its own revision — and their
+             appends need not finish in revision order. The copy ran after the lock was released, unconditionally: the older
+             revision publishing last overwrote the newer, so point reads, which walk the chain, saw the newer value while bulk
+             iteration and Path-B scans, which read the slot, saw the older; a clean close then persisted the slot (CS-03)
+  scope: Transaction.PublishComponent, Transaction.PublishClusterVersionedSlot
+  on_violation: the cluster slot silently disagrees with the chain's HEAD until the entity's next commit
+  verified: VersionedPublishOrderTests.TwoUpdatesPublishedOutOfOrder_LeaveTheNewerValueInTheClusterSlot (the older publish held
+            after its append while the newer one commits) [VerifiesRule]
 
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths
@@ -1742,6 +1806,8 @@ of the LSN value).
   invariant trusted ⇒ skip RebuildVersionedHeadFromChain (persisted cluster-slot HEADs are current)
   invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved)
   scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain
+  requires AP-04 — "the flag says clean, therefore the HEADs are current" holds only if every published HEAD owes its page a write;
+    before #1159 a Versioned update on a page nothing else had dirtied was never written, and this rule trusted it
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
 
 ---

@@ -4512,11 +4512,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
         }
 
+        // Zone maps last (IXS-08, #1151): the load, the schema-migration rebuild and the WAL replay above all fill clusters without widening a zone map, so
+        // only now is every cluster that holds values its maps never saw known.
+        MarkZoneMapsUnknownAfterOpen();
+
         // Arm the checkpoint-time SPI persistence (#395 / CK-10) for the paths that did NOT go through recovery — a clean reopen, or a fresh database. From
         // here every steady-state checkpoint records the per-archetype segment SPIs so a consolidated cluster/EntityMap base is reachable on reopen after a
         // hard crash. The crash path arms it earlier, before its seal, because the seal advances CheckpointLSN and reclaims the WAL and so must persist the
         // SPIs in the same cycle (#715); this assignment is then a no-op for it.
         _archetypeSpiPersistArmed = true;
+    }
+
+    /// <summary>Marks every archetype's populated clusters Unknown in its zone maps (<see cref="ArchetypeClusterState.MarkActiveClustersZoneMapsUnknown"/>).</summary>
+    private void MarkZoneMapsUnknownAfterOpen()
+    {
+        var states = _archetypeStates;
+        for (var i = 0; i < (states?.Length ?? 0); i++)
+        {
+            states[i]?.ClusterState?.MarkActiveClustersZoneMapsUnknown();
+        }
     }
 
     /// <summary>
@@ -5675,6 +5689,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Test-only kill switch for the crash-path occupancy re-derive (genuineness probe): when set, recovery trusts the persisted occupancy bitmap so a
     /// proof-gate test can confirm the re-derive — not FPI — is what heals a torn occupancy page (<see cref="RederiveOccupancyOnCrash"/>).</summary>
     internal static bool DisableOccupancyRederiveForTest;
+
+    /// <summary>
+    /// Test hook: runs in <c>Transaction.PublishComponent</c> on the committing thread, after the WAL append and before the publication acts, with the
+    /// component table and the entity's revision-chain root — the window in which another thread's cleanup can compact the chain (#1158). Per engine, so a
+    /// fixture using it stays parallel-safe. Null in production.
+    /// </summary>
+    internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
+    /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool PublishTrustsPrepareCoordinatesForTest { get; set; }
+
+    /// <summary>The impossible branch of AP-05, logged rather than published through: see <c>Transaction.PublishComponent</c>.</summary>
+    [LoggerMessage(LogLevel.Error,
+        "Commit TSN {tsn}: the {component} revision it prepared is no longer in its chain (root chunk {firstChunkId}); the revision was not published")]
+    internal partial void LogPublishEntryNotFound(string component, int firstChunkId, long tsn);
 
     /// <summary>
     /// Whether this archetype's EntityMap can be fully re-derived from persisted data on a crash. True for cluster archetypes (the cluster slots persist

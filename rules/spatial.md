@@ -1406,13 +1406,17 @@
     of a coordinate, or of something tracking one; for an index on an unrelated quantity a re-sort neither helps
     nor harms, and claiming otherwise would be claiming magic
   scope: ArchetypeClusterState.InvalidateClusterZoneMaps, ZoneMapArray.Invalidate, ZoneMapArray.TryGetBounds
+  requires IXS-08 — the conservative direction holds only for a cluster the map has seen. A widen that started the bounds of a
+    cluster loaded at open did narrow, to the one value it carried, and hid the cluster's other rows (#1151). Invalidate
+    returns a cluster to Unset, which is right only for an empty cluster such as a destination a repair allocates. The
+    migration then widens its occupants into the persistent index home only, not the Transient one (#1162)
   verified: ClusterRepairTests.ARepairNarrowsTheZoneMapsOfTheCellItRepacks measures total recorded width before
     and after over every cluster of the cell and every indexed field; measured 3 541 -> 796 (22 %) at 2 000
     entities in 41 clusters. It also asserts the total is non-zero afterwards, so "narrower" cannot be satisfied
     by "invalidated and never re-widened"
   on_violation:
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
-    invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
+    invalidate without a following widen → the map has no bounds (Unset), which is conservative but buys no pruning
 
 ### TH-04: The maintenance budget follows the queries' efficiency, and the configured budget is its ceiling `[perf][silent]`
   invariant every consumer of the re-clustering budget — the repair planner (DatabaseEngine.FinishArchetypeFencePrep), the throttle

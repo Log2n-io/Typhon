@@ -289,6 +289,33 @@ keys.
                 `key < landedLeaf.firstKey`
   verified: BTreeDescentHopAtomicityTests.ParentVersionChangedWhileTakingTheChildVersion_RestartsTheDescent
 
+### IXS-08: A zone map bounds a cluster only after seeing every value the cluster holds `[silent]`
+  invariant ∀ cluster c, ∀ indexed field f with a zone map: state(c) == Bounded → [min, max] covers every value of f in c.
+    The states are Unset (nothing recorded, nothing unseen), Bounded, and Unknown (c may hold values the map never saw)
+  invariant every widen form (Widen, WidenInto, WidenMasked, WidenMaskedInto) leaves Unknown unchanged; only a recompute
+    (Recompute, RecomputeInto), which reads every occupied slot, takes a cluster out of Unknown. MayContain answers yes for every
+    state but Bounded
+  invariant zone maps are not persisted and no open path scans the data to rebuild them, so the end of every open marks each
+    cluster that holds entities Unknown, in the persistent and the Transient index homes alike — after the load, the
+    schema-migration rebuild (RebuildClusterFromChains) and WAL replay (RecoveryApplier), which all fill clusters without
+    widening. Marking where the maps are built (InitializeIndexes) is too early: the last two run after it
+  invariant State publishes a cluster's bounds to the lock-free readers: a writer stores Mins/Maxs first and Bounded last with
+    release; MayContain and TryGetBounds acquire State before reading them — on arm64 a plain pair lets a reader see Bounded
+    over bounds not yet written
+  rationale: "no bounds" was one state meaning both "nothing here yet" and "never seen". Every widen took it for the first, so
+    the first update after a reopen recorded [newValue, newValue] over a cluster holding dozens of other values, and Path B
+    pruned the cluster for all of them. Without a runtime no fence recomputed it, so the rows stayed hidden for the session (#1151)
+  scope: ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.WidenMasked, ZoneMapArray.WidenMaskedInto, ZoneMapArray.MarkUnknown,
+    ZoneMapArray.MayContain, ZoneMapArray.RecomputeInto, ArchetypeClusterState.MarkActiveClustersZoneMapsUnknown,
+    DatabaseEngine.InitializeArchetypes
+  on_violation: rows silently missing from Path-B scans — `WhereField` equality or a range that excludes the widened value —
+    while the B+Tree is intact and every structural validator passes; forcing Path A finds them. Measured: one update after a
+    reopen hid 63 of 200 entities (a whole 64-slot cluster minus the updated one), and the same after a crash recovery
+  verified: ZoneMapUnseenClusterTests.Widen_OnAClusterItHasNotSeen_LeavesItUnbounded (class),
+            ZoneMapUnseenClusterTests.AfterAReopen_UpdatingOneIndexedField_KeepsEveryClusterMateFindable (engine, Path B forced),
+            ZoneMapUnseenClusterRecoveryTests.AfterACrashRecovery_UpdatingOneIndexedField_KeepsEveryClusterMateFindable [VerifiesRule];
+            mutant ZoneMapUnseenClusterTests.Widen_OnAnUnseenClusterLeftUnmarked_PrunesTheValuesItHolds [RuleMutant]
+
 ---
 
 ## Module: IXW — Index writes under OLC
