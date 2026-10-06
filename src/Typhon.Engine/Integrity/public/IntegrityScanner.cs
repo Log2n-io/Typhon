@@ -133,6 +133,13 @@ public static class IntegrityScanner
     /// </remarks>
     private static void DiscoverSpine(ScanContext ctx)
     {
+        // The forward-chain cross-check reads every data page, and this is the tier that runs on every open, so it never makes it (#1143). Quick and
+        // deeper count the chains from the forward pointers their discovery pass reads anyway. After a crash the engine checks each chunk segment's
+        // links during the free-chunk scan it makes then; the cluster, entity-map and index segments it can rebuild from the WAL, the others refuse
+        // the open. Plain logical segments — the occupancy map, the UoW registry — are checked offline only.
+        ctx.Findings.NoteSkipped(SegmentChecks.DirectoryChain,
+            "Spine reads directories only: the forward chains are checked at Quick depth or deeper, and by crash recovery");
+
         var walker = new SegmentWalker(ctx.Source);
         var seen = new HashSet<int>();
 
@@ -203,6 +210,9 @@ public static class IntegrityScanner
         // points back at it. That test needs no cross-page state, which matters: it stays correct on a file where the
         // pointers themselves are what is damaged.
         var roots = new List<int>();
+        // Every page's forward pointer, recorded while the page is in hand so the chain-vs-directory check reads nothing again (#1143).
+        var nextPointers = new int[pageCount];
+        var unread = new bool[pageCount];
         for (var p = 0; p < pageCount; p++)
         {
             if (ctx.Options.Cancellation.IsCancellationRequested)
@@ -213,8 +223,11 @@ public static class IntegrityScanner
 
             if (!source.TryReadPage(p, page))
             {
+                unread[p] = true;
                 continue;
             }
+
+            nextPointers[p] = PageImage.NextRawDataPage(page);
 
             var flags = PageImage.Flags(page);
             ctx.FlagsByte[p] = (byte)flags;
@@ -244,7 +257,7 @@ public static class IntegrityScanner
         var walker = new SegmentWalker(source);
         for (var i = 0; i < roots.Count; i++)
         {
-            var seg = walker.WalkSegment(roots[i]);
+            var seg = walker.WalkSegment(roots[i], nextPointers, unread);
             ctx.Segments[roots[i]] = seg;
             AttributePages(ctx, seg);
             ctx.Options.Progress?.Invoke("segments", i + 1, roots.Count);

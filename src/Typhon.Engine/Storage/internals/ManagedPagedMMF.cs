@@ -9,6 +9,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -688,13 +689,116 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
 
         ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
-        if (segment.Load(filePageIndex) == false)
+        if (LoadChunkSegment(segment, filePageIndex) == false)
         {
             return null;
         }
 
         Logger.LogDebug("Load Chunk Based Logical Segment at {StartPageId} using pages {Pages}", segment.Pages[0], segment.Pages.ToArray());
         return segment;
+    }
+
+    // ─── Chunk summary (#1143) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // What the last clean close recorded for each chunk-based segment, held from the moment the engine trusts it until the open ends. Each entry is handed
+    // out once: a segment is loaded once per session, and an entry describes the file only as that close left it.
+    private ConcurrentDictionary<int, ChunkSegmentSummary> _chunkSummary;
+    private ConcurrentDictionary<int, ClusterListSummary> _clusterSummary;
+    private int _chunkSegmentsLoadedFromSummary;
+    private int _chunkSegmentsScannedAtLoad;
+
+    /// <summary>The bundle's chunk summary file (<see cref="ChunkSummaryFile"/>).</summary>
+    internal string ChunkSummaryPath => Path.Combine(BundleDirectory, ChunkSummaryFile.FileName);
+
+    /// <summary>Chunk-based segments this session loaded from the summary, reading no data page.</summary>
+    internal int ChunkSegmentsLoadedFromSummary => Volatile.Read(ref _chunkSegmentsLoadedFromSummary);
+
+    /// <summary>Chunk-based segments this session loaded by scanning every page's chunk bitmap.</summary>
+    internal int ChunkSegmentsScannedAtLoad => Volatile.Read(ref _chunkSegmentsScannedAtLoad);
+
+    /// <summary>
+    /// Makes <paramref name="contents"/> the summary chunk-segment and cluster-state loads consult. The engine calls it only after a clean close, with a
+    /// matching nonce; <c>null</c> leaves every load on its scan.
+    /// </summary>
+    internal void AdoptChunkSummary(ChunkSummaryContents contents)
+    {
+        _chunkSummary = contents == null ? null : new ConcurrentDictionary<int, ChunkSegmentSummary>(contents.Segments);
+        _clusterSummary = contents == null ? null : new ConcurrentDictionary<int, ClusterListSummary>(contents.Clusters);
+    }
+
+    /// <summary>Drops the summary: loads from here on scan. Called when the open ends, so nothing loaded later is described by a stale close.</summary>
+    internal void ReleaseChunkSummary()
+    {
+        _chunkSummary = null;
+        _clusterSummary = null;
+    }
+
+    /// <summary>Removes and returns the summary recorded for the segment rooted at <paramref name="rootPageIndex"/>, or <c>null</c>.</summary>
+    internal ChunkSegmentSummary TakeChunkSummary(int rootPageIndex)
+    {
+        var summary = _chunkSummary;
+        return summary != null && summary.TryRemove(rootPageIndex, out var entry) ? entry : null;
+    }
+
+    /// <summary>
+    /// Removes and returns the active-cluster list recorded for the cluster segment rooted at <paramref name="rootPageIndex"/>, or <c>null</c>.
+    /// </summary>
+    internal ClusterListSummary TakeClusterSummary(int rootPageIndex)
+    {
+        var summary = _clusterSummary;
+        return summary != null && summary.TryRemove(rootPageIndex, out var entry) ? entry : null;
+    }
+
+    /// <summary>
+    /// Writes every registered chunk-based segment's allocator state, and <paramref name="clusters"/>, to <see cref="ChunkSummaryPath"/> under
+    /// <paramref name="nonce"/> (#1143). The clean close calls it after the final data flush and before the flag that vouches for it; nothing may allocate
+    /// or free meanwhile.
+    /// </summary>
+    /// <returns>The number of segments recorded.</returns>
+    internal int WriteChunkSummary(ulong nonce, IReadOnlyList<ClusterListSummary> clusters)
+    {
+        var summaries = CaptureChunkSummaries();
+        ChunkSummaryFile.Write(ChunkSummaryPath, nonce, summaries, clusters, flushToDisk: !Options.TestMode);
+        return summaries.Count;
+    }
+
+    /// <summary>The allocator state of every registered chunk-based segment, for the clean close to record. Nothing may allocate or free meanwhile.</summary>
+    internal List<ChunkSegmentSummary> CaptureChunkSummaries()
+    {
+        var list = new List<ChunkSegmentSummary>();
+        var dic = _segments;
+        if (dic == null)
+        {
+            return list;
+        }
+
+        foreach (var segment in dic.Values)
+        {
+            if (segment is ChunkBasedSegment<PersistentStore> chunked && chunked.Length > 0)
+            {
+                list.Add(chunked.CaptureSummary());
+            }
+        }
+
+        return list;
+    }
+
+    private bool LoadChunkSegment(ChunkBasedSegment<PersistentStore> segment, int filePageIndex)
+    {
+        if (!segment.Load(filePageIndex, TakeChunkSummary(filePageIndex)))
+        {
+            return false;
+        }
+
+        if (segment.LoadedFromSummary)
+        {
+            Interlocked.Increment(ref _chunkSegmentsLoadedFromSummary);
+        }
+        else
+        {
+            Interlocked.Increment(ref _chunkSegmentsScannedAtLoad);
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -722,7 +826,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
         try
         {
-            if (!segment.Load(filePageIndex))
+            if (!LoadChunkSegment(segment, filePageIndex))
             {
                 dic.TryRemove(filePageIndex, out _);
                 return false;

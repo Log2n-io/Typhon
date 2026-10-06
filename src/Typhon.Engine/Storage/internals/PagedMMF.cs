@@ -978,8 +978,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Verifies a bundle's structural spine before it is opened and refuses the open on a
-    /// <see cref="IntegritySeverity.Fatal"/> finding.
+    /// Verifies a bundle's structural spine before it is opened and refuses the open on a finding
+    /// <see cref="DatabaseIntegrityException.RefusesOpen"/> names: every <see cref="IntegritySeverity.Fatal"/> one, and a segment whose directory and
+    /// forward chain disagree when recovery will not rebuild it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -987,7 +988,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// pointer that does not resolve. Opening anyway is the most harmful possible response: the engine follows those
     /// pointers into garbage. Lesser findings do <b>not</b> block the open, because a database with a divergent index is
     /// still a working database and refusing it would be the cure being worse than the disease; they are logged so the
-    /// operator learns about them.
+    /// operator learns about them. The one exception is the directory-vs-chain disagreement, which the open itself used to
+    /// refuse and no longer checks (#1143).
     /// </para>
     /// <para>
     /// The scan is skipped when the bundle cannot be read, since there is then nothing to verify — verification must never
@@ -1023,16 +1025,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return;
         }
 
-        var fatal = 0;
+        var refusing = 0;
         for (var i = 0; i < report.Findings.Count; i++)
         {
-            if (report.Findings[i].Severity == IntegritySeverity.Fatal)
+            if (DatabaseIntegrityException.RefusesOpen(report.Findings[i], report.Identity.CleanShutdown))
             {
-                fatal++;
+                refusing++;
             }
         }
 
-        if (fatal > 0)
+        if (refusing > 0)
         {
             throw new DatabaseIntegrityException(report);
         }

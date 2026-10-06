@@ -501,8 +501,9 @@ CK-08 (flush-only cycles) are later increments.
             live pages. The persisted `ArchetypeR1` / `ComponentR1` segment pointers are now walked in addition, so `owned`
             is a function of the file alone. A reconstruction that cannot read a pointer it knows exists is PARTIAL and MUST
             NOT be adopted — `RederiveOccupancyOnCrash` refuses rather than freeing pages it merely failed to attribute.
-            The heal is also skipped entirely when the previous shutdown was clean: `WalFilesPresentAtOpen` means "WAL
-            segments exist on disk", which a clean shutdown does not preclude, so it alone does not establish a crash.
+            The heal runs only after an unclean close: it is gated on `CrashRecoveryAtOpen` (WAL segments on disk AND the clean
+            flag unset at open, CS-06). It used to be gated on "WAL segments exist on disk", which a clean close does not
+            preclude, and its own clean-shutdown guard read the on-disk flag after CS-02 had cleared it, so it never fired.
             The persisted L0 words are overwritten with `owned`
             (`BitmapL3.OverwriteFromDerived`) and the L1/L2 skip summaries recomputed — a full replacement, NOT a read-then-diff,
             so a CRC-torn occupancy page is healed by replacement (the FPI substitute) and any page a torn checkpoint leaked
@@ -513,7 +514,7 @@ CK-08 (flush-only cycles) are later increments.
           simply re-derives (idempotent — `owned` depends only on persisted segment directories)
   scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap`,
          `ManagedPagedMMF.RederiveOccupancy`, `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on
-         `WalFilesPresentAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
+         `CrashRecoveryAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
   on_violation: a torn / stale occupancy page survives recovery → a clear bit over a live page double-allocates it (data
                 corruption), or a stale set bit leaks the page forever
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
@@ -1876,9 +1877,12 @@ of the LSN value).
 
 ### CS-01: Clean-shutdown flag written strictly after data fsync `[fatal][silent]`
   pre PersistEngineState data fsync complete (every dirty cluster page with current HEADs is durable)
-  post MarkCleanShutdown: BK_CleanShutdown = 1 + its OWN fsync (never bundled with the data flush)
-  invariant runs only on graceful Dispose, after final checkpoint → PersistArchetypeState → PersistEngineState (CPO-06)
-  scope: DatabaseEngine.Dispose, DurabilityWatermarks.SetCleanShutdown, ManagedPagedMMF.PersistMetaNow
+  pre the chunk summary written and fsynced (CS-05) — it describes the data file as that flush left it
+  post MarkCleanShutdown: BK_CleanShutdown = 1 and the summary's nonce, in ONE meta flip with its OWN fsync (never bundled with
+       the data flush)
+  invariant runs only on graceful Dispose, after final checkpoint → PersistArchetypeState → PersistEngineState (CPO-06), and only
+            for an engine whose open completed (CS-04)
+  scope: DatabaseEngine.Dispose, DurabilityWatermarks.MarkCleanShutdown, ManagedPagedMMF.PersistMetaNow
   requires: CK-05 — the flag rides the meta-pair generation flip, so its durability is atomic and torn-slot
             detected. That is STRONGER than this rule originally claimed.
   note the bootstrap key `BK_CleanShutdown` this module used to name is DEAD — the const is declared and never
@@ -1888,9 +1892,10 @@ of the LSN value).
 
 ### CS-02: Clean-shutdown flag cleared on open before any mutation `[fatal][silent]`
   pre bootstrap loaded; flag value captured for the trust decision (ctor loading path)
-  post InitializeArchetypes: SetInt(BK_CleanShutdown, 0) + fsync, before the engine accepts any write
+  post the ctor's loading path (InitializeUowRegistry): flag cleared + fsync, before the engine accepts any write and before
+       registration can migrate a schema (#583) — after the chunk summary has been adopted (CS-05)
   invariant the clear is the authoritative dirtying step — a session that mutates then crashes leaves the flag = 0
-  scope: DatabaseEngine.InitializeArchetypes
+  scope: DatabaseEngine.InitializeUowRegistry, DurabilityWatermarks.SetCleanShutdown
   on_violation: flag survives an unclean session → next open trusts stale HEADs
 
 ### CS-03: HEAD rebuild skipped iff the clean flag was set `[fatal]`
@@ -1901,6 +1906,105 @@ of the LSN value).
   requires AP-04 — "the flag says clean, therefore the HEADs are current" holds only if every published HEAD owes its page a write;
     before #1159 a Versioned update on a page nothing else had dirtied was never written, and this rule trusted it
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
+
+### CS-04: An open that did not complete closes as a crash `[fatal][silent]`
+  invariant an engine whose InitializeArchetypes threw is disposed as a crash would leave it: no PersistArchetypeState, no
+            PersistEngineState, no chunk summary, no MarkCleanShutdown, and no final checkpoint cycle (the checkpoint manager is
+            crash-stopped). CS-02 cleared the flag at open, so the next open recovers
+  invariant when that open followed a clean close (or another such failure), its close records the failed-open marker, and the next
+            open loads its segments without tolerating a torn one (DatabaseEngine.TolerateTornSegmentsAtOpen): the WAL holds
+            nothing past the clean close, so a segment that fails to load is damage to refuse, not a crash to refill (RB-01)
+  invariant a repeat InitializeArchetypes disarms the checkpoint's segment-pointer persistence until it completes
+  rationale: hosts (DI, DatabaseEngine.Open) dispose an engine whose initialization threw, and the dispose ran the full close: it
+             persisted the archetype table as far as the open had built it — an archetype whose cluster state was never built was
+             written with ClusterSegmentSPI = 0, orphaning every entity it held — and set the clean flag over it, so the next open
+             trusted all of it (#1147). Any exception in InitializeArchetypes did it: back-pressure, a schema error, an I/O fault.
+             The final checkpoint cycle could do the same through its segment-pointer hook. And closing as a crash alone was not
+             enough: the retry of an open that failed on a damaged segment replaced the segment with an empty one and opened
+  scope: DatabaseEngine.InitializeArchetypes, DatabaseEngine.DisposeCore, DatabaseEngine.TolerateTornSegmentsAtOpen,
+         DurabilityWatermarks.MarkFailedOpen, DurabilityWatermarks.ClearForOpen
+  on_violation: silent loss of every entity of the archetypes the failed open had not reached, behind a clean flag; or, on the
+                retry, of every entity of a damaged segment
+  verified: HealthyOpenTests.AnOpenThatFailsHalfway_ClosesAsACrash_AndLosesNothing (fails the open between two archetypes through
+            DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsReplacedOnlyAfterACrash (the retry
+            of a failed open refuses; after a real crash the segment is replaced) [VerifiesRule]
+
+### CS-05: The chunk summary is trusted only after the close that wrote it `[fatal][silent]`
+  invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and free-list membership, every
+            archetype's active-cluster list and free-cluster head — after PersistEngineState's data fsync, with a fresh random
+            nonce; the nonce reaches the data file in the same meta flip as the clean flag (CS-01). A close that cannot write the
+            file, for any reason, records nonce 0, which nothing matches. Clearing the flag clears the nonce in the same flip
+  invariant an open adopts the file iff the clean flag was set at open ∧ the nonces agree ∧ the header and payload CRC32C hold ∧
+            every entry is one a close can write (cluster ids ascending from 1, the head among them, no root twice); otherwise every
+            load scans. Each segment entry is used only when it fits the segment just loaded (same page count, count within
+            capacity), and a cluster list only together with its segment's own entry and within its allocated count and capacity
+  invariant nothing checks a summary's content against the pages: a summary that passes every guard above but is wrong — a bug in
+            the capture — is trusted. Deliberate: the chunk bitmaps stay authoritative for allocation, so a wrong count costs space,
+            never a reused chunk; the exposure is the active-cluster list, which ASummaryLoadedOpen_HoldsTheStateAScanWould pins
+  invariant the summary is consumed by the open only and released when InitializeArchetypes ends, completed or not; the pages stay
+            the truth. Every repair step deletes the file before it writes the data file
+  rationale: the count and the free list were rebuilt by reading every page of every chunk segment, and the active-cluster list by
+             reading every cluster's occupancy word — most of the file on every open, each page pinned by a bare epoch tag, so a
+             segment larger than the cache deadlocked the open (#1143). The summary replaces those reads; the nonce and the flag make
+             a stale, copied-in or damaged file cost a scan, never a wrong count
+  scope: DatabaseEngine.WriteChunkSummary, DatabaseEngine.AdoptChunkSummary, DatabaseEngine.TakeClusterSummaryFor,
+         DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.SetCleanShutdown, ChunkSummaryFile.Parse, ChunkBasedSegment.Load,
+         ChunkBasedSegment.CaptureSummary, ArchetypeClusterState.CreateFromExisting, ArchetypeClusterState.CaptureClusterSummary,
+         DatabaseRepair.Repair
+  on_violation: a summary from another state of the file is trusted — allocated counts wrong, so the segment grows instead of
+                reusing its free chunks; clusters holding entities missing from the active list and so from every iteration
+  verified: HealthyOpenTests.ASummaryLoadedOpen_HoldsTheStateAScanWould, HealthyOpenTests.ASummaryThatDoesNotDescribeTheFile_IsNotUsed
+            (unclean close, a stale file whose counts really differ, damage, missing file),
+            HealthyOpenTests.AnEntryThatDoesNotFitItsSegment_IsScanned_AndItsClusterListIgnored [VerifiesRule];
+            ChunkSummaryFileTests (the format)
+
+### CS-06: Crash recovery runs iff the last close was unclean `[fatal]`
+  invariant CrashRecoveryAtOpen = WAL segments on disk ∧ ¬clean flag at open, and every crash-path gate reads it: RB-01's index
+            clear + rebuild and EntityMap rebuild, RecoverySuspect checksum mode, WAL replay, CK-09's occupancy re-derive. The
+            tolerate-torn segment loads read TolerateTornSegmentsAtOpen, which is the same flag minus a failed open (CS-04)
+  invariant repair forces it (DatabaseEngineOptions.ForceCrashRecoveryAtOpen) and then ignores the chunk summary: the rebuild net
+            is what regenerates derived structures, and it runs on the crash path only
+  invariant the ctor's WAL scan still runs whenever segments exist: it reads the log, not the data file, and gives LOG-08 its
+            LSN frontier
+  rationale: the flag used to mean "WAL segment files exist", which a clean close leaves true, so every reopen of a database with
+             a disk WAL ran the whole recovery pipeline — replay, scrub, rebuilds, seal, re-derive — over a file CS-01 had already
+             made current (#1143). Repair-by-reopen silently relied on that
+  scope: DatabaseEngine.InitializeUowRegistry, DatabaseEngine.RunWalV2Recovery, DatabaseEngine.RederiveOccupancyOnCrash,
+         DatabaseEngineOptions.ForceCrashRecoveryAtOpen
+  on_violation: (narrower) a crash is not recovered — torn derived structures trusted; (wider) every clean open reads the whole
+                file; (repair) a regeneration that rebuilds nothing and reports success
+  verified: HealthyOpenTests.WalFilesOnDisk_RunRecoveryOnlyAfterAnUncleanClose,
+            HealthyOpenTests.ARepairOpen_RunsRecoveryAfterACleanClose_AndIgnoresTheSummary [VerifiesRule]
+
+### CS-07: A clean open reads no data page `[perf]`
+  invariant after a clean close (CS-05 summary adopted), an open reads segment directories, the bootstrap and the schema — not the
+            pages of the chunk segments: every chunk segment loads its allocator from the summary, every cluster state its active
+            list, and no chain is walked (LogicalSegment.Load reads the directory only; the chain cross-check runs on the crash
+            path inside the scan, and offline at Quick depth)
+  exception the spatial cell layer of a cluster-spatial archetype is still rebuilt from every active cluster at every open
+            (RebuildSpatialStateFromData), O(entities) and under one epoch — its persistence is #1148
+  rationale: a 1.9 GB database read 251 053 pages (13 s) per open and could not open at all with a cache smaller than one segment
+  scope: ChunkBasedSegment.Load, LogicalSegment.Load, ArchetypeClusterState.CreateFromExisting
+  on_violation: open cost grows with the database instead of with its schema; a database larger than its cache cannot open
+  verified: HealthyOpenTests.ACleanReopen_ReadsNoDataPage (disk reads during the open under a tenth of the file),
+            HealthyOpenTests.ADatabaseLargerThanItsCache_ReopensCleanly (a cache smaller than one segment) [VerifiesRule]
+
+### CS-08: A segment whose directory and chain disagree is refused unless recovery rebuilds it `[fatal]`
+  invariant the open no longer cross-checks each segment's directory against its forward chain (CS-07). Open-time verification at
+            Quick depth and deeper does (CHK-SEG-05, counted from pointers its sweep records, compared position by position), and
+            refuses the open on a disagreement after a clean close, and after an unclean one for every kind but the three the
+            crash path replaces and refills from the WAL — cluster, entity map, index (DatabaseIntegrityException.RefusesOpen)
+  invariant the Spine tier, on by default, reads directories only and says so (CHK-SEG-05 skipped). On the crash path a chunk-based
+            segment checks its links during the free-chunk scan (ChunkBasedSegment.ScanForAllocatorState); plain logical segments
+            (occupancy map, UoW registry) are checked offline only
+  rationale: the check used to run in LogicalSegment.Load on every open, which read every data page (#1143). Moving it offline kept
+             its strength only if a finding still refuses what the open used to refuse; rating it a mere divergence would let a
+             clean database with a lost write open with pages its segment can no longer address
+  scope: DatabaseIntegrityException.RefusesOpen, SegmentChecks.Run, SegmentWalker.WalkSegment, IntegrityScanner.Scan,
+         ChunkBasedSegment.Load
+  on_violation: a lost write found offline is ignored by the open, which serves a segment that cannot address all its pages
+  verified: IntegrityScannerTests.AShortenedChain_IsFoundAtQuick_AndRefusesTheOpenUnlessRecoveryRebuildsIt [VerifiesRule];
+            IntegrityScannerTests.QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal
 
 ---
 
@@ -2077,7 +2181,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     (ComponentTable.RebuildSecondaryIndexEntriesFromHeads, DatabaseEngine.RebuildSecondaryIndexes).
     🔴 BOTH index homes, since #656. A cluster-backed archetype keeps its field indexes on the ARCHETYPE, and that home did
     NOT implement this rule: the cluster-index init block read the persisted SPI, loaded the segment and skipped its rebuild,
-    so `WalFilesPresentAtOpen` — consulted in six places — reached none of it. Now the same shape as the flat home: the init
+    so the crash flag — consulted in six places, `CrashRecoveryAtOpen` since #1143 (CS-06) — reached none of it. Now the same shape as the flat home: the init
     block clears (ClearSharedSegment over both stride segments) and DatabaseEngine.RebuildClusterIndexes repopulates from the
     cluster SoA in Phase 5, via ArchetypeClusterState.RebuildIndexesFromData. Rebuilding from the SoA rather than from chain
     heads is what makes it storage-mode-agnostic: the cluster slot IS the head for SingleVersion and carries the published

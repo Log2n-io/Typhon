@@ -87,25 +87,30 @@ internal static class SegmentChecks
     {
         foreach (var seg in ctx.Segments.Values)
         {
-            if (!seg.DirectoryComplete || !seg.ChainComplete)
+            // Not counted at all (Spine, #1143), or already reported as a traversal problem: the counts would be meaningless.
+            if (!seg.ChainWalked || !seg.DirectoryComplete || !seg.ChainComplete)
             {
-                continue;   // already reported as a traversal problem; the counts would be meaningless
+                continue;
             }
 
-            if (seg.ForwardChainCount == seg.Pages.Count)
+            if (seg.ForwardChainCount == seg.Pages.Count && seg.ChainMatchesDirectory)
             {
                 continue;
             }
 
             var diff = seg.ForwardChainCount - seg.Pages.Count;
+            var detail = diff == 0
+                ? $"Its page directory and its forward page chain both hold {seg.Pages.Count:N0} pages, but the chain links them in a different "
+                  + "order than the directory lists them, so one of a grow's writes did not persist."
+                : $"Its page directory enumerates {seg.Pages.Count:N0} pages; its forward page chain reaches {seg.ForwardChainCount:N0} ({diff:+0;-#}). "
+                  + "The two are written by separate code paths during a grow, so "
+                  + (diff > 0
+                      ? "the directory append did not persist — the extra pages are allocated and linked but unaddressable."
+                      : "the chain pointer did not persist — the directory names pages the chain cannot reach.");
             ctx.Report(DirectoryChain, IntegritySeverity.Divergence, "",
                 new Locus(seg.RootPageIndex, seg.RootPageIndex, seg.Kind),
-                $"The {seg.Kind} segment rooted at page {seg.RootPageIndex} disagrees with itself about how many pages it owns.",
-                $"Its page directory enumerates {seg.Pages.Count:N0} pages; its forward page chain reaches "
-                + $"{seg.ForwardChainCount:N0} ({diff:+0;-#}). The two are written by separate code paths during a grow, so "
-                + (diff > 0
-                    ? "the directory append did not persist — the extra pages are allocated and linked but unaddressable."
-                    : "the chain pointer did not persist — the directory names pages the chain cannot reach."),
+                $"The {seg.Kind} segment rooted at page {seg.RootPageIndex} disagrees with itself about which pages it owns.",
+                detail,
                 Repairability.Lossless);
         }
     }

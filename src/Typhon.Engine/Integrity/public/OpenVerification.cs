@@ -22,11 +22,15 @@ public enum OpenVerification
 
     /// <summary>
     /// Page-0 pair selection, the bootstrap stream, and that every segment pointer resolves to a real, allocated segment
-    /// root. <b>O(segments)</b> rather than O(pages): kilobytes read, sub-millisecond. The default.
+    /// root. <b>O(segments)</b> rather than O(pages): kilobytes read, sub-millisecond. The default. It reads each segment's
+    /// directory but not its forward page chain, which would read every data page (#1143).
     /// </summary>
     Spine = 1,
 
-    /// <summary>Adds every page's header. O(pages) and IOPS-bound; no page bodies are hashed.</summary>
+    /// <summary>
+    /// Adds every page's header, and each segment's directory against its forward page chain, counted from the headers the
+    /// sweep already read. O(pages) and IOPS-bound; no page bodies are hashed.
+    /// </summary>
     Quick = 2,
 
     /// <summary>Adds a checksum sweep over every allocated page. O(pages) and bandwidth-bound.</summary>
@@ -52,6 +56,26 @@ public sealed class DatabaseIntegrityException : Exception
     /// <summary>The report that refused the open, with every finding and the scan's stated limits.</summary>
     public IntegrityReport Report { get; }
 
+    /// <summary>
+    /// Whether a finding refuses an open: every <see cref="IntegritySeverity.Fatal"/> one, and a segment whose directory and forward page chain
+    /// disagree unless crash recovery will rebuild it. The scanner rates that one a repairable divergence, and the open used to refuse it itself; #1143
+    /// moved the check out of the open. After a clean close nothing rebuilds the segment: a write was lost before the close. After an unclean close the
+    /// same disagreement is what an interrupted checkpoint leaves behind, and recovery replaces a cluster, entity-map or index segment with a fresh one
+    /// that WAL replay refills, so for those three it is reported and the open proceeds. Every other kind is loaded without that tolerance, and the
+    /// open would fail on it anyway, without this report.
+    /// </summary>
+    /// <param name="finding">The finding.</param>
+    /// <param name="cleanShutdown">Whether the last close was clean (<see cref="DatabaseIdentity.CleanShutdown"/>).</param>
+    internal static bool RefusesOpen(IntegrityFinding finding, bool cleanShutdown) =>
+        finding.Severity == IntegritySeverity.Fatal
+        || (finding.Code == Typhon.Engine.Internals.SegmentChecks.DirectoryChain && (cleanShutdown || !RebuiltByRecovery(finding.Locus.Kind)));
+
+    /// <summary>
+    /// The segment kinds the crash path loads tolerating a torn segment, rebuilding it from the WAL (RB-01): see <c>TryLoadChunkBasedSegment</c>.
+    /// </summary>
+    private static bool RebuiltByRecovery(StorageSegmentKind kind) =>
+        kind is StorageSegmentKind.Cluster or StorageSegmentKind.EntityMap or StorageSegmentKind.Index;
+
     private static string BuildMessage(IntegrityReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -62,7 +86,7 @@ public sealed class DatabaseIntegrityException : Exception
         for (var i = 0; i < report.Findings.Count; i++)
         {
             var f = report.Findings[i];
-            if (f.Severity != IntegritySeverity.Fatal)
+            if (!RefusesOpen(f, report.Identity.CleanShutdown))
             {
                 continue;
             }
