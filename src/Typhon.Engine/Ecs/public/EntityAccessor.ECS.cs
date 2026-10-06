@@ -823,6 +823,25 @@ public unsafe partial class EntityAccessor
     internal void NoteSvInPlaceWrite() => _didInPlaceSvWrite = true;
 
     /// <summary>
+    /// Records the cache page a SingleVersion value is written into in place, through the ref <see cref="EntityRefMut.Write{T}(Comp{T})"/> returns (PS-10,
+    /// #1172). The resolve mapped the page dirty through a chunk accessor without a ChangeSet, which records nothing: unrecorded, an eviction before the
+    /// next fence reloads the old value. By address, with no page lookup, since it runs once per written component. A cluster without a persistent segment
+    /// lives in the transient store and needs nothing.
+    /// <para>The caller stores through the ref after this returns. That is safe while the resolving accessor still maps the page dirty, which keeps a
+    /// checkpoint from copying it; a store after the accessor released the page is #1176.</para>
+    /// </summary>
+    internal void NoteSvInPlacePageWrite(ArchetypeClusterState clusterState, byte* address)
+    {
+        if (clusterState.ClusterSegment == null)
+        {
+            return;
+        }
+
+        var mmf = _dbe.MMF;
+        mmf.MarkPageModified(mmf.MemPageIndexOf(address));
+    }
+
+    /// <summary>
     /// Cluster-path entry point for Commit-discipline staging — resolves the ComponentInfo, then stages (see <see cref="StageCommitWriteCore{T}"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

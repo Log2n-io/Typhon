@@ -10499,6 +10499,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var chunkId = ActiveClusterIds[c];
                 var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
                 var occupancy = *(ulong*)clusterBase;
+                var wroteElementIds = false;
 
                 while (occupancy != 0)
                 {
@@ -10545,9 +10546,16 @@ internal sealed unsafe partial class ArchetypeClusterState
                             if (field.AllowMultiple)
                             {
                                 *(int*)(clusterBase + Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                                wroteElementIds = true;
                             }
                         }
                     }
+                }
+
+                // The element ids went in through a clean mapping: record the page, or an eviction reloads the stale ids (PS-10).
+                if (wroteElementIds)
+                {
+                    NoteClusterPageModified(chunkId);
                 }
             }
         }

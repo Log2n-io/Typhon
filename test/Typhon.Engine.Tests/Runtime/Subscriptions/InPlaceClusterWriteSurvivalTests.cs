@@ -78,6 +78,60 @@ sealed class InPlaceClusterWriteSurvivalTests : TestBase<InPlaceClusterWriteSurv
         Assert.That(written.Count, Is.GreaterThan(50), "too few spatial writes for the check to mean anything");
     }
 
+    /// <summary>
+    /// The same for a point write: <c>Write</c> on a SingleVersion component writes the cluster slot in place through the ref it returns, and the committed
+    /// value must read back after the cache has evicted every page its own rules let it evict, before any fence has logged the write (#1172). It lost 2 338
+    /// of 4 096 writes in the fence fixture that found it. Both overloads: by handle and by type.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-10")]
+    public void CommittedPointWritesSurviveEviction([Values] bool byType)
+    {
+        using var engine = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var workload = new OracleWorkload(engine, 42);
+        workload.Seed(creatures: 400, rocks: 120);
+        engine.WriteTickFence(1);
+        Assert.That(CheckpointNow(engine), Is.True, "premise: a checkpoint wrote the seed's pages");
+
+        var written = new Dictionary<EntityId, int>();
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            foreach (var id in workload.Creatures)
+            {
+                var entity = tx.OpenMut(id);
+                ref var ai = ref byType ? ref entity.Write<ProjAi>() : ref entity.Write(ProjCreature.Ai);
+                ai.ThinkCooldown += 1_000_003;
+                written[id] = ai.ThinkCooldown;
+            }
+
+            tx.Commit();
+        }
+
+        var evicted = engine.MMF.EvictEvictablePagesForTest();
+        var lost = LostCooldowns(engine, written);
+        Assert.That(evicted, Is.GreaterThan(0), "premise: the cache evicted pages between the commit and the read");
+        var sample = string.Join(" | ", lost.GetRange(0, System.Math.Min(5, lost.Count)));
+        Assert.That(lost, Is.Empty, $"{lost.Count} of {written.Count} committed writes reverted: {sample}");
+    }
+
+    private static bool CheckpointNow(DatabaseEngine engine) => engine.CheckpointManager.ForceCheckpointAndWait(System.TimeSpan.FromSeconds(30));
+
+    private static List<string> LostCooldowns(DatabaseEngine engine, Dictionary<EntityId, int> written)
+    {
+        var lost = new List<string>();
+        using var tx = engine.CreateQuickTransaction();
+        foreach (var (id, value) in written)
+        {
+            var read = tx.Open(id).Read(ProjCreature.Ai).ThinkCooldown;
+            if (read != value)
+            {
+                lost.Add($"entity {id.RawValue}: wrote {value}, reads {read}");
+            }
+        }
+
+        return lost;
+    }
+
     /// <summary>Moves a few creatures by a centimetre through <c>WriteSpatial</c> — inside their cluster, so nothing migrates — and records where.</summary>
     private static void NudgeSome(DatabaseEngine engine, System.Random random, Dictionary<long, (float X, float Y)> written)
     {

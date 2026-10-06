@@ -2438,6 +2438,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
+    /// The cache slot holding <paramref name="address"/>, a pointer into a cached page: its offset in the cache, so a hot writer that holds a pointer
+    /// records its page (<see cref="MarkPageModified"/>) without a page lookup.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal unsafe int MemPageIndexOf(byte* address)
+    {
+        var memPageIndex = (int)((address - _memPagesAddr) >> PageSizePow2);
+        Debug.Assert((uint)memPageIndex < (uint)MemPagesCount, "the address is not in the page cache");
+        return memPageIndex;
+    }
+
+    /// <summary>
     /// Publishes that the bytes this page held at <paramref name="capturedGen"/> are durable on the data file.
     /// </summary>
     /// <remarks>

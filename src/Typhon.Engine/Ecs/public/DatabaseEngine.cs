@@ -1325,7 +1325,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         if (archetypeId >= 0 && archetypeId < _archetypeStates.Length)
         {
-            _archetypeStates[archetypeId]?.ClusterState?.SetDirty(chunkId, slotIndex);
+            var state = _archetypeStates[archetypeId]?.ClusterState;
+            if (state != null)
+            {
+                state.SetDirty(chunkId, slotIndex);
+                // The page too, not only the entity: the span wrote it in place through a clean mapping (PS-10), as ClusterRef.MarkDirty records it.
+                state.NoteClusterPageModified(chunkId);
+            }
         }
     }
 

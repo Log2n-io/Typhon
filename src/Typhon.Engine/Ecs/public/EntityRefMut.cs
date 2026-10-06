@@ -132,7 +132,8 @@ public unsafe ref struct EntityRefMut
             }
 
             // SV cluster fast path: direct pointer arithmetic into SoA array.
-            // Page was already marked dirty at resolve time (OpenMut → GetChunkAddress(dirty:true)).
+            // The page was mapped dirty at resolve time (OpenMut → GetChunkAddress(dirty:true)), but through an accessor without a ChangeSet, which records
+            // nothing: the write records its page below (PS-10, #1172).
             byte* svHeadPtr = _ref._clusterBase + _ref._clusterLayout.ComponentOffset(slot) + _ref._clusterSlotIndex * _ref._clusterLayout.ComponentSize(slot);
             var svTable = _ref._engineState.SlotToComponentTable[slot];
 
@@ -162,6 +163,8 @@ public unsafe ref struct EntityRefMut
 
             _ref._accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
             clusterState.SetDirty(_ref._clusterChunkId, _ref._clusterSlotIndex, slot);
+            // The page owes a write (PS-10): unrecorded, an eviction before the fence reloads the old value (#1172).
+            _ref._accessor.NoteSvInPlacePageWrite(clusterState, svHeadPtr);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 
@@ -256,6 +259,8 @@ public unsafe ref struct EntityRefMut
 
             _ref._accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
             clusterState.SetDirty(_ref._clusterChunkId, _ref._clusterSlotIndex, slot);
+            // The page owes a write (PS-10): unrecorded, an eviction before the fence reloads the old value (#1172).
+            _ref._accessor.NoteSvInPlacePageWrite(clusterState, svHeadPtr);
             return ref Unsafe.AsRef<T>(svHeadPtr);
         }
 

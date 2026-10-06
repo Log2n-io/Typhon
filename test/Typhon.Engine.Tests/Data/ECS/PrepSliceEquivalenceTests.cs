@@ -258,7 +258,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         return outcome;
     }
 
-    private static void RunParallel(DatabaseEngine dbe, int workerCount, EntityId[] ids, Outcome outcome)
+    private static void RunParallel(DatabaseEngine dbe, int workerCount, EntityId[] ids, Outcome outcome, Action afterWrites = null)
     {
         var ticks = 0;
         TyphonRuntime runtime = null;
@@ -292,6 +292,17 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                     ApplyWrites(ctx.Transaction, ids);
                 }
             }, after: "Sample");
+            if (afterWrites != null)
+            {
+                // Its own system, so it runs once the Write system's transaction has committed and ended, and before the tick's fence.
+                dag.CallbackSystem("AfterWrites", _ =>
+                {
+                    if (Volatile.Read(ref ticks) == 1)
+                    {
+                        afterWrites();
+                    }
+                }, after: "Write");
+            }
         }, new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = 100, EnableParallelFence = true });
 
         using (runtime)
@@ -377,14 +388,16 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     public void ParallelFence_AtOneWorker_IsNotSliced_AndMatchesTheSerialFence() => AssertArmMatchesSerial(1, expectSlices: false);
 
     /// <summary>
-    /// The element id a sliced Prep writes into a cluster's tail (the tag's index move, step ③) survives the page cache evicting every page it may evict
-    /// between Prep and Migrate. Unrecorded, the write was lost with the page: Migrate read the old id, its location update named a chunk that no longer held
-    /// the element and was dropped, and the index kept the entity at the slot it had left (#1171).
+    /// The element id a sliced Prep's shadow drain writes into a cluster's tail (the tag's index move, step ③) survives the page cache evicting every page it
+    /// may evict between Prep and Migrate. Unrecorded, the write was lost with the page: Migrate read the old id, its location update named a chunk that no
+    /// longer held the element and was dropped, and the index kept the entity at the slot it had left (#1171).
     /// </summary>
     /// <remarks>
     /// Found because #1143 stopped the open from reading the whole file: the cache stayed cold, the fence's own loads evicted pages, and the fixture's
     /// second arm lost entries in every run. The eviction here is what made it certain: every Idle page with no writer, no slot reference, no debt and no
-    /// live epoch goes, which is exactly what the cache is allowed to do at that point.
+    /// live epoch goes, which is exactly what the cache is allowed to do at that point. The writes record their own pages (#1172), which would keep those
+    /// pages resident whatever the drain did; a checkpoint between the writes and the fence settles those records, so the drain's is the only one left.
+    /// The serial fence cannot stand in for the slices: its drain writes through an accessor that holds a ChangeSet.
     /// </remarks>
     [Test]
     [CancelAfter(120_000)]
@@ -398,6 +411,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         dbe.WriteTickFence(1);
 
         var evicted = 0;
+        var checkpointed = false;
         var cs = ClusterStateOf(dbe);
         ArchetypeClusterState.PrepQueueProbe = (state, _) =>
         {
@@ -409,13 +423,14 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
         try
         {
-            RunParallel(dbe, 2, ids, new Outcome());
+            RunParallel(dbe, 2, ids, new Outcome(), () => checkpointed = dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)));
         }
         finally
         {
             ArchetypeClusterState.PrepQueueProbe = null;
         }
 
+        Assert.That(checkpointed, Is.True, "premise: a checkpoint settled the writes' own records before the fence");
         Assert.That(evicted, Is.GreaterThan(0), "premise: the cache evicted pages between Prep and Migrate");
         IndexDataOracle.AssertIndexAgreesWithData<ClMigUnit>(dbe, "after a fence whose cache evicted every evictable page between Prep and Migrate");
     }
