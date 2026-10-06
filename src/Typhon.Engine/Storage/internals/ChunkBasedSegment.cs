@@ -766,6 +766,23 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         if (_allocatedCount < _capacity)
         {
             RebuildFreeList();
+            if (Volatile.Read(ref _freeHead) != EMPTY_PAGE)
+            {
+                pass = 0;
+                goto restart;
+            }
+
+            // The bitmaps hold no free chunk, yet the count says some are free: the count is short. It is exact by construction while the engine runs,
+            // so only a chunk summary that recorded it wrong can do this (CS-05). Grow, as a full segment would, instead of rebuilding the same empty list
+            // for ever. A race with an allocation that has set its bit and not yet counted it lands here too, and costs one unneeded growth.
+            lock (_growLock)
+            {
+                if (Volatile.Read(ref _freeHead) == EMPTY_PAGE && !GrowChunkCapacity(changeSet: changeSet))
+                {
+                    ThrowHelper.ThrowResourceExhausted("Storage/ChunkBasedSegment/AllocateChunk", ResourceType.Memory, _allocatedCount, _capacity);
+                }
+            }
+
             pass = 0;
             goto restart;
         }

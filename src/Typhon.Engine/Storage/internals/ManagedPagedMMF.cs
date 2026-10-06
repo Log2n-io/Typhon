@@ -705,6 +705,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     private ConcurrentDictionary<int, ClusterListSummary> _clusterSummary;
     private int _chunkSegmentsLoadedFromSummary;
     private int _chunkSegmentsScannedAtLoad;
+    private int _chunkSegmentsReplacedAsTorn;
 
     /// <summary>The bundle's chunk summary file (<see cref="ChunkSummaryFile"/>).</summary>
     internal string ChunkSummaryPath => Path.Combine(BundleDirectory, ChunkSummaryFile.FileName);
@@ -714,6 +715,9 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
     /// <summary>Chunk-based segments this session loaded by scanning every page's chunk bitmap.</summary>
     internal int ChunkSegmentsScannedAtLoad => Volatile.Read(ref _chunkSegmentsScannedAtLoad);
+
+    /// <summary>Chunk-based segments this session failed to load and left for a fresh one, on a load that tolerates a torn segment (RB-01).</summary>
+    internal int ChunkSegmentsReplacedAsTorn => Volatile.Read(ref _chunkSegmentsReplacedAsTorn);
 
     /// <summary>
     /// Makes <paramref name="contents"/> the summary chunk-segment and cluster-state loads consult. The engine calls it only after a clean close, with a
@@ -838,6 +842,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             // all of the segment's pages; CK-03's coverage gate held CheckpointLSN back, so the full WAL window is intact). Discard the partial load
             // and let the caller fresh-allocate + WAL-replay instead of trusting it (#395 / RB-01).
             dic.TryRemove(filePageIndex, out _);
+            Interlocked.Increment(ref _chunkSegmentsReplacedAsTorn);
             return false;
         }
 

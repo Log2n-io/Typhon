@@ -7,9 +7,9 @@ using Typhon.Engine.Internals;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// <see cref="RawValuePagedHashMap{TKey,TStore}.ForEachEntryQuiescent{TAction}"/>: the walk an open makes over a persisted map it is about to replace, which may
-/// be torn. It must end, and must not read outside the segment, whatever the damage. The optimistic walk retried a bucket whose version word was torn into
-/// "locked" forever: a crash reopen hung in the EntityMap rebuild.
+/// <see cref="RawValuePagedHashMap{TKey,TStore}.ForEachEntryQuiescent{TAction}"/>: the walk an open makes over a persisted map it is about to replace,
+/// which may be torn. It must end, and must not read outside the segment, whatever the damage. The optimistic walk retried a bucket whose version word was
+/// torn into "locked" forever: a crash reopen hung in the EntityMap rebuild.
 /// </summary>
 [TestFixture]
 unsafe class RawValueHashMapDamagedScanTests

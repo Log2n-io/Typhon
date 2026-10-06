@@ -100,8 +100,8 @@ internal static class SegmentChecks
 
             var diff = seg.ForwardChainCount - seg.Pages.Count;
             var detail = diff == 0
-                ? $"Its page directory and its forward page chain both hold {seg.Pages.Count:N0} pages, but the chain links them in a different "
-                  + "order than the directory lists them, so one of a grow's writes did not persist."
+                ? $"Its page directory and its forward page chain both hold {seg.Pages.Count:N0} pages, but the chain does not link the directory's "
+                  + "pages in its order (a page out of place, or one the directory does not list), so one of a grow's writes did not persist."
                 : $"Its page directory enumerates {seg.Pages.Count:N0} pages; its forward page chain reaches {seg.ForwardChainCount:N0} ({diff:+0;-#}). "
                   + "The two are written by separate code paths during a grow, so "
                   + (diff > 0

@@ -290,7 +290,13 @@ internal sealed class SegmentWalker
     /// No visited set: a chain that outruns its bound is classified afterwards by a constant-memory cycle test, which keeps a segment of millions of
     /// pages from costing a hash set of millions of entries.
     /// </remarks>
-    private int CountRecordedChain(int rootPageIndex, List<int> directory, int[] next, bool[] unread, out bool complete, out bool matchesDirectory,
+    private int CountRecordedChain(
+        int rootPageIndex,
+        List<int> directory,
+        int[] next,
+        bool[] unread,
+        out bool complete,
+        out bool matchesDirectory,
         List<string> diagnostics)
     {
         complete = false;

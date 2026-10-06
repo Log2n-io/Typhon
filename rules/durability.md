@@ -1895,7 +1895,7 @@ of the LSN value).
   post the ctor's loading path (InitializeUowRegistry): flag cleared + fsync, before the engine accepts any write and before
        registration can migrate a schema (#583) — after the chunk summary has been adopted (CS-05)
   invariant the clear is the authoritative dirtying step — a session that mutates then crashes leaves the flag = 0
-  scope: DatabaseEngine.InitializeUowRegistry, DurabilityWatermarks.SetCleanShutdown
+  scope: DatabaseEngine.InitializeUowRegistry, DurabilityWatermarks.BeginOpenAfterCleanClose
   on_violation: flag survives an unclean session → next open trusts stale HEADs
 
 ### CS-03: HEAD rebuild skipped iff the clean flag was set `[fatal]`
@@ -1911,23 +1911,32 @@ of the LSN value).
   invariant an engine whose InitializeArchetypes threw is disposed as a crash would leave it: no PersistArchetypeState, no
             PersistEngineState, no chunk summary, no MarkCleanShutdown, and no final checkpoint cycle (the checkpoint manager is
             crash-stopped). CS-02 cleared the flag at open, so the next open recovers
-  invariant when that open followed a clean close (or another such failure), its close records the failed-open marker, and the next
-            open loads its segments without tolerating a torn one (DatabaseEngine.TolerateTornSegmentsAtOpen): the WAL holds
-            nothing past the clean close, so a segment that fails to load is damage to refuse, not a crash to refill (RB-01)
+  invariant an open that follows a clean close (or an open that never completed after one) sets the failed-open marker in the same
+            meta flip that clears the clean flag (DurabilityWatermarks.BeginOpenAfterCleanClose), and only a completed
+            InitializeArchetypes clears it (ClearFailedOpen). An open that dies anywhere in between — constructor, InitializeArchetypes,
+            or killed — leaves it set, and the next open loads its segments without tolerating a torn one: the WAL holds nothing past
+            the clean close, so a segment that fails to load is damage to refuse, not a crash to refill (RB-01)
+  invariant DatabaseEngine.TolerateTornSegmentsAtOpen = CrashRecoveryAtOpen ∧ ¬clean flag at open ∧ ¬marker: a repair's forced
+            recovery open (CS-06) after a clean close refuses a damaged segment too, for the same reason
   invariant a repeat InitializeArchetypes disarms the checkpoint's segment-pointer persistence until it completes
   rationale: hosts (DI, DatabaseEngine.Open) dispose an engine whose initialization threw, and the dispose ran the full close: it
              persisted the archetype table as far as the open had built it — an archetype whose cluster state was never built was
              written with ClusterSegmentSPI = 0, orphaning every entity it held — and set the clean flag over it, so the next open
              trusted all of it (#1147). Any exception in InitializeArchetypes did it: back-pressure, a schema error, an I/O fault.
              The final checkpoint cycle could do the same through its segment-pointer hook. And closing as a crash alone was not
-             enough: the retry of an open that failed on a damaged segment replaced the segment with an empty one and opened
+             enough: the retry of an open that failed on a damaged segment replaced the segment with an empty one and opened. The
+             marker was first cleared at the start of the open and written again only by the close of an open that failed in
+             InitializeArchetypes, so a kill or a constructor failure erased it; and a forced repair open after a clean close
+             tolerated a torn segment, emptying it while the repair reported success
   scope: DatabaseEngine.InitializeArchetypes, DatabaseEngine.DisposeCore, DatabaseEngine.TolerateTornSegmentsAtOpen,
-         DurabilityWatermarks.MarkFailedOpen, DurabilityWatermarks.ClearForOpen
+         DurabilityWatermarks.BeginOpenAfterCleanClose, DurabilityWatermarks.ClearFailedOpen
   on_violation: silent loss of every entity of the archetypes the failed open had not reached, behind a clean flag; or, on the
                 retry, of every entity of a damaged segment
   verified: HealthyOpenTests.AnOpenThatFailsHalfway_ClosesAsACrash_AndLosesNothing (fails the open between two archetypes through
             DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsReplacedOnlyAfterACrash (the retry
-            of a failed open refuses; after a real crash the segment is replaced) [VerifiesRule]
+            of a failed open refuses; after a real crash the segment is replaced, ChunkSegmentsReplacedAsTorn = 1),
+            HealthyOpenTests.AnOpenKilledBeforeItCompletes_LeavesTheMarker_AndTheNextOpenRefusesADamagedSegment,
+            HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule]
 
 ### CS-05: The chunk summary is trusted only after the close that wrote it `[fatal][silent]`
   invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and free-list membership, every
@@ -1939,23 +1948,28 @@ of the LSN value).
             load scans. Each segment entry is used only when it fits the segment just loaded (same page count, count within
             capacity), and a cluster list only together with its segment's own entry and within its allocated count and capacity
   invariant nothing checks a summary's content against the pages: a summary that passes every guard above but is wrong — a bug in
-            the capture — is trusted. Deliberate: the chunk bitmaps stay authoritative for allocation, so a wrong count costs space,
-            never a reused chunk; the exposure is the active-cluster list, which ASummaryLoadedOpen_HoldsTheStateAScanWould pins
+            the capture — is trusted. Deliberate: the chunk bitmaps stay authoritative for allocation, so a wrong count never reuses a
+            chunk; a short count on a full segment grows it instead of rebuilding an empty free list for ever (AllocateChunkInternal).
+            What a wrong count still misleads is AllocatedChunkCount's readers, and the exposure the pages cannot catch is the
+            active-cluster list, which ASummaryLoadedOpen_HoldsTheStateAScanWould pins
   invariant the summary is consumed by the open only and released when InitializeArchetypes ends, completed or not; the pages stay
-            the truth. Every repair step deletes the file before it writes the data file
+            the truth. Repair deletes the file once, after its backup and before its first offline write; a regeneration step's own
+            clean close then writes a fresh one, which describes the file as that close left it
   rationale: the count and the free list were rebuilt by reading every page of every chunk segment, and the active-cluster list by
              reading every cluster's occupancy word — most of the file on every open, each page pinned by a bare epoch tag, so a
              segment larger than the cache deadlocked the open (#1143). The summary replaces those reads; the nonce and the flag make
              a stale, copied-in or damaged file cost a scan, never a wrong count
   scope: DatabaseEngine.WriteChunkSummary, DatabaseEngine.AdoptChunkSummary, DatabaseEngine.TakeClusterSummaryFor,
-         DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.SetCleanShutdown, ChunkSummaryFile.Parse, ChunkBasedSegment.Load,
+         DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose, ChunkSummaryFile.Parse,
+         ChunkBasedSegment.Load, ChunkBasedSegment.AllocateChunkInternal,
          ChunkBasedSegment.CaptureSummary, ArchetypeClusterState.CreateFromExisting, ArchetypeClusterState.CaptureClusterSummary,
          DatabaseRepair.Repair
   on_violation: a summary from another state of the file is trusted — allocated counts wrong, so the segment grows instead of
                 reusing its free chunks; clusters holding entities missing from the active list and so from every iteration
   verified: HealthyOpenTests.ASummaryLoadedOpen_HoldsTheStateAScanWould, HealthyOpenTests.ASummaryThatDoesNotDescribeTheFile_IsNotUsed
             (unclean close, a stale file whose counts really differ, damage, missing file),
-            HealthyOpenTests.AnEntryThatDoesNotFitItsSegment_IsScanned_AndItsClusterListIgnored [VerifiesRule];
+            HealthyOpenTests.AnEntryThatDoesNotFitItsSegment_IsScanned_AndItsClusterListIgnored,
+            ChunkSegmentSummaryLoadTests.ASummaryWithAShortCount_GrowsAFullSegment_InsteadOfSpinning [VerifiesRule];
             ChunkSummaryFileTests (the format)
 
 ### CS-06: Crash recovery runs iff the last close was unclean `[fatal]`
@@ -1963,7 +1977,8 @@ of the LSN value).
             clear + rebuild and EntityMap rebuild, RecoverySuspect checksum mode, WAL replay, CK-09's occupancy re-derive. The
             tolerate-torn segment loads read TolerateTornSegmentsAtOpen, which is the same flag minus a failed open (CS-04)
   invariant repair forces it (DatabaseEngineOptions.ForceCrashRecoveryAtOpen) and then ignores the chunk summary: the rebuild net
-            is what regenerates derived structures, and it runs on the crash path only
+            is what regenerates derived structures, and it runs on the crash path only. OPEN (#1179): the force takes effect only
+            when WAL segments are on disk; on a bundle without any, the forced open rebuilds nothing
   invariant the ctor's WAL scan still runs whenever segments exist: it reads the log, not the data file, and gives LOG-08 its
             LSN frontier
   rationale: the flag used to mean "WAL segment files exist", which a clean close leaves true, so every reopen of a database with

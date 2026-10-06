@@ -655,8 +655,8 @@ internal sealed class IntegrityScannerTests
 
     /// <summary>
     /// A chain that stops a page short of its directory is found at Quick, from the forward pointers the sweep records, and not at Spine. It refuses an
-    /// open — through open-time verification, not just in principle — unless crash recovery will rebuild the segment: after an unclean close, and only
-    /// for the kinds the crash path replaces and refills from the WAL.
+    /// open — through open-time verification, not just in principle — unless the crash path will replace the segment: after an unclean close, and only
+    /// for the kinds it replaces with a fresh one. What WAL replay then refills is only what followed the last checkpoint (#1180).
     /// </summary>
     [TestCase(StorageSegmentKind.Cluster, false, true, TestName = "AShortenedClusterChain_AfterACleanClose_RefusesTheOpen")]
     [TestCase(StorageSegmentKind.Cluster, true, false, TestName = "AShortenedClusterChain_AfterACrash_OpensForRecoveryToRebuild")]
@@ -696,7 +696,7 @@ internal sealed class IntegrityScannerTests
         }
         else
         {
-            Assert.That(thrown, Is.Null, "recovery rebuilds this segment from the WAL, so the finding is reported and the open proceeds");
+            Assert.That(thrown, Is.Null, "after an unclean close the crash path replaces this kind of segment: the finding is reported, the open proceeds");
         }
     }
 

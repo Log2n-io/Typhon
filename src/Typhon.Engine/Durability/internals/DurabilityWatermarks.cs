@@ -47,8 +47,9 @@ internal static class DurabilityWatermarks
     internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn)
         => mmf.MutateBootstrapAndPersist(() => Write(mmf, checkpointLsn, Read(mmf).CleanShutdown));
 
-    // Set by the close of an open that failed after a clean close (#1147): the next open must recover, but there is nothing in the WAL to rebuild a
-    // damaged segment from, so it must not replace one with a fresh segment the way it would after a crash.
+    // Set while an open that followed a clean close is in progress, and cleared when it completes (#1147, CS-04). Found set, it means that open never
+    // completed: the next one must recover, but the WAL holds nothing past the clean close to rebuild a damaged segment from, so it must not replace one
+    // with a fresh segment the way it would after a crash.
     internal const string FailedOpenKey = "FailedOpenAfterCleanClose";
 
     /// <summary>
@@ -66,21 +67,23 @@ internal static class DurabilityWatermarks
         });
 
     /// <summary>
-    /// The open's dirtying step (CS-02): clears the clean flag, the chunk summary's nonce and the failed-open marker in ONE meta flip, before the session
-    /// mutates anything.
+    /// The dirtying step of an open that follows a clean close, or an open that never completed after one (CS-02, CS-04): clears the clean flag and the
+    /// chunk summary's nonce and sets the failed-open marker, in ONE meta flip, before the session mutates anything. The marker stays set until the open
+    /// completes (<see cref="ClearFailedOpen"/>), so an open that dies anywhere before that — in the constructor, in InitializeArchetypes, or killed —
+    /// leaves it for the next one.
     /// </summary>
-    internal static void ClearForOpen(ManagedPagedMMF mmf)
+    internal static void BeginOpenAfterCleanClose(ManagedPagedMMF mmf)
         => mmf.MutateBootstrapAndPersist(() =>
         {
             Write(mmf, Read(mmf).CheckpointLsn, false);
             mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, 0);
-            mmf.Bootstrap.SetInt(FailedOpenKey, 0);
+            mmf.Bootstrap.SetInt(FailedOpenKey, 1);
         });
 
-    /// <summary>Records that an open which followed a clean close failed before it completed (#1147, CS-04).</summary>
-    internal static void MarkFailedOpen(ManagedPagedMMF mmf) => mmf.MutateBootstrapAndPersist(() => mmf.Bootstrap.SetInt(FailedOpenKey, 1));
+    /// <summary>Clears the failed-open marker once the open that set it has completed (CS-04): from then on a crash is an ordinary one.</summary>
+    internal static void ClearFailedOpen(ManagedPagedMMF mmf) => mmf.MutateBootstrapAndPersist(() => mmf.Bootstrap.SetInt(FailedOpenKey, 0));
 
-    /// <summary>Whether the last session was an open that failed after a clean close.</summary>
+    /// <summary>Whether the last session was an open after a clean close that never completed.</summary>
     internal static bool ReadFailedOpen(ManagedPagedMMF mmf) => mmf.Bootstrap.GetInt(FailedOpenKey) != 0;
 
     /// <summary>

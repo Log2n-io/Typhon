@@ -1884,13 +1884,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     MarkCleanShutdown(WriteChunkSummary());
                 }
             }
-            else if (!_simulateHardCrash && _constructed && _archetypeInitIncomplete && (_cleanShutdownAtOpen || _failedOpenAtOpen))
-            {
-                // The open failed after a clean close (or after another such failure). The next open must recover, but the WAL holds nothing past the
-                // clean close, so a segment that fails to load is damage it cannot rebuild: the marker makes it refuse instead of replacing the segment
-                // with an empty one (#1147).
-                MarkFailedOpenBestEffort();
-            }
 
             Logger?.LogInformation("Engine disposing: WalManager");
             WalManager?.Dispose();
@@ -2302,10 +2295,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // where a crash mid-registration kept the flag set: the next open then saw cleanShutdown=1 with no migration of its own, trusted the half-migrated
             // Versioned HEADs and skipped RebuildVersionedHeadFromChain — serving stale HEADs silently (#583). The trust decision is unaffected: it reads the
             // captured _cleanShutdownAtOpen above, not the disk.
-            // The summary's nonce and the failed-open marker go with the flag, in the same flip: neither may outlive the session that read it (CS-05, CS-04).
+            // The summary's nonce goes with the flag, in the same flip: it may not outlive the session that read it (CS-05). The same flip sets the
+            // failed-open marker, which only a completed open clears: an open that dies before then, anywhere, leaves it set (CS-04).
             if (_cleanShutdownAtOpen || _failedOpenAtOpen)
             {
-                DurabilityWatermarks.ClearForOpen(MMF);
+                DurabilityWatermarks.BeginOpenAfterCleanClose(MMF);
             }
             var segment = MMF.GetSegment(spi);
             UowRegistry = new UowRegistry(segment, MMF, EpochManager, MemoryAllocator, this);
@@ -3880,33 +3874,31 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _archetypeInitIncomplete = false;
+
+        // The open the marker guards has completed: from here a crash is an ordinary one, whose recovery may replace a torn segment (CS-04). Set at the
+        // start of the open (BeginOpenAfterCleanClose) and cleared only now, so an open that dies before this point leaves it for the next one.
+        if ((_cleanShutdownAtOpen || _failedOpenAtOpen) && !_failedOpenCleared)
+        {
+            DurabilityWatermarks.ClearFailedOpen(MMF);
+            _failedOpenCleared = true;
+        }
     }
+
+    /// <summary>Whether this session cleared the failed-open marker its open set (once, at the first completed <see cref="InitializeArchetypes"/>).</summary>
+    private bool _failedOpenCleared;
 
     /// <summary>
-    /// Whether this open's segment loads may replace a segment that fails to load with a fresh one for WAL replay to refill (RB-01, #395): only on the
-    /// crash path, and not when the last session was an open that failed after a clean close — the WAL holds nothing to refill it from (#1147).
+    /// Whether this open's segment loads may replace a segment that fails to load with a fresh one for WAL replay to refill (RB-01, #395): only after an
+    /// unclean close, and not when the last session was an open that failed after a clean close (#1147). After a clean close the WAL holds nothing to
+    /// refill it from — which is also true of a repair's forced recovery open (<see cref="DatabaseEngineOptions.ForceCrashRecoveryAtOpen"/>): it takes
+    /// the crash path to rebuild derived structures, and must not empty a damaged segment on the way.
     /// </summary>
-    internal bool TolerateTornSegmentsAtOpen => CrashRecoveryAtOpen && !_failedOpenAtOpen;
+    internal bool TolerateTornSegmentsAtOpen => CrashRecoveryAtOpen && !_cleanShutdownAtOpen && !_failedOpenAtOpen;
 
-    /// <summary>Whether the last session was an open that failed after a clean close (<see cref="DurabilityWatermarks.MarkFailedOpen"/>).</summary>
+    /// <summary>
+    /// Whether the last session was an open after a clean close that never completed (<see cref="DurabilityWatermarks.BeginOpenAfterCleanClose"/>).
+    /// </summary>
     private bool _failedOpenAtOpen;
-
-    /// <summary>Writes the failed-open marker; a failure to write it must not mask the exception that failed the open.</summary>
-    private void MarkFailedOpenBestEffort()
-    {
-        try
-        {
-            DurabilityWatermarks.MarkFailedOpen(MMF);
-        }
-        catch (Exception e)
-        {
-            LogFailedOpenMarkerNotWritten(e);
-        }
-    }
-
-    [LoggerMessage(LogLevel.Warning,
-        "Close of a failed open: the failed-open marker could not be written; the next open may replace a damaged segment instead of refusing it")]
-    private partial void LogFailedOpenMarkerNotWritten(Exception exception);
 
     /// <summary>
     /// Set while <see cref="InitializeArchetypes"/> runs and left set when it throws. <see cref="DisposeCore"/> then skips every final-persistence step, as
@@ -6244,7 +6236,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// crash (D1): post-recovery there are no readers of pre-crash snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap
     /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
     /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
-    /// Invoked only on the crash path (WAL files present); a clean reopen keeps its chains for lazy cleanup.
+    /// Invoked only on the crash path (CrashRecoveryAtOpen: WAL segments present and an unclean close); a clean reopen keeps its chains for lazy cleanup.
     /// </summary>
     private void ScrubVersionedChains()
     {
