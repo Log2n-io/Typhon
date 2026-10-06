@@ -201,7 +201,9 @@ class ClusterSpanWriteDurabilityTests
         }
 
         dbe.WriteTickFence(1);
-        dbe.ForceCheckpoint();
+        // Waited for, not just requested: the seed must be on disk before the tick writes. A cycle still running when the unmarked write lands leaves
+        // the seed's page owed, so the close saves the unmarked write with it and the "lost" case reads the written values.
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)), Is.True, "premise: the seed is on disk before the tick");
         return ids;
     }
 
