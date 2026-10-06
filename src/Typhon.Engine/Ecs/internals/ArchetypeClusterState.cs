@@ -530,6 +530,35 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Prep-time snapshot of <see cref="WrittenSlotUnion"/> — the value Finalize reads when choosing which columns to emit.</summary>
     internal int FenceWrittenSlots;
 
+    /// <summary>
+    /// QFENCE-01: whether the indexes of component slot <paramref name="componentSlot"/> may hold keys their entities have left since the last fence.
+    /// Some entity must be marked in <see cref="ClusterShadowBitmap"/>, and one of three things true — the same three the fence's shadow drain gates on
+    /// (<c>DrainClusterShadowSlots</c>), for the same reasons:
+    /// <list type="bullet">
+    /// <item>the slot was written (<see cref="WrittenSlotUnion"/>, <see cref="AllSlotsWritten"/> included);</item>
+    /// <item>a slot was released this tick (<see cref="SlotReleasesThisTick"/>): a destroy after a write to ANY component leaves this one's index entries
+    /// for the fence, on a slot a spawn may already have reused;</item>
+    /// <item>the union is empty while entities are marked: a path that does not maintain the union (a pure-Transient archetype's writes) — a
+    /// contradiction, answered by doing the work.</item>
+    /// </list>
+    /// False lets a query trust this component's tree keys: a tick that only moves positions costs an index query on another component nothing.
+    /// </summary>
+    /// <remarks>
+    /// The union is reset at the fence's Prep, and the release count and the bitmap at its end, inside the fence window. Under the runtime no query runs
+    /// there — every system has completed (EW-01). A host driving <c>WriteTickFence</c> itself must not query concurrently with it: the fence's index
+    /// writers skip OLC validation in that window, which already makes a concurrent query unsafe.
+    /// </remarks>
+    internal bool MayHaveFenceStaleKeys(int componentSlot)
+    {
+        if (ClusterShadowBitmap is not { AnyTestAndSetSinceClear: true })
+        {
+            return false;
+        }
+
+        var written = Volatile.Read(ref WrittenSlotUnion);
+        return written == 0 || (written & (1 << componentSlot)) != 0 || Volatile.Read(ref SlotReleasesThisTick) != 0;
+    }
+
     /// <summary>Dirty cluster count (per-word non-zero count) at the end of Prep. Used for telemetry only.</summary>
     internal int FenceDirtyClusterCount;
 

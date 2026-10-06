@@ -183,7 +183,7 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// Fast path for index &lt; 57 (inline in meta). Slow path walks the overflow dir-index chain.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int GetDirectoryChunkId(int dirIndex, ref ChunkAccessor<TStore> accessor)
+    protected int GetDirectoryChunkId(int dirIndex, ref ChunkAccessor<TStore> accessor)
     {
         ref readonly var meta = ref accessor.GetChunkReadOnly<PagedHashMapMeta>(0);
 
@@ -531,7 +531,11 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// Ensure the directory has enough chunks to address bucket <paramref name="maxBucketId"/>.
     /// Allocates new directory chunks (inline or overflow dir-index) as needed.
     /// </summary>
-    protected void EnsureDirectoryCapacity(int maxBucketId, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    /// <param name="maxBucketId">The highest bucket id the directory must address.</param>
+    /// <param name="accessor">The caller's accessor; new directory chunks are cleared and written through it.</param>
+    /// <param name="changeSet">The caller's ChangeSet.</param>
+    /// <param name="underLatch">The caller holds a bucket latch (a split): the chunks come from its reservation (IXW-07).</param>
+    protected void EnsureDirectoryCapacity(int maxBucketId, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet, bool underLatch = false)
     {
         int requiredDirChunks = (maxBucketId >> PagedHashMapDirectory.Shift) + 1;
 
@@ -549,7 +553,7 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
             // local-accessor-dispose window left the new dir chunk's CONTENT page with ACW=0 but DC=1 — a checkpoint racing in that window snapshotted
             // the cleared (zero-filled) content, fsync'd, dropped DC→0, and any eviction-then-reload before the first SetBucketChunkId would lose subsequent
             // slot writes (the SLOT-ZERO corruption).
-            int newDirChunkId = _segment.AllocateChunk(changeSet, ref accessor);
+            int newDirChunkId = AllocateDirectoryChunk(changeSet, ref accessor, underLatch);
             meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
 
             if (i < PagedHashMapMeta.MaxInlineDirectoryChunks)
@@ -571,7 +575,7 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
                     // garbage from meta's byte layout as directory chunk ids — which then propagates as `BucketChunkIds[slot] == 0` and corrupts every
                     // subsequent insert that hashes into that bucket. Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on the new chunk's content
                     // page.
-                    int ovId = _segment.AllocateChunk(changeSet, ref accessor);
+                    int ovId = AllocateDirectoryChunk(changeSet, ref accessor, underLatch);
 
                     ref var ov = ref accessor.GetChunk<OverflowDirIndex>(ovId, true);
                     ov.NextOverflowChunkId = -1;
@@ -593,7 +597,7 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
                             // as the first-overflow branch above: a half-formed link (prev → new, new.NextOverflowChunkId == 0) lets a concurrent snapshot
                             // persist a walk-into-meta, producing garbage directory slots. Caller-accessor overload (#301 cascade fix) keeps ACW > 0 on the
                             // new chunk's content page.
-                            int newOvId = _segment.AllocateChunk(changeSet, ref accessor);
+                            int newOvId = AllocateDirectoryChunk(changeSet, ref accessor, underLatch);
 
                             ref var newOv = ref accessor.GetChunk<OverflowDirIndex>(newOvId, true);
                             newOv.NextOverflowChunkId = -1;
@@ -646,6 +650,15 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     // ═══════════════════════════════════════════════════════════════════════
     // Meta persistence
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Directory chunks allocated so far — <see cref="EnsureDirectoryCapacity"/> adds one per 64 buckets.</summary>
+    protected int DirectoryChunkCount(ref ChunkAccessor<TStore> accessor) => accessor.GetChunkReadOnly<PagedHashMapMeta>(0).DirectoryChunkCount;
+
+    /// <summary>A directory chunk: from the caller's reservation when it holds a bucket latch (IXW-07), otherwise a plain allocation.</summary>
+    private int AllocateDirectoryChunk(ChangeSet changeSet, ref ChunkAccessor<TStore> accessor, bool underLatch)
+        => underLatch
+            ? ChunkReservation<TStore>.AllocateUnderLatch(_segment, changeSet, ref accessor)
+            : _segment.AllocateChunk(changeSet, ref accessor);
 
     /// <summary>
     /// Persist in-memory <see cref="PackedMeta"/> and <see cref="_entryCount"/> to chunk 0.

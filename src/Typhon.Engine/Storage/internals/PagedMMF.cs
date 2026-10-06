@@ -1201,6 +1201,85 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
+    /// Read-only access to a page, for a scan that visits a whole structure (EP-02, #1144). The page is pinned by <see cref="PageInfo.SlotRefCount"/>
+    /// instead of being tagged with the caller's epoch, so <see cref="ReleasePageForRead"/> leaves it evictable at once: a scan of N pages holds one
+    /// slot at a time, not N for the rest of its scope. No latch: the caller only reads, and releases the page before it reads the next.
+    /// </summary>
+    /// <param name="filePageIndex">The page to read.</param>
+    /// <param name="memPageIndex">The cache slot holding it, pinned until <see cref="ReleasePageForRead"/>.</param>
+    /// <param name="warm">Marks the page recently used, as <see cref="RequestPageEpoch"/> does. A one-off structural scan (a load, a rebuild) leaves it
+    /// false and passes through the cache cold, without pushing out the working set; a query scan, which the application repeats, sets it so its pages
+    /// age exactly as they would through the epoch path.</param>
+    /// <remarks>
+    /// The pin is taken under the slot's lock, after checking the slot still holds the page and is ready (PS-15). <see cref="TryAcquire"/> withdraws
+    /// "ready", re-checks <see cref="PageInfo.SlotRefCount"/> and reclaims the slot under the same lock, so a pin either lands before that check, which
+    /// then backs off, or sees the slot gone and looks the page up again. A pin taken outside the lock could land between the check and the reclaim.
+    /// </remarks>
+    internal bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false)
+    {
+        while (true)
+        {
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            {
+                return false;
+            }
+
+            var pi = Slot(memPageIndex);
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
+
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            if (pi.ReadFilePageIndexVolatile() != filePageIndex || !Volatile.Read(ref pi.SlotReady))
+            {
+                pi.StateSyncRoot.ExitExclusiveAccess();
+                continue;
+            }
+
+            Interlocked.Increment(ref pi.SlotRefCount);
+            // A freshly read slot leaves Allocating only now, pinned, as ValidateTaggedSlot does after its epoch tag.
+            if (pi.PageState == PageState.Allocating)
+            {
+                pi.PageState = PageState.Idle;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            }
+
+            pi.StateSyncRoot.ExitExclusiveAccess();
+
+            try
+            {
+                if (pi.ReadPending)
+                {
+                    CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: true);
+                }
+
+                EnsurePageVerified(memPageIndex);
+            }
+            catch
+            {
+                Interlocked.Decrement(ref pi.SlotRefCount);
+                throw;
+            }
+
+            if (warm)
+            {
+                pi.IncrementClockSweepCounter();
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Releases a page taken by <see cref="AcquirePageForRead"/>; it is evictable again unless something else holds it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ReleasePageForRead(int memPageIndex)
+    {
+        var remaining = Interlocked.Decrement(ref Slot(memPageIndex).SlotRefCount);
+        Debug.Assert(remaining >= 0, "a page released for read more often than it was acquired");
+    }
+
+    /// <summary>
     /// Like <see cref="RequestPageEpochUnchecked"/> but does <b>not</b> bump the page's clock-sweep counter and does <b>not</b> touch
     /// <see cref="PageInfo.CrcVerified"/>. This is the read-only introspection path consumed by the Database File Map's detail tier (Module 15, A2): faulting
     /// a page in purely to inspect it must not perturb the eviction heuristic that protects the live working set, and must leave a genuine CRC verification

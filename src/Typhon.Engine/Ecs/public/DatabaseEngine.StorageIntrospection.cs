@@ -1239,8 +1239,8 @@ public partial class DatabaseEngine
                     }
                 }
                 if (ls == null) continue;
-                var chainCount = ls.WalkForwardChainPageCount(chainGuard.Epoch);
-                var dirCount = ls.VerifyDirectoryAgainst(chainGuard.Epoch, seg.Pages);
+                var chainCount = ls.WalkForwardChainPageCount();
+                var dirCount = ls.VerifyDirectoryAgainst(seg.Pages);
                 if (chainCount != seg.Pages.Length || dirCount != seg.Pages.Length)
                 {
                     issues.Add(new StorageIntegrityIssue(

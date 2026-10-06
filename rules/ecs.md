@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-25 |
-| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime |
+| Last Updated | 2026-10-06 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -768,3 +768,68 @@ easy to get wrong — the copy is invisible at the call site and outlives everyt
             the three regression tests beside it do NOT do: they assert the CONSEQUENCE (a view still refreshes once its
             creator is gone) and would stay green against a fix that merely rebound at the top of `Refresh`.
             Mutant_AQueryStillBoundToItsTransaction_IsReported is the mutant.
+
+---
+
+## Module: QFENCE — What an indexed query answers between a write and its tick fence
+
+A `SingleVersion` write under the default TickFence discipline, and any `Transient` write, lands in place at once, while
+the secondary B+Tree indexes and the per-cluster zone maps catch up only at `WriteTickFence`: the index still holds the
+entity under its old key, and a zone map may still rule its cluster out for the new value. Writes that reconcile at
+commit have no such window — `Versioned` components, `SingleVersion` under the Commit discipline, spawns. A destroy
+removes the entity's entries itself, unless the entity was written earlier in the tick: then it leaves them for the
+fence, and every query path must drop them by the cleared occupancy bit. A query answers from a structure that lags the data, so it cannot be
+both fast and exact inside the window; this rule fixes what it does promise.
+
+### QFENCE-01: An indexed query never returns a row its current value fails `[silent]`
+  invariant ∀ query Q with an indexed `WhereField`, run after an in-place write to entity e (the write happens-before Q)
+            and before the tick fence that moves e's index entries: Q returns e only if e is live and its CURRENT value
+            satisfies Q's condition — on every path the planner may take (the index path, the zone-map scan) and every
+            terminal (`Execute`, `Count`, `Any`, `ExecuteOrdered`)
+  invariant an entity whose value STARTED satisfying Q since the last fence may be absent from Q's result until the fence;
+            once the fence has run, Q is exact
+  invariant an ordered result places a written entity that still satisfies Q by its value as of the last fence — its key
+            in the tree — and Skip / Take count only the rows returned
+  never trusting a tree key for an entity written since the fence: the index path skips re-testing the predicate its
+        range enforced (`PrimaryRangeAdmitsOnlyMatches`), and the ordered merge tests no value at all, so both re-test the
+        entities whose shadow-bitmap bit is set (`ClusterShadowBitmap`, set before the in-place write lands)
+  never looking for the new values by checking every entity written since the fence: that costs each query in proportion
+        to the tick's writes — measured at +0.9 ms per point lookup with 100 000 entities written — where the index's
+        point is a cost independent of them. A caller that needs the new value inside the tick uses the Commit
+        discipline, or fences first
+  enforce the re-test runs only while the queried component may have stale keys
+          (`ArchetypeClusterState.MayHaveFenceStaleKeys`): some entity marked since the fence, AND its slot written, OR a
+          slot released this tick (a destroy after a write to ANY component leaves this one's entries for the fence), OR
+          an empty written-slot union (a path that does not maintain it) — the fence drain's own three-term gate. A tick
+          that only writes other components and destroys nothing costs an index query on this one nothing
+  scope: EcsQuery.ScanPerArchetypeBTreeSelective, ArchetypeSortedStream, ArchetypeSortedStream.Create,
+         ArchetypeClusterState.MayHaveFenceStaleKeys, DirtyBitmap.ReadWord, DirtyBitmap.AnyTestAndSetSinceClear
+  on_violation: a row that fails the query's own condition, with nothing raised — and only when the planner happened to
+                pick the index path, which it does on an estimate. A unique point lookup on 1 000 000 rows returned an
+                entity whose key had moved 100 → 5 000 000 since the fence, while the zone-map scan of the same query
+                returned nothing; an ordered query returned it at its old position
+  rationale: a missing row is the documented lag of a structure maintained at the fence; a wrong row breaks every caller
+             that trusts its WHERE clause. Re-testing costs one bitmap word per cluster the index path's result touches,
+             and on the ordered path one per page of keys it reads; a value test runs only for an entity written since
+             the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
+             `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
+  note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
+        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186); a write through
+        `ClusterRef.GetSpan` / `Get` marks no entity and records no old key, so the indexes never follow it, even at the
+        fence (#1187); a slot destroyed after a write and reused by a spawn before the fence makes an ordered query
+        return the new entity twice, and the fence then leaves the indexes answering keys no entity holds (#1188). Reads
+        of an index that test no value — `Transaction.EnumerateIndex`, foreign-key navigation — are not queries and are
+        not covered
+  verified: QueryBetweenWriteAndFenceTests [VerifiesRule] — the old value, a range left and a range still matched, the
+            new value before and after the fence (inside and outside the cluster's old bounds), the `AllowMultiple`
+            index, a second vectorisable predicate (the SIMD branch), a write followed by a destroy, and a write to
+            ANOTHER component followed by a destroy and a respawn into the freed slot, each on the
+            planner's path and both forced paths; the ordered query (ascending, descending, Skip / Take, before and after
+            the fence, a destroyed entity), which takes the merge whatever path is forced; the gate (a write to another
+            component leaves the re-test off, a write to this one turns it on, the fence turns it off); and the
+            controls — a Commit-discipline write and a `Versioned` write have no window. Mutants: without the index
+            path's re-test, or its SIMD-branch half, the cases that reach it fail; without the stream's, the ordered
+            case; without its liveness test, the destroy case; with the gate always off, seven of ten; with the gate
+            blind to which component was written, the gate case; with the gate blind to releases, the
+            destroy-after-another-write case
+

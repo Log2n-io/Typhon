@@ -96,6 +96,18 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false)
+    {
+        memPageIndex = filePageIndex;
+        return true;
+    }
+
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReleasePageForRead(int memPageIndex) { }
+
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PageAccessor GetPage(int memPageIndex) => new(_pageAddresses[memPageIndex]);
 
     /// <inheritdoc />

@@ -237,9 +237,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// matches the directory just read and its count fits the capacity; anything else is a summary that does not describe this segment, and the scan runs.
     /// </param>
     /// <remarks>
-    /// The scan is what a healthy open must not do (#1143): one page read per data page, each page tagged with a bare epoch snapshot and so held in the
-    /// cache until the epoch advances, which deadlocks the open once a segment outgrows the cache. It still runs after a crash, where the summary is never
-    /// trusted, and there it carries the chain-versus-directory cross-check that used to run on every load (#382): see <see cref="ScanForAllocatorState"/>.
+    /// The scan is what a healthy open must not do (#1143): one page read per data page. Each page is read and released before the next (EP-02), so the
+    /// scan holds one page of the cache however large the segment. It still runs after a crash, where the summary is never trusted, and there it carries
+    /// the chain-versus-directory cross-check that used to run on every load (#382): see <see cref="ScanForAllocatorState"/>.
     /// </remarks>
     internal bool Load(int filePageIndex, ChunkSegmentSummary summary)
     {
@@ -289,19 +289,30 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// </remarks>
     private void ScanForAllocatorState(int filePageIndex)
     {
-        var epoch = _store.EpochManager.GlobalEpoch;
         var length = Length;
         var pages = Pages;
         _allocatedCount = 0;
         var lastInList = -1;
 
+        // One page at a time (EP-02): an epoch-tagged read would hold every page of the segment for the open's scope, and a segment larger than the
+        // cache would then wait for evictions its own tags forbid (#1144).
         for (int i = 0; i < length; i++)
         {
             var maxChunks = i == 0 ? _rootChunkCount : _otherChunkCount;
             var bitmapLongs = i == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
-            var page = GetPage(i, epoch, out _);
+            var page = AcquirePageForRead(i, out var memPageIndex);
+            int next;
+            int popcount;
+            try
+            {
+                next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+                popcount = CountAllocatedBits(page.MetadataReadOnly<long>(), bitmapLongs, maxChunks);
+            }
+            finally
+            {
+                ReleasePageForRead(memPageIndex);
+            }
 
-            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
             var expected = (i + 1) < length ? pages[i + 1] : 0;
             if (next != expected)
             {
@@ -311,8 +322,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                     + "grow did not persist before the previous close.");
             }
 
-            var metadata = page.MetadataReadOnly<long>();
-            var popcount = CountAllocatedBits(metadata, bitmapLongs, maxChunks);
             _allocatedCount += popcount;
 
             if (popcount < maxChunks) // page has free space
@@ -633,8 +642,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         }
     }
 
+    /// <summary>Called with the segment at the start of every allocation; a test throws from it to stand in for a failing grow. Test seam.</summary>
+    internal static Action<object> AllocateFaultForTest;
+
     private int AllocateChunkInternal(bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
     {
+        AllocateFaultForTest?.Invoke(this);
         int pass = 0;
 
         restart:
@@ -974,6 +987,13 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         }
     }
 
+    /// <summary>Test seam: rebuilds the free list from the chunk bitmaps now, as an allocation that found no free chunk does.</summary>
+    internal void RebuildFreeListForTest()
+    {
+        Volatile.Write(ref _freeHead, EMPTY_PAGE);   // otherwise the rebuild sees a valid list and returns
+        RebuildFreeList();
+    }
+
     /// <summary>
     /// Rebuilds the free list from L0 bitmap truth when the list is empty but free space exists.
     /// Recovers pages orphaned by rare concurrent race conditions.
@@ -991,7 +1011,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 return; // list looks valid, another thread fixed it
             }
 
-            var epoch = _store.EpochManager.GlobalEpoch;
             var length = Length;
             var nextPage = _nextPage;
 
@@ -1013,10 +1032,20 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             {
                 var maxChunks = i == 0 ? _rootChunkCount : _otherChunkCount;
                 var bitmapLongs = i == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
-                var page = GetPage(i, epoch, out _);
-                var metadata = page.MetadataReadOnly<long>();
+                // One page at a time (EP-02): an epoch-tagged read would hold every page for the allocating caller's scope — under update churn on a
+                // segment larger than the cache, the rebuild then waited for evictions its own tags forbid (#1144, found by MarketHardeningTests).
+                var page = AcquirePageForRead(i, out var memPageIndex);
+                int allocated;
+                try
+                {
+                    allocated = CountAllocatedBits(page.MetadataReadOnly<long>(), bitmapLongs, maxChunks);
+                }
+                finally
+                {
+                    ReleasePageForRead(memPageIndex);
+                }
 
-                if (CountAllocatedBits(metadata, bitmapLongs, maxChunks) < maxChunks)
+                if (allocated < maxChunks)
                 {
                     nextPage[i] = EMPTY_PAGE; // mark as in-list, tail
                     if (firstFree == EMPTY_PAGE)
@@ -1095,6 +1124,14 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     [AllowCopy]
     [return: TransfersOwnership]
     internal ChunkAccessor<TStore> CreateChunkAccessor(ChangeSet changeSet = null) => new(this, _store, _epochManager, changeSet);
+
+    /// <summary>
+    /// A read-only accessor for a scan whose length grows with the data — a query over a whole archetype, an index range (EP-02). It holds at most its
+    /// window's 32 pages, never tags them with the caller's epoch, and an address it returns is valid only until its next window miss: see
+    /// <see cref="ChunkAccessor{TStore}"/>, scan mode. An epoch-tagged accessor would keep every page the scan touched until the caller's scope ends,
+    /// which a transaction holds until it is disposed.
+    /// </summary>
+    internal ChunkAccessor<TStore> CreateScanAccessor() => new(this, _store, _epochManager, null, scan: true);
 
     /// <summary>
     /// Single-entry thread-local cache for warm <see cref="ChunkAccessor{TStore}"/> reuse.

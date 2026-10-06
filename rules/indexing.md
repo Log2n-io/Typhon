@@ -554,3 +554,27 @@ written for the read path; these are the write-path obligations that went unwrit
             `Mutant_AnElementRemovedBehindTheCensus_IsReported` shows the census detects the loss shape rather than passing vacuously.
   requires IXW-04 (the leaf-authority proof both paths take, and which says nothing about the buffer behind the entry)
 
+### IXW-07: A writer never allocates storage while it holds a node or bucket latch `[fatal]`
+  invariant every chunk a B+Tree split, or an entity-map append, bulk append or bucket split, writes under its latches is reserved before the first
+            latch is taken (`ChunkReservation.Fill`, which grows to the exact need), its page pinned until the writer ends; under a latch
+            `ChunkReservation.AllocateUnderLatch` hands out reserved chunks — anything else is counted (`UnreservedAllocations`)
+  invariant a writer that finds its reservation short under its latches releases every one and reserves before it latches again; a fault under an
+            entity-map bucket lock releases the lock — with a version bump once anything may have been written (an upsert's in-place update, an
+            append, a bulk run's entries, a split's rewrite), without one only when nothing was
+  never `AllocateChunk`, a segment grow, or a page fault for a chunk being written, between a latch's acquisition and its release
+  scope: ChunkReservation, BTree.AllocNode, BTree.InsertIterative, BTree.AddOrUpdateCorePessimistic, RawValuePagedHashMap.AppendUnderBucketLock,
+         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.EnsureDirectoryCapacity
+  on_violation: an allocation can grow the segment — up to 1 024 pages — and wait seconds on page-cache back-pressure, or throw. Waiting, it holds
+                every writer of the node or bucket: the B+Tree's waiters exhaust their bounded retries and report a liveness defect (IXW-01), two workers
+                in one MarketHardeningTests storm. Throwing, it leaves the latch held for good: an entity-map bucket nobody would unlock froze a storm at
+                175 623 operations, and the test's teardown then freed the engine under the spinning writer (AccessViolationException)
+  note: an `AllowMultiple` index still allocates its VSBS buffers under the leaf latch, which IXW-06 makes the only place the buffer may be touched;
+        not covered here. Nor is the generic `PagedHashMap<TKey, TValue, TStore>`, used only by tests and benchmarks, which still allocates under its
+        bucket latches
+  verified: LatchFreeAllocationTests [VerifiesRule] — 20 000 inserts that split a B+Tree, and chain and split an entity map, allocate nothing under
+            a latch (713 and 6 467 allocations when the reservation is ignored); after an injected allocation fault a scan and further writes
+            complete. With the code before the reservation, the map's scan spins until the 15 s guard and the tree's next insert reports IXW-01
+            ("made no progress in 10000 pessimistic retries") — the hardening signature, reproduced. A split of a chain longer than the initial
+            reservation allocates nothing under its lock (with the reservation capped at 64 it did); a fault in a bulk insert's write phase leaves no
+            bucket locked and the map's count equal to what its buckets hold (without the release, the scan spins until the 15 s guard)
+  requires IXW-01 (the bounded retry that turned a latch held across a slow allocation into that report)
