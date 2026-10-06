@@ -5881,13 +5881,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return SnapshotEnabledBits(state.EntityMap);
     }
 
-    /// <summary>Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/>.</summary>
+    /// <summary>
+    /// Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/> it can reach. The map is one an open is about to replace and may be
+    /// torn, so the walk is the damage-tolerant one: the optimistic walk retried a torn bucket forever (#1143 exposed it).
+    /// </summary>
     private static Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
     {
         var snapshot = new Dictionary<long, ushort>();
         var accessor = map.Segment.CreateChunkAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
-        map.ForEachEntry(ref accessor, ref action);
+        map.ForEachEntryQuiescent(ref accessor, ref action);
         accessor.Dispose();
         return snapshot;
     }

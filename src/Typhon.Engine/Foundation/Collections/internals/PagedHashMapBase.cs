@@ -237,6 +237,59 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     }
 
     /// <summary>
+    /// <see cref="GetBucketChunkId"/> for a map whose pages may be damaged: every chunk id on the way to the bucket is range-checked before it is read, so a
+    /// torn directory yields <c>-1</c> (no bucket) instead of a read outside the segment — a negative id would land before the page's chunk area.
+    /// </summary>
+    protected int GetBucketChunkIdChecked(int bucketId, ref ChunkAccessor<TStore> accessor)
+    {
+        var capacity = _segment.ChunkCapacity;
+        var dirIndex = bucketId >> PagedHashMapDirectory.Shift;
+        var dirSlot = bucketId & 0x3F;
+
+        ref readonly var meta = ref accessor.GetChunkReadOnly<PagedHashMapMeta>(0);
+        if (dirIndex >= meta.DirectoryChunkCount)
+        {
+            return -1;
+        }
+
+        int dirChunkId;
+        if (dirIndex < PagedHashMapMeta.MaxInlineDirectoryChunks)
+        {
+            dirChunkId = meta.DirectoryChunkIds[dirIndex];
+        }
+        else
+        {
+            var overflowChunkId = meta.OverflowDirIndexChunkId;
+            var remaining = dirIndex - PagedHashMapMeta.MaxInlineDirectoryChunks;
+            while (true)
+            {
+                if ((uint)overflowChunkId >= (uint)capacity)
+                {
+                    return -1;
+                }
+
+                ref readonly var overflow = ref accessor.GetChunkReadOnly<OverflowDirIndex>(overflowChunkId);
+                if (remaining < OverflowDirIndex.EntriesPerChunk)
+                {
+                    dirChunkId = overflow.DirectoryChunkIds[remaining];
+                    break;
+                }
+
+                overflowChunkId = overflow.NextOverflowChunkId;
+                remaining -= OverflowDirIndex.EntriesPerChunk;
+            }
+        }
+
+        if ((uint)dirChunkId >= (uint)capacity)
+        {
+            return -1;
+        }
+
+        ref readonly var dir = ref accessor.GetChunkReadOnly<PagedHashMapDirectory>(dirChunkId);
+        return dir.BucketChunkIds[dirSlot];
+    }
+
+    /// <summary>
     /// Set the chunk ID of a bucket in the directory. Used during split to register new buckets.
     /// </summary>
     protected void SetBucketChunkId(int bucketId, int chunkId, ref ChunkAccessor<TStore> accessor)

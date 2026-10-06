@@ -1354,6 +1354,51 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     }
 
     /// <summary>
+    /// Visits every entry it can reach in a map no other thread is using and whose pages may be damaged: the open's snapshots of a persisted map it is about
+    /// to replace (<c>DatabaseEngine.SnapshotEnabledBits</c>). Unreachable entries are skipped, never waited for.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ForEachEntry{TAction}"/> retries any inconsistent read, because under its contract the cause is a concurrent writer that will finish. On a
+    /// page torn on disk the inconsistency is permanent — a lock bit set in a bucket's version word, an out-of-range chunk id — and it retried forever: a crash
+    /// reopen hung in the EntityMap rebuild. Here nothing writes, so nothing is retried: every chunk id is range-checked before it is read, directory ones
+    /// included (<see cref="PagedHashMapBase{TStore}.GetBucketChunkIdChecked"/>), and a chain is cut at the segment's capacity (a cycle). What a damaged page
+    /// yields is garbage keys, which the callers' lookups by authoritative key do not match.
+    /// </remarks>
+    /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
+    internal int ForEachEntryQuiescent<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action) where TAction : struct, IEntryAction<TKey>
+    {
+        var visited = 0;
+        var (_, _, bucketCount) = ReadMeta();
+        var chunkCapacity = Segment.ChunkCapacity;
+        for (var b = 0; b < bucketCount; b++)
+        {
+            // -1 when the directory leading to the bucket is damaged: the bucket's entries are lost
+            var chunkId = GetBucketChunkIdChecked(b, ref accessor);
+            for (var walk = 0; (uint)chunkId < (uint)chunkCapacity && walk <= chunkCapacity; walk++)
+            {
+                var addr = accessor.GetChunkAddress(chunkId);
+                ref readonly var header = ref GetHeader(addr);
+                var count = Math.Min((int)header.EntryCount, _bucketCapacity);
+                var nextId = header.OverflowChunkId;
+                var keys = KeysPtr(addr);
+                for (var i = 0; i < count; i++)
+                {
+                    if (!action.Process(keys[i], ValueAt(addr, i)))
+                    {
+                        return visited;
+                    }
+
+                    visited++;
+                }
+
+                chunkId = nextId;
+            }
+        }
+
+        return visited;
+    }
+
+    /// <summary>
     /// Side-effect-free predicate for the optimistic in-place aggregation paths (<see cref="CountEntries{TPred}"/> / <see cref="AnyEntry{TPred}"/>).
     /// </summary>
     internal interface IEntryPredicate<in TK> where TK : unmanaged
