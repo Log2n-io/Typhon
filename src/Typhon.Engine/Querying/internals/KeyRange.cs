@@ -40,6 +40,30 @@ internal static class KeyRange
         kt is KeyType.Bool or KeyType.Byte or KeyType.SByte or KeyType.Short or KeyType.UShort or KeyType.Int or KeyType.UInt or KeyType.Long or KeyType.ULong;
 
     /// <summary>
+    /// How many distinct keys the encoded range [<paramref name="min"/>, <paramref name="max"/>] can hold, saturated at <see cref="long.MaxValue"/>: on a
+    /// unique index, the most rows the range can match. Exact for integer keys (<see cref="KeyType.ULong"/> compared unsigned, as it is encoded); for a
+    /// floating key only an equality is bounded, and any wider range reports <see cref="long.MaxValue"/>. An inverted range holds none.
+    /// </summary>
+    internal static long MaxKeysInRange(KeyType kt, long min, long max)
+    {
+        Int128 width;
+        if (kt == KeyType.ULong)
+        {
+            width = (Int128)unchecked((ulong)max) - unchecked((ulong)min) + 1;
+        }
+        else if (IsIntegerKeyType(kt))
+        {
+            width = (Int128)max - min + 1;
+        }
+        else
+        {
+            return min == max ? 1 : long.MaxValue;
+        }
+
+        return width <= 0 ? 0 : width >= long.MaxValue ? long.MaxValue : (long)width;
+    }
+
+    /// <summary>
     /// Whether a correct B+Tree range scan can be built over this key type.
     /// </summary>
     /// <remarks>

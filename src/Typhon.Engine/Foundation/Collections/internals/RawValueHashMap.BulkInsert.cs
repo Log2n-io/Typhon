@@ -108,8 +108,29 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
     }
 
     /// <summary>Appends one bucket's run under a single write lock.</summary>
+    /// <remarks>
+    /// IXW-07: the overflow chunks the run needs are reserved with the lock released, then the bucket is locked and measured again; nothing under the lock
+    /// allocates. See <see cref="AppendUnderBucketLock"/>.
+    /// </remarks>
     private int InsertBucketRun<TEntry, TInserter>(Span<TEntry> run, int bucket, long packed, ref TInserter inserter,
         ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+        where TEntry : struct
+        where TInserter : struct, IRawBulkInserter<TKey, TEntry>
+    {
+        var reservation = ChunkReservation<TStore>.Current;
+        reservation.Begin(Segment);
+        try
+        {
+            return InsertBucketRunReserved(run, bucket, packed, ref inserter, ref accessor, changeSet, reservation);
+        }
+        finally
+        {
+            reservation.End();
+        }
+    }
+
+    private int InsertBucketRunReserved<TEntry, TInserter>(Span<TEntry> run, int bucket, long packed, ref TInserter inserter,
+        ref ChunkAccessor<TStore> accessor, ChangeSet changeSet, ChunkReservation<TStore> reservation)
         where TEntry : struct
         where TInserter : struct, IRawBulkInserter<TKey, TEntry>
     {
@@ -137,17 +158,64 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
                 continue;
             }
 
-            for (var i = 0; i < run.Length; i++)
+            int need;
+            try
             {
-                AppendEntryFrom<TEntry, TInserter>(rootChunkId, inserter.KeyOf(run[i]), in run[i], ref inserter, ref accessor, changeSet);
+                need = OverflowChunksFor(rootChunkId, run.Length, ref accessor);
+            }
+            catch
+            {
+                ReleaseAfterFault(rootChunkId, written: false, ref accessor);
+                throw;
+            }
+
+            if (reservation.Available < need)
+            {
+                HeadLatchForRelease(rootChunkId, ref accessor).AbortWriteLock();
+                reservation.Fill(need, changeSet, ref accessor);
+                continue;
+            }
+
+            // The write phase runs the caller's WriteValue under the lock, so it can fault: the lock is released with a version bump, and the entries already
+            // in the bucket — each one whole, as AppendEntryFrom counts an entry only after writing it — are counted.
+            var appended = 0;
+            try
+            {
+                for (; appended < run.Length; appended++)
+                {
+                    AppendEntryFrom<TEntry, TInserter>(rootChunkId, inserter.KeyOf(run[appended]), in run[appended], ref inserter, ref accessor, changeSet);
+                }
+
+                // Re-fetch for the unlock: chaining an overflow chunk above may have evicted and reloaded the primary.
+                var unlockAddr = accessor.GetChunkAddress(rootChunkId, true);
+                new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
+            }
+            catch
+            {
+                Interlocked.Add(ref _entryCount, appended);
+                ReleaseAfterFault(rootChunkId, written: true, ref accessor);
+                throw;
             }
 
             Interlocked.Add(ref _entryCount, run.Length);
-
-            // Re-fetch for the unlock: chaining an overflow chunk above may have evicted and reloaded the primary.
-            var unlockAddr = accessor.GetChunkAddress(rootChunkId, true);
-            new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
             return run.Length;
+        }
+    }
+
+    /// <summary>New overflow chunks appending <paramref name="entries"/> entries to the chain at <paramref name="startChunkId"/> takes.</summary>
+    private int OverflowChunksFor(int startChunkId, int entries, ref ChunkAccessor<TStore> accessor)
+    {
+        var chunkId = startChunkId;
+        while (true)
+        {
+            ref readonly var header = ref GetHeader(accessor.GetChunkAddress(chunkId));
+            if (header.OverflowChunkId == -1)
+            {
+                var beyondTail = entries - (_bucketCapacity - header.EntryCount);
+                return beyondTail <= 0 ? 0 : (beyondTail + _bucketCapacity - 1) / _bucketCapacity;
+            }
+
+            chunkId = header.OverflowChunkId;
         }
     }
 
@@ -187,8 +255,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
             }
 
             // #301: initialise the new chunk FULLY — including the -1 end-of-chain sentinel — before linking it from the predecessor, or a checkpoint
-            // snapshotting the gap persists a chain ending at chunk 0 (the meta) and the corruption becomes permanent on the next reload.
-            var overflowChunkId = Segment.AllocateChunk(changeSet, ref accessor);
+            // snapshotting the gap persists a chain ending at chunk 0 (the meta) and the corruption becomes permanent on the next reload. IXW-07: reserved by
+            // InsertBucketRun before it took the bucket lock.
+            var overflowChunkId = ChunkReservation<TStore>.AllocateUnderLatch(Segment, changeSet, ref accessor);
             Interlocked.Increment(ref _overflowChunksChained);
 
             var ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
@@ -199,7 +268,16 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
             ovHeader.Reserved = 0;
             ovHeader.OverflowChunkId = -1;
             KeysPtr(ovAddr)[0] = key;
-            inserter.WriteValue(entry, new Span<byte>(ValueAt(ovAddr, 0), _valueSize));
+            try
+            {
+                inserter.WriteValue(entry, new Span<byte>(ValueAt(ovAddr, 0), _valueSize));
+            }
+            catch
+            {
+                // Not linked yet: back to the reservation, which frees it, rather than allocated with nothing reaching it.
+                ChunkReservation<TStore>.ReturnUnlinked(Segment, overflowChunkId);
+                throw;
+            }
 
             addr = accessor.GetChunkAddress(chunkId, true);
             GetHeader(addr).OverflowChunkId = overflowChunkId;

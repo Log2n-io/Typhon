@@ -171,32 +171,80 @@ lock ordering and deadlock prevention are still to come.
              index 0 is ALWAYS verified as well; it costs no extra fetch, because `VerifyDirectoryAgainst` faults the
              root immediately afterwards. Over the verified set the positional comparison that replaced the whole-chain
              count is strictly stronger: it also rejects "right count, wrong target".
-  note: the check is NOT free, and the earlier claim that it was ("the pages were already latched by this call") was
-        wrong in a way worth recording: the write loops UNLATCH, which resets `AccessEpoch` to 0, so the grow's own
-        writes leave nothing pinned and this post-condition is the ONLY thing a grow leaves pinned. The bound therefore
-        does not remove the cost, it makes the cost proportional to the grow instead of to the segment — a caller that
-        grows by N has already committed to touching N pages, so O(N) is the right ceiling and O(segment) is not.
+  note: the write loops UNLATCH, which resets `AccessEpoch` to 0, so the grow's own writes leave nothing pinned, and
+        while this post-condition epoch-tagged what it read it was the ONLY thing a grow left pinned: the whole segment
+        before the bound, then one page per page grown. Segments grow by doubling up to 1 024 pages, so the bounded
+        check still pinned as much as the segment held (a 128-page cluster segment growing in a 256-page cache
+        stalled its commit with 128 pages pinned). It now reads and releases each page (EP-02) and a grow pins
+        nothing; the bound is what keeps its reads proportional to the grow.
   enforce: no strict-mode escape hatch re-runs the exhaustive walk on this path. `CheckConfig.Enabled` is what a user
            turns on to diagnose a stall, and this walk is what produces the stall; the engine's own test suite runs
            strict mode on for every fixture, so "nobody will enable it in anger" is already false. Exhaustive structural
-           walks belong where no caller scope spans them — `LogicalSegment.Load` on reopen, `RunStorageIntegrityCheck`
-           on demand.
+           walks read and release each page instead (EP-02): `RunStorageIntegrityCheck` on demand, and the crash path's
+           allocator scan.
   note: what the bound gives up, accepted deliberately — prefix damage this method did NOT cause (a stale forward
         pointer below `growFrom-1` from a lost write, or a cycle in the prefix) is no longer noticed at the next grow.
-        Both are still caught, by `Load` on the next reopen and by `RunStorageIntegrityCheck` on demand; the detection
-        LATENCY grows from "next grow" to "next restart". Accepted because the old check mis-attributed that damage to
+        Both are still caught, by the crash path's allocator scan after an unclean close and by `RunStorageIntegrityCheck`
+        on demand (`Load` stopped walking chains in #1143); the detection LATENCY grows from "next grow" to "next crash or
+        next check". Accepted because the old check mis-attributed that damage to
         `CreateOrGrow` anyway — #840 is a live example, a loss that happened in memory and was reported as "not
         persistence".
-  verified: SegmentGrowEpochPinTests.Grow_InsideCallerEpochScope_PinsOnlyTheGrownRange [VerifiesRule] — counts pinned
+  verified: SegmentGrowEpochPinTests.Grow_InsideCallerEpochScope_PinsNothing [VerifiesRule] — counts pinned
             pages rather than waiting for the timeout, so it measures the invariant instead of a downstream symptom:
-            13 pins for a 10-page grow, against 2410 (the whole segment) before the fix. It asserts a LOWER bound too,
-            because zero pins would mean `RequestPageEpoch` had stopped stamping — a PS-01 use-after-free passing as a
-            success.
-  note: the walk sites #838 tabulates as latent copies are NOT covered by this rule and remain O(segment) today —
-        `RunStorageIntegrityCheck`, `LogicalSegment.Load`, `Clear`/`Fill`, `EnumerateVersionedChainHeads`,
+            0 pins for a 10-page grow, against 13 while the check epoch-tagged and 2410 (the whole segment) before the
+            bound. A control in the same scope reads one page through `RequestPageEpoch` and requires it counted,
+            because zero pins could otherwise mean `RequestPageEpoch` had stopped stamping — a PS-01 use-after-free
+            passing as a success.
+  note: the walk sites #838 tabulates as latent copies are NOT covered by this rule. `RunStorageIntegrityCheck`'s chain
+        walk now reads and releases (EP-02), and `LogicalSegment.Load` no longer walks (#1143); the rest remain O(segment) —
+        `Clear`/`Fill`, `EnumerateVersionedChainHeads`,
         `SchemaEvolutionEngine.MigrateEntities`, `RederiveOccupancyOnCrash`, `StatisticsRebuilder.RebuildClusterAll`,
         `GetSchemaHistory`, `LoadPersistedArchetypes`. None is a post-condition and none is on the commit path. Widening
         the rule to cover them would make it false on the day it was written, which is worse than not covering them.
+
+### EP-02: A read whose length grows with the data holds a bounded set of pages `[fatal]`
+  invariant a read that visits every page of a structure — a segment's chunk bitmaps, its forward chain, a grow's post-condition, a segment's
+            directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them
+  invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
+            range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
+            (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
+            it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
+            page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
+            positioning faults: a window's pins are slot references, and nothing else releases them
+  invariant AcquirePageForRead pins by SlotRefCount, taken under the slot's StateSyncRoot after re-checking that the slot still holds the
+            page and is ready (PS-15). TryAcquire withdraws "ready", re-checks SlotRefCount and reclaims under the same lock, so a pin never
+            lands on a slot being reclaimed. It never tags AccessEpoch, and bumps the clock counter only for a query (warm): a structural scan
+            passes through the cache cold
+  invariant an address a scan accessor returns is valid only until its next window miss, not for the epoch scope: the clock hand may reclaim any slot
+            but the most recently used one. A hash-map bucket read therefore validates against its head's latch resolved again after the chain walk
+            (RawValuePagedHashMap.HeadLatch), never a reference taken before it
+  never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
+        transaction's scope lasts until it is disposed
+  scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
+         LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
+         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.RebuildFreeList, ChunkBasedSegment.ScanForAllocatorState,
+         ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
+         EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
+         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
+  on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
+                `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
+                storm stalled that way after about 96 000 transfers (RebuildFreeList under a Versioned copy-on-write); a load without
+                a chunk summary — every crash-path load — could not load a segment larger than the cache (#1144); and once the storm had
+                completed, counting its 300 000 audit entries stalled with 12 600 pages epoch-protected and none dirty: the count held every
+                cluster page it had read for its transaction
+  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) hold long scopes and dirty more pages than the
+        cache: #1183. A write cannot release its pages early either — its ChangeSet's marks keep them resident until its unit of work ends,
+        which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
+        epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
+        `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
+  verified: WholeSegmentScanTests — a segment four times the cache: the load scan, the free-list rebuild and the chain walk complete inside
+            one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
+            [VerifiesRule]; the same fixture pins the pair's semantics (not evicted until released, no epoch tag, no clock bump, readers
+            racing eviction always get their page)
+  verified: QueryScanCacheBoundTests — the occupancy count, the entity-map count and existence check, the SoA scan, the index range scan and the
+            unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
+            epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page
+            is left held by a slot reference [VerifiesRule]
 
 ## Module: SIGNAL — Wake signals versus resource counts
 

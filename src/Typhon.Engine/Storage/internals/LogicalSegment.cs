@@ -151,6 +151,20 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     }
 
     /// <summary>
+    /// A page of this segment for a whole-segment read (EP-02): pinned, not epoch-tagged, until <see cref="ReleasePageForRead"/>. Release it before
+    /// reading the next page, so the scan holds one page of the cache at a time however large the segment is.
+    /// </summary>
+    internal PageAccessor AcquirePageForRead(int segmentPageIndex, out int memPageIndex)
+    {
+        _store.AcquirePageForRead(Pages[segmentPageIndex], out memPageIndex);
+        return _store.GetPage(memPageIndex);
+    }
+
+    /// <summary>Releases a page taken by <see cref="AcquirePageForRead"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ReleasePageForRead(int memPageIndex) => _store.ReleasePageForRead(memPageIndex);
+
+    /// <summary>
     /// Fault <paramref name="filePageIndex"/> into the page cache and acquire its exclusive latch with NO eviction window
     /// (#2 fix). The epoch tag does not pin a not-yet-latched slot — the grow path tags pages with a bare
     /// <see cref="EpochManager.GlobalEpoch"/> snapshot (it cannot hold an <see cref="EpochGuard"/> across the fetch, which
@@ -814,17 +828,13 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // Post-condition #1: verify the data-page forward chain over the pages this call actually wrote — the root, the old tail at growFrom-1, and every new
         // page. Mismatch here ⇒ bug in CreateOrGrow's pointer writes (not persistence).
         //
-        // The range is bounded on purpose (#838). This check is the ONLY thing a grow leaves epoch-pinned: RequestPageEpoch raises AccessEpoch by CAS-max and
-        // the sole thing that lowers it is UnlatchPageExclusive, which resets it to 0 (PS-03) — so the write loops above, which latch and unlatch every page
-        // they touch, end pinning nothing, while a page merely READ through RequestPageEpoch stays unevictable under PS-01 until the enclosing epoch scope
-        // exits. That scope is the CALLER's, not ours: Transaction.Init opens it and only the transaction's dispose closes it, and a nested EpochGuard.Enter
-        // does not re-pin (PinCurrentThread stamps at depth 0 only). Walking the whole chain therefore pinned O(segment) pages for a whole transaction, and
-        // once the segment outgrew the page cache a commit ended up waiting for eviction of pages its own pin protected — a self-deadlock surfaced as a 5 s
-        // PageCacheBackpressureTimeoutException. Bounding the walk does not make the check free; it makes its cost proportional to the grow (measured: 12
-        // pages for a 10-page grow, against 1210 — the whole segment — before), which is the property that matters, because a caller that grows by N has
-        // already committed to touching N pages.
+        // The range is bounded on purpose (#838), and each page is read and released (EP-02), so a grow leaves nothing pinned. Read through
+        // RequestPageEpoch, a page stays unevictable until the CALLER's epoch scope exits — a transaction's, for its whole life — and the write loops above
+        // end pinning nothing (UnlatchPageExclusive resets AccessEpoch), so this check was the one thing a grow left pinned: the whole segment while it walked
+        // the chain (a commit waiting for eviction of pages its own pin protected, #838), then one page per page grown. Segments grow by doubling, so that was
+        // still the size of the segment, up to 1 024 pages: a 128-page cluster segment growing in a 256-page cache stalled its commit with 128 pages pinned.
         var pageList = _pages;
-        var badLink = VerifyGrownChainLinks(epoch, pageList, growFrom, out var actualNext);
+        var badLink = VerifyGrownChainLinks(pageList, growFrom, out var actualNext);
         if (badLink >= 0)
         {
             throw new InvalidOperationException(
@@ -846,7 +856,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // verify each entry matches the in-memory _pages array position-by-position. Mismatch here ⇒ bug in CreateOrGrow's
         // directory writes (not persistence). Positional verification is store-agnostic — works for both PersistentStore
         // (where page index 0 is reserved by the MMF bootstrap) and TransientStore (where page index 0 is a valid entry).
-        var memDirCount = VerifyDirectoryAgainst(epoch, _pages);
+        var memDirCount = VerifyDirectoryAgainst(_pages);
         if (memDirCount != _pages.Length)
         {
             throw new InvalidOperationException(
@@ -864,7 +874,6 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// positionally: page <c>i</c>'s forward pointer must be <c>_pages[i+1]</c>, and <c>0</c> at the last page. Returns <c>-1</c> when every link matches,
     /// else the index into <paramref name="pages"/> whose pointer is wrong, with <paramref name="actualNext"/> set to what that page actually held.
     /// </summary>
-    /// <param name="epoch">The caller's epoch, used to tag every page this reads.</param>
     /// <param name="pages">
     /// The segment's page directory. Passed in rather than re-read from <c>_pages</c> so the index this returns and the array the caller reports it against
     /// are provably the same object — two independent reads of a volatile field are two chances to disagree.
@@ -879,14 +888,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// walk, which turned a post-condition on a small grow into an O(segment) pin held for a whole transaction.
     /// </para>
     /// <para>
-    /// This check is consequently the ONLY thing a grow leaves pinned: the write loops in <see cref="CreateOrGrow"/> latch and unlatch every page they
-    /// touch, so they end pinning nothing. Bounding the walk does not make the check free — it costs one pin per page in range, held for the caller's scope —
-    /// it makes the cost proportional to the grow rather than to the segment, which is the property EP-01 (<c>rules/concurrency.md</c>) requires.
+    /// Each page is read and released (EP-02), so the check pins nothing past its own read. It used to tag each page with the caller's epoch, which made it
+    /// the one thing a grow left pinned — one page per page grown, for the caller's scope, and since segments grow by doubling, as many pages as the
+    /// segment held. Bounding the range is what EP-01 requires; reading and releasing is what makes the bound cost nothing.
     /// </para>
     /// <para>
     /// Coverage over the range is strictly stronger than the count comparison it replaces: positional comparison also catches "right count, wrong target",
     /// for the same reason <see cref="VerifyDirectoryAgainst"/> is positional. What it gives up is prefix damage <see cref="CreateOrGrow"/> did not cause,
-    /// which the exhaustive walk still catches on every reopen (<see cref="Load"/>) and on demand (<c>RunStorageIntegrityCheck</c>).
+    /// which the crash path's allocator scan still catches after an unclean close, and the exhaustive walk on demand (<c>RunStorageIntegrityCheck</c>).
     /// </para>
     /// <para>
     /// <b>Index 0 is always verified</b>, even when it falls outside <c>[growFrom-1, end]</c>. A grow that pushes the page directory past
@@ -896,7 +905,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// post-condition exists to catch. It costs no extra fetch in practice: <see cref="VerifyDirectoryAgainst"/> faults the root immediately afterwards.
     /// </para>
     /// </remarks>
-    private int VerifyGrownChainLinks(long epoch, int[] pages, int growFrom, out int actualNext)
+    private int VerifyGrownChainLinks(int[] pages, int growFrom, out int actualNext)
     {
         actualNext = 0;
 
@@ -911,14 +920,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             $"CreateOrGrow growFrom={growFrom} exceeds the {pages.Length}-page directory; the chain check would be vacuous.");
 
         var start = Math.Max(0, growFrom - 1);
-        if ((start > 0) && !ChainLinkMatches(epoch, pages, 0, out actualNext))
+        if ((start > 0) && !ChainLinkMatches(pages, 0, out actualNext))
         {
             return 0;
         }
 
         for (var i = start; i < pages.Length; i++)
         {
-            if (!ChainLinkMatches(epoch, pages, i, out actualNext))
+            if (!ChainLinkMatches(pages, i, out actualNext))
             {
                 return i;
             }
@@ -930,13 +939,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     /// <summary>
     /// Reads page <paramref name="index"/>'s forward-chain pointer and reports whether it names the next page in <paramref name="pages"/> (or <c>0</c> at the
-    /// tail). <paramref name="actualNext"/> always receives what the page actually held, so the caller can put both values in its message.
+    /// tail). <paramref name="actualNext"/> always receives what the page actually held, so the caller can put both values in its message. Reads and
+    /// releases the page (EP-02).
     /// </summary>
-    private bool ChainLinkMatches(long epoch, int[] pages, int index, out int actualNext)
+    private bool ChainLinkMatches(int[] pages, int index, out int actualNext)
     {
-        _store.RequestPageEpoch(pages[index], epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-        actualNext = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        actualNext = ReadNextRawDataPage(pages[index]);
         return actualNext == (((index + 1) < pages.Length) ? pages[index + 1] : 0);
     }
 
@@ -953,50 +961,65 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// entry, an assumption that holds for <see cref="PersistentStore"/> (MMF reserve carves out page 0 for the bootstrap)
     /// but NOT for <see cref="TransientStore"/> (in-memory allocator can hand out page 0 as the first segment page).
     /// Positional comparison is store-agnostic AND strictly more thorough — it catches not just count mismatches but also
-    /// "right count, wrong content" bugs that the original walker silently passed.
+    /// "right count, wrong content" bugs that the original walker silently passed. Reads and releases each directory page (EP-02): the integrity
+    /// check runs it over every segment.
     /// </remarks>
-    internal int VerifyDirectoryAgainst(long epoch, ReadOnlySpan<int> expected)
+    internal int VerifyDirectoryAgainst(ReadOnlySpan<int> expected)
     {
         if (expected.Length == 0)
         {
             return 0;
         }
 
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-
-        var matched = 0;
-        var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
-        var maxIndicesForPage = RootHeaderIndexSectionCount;
-        var i = 0;
-        while (matched < expected.Length)
+        _store.AcquirePageForRead(RootPageIndex, out var memPageIndex);
+        try
         {
-            if (i == maxIndicesForPage)
+            var page = _store.GetPage(memPageIndex);
+            var matched = 0;
+            var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
+            var maxIndicesForPage = RootHeaderIndexSectionCount;
+            var i = 0;
+            while (matched < expected.Length)
             {
-                ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
-                if (lsh.LogicalSegmentNextMapPBID == 0)
+                if (i == maxIndicesForPage)
                 {
-                    // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                    var nextMap = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID;
+                    if (nextMap == 0)
+                    {
+                        // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                        return matched;
+                    }
+
+                    _store.ReleasePageForRead(memPageIndex);
+                    memPageIndex = -1;
+                    // Into a fresh local: AcquirePageForRead assigns its out parameter before it can throw, and a throw after that holds no pin — writing
+                    // memPageIndex directly would have the finally release a pin this method never took.
+                    _store.AcquirePageForRead(nextMap, out var nextMemPageIndex);
+                    memPageIndex = nextMemPageIndex;
+                    page = _store.GetPage(memPageIndex);
+                    rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
+                    i = 0;
+                    maxIndicesForPage = NextHeadersIndexSectionCount;
+                }
+
+                if (rd[i] != expected[matched])
+                {
+                    // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
+                    // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
                     return matched;
                 }
-                _store.RequestPageEpoch(lsh.LogicalSegmentNextMapPBID, epoch, out memPageIndex);
-                page = _store.GetPage(memPageIndex);
-                rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
-                i = 0;
-                maxIndicesForPage = NextHeadersIndexSectionCount;
+                matched++;
+                i++;
             }
-
-            if (rd[i] != expected[matched])
-            {
-                // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
-                // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
-                return matched;
-            }
-            matched++;
-            i++;
+            return matched;
         }
-        return matched;
+        finally
+        {
+            if (memPageIndex >= 0)
+            {
+                _store.ReleasePageForRead(memPageIndex);
+            }
+        }
     }
 
     /// <summary>
@@ -1118,31 +1141,42 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// pointer until it reaches <c>0</c>, counting pages along the way.
     /// </summary>
     /// <remarks>
-    /// Pure integrity-check helper — read-only, no allocations. Caller must be inside an <see cref="EpochGuard"/> scope (or pass an epoch known to be live).
-    /// No longer called by <see cref="Load"/> (#1143): tests and storage introspection use it to cross-check the chain against the directory.
+    /// Pure integrity-check helper — read-only, no allocations. No longer called by <see cref="Load"/> (#1143): tests and storage introspection use it
+    /// to cross-check the chain against the directory. Each page is read and released before the next (EP-02), so the walk holds one page of the cache
+    /// however long the chain is; it used to tag every page with the caller's epoch and pin the whole segment for the caller's scope (#1144).
     /// </remarks>
-    internal int WalkForwardChainPageCount(long epoch)
+    internal int WalkForwardChainPageCount()
     {
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-
         var count = 1;
+        var next = ReadNextRawDataPage(RootPageIndex);
         // Cycle guard: any healthy chain is bounded by the directory's page count. A runaway chain (cycle or wildly past the directory's length) is itself a
         // corruption signal — the caller's mismatch detection will flag it against the directory count.
         var maxWalk = ((_pages?.Length ?? 0) * 2) + 16;
         while (count < maxWalk)
         {
-            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
             if (next == 0)
             {
                 return count;
             }
-            _store.RequestPageEpoch(next, epoch, out memPageIndex);
-            page = _store.GetPage(memPageIndex);
+
+            next = ReadNextRawDataPage(next);
             count++;
         }
         return count;
+    }
+
+    /// <summary>The forward-chain pointer of file page <paramref name="filePageIndex"/>, read and released (EP-02).</summary>
+    private int ReadNextRawDataPage(int filePageIndex)
+    {
+        _store.AcquirePageForRead(filePageIndex, out var memPageIndex);
+        try
+        {
+            return _store.GetPage(memPageIndex).StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        }
+        finally
+        {
+            _store.ReleasePageForRead(memPageIndex);
+        }
     }
 
     /// <summary>

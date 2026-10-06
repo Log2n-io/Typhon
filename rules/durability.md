@@ -688,6 +688,22 @@ CK-08 (flush-only cycles) are later increments.
         commit across the whole cycle; the S3 mutants cover it. Withdraw-after-the-last-page-effect is pinned by the hold just before the staged
         writes' publish; -mutant-withdrawearly pins only withdraw-after-publish, since S3's publish is one step
 
+### CK-14: A checkpoint never waits for a cache slot only its own writes can free `[fatal]`
+  invariant a step of a cycle that loads a page into the cache runs after the cycle has written the pages the cache owes, whenever the cache
+            owes enough that no other slot may be free: CheckpointManager.WriteAheadOfTheHook writes them before PersistDurableMetadataHook
+            once the writeback debt reaches the dirty-page trigger's threshold, capped at 50 % of the cache
+  invariant that early write keeps CK-02 (the WAL is durable through what the copies can reflect before the data fsync) and CP-03 (a page is
+            settled only after it), and does not move CheckpointLSN: the hook's records still precede the cycle's own barrier and advance
+  scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
+         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState
+  on_violation: the checkpoint is the only thing that turns owed slots into free ones. When a step of its own cycle waits for a free slot while every
+                slot is owed, it waits for itself until the back-pressure timeout: the cycle ends Degraded and every writer waiting behind it times out
+                too. Measured (#1184): MarketHardeningTests, a 0.76 GiB file over a 256 MiB cache, 16 threads. PersistArchetypeState, which writes
+                every cycle while entities are being created, waited in AllocateMemoryPageCore for the archetype table's evicted page (stack captured
+                twice); the storm died at 36 639 operations on main
+  verified: CheckpointManagerTests.HookLoadingAPage_OnAFullyOwedCache_DoesNotWait [VerifiesRule] — every slot owes a write, the loop is not
+            running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
+
 ---
 
 ---

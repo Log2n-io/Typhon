@@ -243,6 +243,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         public int ElementId;
         public int BufferRootId;
 
+        /// <summary>Set by a pass that reached its split without the nodes reserved: the next pass reserves whatever the leaf looks like (IXW-07).</summary>
+        public bool ReserveForSplit;
+
         public ref ChunkAccessor<TStore> Accessor;
         /// <summary>Dedicated accessor for horizontal (sibling) navigation — prevents sibling page loads from evicting parent path pages in the primary accessor.</summary>
         public ref ChunkAccessor<TStore> SiblingAccessor;
@@ -2530,9 +2533,16 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     #region Private API
 
+    /// <remarks>
+    /// IXW-07: a split calls this holding the leaf, its neighbours and the whole path, so the chunk comes from the reservation the insert made before it
+    /// latched anything (<see cref="ChunkReservation{TStore}"/>), on a page pinned since. Allocating here instead could grow the segment and wait on the page
+    /// cache with every one of those latches held — the other writers' bounded retries then ran out and reported a liveness defect (IXW-01) — or throw and
+    /// leave them held for good. Only an empty tree's first root allocates here, counted as an unreserved allocation.
+    /// </remarks>
     protected internal NodeWrapper AllocNode(NodeStates states, ref ChunkAccessor<TStore> accessor)
     {
-        var node = new NodeWrapper(_storage, _segment.AllocateChunk(false, accessor.ChangeSet), (states & NodeStates.IsLeaf) != 0);
+        var chunkId = ChunkReservation<TStore>.AllocateUnderLatch(_segment, accessor.ChangeSet, ref accessor);
+        var node = new NodeWrapper(_storage, chunkId, (states & NodeStates.IsLeaf) != 0);
         _storage.InitializeNode(node, states, ref accessor);
         return node;
     }

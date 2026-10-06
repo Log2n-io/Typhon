@@ -123,6 +123,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     private long _totalCheckpoints;
     private long _totalPressureCheckpoints;
+    private long _totalWritesAheadOfTheHook;
     private long _totalPagesWritten;
     private long _totalSegmentsRecycled;
     private long _totalUowTransitioned;
@@ -202,6 +203,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// alongside back-pressure waits means the threshold is set too high to prevent the stall it exists to prevent.
     /// </remarks>
     public long TotalPressureCheckpoints => Interlocked.Read(ref _totalPressureCheckpoints);
+
+    /// <summary>
+    /// Cycles that wrote the owed pages before running <see cref="PersistDurableMetadataHook"/>, because the cache owed enough writeback that the hook
+    /// might find no free slot (CK-14, #1184). Expected to climb under a write storm, alongside <see cref="TotalPressureCheckpoints"/>.
+    /// </summary>
+    public long TotalWritesAheadOfTheHook => Interlocked.Read(ref _totalWritesAheadOfTheHook);
 
     /// <summary>Total number of dirty pages written across all checkpoints.</summary>
     public long TotalPagesWritten => Interlocked.Read(ref _totalPagesWritten);
@@ -630,6 +637,95 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         }
     }
 
+    /// <summary>
+    /// CK-14 (#1184): writes the owed pages before <see cref="PersistDurableMetadataHook"/> runs, when the cache owes enough writeback that the hook
+    /// might find no free slot. The hook loads pages — the archetype table's, each entity map's meta chunk — and under a write storm the churn has evicted
+    /// them while every remaining slot owes a write only this cycle would make. The hook then waited for a slot only the checkpoint could free, for the
+    /// whole back-pressure timeout, and every writer behind it timed out too. Writing first frees those slots.
+    /// </summary>
+    /// <remarks>
+    /// The pages written here keep CK-02's order (the WAL is durable through what the copies can reflect before the data fsync) and CP-03's (a page
+    /// is settled only after that fsync), as in the cycle's own write. CheckpointLSN does not move: the hook's records must still precede the advance,
+    /// which only the barrier and write after the hook make. The threshold is the dirty-page trigger's, capped at half the cache so that disabling the
+    /// trigger cannot disable this.
+    /// </remarks>
+    private void WriteAheadOfTheHook(ref WaitContext ctx)
+    {
+        if (PersistDurableMetadataHook == null
+            || _mmf.WritebackDebtPercent() < Math.Clamp(_resourceOptions.CheckpointDirtyPageThresholdPercent, 0, MaxWriteAheadThresholdPercent))
+        {
+            return;
+        }
+
+        var pending = _mmf.CollectDirtyMemPageIndices();
+        if (pending.Length == 0)
+        {
+            return;
+        }
+
+        var written = WriteDirtyPages(ref pending, ref ctx, out _);
+        Interlocked.Add(ref _totalPagesWritten, written);
+        Interlocked.Increment(ref _totalWritesAheadOfTheHook);
+    }
+
+    /// <summary>The highest writeback debt, in percent of the cache, at which <see cref="WriteAheadOfTheHook"/> still lets the hook run first.</summary>
+    private const int MaxWriteAheadThresholdPercent = 50;
+
+    /// <summary>
+    /// Captures and writes <paramref name="pending"/>, retrying for up to <see cref="MaxCoveragePasses"/> passes the pages a live writer held. On return
+    /// <paramref name="pending"/> holds the last pass's pages, the <paramref name="stillSkipped"/> still owed at its tail.
+    /// </summary>
+    /// <returns>The pages written.</returns>
+    private int WriteDirtyPages(ref int[] pending, ref WaitContext ctx, out int stillSkipped)
+    {
+        var writtenTotal = 0;
+        stillSkipped = 0;
+        for (int pass = 0; pass < MaxCoveragePasses; pass++)
+        {
+            // One slot per page this pass: the generation each page's snapshot covers, sampled under the ACW
+            // sentinel inside WritePagesForCheckpoint. Publishing THESE values after the fsync is what
+            // discharges the pages' writeback debt — a page re-modified between its capture and now has a
+            // higher generation and therefore stays owed, which is CP-04 falling out of the comparison.
+            var capturedGen = new long[pending.Length];
+            _mmf.WritePagesForCheckpoint(pending, _stagingPool, out var writtenThisPass, capturedGen);
+
+            if (writtenThisPass > 0)
+            {
+                // CK-02 flush2: the captured page copies just written may reflect records up to the current flush
+                // target — every record whose frame was PUBLISHED, since AP-01 orders a commit's page effects strictly
+                // after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes
+                // durable, so the data file can never hold a change whose record could still be lost
+                // (captured ⊆ durable, composing with AP-01 — 04 §3).
+                _walManager.RequestFlush();
+                _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
+
+                using (TyphonEvent.BeginCheckpointFsync())
+                {
+                    _mmf.FlushToDisk();
+                }
+
+                for (int i = 0; i < writtenThisPass; i++)
+                {
+                    _mmf.MarkCaptured(pending[i], capturedGen[i]);
+                }
+            }
+
+            writtenTotal += writtenThisPass;
+            stillSkipped = pending.Length - writtenThisPass;
+            if (stillSkipped == 0)
+            {
+                break;
+            }
+
+            // Retry exactly the skipped pages (now partitioned into the tail), not the whole dirty set — new commits dirtying other pages must not block this cycle.
+            var retry = new int[stillSkipped];
+            Array.Copy(pending, writtenThisPass, retry, 0, stillSkipped);
+            pending = retry;
+        }
+
+        return writtenTotal;
+    }
+
     private void RunCheckpointCycleCore(long targetLsn, CheckpointReason reason)
     {
         // Numbered before the cycle reads anything, with a full fence: a request that read the previous number is covered by this cycle (CK-12).
@@ -653,6 +749,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
 
+            // The whole cycle shares one bounded deadline budget: the write ahead of the hook, the barrier and the write below.
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+
+            // CK-14: the hook loads pages, and under writeback pressure the cache may have no slot left that only this cycle's writes would not have to
+            // free first.
+            WriteAheadOfTheHook(ref ctx);
+
             // Persist per-archetype durable metadata (segment SPIs, NextEntityKey, EntityMap meta) into the ArchetypeR1 table BEFORE the barrier, so
             // its WAL records and dirty pages are flushed by THIS cycle. This makes the consolidated cluster/EntityMap base reachable on reopen after a
             // hard crash (CK-09 family / #395) — the checkpoint already writes the data pages; this records the pointers to them. Idempotent and cheap
@@ -663,8 +766,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // post-flush DurableLsn as the cycle's authoritative high-water (barrierLsn). The checkpoint advances to
             // THIS — not the stale loop-sampled targetLsn — so any records appended since the loop's trigger are now
             // durable and safely covered. A timeout here throws WalBackPressureTimeoutException (transient → CK-06
-            // retry). The WaitContext gives the whole cycle one shared, bounded deadline budget.
-            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+            // retry).
             _walManager.RequestFlush();
             // #937: the allocation frontier can name LSNs no frame owns (an abandoned claim, a claim whose producer timed out over
             // the buffer boundary). Waiting for one of those stalls every cycle — the shutdown cycle included — for the full
@@ -712,48 +814,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 try
                 {
                     var pending = dirtyPages;
-                    for (int pass = 0; pass < MaxCoveragePasses; pass++)
-                    {
-                        // One slot per page this pass: the generation each page's snapshot covers, sampled under the ACW
-                        // sentinel inside WritePagesForCheckpoint. Publishing THESE values after the fsync is what
-                        // discharges the pages' writeback debt — a page re-modified between its capture and now has a
-                        // higher generation and therefore stays owed, which is CP-04 falling out of the comparison.
-                        var capturedGen = new long[pending.Length];
-                        _mmf.WritePagesForCheckpoint(pending, _stagingPool, out var writtenThisPass, capturedGen);
-
-                        if (writtenThisPass > 0)
-                        {
-                            // CK-02 flush2: the captured page copies just written may reflect records up to the current flush
-                            // target — every record whose frame was PUBLISHED, since AP-01 orders a commit's page effects strictly
-                            // after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes
-                            // durable, so the data file can never hold a change whose record could still be lost
-                            // (captured ⊆ durable, composing with AP-01 — 04 §3).
-                            _walManager.RequestFlush();
-                            _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
-
-                            using (TyphonEvent.BeginCheckpointFsync())
-                            {
-                                _mmf.FlushToDisk();
-                            }
-
-                            for (int i = 0; i < writtenThisPass; i++)
-                            {
-                                _mmf.MarkCaptured(pending[i], capturedGen[i]);
-                            }
-                        }
-
-                        writtenTotal += writtenThisPass;
-                        stillSkipped = pending.Length - writtenThisPass;
-                        if (stillSkipped == 0)
-                        {
-                            break;
-                        }
-
-                        // Retry exactly the skipped pages (now partitioned into the tail), not the whole dirty set — new commits dirtying other pages must not block this cycle.
-                        var retry = new int[stillSkipped];
-                        Array.Copy(pending, writtenThisPass, retry, 0, stillSkipped);
-                        pending = retry;
-                    }
+                    writtenTotal = WriteDirtyPages(ref pending, ref ctx, out stillSkipped);
 
                     // #817 diagnostic: capture WHICH pages the gate is stuck on, not just how many. The retry loop
                     // partitions written to the front, so the survivors are the last `stillSkipped` entries. The

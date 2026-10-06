@@ -67,6 +67,10 @@ anim.Time += dt;               // ~40 ns write, no dirty tracking, no WAL
   `InvalidOperationException`. The collection's buffers would live in a persistent store while the component itself
   is RAM-only, orphaning them on restart. Use `Versioned` or `SingleVersion` for a component that needs one.
 - `ReadsSnapshot` is rejected for `Transient` components — there is no history to freeze to.
+- Indexes on `Transient` components are updated at `WriteTickFence`, like `SingleVersion`'s. Between a write and the fence
+  an indexed query never returns a row whose current value fails its condition, but may miss one whose value started
+  matching since the fence — see [indexed queries between a write and the tick fence](./storage-mode-singleversion.md#indexed-queries-between-a-write-and-the-tick-fence).
+  Known exception: an ordered query on an archetype whose only indexed component is `Transient` returns nothing (#1186).
 
 ## 🧪 Tests
 

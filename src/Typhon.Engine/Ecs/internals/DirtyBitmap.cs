@@ -46,6 +46,9 @@ internal sealed class DirtyBitmap
 
     private readonly Lock _growLock = new();
 
+    /// <summary>1 once <see cref="TestAndSet"/> has set a bit since the last <see cref="Clear"/>; see <see cref="AnyTestAndSetSinceClear"/>.</summary>
+    private int _anySet;
+
     internal DirtyBitmap(int initialCapacity)
     {
         var wordCount = Math.Max(1, (initialCapacity + 63) >> 6);
@@ -80,7 +83,30 @@ internal sealed class DirtyBitmap
         var word = chunkId >> 6;
         var mask = 1L << (chunkId & 63);
         var block = ResolveBlock(word >> WordsPerBlockShift);
-        return (Interlocked.Or(ref block[word & WordInBlockMask], mask) & mask) != 0;
+        var wasSet = (Interlocked.Or(ref block[word & WordInBlockMask], mask) & mask) != 0;
+        if (!wasSet)
+        {
+            NoteSet();
+        }
+
+        return wasSet;
+    }
+
+    /// <summary>
+    /// Whether <see cref="TestAndSet"/> has set any bit since the last <see cref="Clear"/> — one read, where scanning the words costs one per 64 ids.
+    /// Raised only by <see cref="TestAndSet"/>, the shadow bitmap's writer; conservative, since bits cleared one word at a time leave it raised until
+    /// the next <see cref="Clear"/>.
+    /// </summary>
+    internal bool AnyTestAndSetSinceClear => Volatile.Read(ref _anySet) != 0;
+
+    /// <summary>Raises <see cref="_anySet"/>, reading first so the writers of an already-dirty bitmap do not all write the one shared line.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteSet()
+    {
+        if (Volatile.Read(ref _anySet) == 0)
+        {
+            Volatile.Write(ref _anySet, 1);
+        }
     }
 
     /// <summary>Check if a bit is set without modifying state.</summary>
@@ -98,9 +124,24 @@ internal sealed class DirtyBitmap
         return (Volatile.Read(ref blocks[blockIndex][word & WordInBlockMask]) & (1L << (chunkId & 63))) != 0;
     }
 
+    /// <summary>The 64 bits of word <paramref name="wordIndex"/>, read without modifying state; 0 past the allocated range.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ulong ReadWord(int wordIndex)
+    {
+        var blockIndex = wordIndex >> WordsPerBlockShift;
+        var blocks = Volatile.Read(ref _blocks);
+        if ((uint)blockIndex >= (uint)blocks.Length)
+        {
+            return 0;
+        }
+
+        return (ulong)Volatile.Read(ref blocks[blockIndex][wordIndex & WordInBlockMask]);
+    }
+
     /// <summary>Reset all bits to zero. Not thread-safe — call only when no concurrent writers are active.</summary>
     internal void Clear()
     {
+        Volatile.Write(ref _anySet, 0);
         var blocks = Volatile.Read(ref _blocks);
         for (var i = 0; i < blocks.Length; i++)
         {

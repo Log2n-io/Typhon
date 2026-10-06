@@ -47,6 +47,14 @@ public readonly unsafe struct PersistentStore : IPageStore
     public bool RequestPageEpochUnchecked(int filePageIndex, long epoch, out int memPageIndex)
         => _mmf.RequestPageEpochUnchecked(filePageIndex, epoch, out memPageIndex);
 
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false) => _mmf.AcquirePageForRead(filePageIndex, out memPageIndex, warm);
+
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReleasePageForRead(int memPageIndex) => _mmf.ReleasePageForRead(memPageIndex);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PageAccessor GetPage(int memPageIndex) => _mmf.GetPage(memPageIndex);
 

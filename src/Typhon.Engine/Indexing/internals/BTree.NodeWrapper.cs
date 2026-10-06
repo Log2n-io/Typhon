@@ -188,6 +188,23 @@ internal abstract partial class BTree<TKey, TStore>
             return right;
         }
 
+        /// <summary>
+        /// Where a FULL leaf can spill instead of splitting: into the previous leaf, the next, or neither — then it splits. The one definition, read by
+        /// <see cref="InsertLeaf"/> to decide and by the insert before it latches, to reserve the nodes only a split allocates (IXW-07), so the two
+        /// cannot disagree on whether a split is coming. A neighbour qualifies when it has room, shares an ancestor with this leaf (the separator the
+        /// spill rewrites is reached through it), and keeps the sort invariant (#297).
+        /// </summary>
+        internal void LeafSpillOptions(ref NodeRelatives relatives, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor,
+            out bool left, out bool right)
+        {
+            var prev = GetPrevious(ref accessor);
+            var next = GetNext(ref accessor);
+            left = relatives.LeftAncestor.IsValid && prev.IsValid && !prev.GetIsFull(ref sibAccessor)
+                   && SpillLeftSortInvariantHolds(prev, ref sibAccessor, ref accessor);
+            right = relatives.RightAncestor.IsValid && next.IsValid && !next.GetIsFull(ref sibAccessor)
+                    && SpillRightSortInvariantHolds(next, ref sibAccessor, ref accessor);
+        }
+
         internal KeyValueItem? InsertLeaf(ref InsertArguments args, ref NodeRelatives relatives, ref ChunkAccessor<TStore> accessor, bool forceSplit = false)
         {
             KeyValueItem? rightLeaf = null;
@@ -222,9 +239,6 @@ internal abstract partial class BTree<TKey, TStore>
                     //
                     // Issue #297: VerifySpillInvariant — only spill when prev/next ranges are consistent with `this` (i.e., the B-link sort invariant hasn't
                     // been temporarily violated by a concurrent operation). If broken, fall through to split which is range-self-contained.
-                    var prevForSpill = GetPrevious(ref accessor);
-                    var nextForSpill = GetNext(ref accessor);
-
                     // The ancestor check is load-bearing and was missing. Both spill branches finish by rewriting the separator that routes between this leaf and
                     // the neighbour it spilled into, and they reach that separator through relatives.LeftAncestor / RightAncestor. Eligibility, however, was
                     // decided purely from the LEAF CHAIN — GetPrevious/GetNext plus a sort-invariant check — and a chain neighbour is not necessarily a cousin
@@ -234,10 +248,14 @@ internal abstract partial class BTree<TKey, TStore>
                     // room AND lives across a subtree boundary.
                     // Falling through to split is the documented, always-correct alternative — the comment above already calls split "range-self-contained" —
                     // so this strictly narrows when a spill is attempted and never changes what a legal spill does.
-                    bool spillLeftOk = !forceSplit && relatives.LeftAncestor.IsValid && CanSpillTo(prevForSpill, ref sibAccessor)
-                                       && SpillLeftSortInvariantHolds(prevForSpill, ref sibAccessor, ref accessor);
-                    bool spillRightOk = !forceSplit && relatives.RightAncestor.IsValid && CanSpillTo(nextForSpill, ref sibAccessor)
-                                        && SpillRightSortInvariantHolds(nextForSpill, ref sibAccessor, ref accessor);
+                    //
+                    // The options are LeafSpillOptions', which the insert also asks before it latches, to reserve the nodes a split allocates (IXW-07).
+                    var spillLeftOk = false;
+                    var spillRightOk = false;
+                    if (!forceSplit)
+                    {
+                        LeafSpillOptions(ref relatives, ref accessor, ref sibAccessor, out spillLeftOk, out spillRightOk);
+                    }
                     if (spillLeftOk)
                     {
                         Interlocked.Increment(ref _storage.Owner._spillLeftCount);
@@ -338,11 +356,6 @@ internal abstract partial class BTree<TKey, TStore>
 
                 // splits right side to new node and keeps left side for current node.
                 NodeWrapper SplitNodeRight(NodeWrapper left, ref ChunkAccessor<TStore> ca) => left.SplitLeafRight(ref ca);
-
-                bool CanSpillTo(NodeWrapper leaf, ref ChunkAccessor<TStore> ca)
-                {
-                    return leaf.IsValid && !leaf.GetIsFull(ref ca);
-                }
             }
             else
             {

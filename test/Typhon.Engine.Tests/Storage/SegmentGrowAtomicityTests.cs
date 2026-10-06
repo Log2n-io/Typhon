@@ -417,7 +417,7 @@ internal static class SegmentGrowTestKit
         using var guard = EpochGuard.Enter(pmmf.EpochManager);
         var fresh = new LogicalSegment<PersistentStore>(new PersistentStore(pmmf));
         fresh.Load(root);
-        Assert.That(fresh.WalkForwardChainPageCount(guard.Epoch), Is.EqualTo(fresh.Length), "the forward chain and the directory must agree after a grow");
+        Assert.That(fresh.WalkForwardChainPageCount(), Is.EqualTo(fresh.Length), "the forward chain and the directory must agree after a grow");
         return fresh.Length;
     }
 
@@ -461,7 +461,7 @@ internal static class SegmentGrowTestKit
         return segment;
     }
 
-    internal static ServiceProvider CreateProvider(int memPageCount, string databaseName, List<string> bundles)
+    internal static ServiceProvider CreateProvider(int memPageCount, string databaseName, List<string> bundles, bool fresh = true)
     {
         var services = new ServiceCollection();
         services
@@ -479,7 +479,11 @@ internal static class SegmentGrowTestKit
             });
 
         var provider = services.BuildServiceProvider();
-        provider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        if (fresh)
+        {
+            provider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        }
+
         bundles.Add(provider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BundleDirectory);
         return provider;
     }

@@ -56,7 +56,7 @@ internal abstract partial class BTree<TKey, TStore>
         internal RangeEnumerator(BTree<TKey, TStore> tree)
         {
             _tree = tree;
-            _accessor = tree._segment.CreateChunkAccessor();
+            _accessor = tree._segment.CreateScanAccessor();
             _comparer = tree.Comparer;
             _bounded = false;
             _reverse = false;
@@ -69,11 +69,19 @@ internal abstract partial class BTree<TKey, TStore>
             _currentIndex = -1;
             _disposed = false;
 
-            if (!_currentNode.IsValid || !TryReadLeafState())
+            try
             {
-                _nodeItemCount = 0;
-                _leafVersion = 0;
-                _finished = !_currentNode.IsValid;
+                if (!_currentNode.IsValid || !TryReadLeafState())
+                {
+                    _nodeItemCount = 0;
+                    _leafVersion = 0;
+                    _finished = !_currentNode.IsValid;
+                }
+            }
+            catch
+            {
+                _accessor.Dispose();   // never reaches the caller's Dispose (EP-02)
+                throw;
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
@@ -87,7 +95,7 @@ internal abstract partial class BTree<TKey, TStore>
         internal RangeEnumerator(BTree<TKey, TStore> tree, TKey minKey, TKey maxKey, bool reverse = false)
         {
             _tree = tree;
-            _accessor = tree._segment.CreateChunkAccessor();
+            _accessor = tree._segment.CreateScanAccessor();
             _comparer = tree.Comparer;
             _bounded = true;
             _reverse = reverse;
@@ -109,35 +117,44 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
 
-            // Seek to the leaf containing the start key (pessimistic descent)
-            _currentNode = tree.FindLeaf(_seekKey, out int index, ref _accessor);
-            if (!_currentNode.IsValid)
+            // A fault while positioning never reaches the caller's Dispose: the window's pins are slot references, released here or never (EP-02).
+            try
             {
-                _finished = true;
-                return;
-            }
-
-            if (reverse)
-            {
-                InitReverse(index);
-            }
-            else
-            {
-                InitForward(index);
-            }
-
-            if (_currentNode.IsValid)
-            {
-                if (!TryReadLeafState())
+                // Seek to the leaf containing the start key (pessimistic descent)
+                _currentNode = tree.FindLeaf(_seekKey, out int index, ref _accessor);
+                if (!_currentNode.IsValid)
                 {
                     _finished = true;
+                    return;
                 }
 
-                // Fix sentinel: if reverse moved to previous leaf, start from its last item
-                if (_reverse && _currentIndex == -2)
+                if (reverse)
                 {
-                    _currentIndex = _nodeItemCount;
+                    InitReverse(index);
                 }
+                else
+                {
+                    InitForward(index);
+                }
+
+                if (_currentNode.IsValid)
+                {
+                    if (!TryReadLeafState())
+                    {
+                        _finished = true;
+                    }
+
+                    // Fix sentinel: if reverse moved to previous leaf, start from its last item
+                    if (_reverse && _currentIndex == -2)
+                    {
+                        _currentIndex = _nodeItemCount;
+                    }
+                }
+            }
+            catch
+            {
+                _accessor.Dispose();
+                throw;
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
