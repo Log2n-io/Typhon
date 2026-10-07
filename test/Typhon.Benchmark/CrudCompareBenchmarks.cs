@@ -95,7 +95,9 @@ public class CrudCompareBenchmarks
         _ = entity.Read(BenchArch.Data);
 
         var mut = t.OpenMut(id);
-        mut.Write(BenchArch.Data).Value = 999;
+        var dataCopy = mut.Read(BenchArch.Data);
+        dataCopy.Value = 999;
+        mut.Set(BenchArch.Data, dataCopy);
 
         t.Commit();
     }
@@ -121,7 +123,9 @@ public class CrudCompareBenchmarks
         for (int i = 0; i < 100; i++)
         {
             var mut = t.OpenMut(_prePopIds[i]);
-            mut.Write(BenchArch.Data).Value = i + 10000;
+            var data = mut.Read(BenchArch.Data);
+            data.Value = i + 10000;
+            mut.Set(BenchArch.Data, data);
         }
         t.Commit();
     }

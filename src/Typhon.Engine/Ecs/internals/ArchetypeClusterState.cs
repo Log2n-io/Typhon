@@ -3309,7 +3309,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     private static void WriteRealmKeyOf<TKey>(ref EntityRefMut entity, ushort realm, int componentTypeId, int keyOffset) where TKey : unmanaged
     {
-        ref var value = ref entity.Write(new Comp<TKey>(componentTypeId));
+        ref var value = ref entity.WriteRef(new Comp<TKey>(componentTypeId));
         Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<TKey, byte>(ref value), keyOffset), realm);
     }
 
@@ -3694,7 +3694,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     ///   <item><see cref="RecomputeDirtyClusterAabbs"/> iterates <see cref="ClusterProcessBitmap"/>
     ///         (sparse) instead of <see cref="ActiveClusterIds"/> (full).</item>
     /// </list>
-    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Write</c> will cause those mutations to be invisible
+    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Set</c> will cause those mutations to be invisible
     /// to the engine's spatial maintenance — only set when you've migrated ALL spatial writers to <c>WriteSpatial</c>.
     /// Default <c>false</c>: legacy behaviour (full scan), safe for any caller.
     /// </summary>

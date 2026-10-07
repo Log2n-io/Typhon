@@ -247,8 +247,9 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
                 float nx = Math.Clamp(xs[i] + (((float)rng.NextDouble() - 0.5f) * 4f), 1f, CellSize - 1f);
                 float ny = Math.Clamp(ys[i] + (((float)rng.NextDouble() - 0.5f) * 4f), 1f, CellSize - 1f);
                 var eref = tx.OpenMut(ids[i]);
-                ref var pos = ref eref.Write(ClCohUnit.Pos);
+                var pos = eref.Read(ClCohUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = nx, MinY = ny, MaxX = nx, MaxY = ny };
+                eref.Set(ClCohUnit.Pos, pos);
             }
             tx.Commit();
         }
@@ -368,8 +369,9 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
                 float nx = Math.Clamp(xs[i] + (((float)rng.NextDouble() - 0.5f) * 20f), 1f, CellSize - 1f);
                 float ny = Math.Clamp(ys[i] + (((float)rng.NextDouble() - 0.5f) * 20f), 1f, CellSize - 1f);
                 var eref = tx.OpenMut(movers[i]);
-                ref var pos = ref eref.Write(ClCohUnit.Pos);
+                var pos = eref.Read(ClCohUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = nx, MinY = ny, MaxX = nx, MaxY = ny };
+                eref.Set(ClCohUnit.Pos, pos);
             }
             tx.Commit();
         }

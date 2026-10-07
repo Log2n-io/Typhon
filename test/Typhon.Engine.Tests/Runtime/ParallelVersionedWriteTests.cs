@@ -84,7 +84,10 @@ class ParallelVersionedWriteTests : TestBase<ParallelVersionedWriteTests>
                         {
                             foreach (var id in ids)
                             {
-                                ctx.Transaction.OpenMut(id).Write(PvwUnit.Tag).Value++;
+                                var target = ctx.Transaction.OpenMut(id);
+                                var tagCopy = target.Read(PvwUnit.Tag);
+                                tagCopy.Value++;
+                                target.Set(PvwUnit.Tag, tagCopy);
                             }
                         }
                     });
@@ -94,7 +97,10 @@ class ParallelVersionedWriteTests : TestBase<ParallelVersionedWriteTests>
                         {
                             foreach (var id in ctx.Entities)
                             {
-                                ctx.Transaction.OpenMut(id).Write(PvwUnit.Gold).Value++;
+                                var opened = ctx.Transaction.OpenMut(id);
+                                var goldCopy = opened.Read(PvwUnit.Gold);
+                                goldCopy.Value++;
+                                opened.Set(PvwUnit.Gold, goldCopy);
                             }
 
                             if (ctx.ChunkIndex == 0)

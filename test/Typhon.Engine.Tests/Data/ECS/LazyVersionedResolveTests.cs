@@ -62,7 +62,10 @@ class LazyVersionedResolveTests : TestBase<LazyVersionedResolveTests>
     private static void SetGold(DatabaseEngine dbe, EntityId id, long gold)
     {
         using var tx = dbe.CreateQuickTransaction();
-        tx.OpenMut(id).Write(LazyVMixed.Gold).Amount = gold;
+        var target = tx.OpenMut(id);
+        var goldCopy = target.Read(LazyVMixed.Gold);
+        goldCopy.Amount = gold;
+        target.Set(LazyVMixed.Gold, goldCopy);
         tx.Commit();
     }
 

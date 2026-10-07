@@ -46,11 +46,11 @@ Each `Register<T>()` adds a component slot and returns a `Comp<T>` handle (`Char
 In ch.1 you read one component at a time with `e.Read(Character.Wallet)`. For the common "give me everything" case, Typhon's source generator emits typed bulk accessors on any `partial` archetype:
 
 ```csharp
-var c = Character.ReadAll(tx, id);           // read-only view of all of Character's components
+var c = Character.ReadAll(tx, id);           // a copy of all of Character's components
 long credits = c.Wallet.Credits;
 
-var m = Character.ReadWriteAll(tx, id);      // mutable view
-m.Wallet.Credits -= 10;
+c.Wallet.Credits -= 10;                      // change the copy...
+Character.WriteAll(tx, id, c);               // ...then set every component back
 ```
 
 **Where the generator comes from:** it ships *inside* the `Typhon` package, so if you installed Typhon with `dotnet add package Typhon` it's already active — and it's not optional, because the same generator emits the module-init barrier that registers your archetypes. You wire it by hand only when you reference the engine by *project* instead of by package, as an analyzer:
@@ -60,7 +60,7 @@ m.Wallet.Credits -= 10;
                   ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
 ```
 
-`ReadAll` / `ReadWriteAll` are generated for every `partial` archetype; ch.1 just used `e.Read` because it hadn't introduced them yet.
+`ReadAll` / `WriteAll` are generated for every `partial` archetype; ch.1 just used `e.Read` because it hadn't introduced them yet.
 
 ---
 
@@ -270,7 +270,7 @@ var nearby = tx.Query<Character>()
                .Execute();
 ```
 
-> ⚠️ **A convention the analyzer flags, not a runtime-enforced rule.** A `[SpatialIndex]` field should be mutated through the `WriteSpatial` **barrier**, not a plain assignment — `ClusterRef.GetSpan<T>`/`Get<T>` calls that touch a spatial-indexed component get a build-time `TYPHON009` **warning** (not an error, and it doesn't guard `EntityRefMut.Write` at all — nothing stops a plain write from compiling or running, it just silently skips the spatial-index refresh). To get the warning, reference `Typhon.Analyzers.csproj` as an analyzer too — the same `OutputItemType="Analyzer"` pattern as the generator reference earlier in this chapter — without it the plain write compiles silently and the index goes stale. So a system that moves entities mirrors each point into its box:
+> ⚠️ **A convention the analyzer flags, not a runtime-enforced rule.** A `[SpatialIndex]` field should be mutated through the `WriteSpatial` **barrier**, not a plain assignment — `ClusterRef.GetSpan<T>`/`Get<T>` calls that touch a spatial-indexed component get a build-time `TYPHON009` **warning** (not an error, and it doesn't guard `EntityRefMut.Set` at all — nothing stops a plain write from compiling or running, it just silently skips the spatial-index refresh). To get the warning, reference `Typhon.Analyzers.csproj` as an analyzer too — the same `OutputItemType="Analyzer"` pattern as the generator reference earlier in this chapter — without it the plain write compiles silently and the index goes stale. So a system that moves entities mirrors each point into its box:
 >
 > ```csharp
 > cluster.WriteSpatial(Character.Bounds, slot, new Bounds { Box = new AABB2F { MinX = x, MaxX = x, MinY = y, MaxY = y } });
@@ -314,4 +314,4 @@ You can now design a data model: archetypes and their hierarchy, the storage mod
 
 **Concepts:** [Component](../key-concepts/component.md) · [Archetype](../key-concepts/archetype.md) · [Storage mode](../key-concepts/storage-mode.md) · [Index](../key-concepts/secondary-index.md) · [Spatial index](../key-concepts/spatial-index.md) · [Schema evolution](../key-concepts/schema-evolution.md) · [EntityLink](../key-concepts/entity-link.md).
 
-**Exact calls:** `[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]` · `[SpatialIndex(Mode = …, Category = …)]` on an `AABB2F` field · `[ComponentFamily]` · `Point2F` / `Point3F` · `EntityLink<T>` · `ComponentCollection<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `ReadWriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.
+**Exact calls:** `[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]` · `[SpatialIndex(Mode = …, Category = …)]` on an `AABB2F` field · `[ComponentFamily]` · `Point2F` / `Point3F` · `EntityLink<T>` · `ComponentCollection<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `WriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.

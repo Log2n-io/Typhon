@@ -2398,13 +2398,20 @@
   on_violation: an entity that left a realm answers that realm's queries with coordinates of another frame (SQ-08 broken for one tick)
 
 ### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
-  invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
-    GetSpan, or an in-place write into a pending spawn) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+  invariant validated paths (Spawn, WriteSpatial, Teleport, and EntityRefMut.Set when the value changes the key) throw at the call for an
+    unregistered, closing or incompatible realm, a Static archetype or a non-finite position, and store nothing; Set then flags the slot as
+    Teleport does, so a barrier-only archetype's fence sees the move. An unvalidated write (ClusterRef.GetSpan / Get, or a key valid when
+    written whose realm is gone since) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
     modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
     LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
-  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
-  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
-    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
+  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry, EntityRefMut.Set,
+    ArchetypeMetadata.RealmKeySlotMask
+  note: until #1199 Set handed out a `ref T`, so D-2 listed it among the unvalidated paths; since it takes the value it validates like Teleport
+  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown (a raw span write),
+    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing,
+    CrossRealmMigrationTests.Set_IntoAnUnregisteredRealm_Throws_AtTheCall_AndStoresNothing (by handle and by type),
+    CrossRealmMigrationTests.ASetIntoAPendingSpawn_WithAnInvalidKey_Throws_AndTheSpawnKeepsItsRealm,
+    CrossRealmMigrationTests.Set_RealmChange_MovesABarrierOnlyArchetype_WhoseFenceRunsNoDirtyScan; each fails with its part removed
   on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way
 
 ### RM-06: The rebuild checks every slot's realm, not only the first `[fatal][silent]`

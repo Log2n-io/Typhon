@@ -137,8 +137,8 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
-            ref var bag = ref entity.Write(SvCcUnit.Bag);
-            using (var cca = t.CreateComponentCollectionAccessor(ref bag.Items))
+            var bag = entity.Read(SvCcUnit.Bag);
+            using (var cca = entity.CreateComponentCollectionAccessor(SvCcUnit.Bag, ref bag, ref bag.Items))
             {
                 for (int i = 10; i < 20; i++)
                 {
@@ -147,6 +147,7 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
             }
             // SV is last-writer-wins: the collection must be mutated IN PLACE (same buffer), not cloned.
             Assert.That(bag.Items._bufferId, Is.EqualTo(b1), "SV update must mutate the buffer in place (no clone)");
+            entity.Set(SvCcUnit.Bag, bag);
             Assert.That(t.Commit(), Is.True, "update commit");
         }
 
@@ -229,8 +230,10 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
 
         using (var t = dbe.CreateQuickTransaction())
         {
-            ref var bag = ref t.OpenMut(id).Write(SvCcSpatialUnit.Bag);
+            var target = t.OpenMut(id);
+            var bag = target.Read(SvCcSpatialUnit.Bag);
             bag.Bounds = new AABB2F { MinX = 350, MinY = 350, MaxX = 350, MaxY = 350 };
+            target.Set(SvCcSpatialUnit.Bag, bag);
             Assert.That(t.Commit(), Is.True, "move commit");
         }
         dbe.WriteTickFence(1);

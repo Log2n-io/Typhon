@@ -43,8 +43,10 @@ game.QuerySystem("Pheromone_Diffuse", ctx =>
     // during this phase.
     foreach (var id in ctx.Entities)
     {
-        ref var pher = ref ctx.Accessor.OpenMut(id).Write(Pheromone.Data);
+        var entity = ctx.Accessor.OpenMut(id);
+        var pher = entity.Read(Pheromone.Data);
         pher.Value = Diffuse(pher.Value, NeighborSamples(ctx, id));
+        entity.Set(Pheromone.Data, pher);
     }
 },  input: () => pheromoneView,
     tier: SimTier.Near,

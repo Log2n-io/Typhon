@@ -240,8 +240,10 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         {
             foreach (var e in moved)
             {
-                ref var pos = ref tx.OpenMut(e).Write(ClMigUnit.Pos);
+                var target = tx.OpenMut(e);
+                var pos = target.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = pos.Bounds.MinX + 0.5f, MinY = pos.Bounds.MinY, MaxX = pos.Bounds.MaxX + 0.5f, MaxY = pos.Bounds.MaxY };
+                target.Set(ClMigUnit.Pos, pos);
             }
 
             tx.Commit();

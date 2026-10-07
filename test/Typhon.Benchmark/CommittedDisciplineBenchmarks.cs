@@ -16,7 +16,8 @@ namespace Typhon.Benchmark;
 //   AaBenchMixedCluster (516): SV Position + SV Movement + Versioned Health
 //
 // Each benchmark drives N entities through one transaction and reports per-component time via OperationsPerInvoke = N
-// (the per-transaction create/dispose overhead amortizes away). Write benchmarks roll back (isolate the write); the commit
+// (the per-transaction create/dispose overhead amortizes away). Write benchmarks are read-modify-set since #1199 (the read adds one small
+// copy to each figure below) and roll back (isolate the write); the commit
 // benchmark commits (Deferred, so no fsync dominates the in-memory publish cost).
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -109,7 +110,10 @@ public class CommittedDisciplineBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i;
+            var entity = tx.OpenMut(_svIds[i]);
+            var position = entity.Read(AaBenchAnt.Position);
+            position.X = i;
+            entity.Set(AaBenchAnt.Position, position);
         }
         tx.Rollback();
     }
@@ -121,7 +125,10 @@ public class CommittedDisciplineBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i;
+            var entity = tx.OpenMut(_svIds[i]);
+            var position = entity.Read(AaBenchAnt.Position);
+            position.X = i;
+            entity.Set(AaBenchAnt.Position, position);
         }
         tx.Rollback();
     }
@@ -133,7 +140,10 @@ public class CommittedDisciplineBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_mixedIds[i]).Write(AaBenchMixedCluster.Health).Current = i;
+            var entity = tx.OpenMut(_mixedIds[i]);
+            var healthCopy = entity.Read(AaBenchMixedCluster.Health);
+            healthCopy.Current = i;
+            entity.Set(AaBenchMixedCluster.Health, healthCopy);
         }
         tx.Rollback();
     }
@@ -145,7 +155,10 @@ public class CommittedDisciplineBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i;
+            var opened = tx.OpenMut(_svIds[i]);
+            var position = opened.Read(AaBenchAnt.Position);
+            position.X = i;
+            opened.Set(AaBenchAnt.Position, position);
         }
         tx.Commit();
     }
@@ -158,7 +171,10 @@ public class CommittedDisciplineBenchmarks : IDisposable
         _stagedTx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
-            _stagedTx.OpenMut(_svIds[i]).Write(AaBenchAnt.Position).X = i; // stage only — not committed
+            var entity = _stagedTx.OpenMut(_svIds[i]);
+            var positionCopy = entity.Read(AaBenchAnt.Position);
+            positionCopy.X = i;
+            entity.Set(AaBenchAnt.Position, positionCopy); // stage only — not committed
         }
     }
 

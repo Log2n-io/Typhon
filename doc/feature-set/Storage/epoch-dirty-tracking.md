@@ -26,8 +26,9 @@ using var uow = db.CreateUnitOfWork();            // owns the ChangeSet for this
 using var tx = uow.CreateTransaction();           // epoch scope entered here
 
 EntityRefMut e = tx.OpenMut(entityId);
-ref Position p = ref e.Write<Position>();         // touched pages: epoch-tagged + DirtyCounter++
+Position p = e.Read<Position>();         // touched pages: epoch-tagged
 p.X += 1f;
+e.Set<Position>(p);                      // the written page: DirtyCounter++
 tx.Commit();                                      // epoch scope exited; dirty marks released to 1
                                                    // (checkpoint writes the page later, DirtyCounter -> 0)
 ```
@@ -62,8 +63,8 @@ catch (PageCacheBackpressureTimeoutException ex)
 - **A clean, epoch-stale, unreferenced page is always reclaimable** — eviction never blocks on anything but these four signals; there's no separate "this page is special" escape hatch to reason about.
 - **Dirty data is never evicted before it's durable** — `DirtyCounter` only reaches zero after the checkpoint has actually written the page; rollback and crash-recovery paths cannot make the count go negative.
 - **In-flight lock-free B+Tree writes are checkpoint-safe** — `ActiveChunkWriters` blocks the checkpoint's page snapshot, not eviction; it exists because optimistic B+Tree writes don't take the page's exclusive latch the way ordinary writes do.
-- **Raw pointers stay valid across deferred slot eviction** — `SlotRefCount` protects a page for as long as any `ChunkAccessor` slot — even one logically evicted from its warm cache — might still be dereferenced through a cached `byte*`/`ref T`.
-- **Known limitation — working set must fit the cache**: because protection is granted for the whole epoch scope, a transaction touching more unique pages than the cache holds cannot proceed — every page it touches becomes unevictable by its own epoch tag, a circular dependency with no automatic resolution. Size `DatabaseCacheSize` above the largest expected transaction's page footprint.
+- **Raw pointers stay valid across deferred slot eviction** — `SlotRefCount` protects a page for as long as any `ChunkAccessor` slot — even one logically evicted from its warm cache — might still be dereferenced through a pointer the engine cached.
+- **Known limitation — a refresh window's working set must fit the cache**: protection lasts until the holder's next epoch refresh. A transaction refreshes every 128 entity opens, spawns or enumerated entities (#1189), so it holds only what it touched since; a parallel worker is refreshed once per system. Whatever touches more unique pages than the cache holds within one window cannot proceed — every page it touches stays unevictable by its own epoch tag. Size `DatabaseCacheSize` above that footprint.
 - No per-page synchronized increment/decrement on the read path — only writes register dirty marks; the epoch tag (shared with the underlying scope mechanism) is already paid for once per transaction.
 
 ## 🧪 Tests

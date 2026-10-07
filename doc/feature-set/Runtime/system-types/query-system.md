@@ -47,8 +47,10 @@ public class HealthRegen : QuerySystem
     {
         foreach (var id in ctx.Entities)
         {
-            ref var hp = ref ctx.Transaction.OpenMut(id).Write<EcsHealth>();
+            var target = ctx.Transaction.OpenMut(id);
+            var hp = target.Read<EcsHealth>();
             hp.Current = Math.Min(hp.Current + 1, hp.Max);
+            target.Set<EcsHealth>(hp);
         }
     }
 }
@@ -68,8 +70,9 @@ public class MovementSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);
-            ref var pos = ref entity.Write<EcsPosition>();
+            var pos = entity.Read<EcsPosition>();
             pos.X += entity.Read<EcsVelocity>().X * ctx.DeltaTime;
+            entity.Set<EcsPosition>(pos);
         }
     }
 }

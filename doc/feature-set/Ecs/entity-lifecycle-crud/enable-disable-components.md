@@ -77,8 +77,8 @@ HashSet<EntityId> moving2 = rtx.Query<Unit>().Enabled<Velocity>().Execute();
   filters see a pending, uncommitted toggle before that transaction commits.
 - Cluster-stored (batched SoA) entities update the cluster's own enabled-bit vector immediately on toggle, not just
   at commit, so bulk cluster iteration reflects it right away.
-- `TryRead<T>` returns a copy, not a ref (an `out` parameter can't be `ref readonly`) — for zero-copy access, check
-  `IsEnabled` first, then call `Read` directly.
+- `TryRead<T>` and `Read` both return a copy (#1199); `TryRead` reports a disabled component as `false` instead of
+  failing.
 
 ## 🧪 Tests
 

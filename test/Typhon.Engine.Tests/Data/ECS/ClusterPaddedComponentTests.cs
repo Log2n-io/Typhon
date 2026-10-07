@@ -261,7 +261,7 @@ class ClusterPaddedComponentTests : TestBase<ClusterPaddedComponentTests>
             for (var i = 0; i < EntityCount; i += 2)
             {
                 var e = tx.OpenMut(ids[i]);
-                e.Write(PadUnit.Tail) = new PadTail { Owner = -1, Weight = -2 };
+                e.Set(PadUnit.Tail, new PadTail { Owner = -1, Weight = -2 });
             }
             tx.Commit();
         }
@@ -270,8 +270,8 @@ class ClusterPaddedComponentTests : TestBase<ClusterPaddedComponentTests>
         for (var i = 1; i < EntityCount; i += 2)
         {
             var e = read.Open(ids[i]);
-            ref readonly var tail = ref e.Read(PadUnit.Tail);
-            ref readonly var guard = ref e.Read(PadUnit.Guard);
+            var tail = e.Read(PadUnit.Tail);
+            var guard = e.Read(PadUnit.Guard);
 
             Assert.That(tail.Owner, Is.EqualTo(OwnerOf(i)), $"untouched entity {i} kept its Owner");
             Assert.That(tail.Weight, Is.EqualTo(WeightOf(i)), $"untouched entity {i} kept its Weight");

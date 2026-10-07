@@ -186,8 +186,10 @@ class ClusterTransientIndexTests : TestBase<ClusterTransientIndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var rt = ref tx.OpenMut(moved).Write(TIdxMixedArch.Runtime);
+            var target = tx.OpenMut(moved);
+            var rt = target.Read(TIdxMixedArch.Runtime);
             rt.Bucket = 42;
+            target.Set(TIdxMixedArch.Runtime, rt);
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -311,7 +313,7 @@ class ClusterTransientIndexTests : TestBase<ClusterTransientIndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[2]).Write(TIdxMixedArch.Runtime) = new TIdxRuntime(999, 1);
+            tx.OpenMut(ids[2]).Set(TIdxMixedArch.Runtime, new TIdxRuntime(999, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

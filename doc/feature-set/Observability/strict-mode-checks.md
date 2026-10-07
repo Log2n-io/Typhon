@@ -28,7 +28,7 @@ and even the evaluation of its interpolation arguments — unless the check is a
 strict mode allocates nothing.
 
 A second gate, `DeclaredAccessActive`, is a **separate** opt-in for the one costly check
-(`SystemAccessValidator.AssertWrite<T>`, two `HashSet` lookups per `Write<T>()` that verify a system only writes
+(`SystemAccessValidator.AssertWrite<T>`, two `HashSet` lookups per `Set<T>()` that verify a system only writes
 components it declared) — so enabling strict mode does not tax every write unless you ask for it.
 
 Independently of the gates, a handful of **Tier-0 always-on guards** run in every build: checks whose predicate already

@@ -121,9 +121,11 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
     private static void Write(DatabaseEngine dbe, EntityId id, Action<QfData> check, Func<QfData, QfData> change)
     {
         using var tx = dbe.CreateQuickTransaction();
-        ref var d = ref tx.OpenMut(id).Write(QfUnit.Data);
+        var entity = tx.OpenMut(id);
+        var d = entity.Read(QfUnit.Data);
         check?.Invoke(d);
         d = change(d);
+        entity.Set(QfUnit.Data, d);
         tx.Commit();
     }
 
@@ -352,7 +354,10 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
         var ids = Spawn(dbe);
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[5]).Write(QfUnit.Other).Hp = 1;   // the unindexed component only
+            var target = tx.OpenMut(ids[5]);
+            var otherCopy = target.Read(QfUnit.Other);
+            otherCopy.Hp = 1;
+            target.Set(QfUnit.Other, otherCopy);   // the unindexed component only
             tx.Commit();
         }
 
@@ -428,7 +433,10 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[7]).Write(QfUnit.Other).Hp = 99;
+            var entity = tx.OpenMut(ids[7]);
+            var other = entity.Read(QfUnit.Other);
+            other.Hp = 99;
+            entity.Set(QfUnit.Other, other);
             tx.Commit();
         }
 
@@ -454,7 +462,10 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
         using (var uow = dbe.CreateUnitOfWork())
         {
             using var tx = uow.CreateTransaction(CommitDiscipline.Commit);
-            tx.OpenMut(ids[100]).Write(QfUnit.Data).Key = 100_001;
+            var opened = tx.OpenMut(ids[100]);
+            var dataCopy = opened.Read(QfUnit.Data);
+            dataCopy.Key = 100_001;
+            opened.Set(QfUnit.Data, dataCopy);
             Assert.That(tx.Commit(), Is.True);
         }
 
@@ -486,7 +497,10 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
         dbe.WriteTickFence(0);
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[100]).Write(QfVUnit.Data).Key = 100_001;
+            var entity = tx.OpenMut(ids[100]);
+            var data = entity.Read(QfVUnit.Data);
+            data.Key = 100_001;
+            entity.Set(QfVUnit.Data, data);
             tx.Commit();
         }
 

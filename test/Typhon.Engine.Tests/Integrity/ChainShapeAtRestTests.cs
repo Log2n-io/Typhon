@@ -71,8 +71,10 @@ internal sealed class ChainShapeAtRestTests : IntegrityFixtureBase
                 for (var i = 0; i < ids.Count; i++)
                 {
                     using var tx = uow.CreateTransaction();
-                    ref var w = ref tx.OpenMut(ids[i]).Write(CompAArch.A);
+                    var target = tx.OpenMut(ids[i]);
+                    var w = target.Read(CompAArch.A);
                     w.B = round + 1;
+                    target.Set(CompAArch.A, w);
                     tx.Commit();
                 }
 

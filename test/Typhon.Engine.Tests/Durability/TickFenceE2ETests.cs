@@ -129,8 +129,9 @@ class TickFenceE2ETests
             using (var t = dbe.CreateQuickTransaction())
             {
                 var entity = t.OpenMut(id);
-                ref var sv = ref entity.Write(SvTestArchetype.SvComp);
+                var sv = entity.Read(SvTestArchetype.SvComp);
                 sv.Value = updatedValue;
+                entity.Set(SvTestArchetype.SvComp, sv);
                 t.Commit();
             }
 
@@ -148,7 +149,7 @@ class TickFenceE2ETests
 
             using var t = dbe.CreateQuickTransaction();
             var entity = t.Open(id);
-            ref readonly var sv = ref entity.Read(SvTestArchetype.SvComp);
+            var sv = entity.Read(SvTestArchetype.SvComp);
             Assert.That(sv.Value, Is.EqualTo(updatedValue), "SV data should survive reopen via tick fence recovery");
         }
     }
@@ -180,7 +181,9 @@ class TickFenceE2ETests
             {
                 Assert.That(t.TryOpenMut(new EntityId(id.EntityKey + 1_000, id.ArchetypeId), out _), Is.False);
                 Assert.That(t.TryOpenMut(id, out var entity), Is.True);
-                entity.Write(SvTestArchetype.SvComp).Value = updatedValue;
+                var svCompCopy = entity.Read(SvTestArchetype.SvComp);
+                svCompCopy.Value = updatedValue;
+                entity.Set(SvTestArchetype.SvComp, svCompCopy);
                 t.Commit();
             }
             dbe.WriteTickFence(2);
@@ -218,7 +221,9 @@ class TickFenceE2ETests
             using (var t = dbe.CreateQuickTransaction())
             {
                 var entity = t.OpenMut(id);
-                entity.Write(SvTestArchetype.SvComp).Value = 100;
+                var svComp = entity.Read(SvTestArchetype.SvComp);
+                svComp.Value = 100;
+                entity.Set(SvTestArchetype.SvComp, svComp);
                 t.Commit();
             }
             dbe.WriteTickFence(1);
@@ -227,7 +232,9 @@ class TickFenceE2ETests
             using (var t = dbe.CreateQuickTransaction())
             {
                 var entity = t.OpenMut(id);
-                entity.Write(SvTestArchetype.SvComp).Value = 200;
+                var svCompCopy = entity.Read(SvTestArchetype.SvComp);
+                svCompCopy.Value = 200;
+                entity.Set(SvTestArchetype.SvComp, svCompCopy);
                 t.Commit();
             }
             dbe.WriteTickFence(2);
@@ -241,7 +248,7 @@ class TickFenceE2ETests
             var dbe = CreateEngine(scope2);
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var sv = ref t.Open(id).Read(SvTestArchetype.SvComp);
+            var sv = t.Open(id).Read(SvTestArchetype.SvComp);
             Assert.That(sv.Value, Is.EqualTo(200), "Last tick fence should win on recovery");
         }
     }
@@ -274,7 +281,9 @@ class TickFenceE2ETests
                 for (int i = 0; i < entityCount; i++)
                 {
                     var entity = t.OpenMut(ids[i]);
-                    entity.Write(SvTestArchetype.SvComp).Value = (i + 1) * 100;
+                    var svComp = entity.Read(SvTestArchetype.SvComp);
+                    svComp.Value = (i + 1) * 100;
+                    entity.Set(SvTestArchetype.SvComp, svComp);
                 }
                 t.Commit();
             }
@@ -291,7 +300,7 @@ class TickFenceE2ETests
             using var t = dbe.CreateQuickTransaction();
             for (int i = 0; i < entityCount; i++)
             {
-                ref readonly var sv = ref t.Open(ids[i]).Read(SvTestArchetype.SvComp);
+                var sv = t.Open(ids[i]).Read(SvTestArchetype.SvComp);
                 Assert.That(sv.Value, Is.EqualTo((i + 1) * 100), $"Entity index {i} should have recovered value");
             }
         }
@@ -324,7 +333,9 @@ class TickFenceE2ETests
             using (var t = dbe.CreateQuickTransaction())
             {
                 var entity = t.OpenMut(id1);
-                entity.Write(SvTestArchetype.SvComp).Value = 777;
+                var svComp = entity.Read(SvTestArchetype.SvComp);
+                svComp.Value = 777;
+                entity.Set(SvTestArchetype.SvComp, svComp);
                 t.Commit();
             }
 
@@ -339,8 +350,8 @@ class TickFenceE2ETests
             var dbe = CreateEngine(scope2);
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var sv1 = ref t.Open(id1).Read(SvTestArchetype.SvComp);
-            ref readonly var sv2 = ref t.Open(id2).Read(SvTestArchetype.SvComp);
+            var sv1 = t.Open(id1).Read(SvTestArchetype.SvComp);
+            var sv2 = t.Open(id2).Read(SvTestArchetype.SvComp);
             Assert.That(sv1.Value, Is.EqualTo(777), "Updated entity should have new value");
             Assert.That(sv2.Value, Is.EqualTo(20), "Untouched entity should have original value");
         }

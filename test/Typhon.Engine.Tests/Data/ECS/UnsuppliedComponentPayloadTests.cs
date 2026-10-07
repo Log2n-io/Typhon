@@ -117,8 +117,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var vr = ref read.Open(b).Read(UnsuppliedSvUnit.B);
-        var v = vr;   // ref readonly locals cannot be captured by the lambda below
+        var v = read.Open(b).Read(UnsuppliedSvUnit.B);
 
         Assert.Multiple(() =>
         {
@@ -181,8 +180,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var vr = ref read.Open(b).Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = read.Open(b).Read(EcsUnit.Velocity);
 
         Assert.Multiple(() =>
         {
@@ -229,8 +227,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var vr = ref read.Open(id).Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = read.Open(id).Read(EcsUnit.Velocity);
 
         Assert.That(v.Dx, Is.EqualTo(10f), "disable preserves the payload — the round trip must return the original value");
     }
@@ -261,13 +258,12 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
 
         using (var upd = dbe.CreateQuickTransaction())
         {
-            upd.OpenMut(b).Write(EcsUnit.Velocity) = new EcsVelocity(70, 80, 90);
+            upd.OpenMut(b).Set(EcsUnit.Velocity, new EcsVelocity(70, 80, 90));
             upd.Commit();
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var vr = ref read.Open(b).Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = read.Open(b).Read(EcsUnit.Velocity);
 
         Assert.That(v.Dx, Is.EqualTo(70f),
             "an ordinary write after a mid-life supply must be visible — if it is not, the chain root never reached the "
@@ -305,8 +301,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
 
         Assert.That(e.IsEnabled(EcsUnit.Velocity), Is.True, "the enable must survive the commit");
 
-        ref readonly var vr = ref e.Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = e.Read(EcsUnit.Velocity);
 
         Assert.Multiple(() =>
         {
@@ -405,8 +400,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         var e = tx.Open(b);
         Assert.That(e.IsEnabled(EcsUnit.Velocity), Is.True, "the enable is staged, so the bit is set");
 
-        ref readonly var vr = ref e.Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = e.Read(EcsUnit.Velocity);
 
         Assert.That(v.Dx, Is.EqualTo(7f),
             "re-opening in the same transaction must still see the supplied value, not the recycled chunk's 444 or zeros");
@@ -564,8 +558,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var vr = ref read.Open(id).Read(EcsUnit.Velocity);
-        var v = vr;
+        var v = read.Open(id).Read(EcsUnit.Velocity);
 
         Assert.That(v.Dx, Is.EqualTo(41f),
             "the replayed value must be readable — if it is not, the apply wrote the cluster SoA and created no chain, so the point read resolves nothing");

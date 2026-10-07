@@ -124,7 +124,10 @@ class RealmKeyComponentTests : TestBase<RealmKeyComponentTests>
         // A raw write of the key component (non-barrier archetype): the dirty scan finds it and the fence moves the entity; RM-04 hides it meanwhile.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(b).Write(SepUnit.Realm).Realm = 2;
+            var target = tx.OpenMut(b);
+            var realmCopy = target.Read(SepUnit.Realm);
+            realmCopy.Realm = 2;
+            target.Set(SepUnit.Realm, realmCopy);
             tx.Commit();
         }
 

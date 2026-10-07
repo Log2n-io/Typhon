@@ -59,8 +59,14 @@ class ClusterUniqueIndexDrainTests : TestBase<ClusterUniqueIndexDrainTests>
         // Entity 0 and entity 64 sit in different clusters (a cluster holds at most 64), and both take the same Alpha.Code in one tick.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[0]).Write(DirKeyArch.Alpha).Code = CollidingKey;
-            tx.OpenMut(ids[64]).Write(DirKeyArch.Alpha).Code = CollidingKey;
+            var target = tx.OpenMut(ids[0]);
+            var alpha = target.Read(DirKeyArch.Alpha);
+            alpha.Code = CollidingKey;
+            target.Set(DirKeyArch.Alpha, alpha);
+            var opened = tx.OpenMut(ids[64]);
+            var alphaCopy = opened.Read(DirKeyArch.Alpha);
+            alphaCopy.Code = CollidingKey;
+            opened.Set(DirKeyArch.Alpha, alphaCopy);
             tx.Commit();
         }
 
@@ -95,8 +101,14 @@ class ClusterUniqueIndexDrainTests : TestBase<ClusterUniqueIndexDrainTests>
         dbe.WriteTickFence(1);
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[0]).Write(DirKeyArch.Alpha).Code = CollidingKey;
-            tx.OpenMut(ids[64]).Write(DirKeyArch.Alpha).Code = CollidingKey + 1;
+            var target = tx.OpenMut(ids[0]);
+            var alpha = target.Read(DirKeyArch.Alpha);
+            alpha.Code = CollidingKey;
+            target.Set(DirKeyArch.Alpha, alpha);
+            var entity = tx.OpenMut(ids[64]);
+            var alphaCopy = entity.Read(DirKeyArch.Alpha);
+            alphaCopy.Code = CollidingKey + 1;
+            entity.Set(DirKeyArch.Alpha, alphaCopy);
             tx.Commit();
         }
 

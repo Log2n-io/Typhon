@@ -25,8 +25,9 @@ This is transparent engine plumbing — every page write/read and WAL record wri
 using var tx = dbe.CreateQuickTransaction();
 
 EntityRefMut e = tx.OpenMut(entityId);
-ref Position p = ref e.Write(Unit.Pos);
+Position p = e.Read(Unit.Pos);
 p.X += 1f;
+e.Set(Unit.Pos, p);
 tx.Commit();
 // Pages touched by the commit get their CRC32C stamped on write;
 // a future read verifies it and throws on mismatch — no app code involved.

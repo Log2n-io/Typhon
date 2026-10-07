@@ -678,7 +678,7 @@ static class CellTreeCrossoverProfile
             using var tx = arm.Engine.CreateQuickTransaction();
             for (var i = start; i < Math.Min(arm.Ids.Length, start + TxChunk); i++)
             {
-                tx.OpenMut(arm.Ids[i]).Write(CtxUnit.Pos) = new CtxPos { Bounds = Point(xs[i], ys[i]) };
+                tx.OpenMut(arm.Ids[i]).Set(CtxUnit.Pos, new CtxPos { Bounds = Point(xs[i], ys[i]) });
             }
 
             tx.Commit();

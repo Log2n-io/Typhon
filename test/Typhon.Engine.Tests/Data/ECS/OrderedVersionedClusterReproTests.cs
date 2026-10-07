@@ -96,8 +96,10 @@ class OrderedVersionedClusterReproTests : TestBase<OrderedVersionedClusterReproT
         {
             foreach (var id in ids)
             {
-                ref var w = ref tx.OpenMut(id).Write(RRAgent.Wallet);
+                var target = tx.OpenMut(id);
+                var w = target.Read(RRAgent.Wallet);
                 w.Gold += 1000;
+                target.Set(RRAgent.Wallet, w);
             }
             tx.Commit();
         }

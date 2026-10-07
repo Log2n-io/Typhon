@@ -435,8 +435,10 @@ class WalIntegrationTests : TestBase
                 {
                     using var tx = uow.CreateTransaction();
                     var comp = new CompA(i + 1000, (float)(i * 3.0), i * 7.0);
-                    ref var w = ref tx.OpenMut(ids[i]).Write(CompAArch.A);
+                    var opened = tx.OpenMut(ids[i]);
+                    var w = opened.Read(CompAArch.A);
                     w = comp;
+                    opened.Set(CompAArch.A, w);
                     updatedValues[i] = comp;
                     tx.Commit();
                 }
@@ -905,8 +907,10 @@ class WalIntegrationTests : TestBase
         {
             using var tx = uow.CreateTransaction();
             var updated = new CompA(999);
-            ref var w = ref tx.OpenMut(ids[0]).Write(CompAArch.A);
+            var target = tx.OpenMut(ids[0]);
+            var w = target.Read(CompAArch.A);
             w = updated;
+            target.Set(CompAArch.A, w);
             tx.Commit();
             uow.Flush();
         }
@@ -1158,8 +1162,10 @@ class WalIntegrationTests : TestBase
             {
                 using var tx = uow.CreateTransaction();
                 var comp = new CompA(i + 2000, (float)(i * 0.5), i * 0.25);
-                ref var w = ref tx.OpenMut(ids[i]).Write(CompAArch.A);
+                var target = tx.OpenMut(ids[i]);
+                var w = target.Read(CompAArch.A);
                 w = comp;
+                target.Set(CompAArch.A, w);
                 expectedValues[i] = comp;
                 tx.Commit();
             }
@@ -1189,10 +1195,14 @@ class WalIntegrationTests : TestBase
         using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
         {
             using var tx = uow.CreateTransaction();
-            ref var wa = ref tx.OpenMut(ids[0]).Write(CompAArch.A);
+            var target = tx.OpenMut(ids[0]);
+            var wa = target.Read(CompAArch.A);
             wa = tradeA;
-            ref var wb = ref tx.OpenMut(ids[1]).Write(CompAArch.A);
+            target.Set(CompAArch.A, wa);
+            var opened = tx.OpenMut(ids[1]);
+            var wb = opened.Read(CompAArch.A);
             wb = tradeB;
+            opened.Set(CompAArch.A, wb);
             tx.Commit();
             uow.Flush();
         }
@@ -1485,7 +1495,7 @@ class WalIntegrationTests : TestBase
             using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
             {
                 using var tx = uow.CreateTransaction();
-                tx.OpenMut(aliveId).Write(comp) = new TbSvData(15, 150);
+                tx.OpenMut(aliveId).Set(comp, new TbSvData(15, 150));
                 tx.Commit();
                 uow.Flush();
             }

@@ -49,7 +49,7 @@ EntityId itemId = tx.Spawn<Item>(Item.Data.Set(new ItemData { Owner = bagId, Dam
 
 foreach (EntityRef item in tx.Query<Item>().Where(i => i.Owner == bagId))
 {
-    ref readonly ItemData data = ref item.Read<ItemData>();
+    ItemData data = item.Read<ItemData>();
 }
 
 // Safe follow of a possibly-stale link

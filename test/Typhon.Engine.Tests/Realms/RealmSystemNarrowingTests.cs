@@ -160,8 +160,14 @@ class RealmSystemNarrowingTests : TestBase<RealmSystemNarrowingTests>
             // One entity of realm 0 and one of realm 1 written every tick.
             dag.CallbackSystem("Write", ctx =>
             {
-                ctx.Transaction.OpenMut(byRealm[0][0]).Write(RealmUnit.Pos).Tag++;
-                ctx.Transaction.OpenMut(byRealm[1][0]).Write(RealmUnit.Pos).Tag++;
+                var target = ctx.Transaction.OpenMut(byRealm[0][0]);
+                var posCopy = target.Read(RealmUnit.Pos);
+                posCopy.Tag++;
+                target.Set(RealmUnit.Pos, posCopy);
+                var opened = ctx.Transaction.OpenMut(byRealm[1][0]);
+                var pos = opened.Read(RealmUnit.Pos);
+                pos.Tag++;
+                opened.Set(RealmUnit.Pos, pos);
                 Interlocked.Increment(ref ticks);
             });
             dag.QuerySystem("Reactive", ctx =>
@@ -226,8 +232,14 @@ class RealmSystemNarrowingTests : TestBase<RealmSystemNarrowingTests>
                 // One entity of each realm scored every tick: only realm 1's may reach the narrowed system, and only that one.
                 dag.CallbackSystem("Write", ctx =>
                 {
-                    ctx.Transaction.OpenMut(ids[0][0]).Write(ScoredUnit.Score).Value++;
-                    ctx.Transaction.OpenMut(ids[1][0]).Write(ScoredUnit.Score).Value++;
+                    var opened = ctx.Transaction.OpenMut(ids[0][0]);
+                    var score = opened.Read(ScoredUnit.Score);
+                    score.Value++;
+                    opened.Set(ScoredUnit.Score, score);
+                    var target = ctx.Transaction.OpenMut(ids[1][0]);
+                    var scoreCopy = target.Read(ScoredUnit.Score);
+                    scoreCopy.Value++;
+                    target.Set(ScoredUnit.Score, scoreCopy);
                     Interlocked.Increment(ref ticks);
                 });
                 dag.QuerySystem("Reactive", ctx =>

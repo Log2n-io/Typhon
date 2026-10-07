@@ -36,8 +36,10 @@ using var uow = dbe.CreateUnitOfWork(DurabilityMode.Deferred);
 foreach (var player in activePlayers)
 {
     using var tx = uow.CreateTransaction();
-    ref var pos = ref tx.OpenMut(player.Id).Write(Player.Position);
+    var opened = tx.OpenMut(player.Id);
+    var pos = opened.Read(Player.Position);
     ApplyMovement(ref pos);
+    opened.Set(Player.Position, pos);
     tx.Commit();              // ~1-2µs — WAL record buffered, not yet on disk
 }
 await uow.FlushAsync();       // one FUA for the whole tick's worth of changes
@@ -45,14 +47,18 @@ await uow.FlushAsync();       // one FUA for the whole tick's worth of changes
 // General request handler — bounded data-at-risk, no per-tx wait
 using var req = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit);
 using var tx2 = req.CreateTransaction();
-ref var hp = ref tx2.OpenMut(targetId).Write(Player.Health);
+var entity = tx2.OpenMut(targetId);
+var hp = entity.Read(Player.Health);
 hp.Current -= damage;
+entity.Set(Player.Health, hp);
 tx2.Commit();                 // ~1-2µs — durable within WalWriterOptions.GroupCommitIntervalMs (default 5ms)
 
 // Financial trade — zero data-at-risk
 using var trade = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
-ref var wallet = ref trade.OpenMut(buyerId).Write(Player.Wallet);
+var target = trade.OpenMut(buyerId);
+var wallet = target.Read(Player.Wallet);
 wallet.Gold -= price;
+target.Set(Player.Wallet, wallet);
 trade.Commit();               // blocks ~15-85µs — WAL FUA complete before returning
 ```
 

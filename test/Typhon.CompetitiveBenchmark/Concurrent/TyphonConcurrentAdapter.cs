@@ -95,7 +95,7 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
             // SV in-place write (last-writer-wins) — no commit, no WAL fsync (durability is at tick fence). Lock-free.
             for (int i = 0; i < count; i++)
             {
-                _acc.OpenMut(_ids[startKey + i]).Write(SvValArch.Data).Value = seed + i;
+                _acc.OpenMut(_ids[startKey + i]).Set(SvValArch.Data, new SvVal { Value = seed + i });
             }
         }
 
@@ -105,9 +105,10 @@ public sealed class TyphonConcurrentAdapter : IConcurrentAdapter
         {
             for (int i = 0; i < count; i++)
             {
-                var id = _ids[startKey + i];
-                long v = _acc.Open(id).Read(SvValArch.Data).Value;
-                _acc.OpenMut(id).Write(SvValArch.Data).Value = v + 1;
+                var target = _acc.OpenMut(_ids[startKey + i]);
+                var data = target.Read(SvValArch.Data);
+                data.Value += 1;
+                target.Set(SvValArch.Data, data);
             }
         }
 

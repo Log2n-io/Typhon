@@ -178,8 +178,10 @@ internal sealed class LifecycleDurabilityBugTests
 
                 using (var tx = uow.CreateTransaction())
                 {
-                    ref var w = ref tx.OpenMut(id).Write(CompABArch.A);
+                    var target = tx.OpenMut(id);
+                    var w = target.Read(CompABArch.A);
                     w = updated;
+                    target.Set(CompABArch.A, w);
                     tx.Commit();
                 }
 

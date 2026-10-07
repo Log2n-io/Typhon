@@ -149,8 +149,10 @@ class FencePhaseFailureTests : TestBase<FencePhaseFailureTests>
                     var tx = ctx.Transaction;
                     for (var i = 0; i < 32; i++)
                     {
-                        ref var pos = ref tx.OpenMut(ids[i]).Write(ClMigUnit.Pos);
+                        var target = tx.OpenMut(ids[i]);
+                        var pos = target.Read(ClMigUnit.Pos);
                         pos.Bounds = new AABB2F { MinX = 10f + (n % 7), MinY = 10f + (n % 5), MaxX = 10f + (n % 7), MaxY = 10f + (n % 5) };
+                        target.Set(ClMigUnit.Pos, pos);
                     }
                 });
             }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 200, EnableParallelFence = parallelFence });

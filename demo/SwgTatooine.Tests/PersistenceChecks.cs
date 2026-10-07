@@ -158,14 +158,16 @@ public sealed class PersistenceSurfaceTests
             // leaves an idle player alone, but PlayerMove integrates whatever velocity it is carrying, and a reopened player still running at 12 m/s covers
             // several metres in the five ticks this test runs — which failed the assertion for a reason that had nothing to do with persistence.
             var player = tx.OpenMut(marked);
-            ref var state = ref player.Write(Player.State);
+            var state = player.Read(Player.State);
             state.Activity = PlayerActivity.Idle;
             state.ActivityTicks = int.MaxValue / 2;
-            ref var move = ref player.Write(Player.Move);
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
             move.VelX = 0f;
             move.VelZ = 0f;
             move.DestX = Marker;
             move.DestZ = Marker;
+            player.Set(Player.Move, move);
             var at = default(PlayerPlacement);
             at.SetAt(Marker, Marker, 0f, player.Read(Player.Bounds).HalfExtent);
             tx.Teleport(marked, Player.Bounds, RealmId.Default, in at);
@@ -369,9 +371,12 @@ public sealed class WorldIndexRebuildTests
             possessed = sim.Index.Players[0];
             using var tx = sim.Dbe.CreateQuickTransaction();
             var player = tx.OpenMut(possessed);
-            player.Write(Player.Control).Kind = ControllerKind.Human;
-            ref var session = ref player.Write(Player.Session);
+            var controlCopy = player.Read(Player.Control);
+            controlCopy.Kind = ControllerKind.Human;
+            player.Set(Player.Control, controlCopy);
+            var session = player.Read(Player.Session);
             session.Controller = 4242u;
+            player.Set(Player.Session, session);
             tx.Commit();
         }
 

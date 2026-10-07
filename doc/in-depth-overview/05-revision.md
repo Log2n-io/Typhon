@@ -183,7 +183,7 @@ When `skipTimeout=true` (the `PointInTimeAccessor` path — no concurrent writer
 
 ## 5. Snapshot write path
 
-Writes flow through the ECS mutation API (`OpenMut → Write<T>`, `Spawn`, `Destroy`) on a `Transaction`. The actual revision-layer mutation is `ComponentRevisionManager.AddCompRev`:
+Writes flow through the ECS mutation API (`OpenMut → Set<T>`, `Spawn`, `Destroy`) on a `Transaction`. The actual revision-layer mutation is `ComponentRevisionManager.AddCompRev`:
 
 1. **Lock the chain header** in exclusive mode (`AccessControlSmall.EnterExclusiveAccess`, deadline from `TimeoutOptions.Current.RevisionChainLockTimeout`) — unless the caller already holds it (the `lockAlreadyHeld` parameter, used during conflict resolution).
 2. **Grow the chain** if the current chunk is full (`ItemCount == ComputeRevElementCount(ChainLength)`).
@@ -298,7 +298,7 @@ The static orchestrator for everything above. Not a class you instantiate — a 
 
 Called by:
 
-- `Transaction.ECS.cs` — `OpenMut(id).Write<T>(...)` and `Destroy(id)` paths, **at the moment of mutation**.
+- `Transaction.ECS.cs` — `OpenMut(id).Set<T>(...)` and `Destroy(id)` paths, **at the moment of mutation**.
 - `Transaction.cs` — `DetectAndResolveConflict` and `RelocateRevisionEntry` (commit-time conflict resolution; these append *additional* entries to handle write-write races, not the original write).
 - *(Crash recovery does **not** go through `AddCompRev`: `RecoveryApplier` in `Durability/internals/` rebuilds committed chain roots directly via `ComponentRevisionManager.AllocCompRevStorage`.)*
 

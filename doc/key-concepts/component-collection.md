@@ -24,7 +24,8 @@ Collection content is WAL-logged at commit and recovers the same way as any othe
 ## In the API
 
 - [`ComponentCollection<T>`](xref:Typhon.Schema.Definition.ComponentCollection`1) — the 4-byte field (`T : unmanaged`).
-- [`Transaction.CreateComponentCollectionAccessor(ref field)`](xref:Typhon.Engine.Transaction.CreateComponentCollectionAccessor*) — `Add` / `ElementCount` / `GetAllElements`; [`Transaction.GetReadOnlyCollectionEnumerator(ref field)`](xref:Typhon.Engine.Transaction.GetReadOnlyCollectionEnumerator*) — allocation-free `foreach`.
+- [`EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy, ref copy.Field)`](xref:Typhon.Engine.EntityRefMut.CreateComponentCollectionAccessor*) — change a stored component's collection (disposing it stores the collection; no `Set` needed);
+  [`Transaction.CreateComponentCollectionAccessor(ref field)`](xref:Typhon.Engine.Transaction.CreateComponentCollectionAccessor*) — build a new value's collection, or read one: `Add` / `ElementCount` / `GetAllElements`; [`Transaction.GetReadOnlyCollectionEnumerator(ref field)`](xref:Typhon.Engine.Transaction.GetReadOnlyCollectionEnumerator*) — allocation-free `foreach`.
 
 ## Learn & use
 

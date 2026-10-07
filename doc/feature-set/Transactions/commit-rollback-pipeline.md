@@ -20,7 +20,10 @@ Ending a transaction has to be all-or-nothing from the caller's point of view: e
 using var uow = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit);
 using var tx = uow.CreateTransaction();
 
-tx.OpenMut(accountId).Write(Account.Balance).Amount -= 10m;
+var entity = tx.OpenMut(accountId);
+var balance = entity.Read(Account.Balance);
+balance.Amount -= 10m;
+entity.Set(Account.Balance, balance);
 
 var ctx = UnitOfWorkContext.FromTimeout(TimeSpan.FromSeconds(2));
 try

@@ -69,8 +69,10 @@ using (var tx = dbe.CreateQuickTransaction())
 // Any other member of guild 7 is untouched. No extra calls: it happens as part of Write + Commit.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    ref var m = ref tx.OpenMut(aria).Write(MemberArchetype.M);
+    var entity = tx.OpenMut(aria);
+    var m = entity.Read(MemberArchetype.M);
     m.GuildId = 9;
+    entity.Set(MemberArchetype.M, m);
     tx.Commit();
 }
 

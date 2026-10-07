@@ -143,14 +143,20 @@ EntityId probe = default, mover = default;
     using (var uow = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit))
     using (var tx = uow.CreateTransaction())
     {
-        tx.OpenMut(probe).Write(Character.Wallet).Credits += 40;   // Versioned write
+        var opened = tx.OpenMut(probe);
+        var wallet = opened.Read(Character.Wallet);
+        wallet.Credits += 40;
+        opened.Set(Character.Wallet, wallet);   // Versioned write
         tx.Commit();
     }
     PrintWallet("after committed +40 credits", dbe, probe);
 
     using (var tx = dbe.CreateQuickTransaction())
     {
-        tx.OpenMut(probe).Write(Character.Wallet).Credits += 5000;
+        var entity = tx.OpenMut(probe);
+        var wallet = entity.Read(Character.Wallet);
+        wallet.Credits += 5000;
+        entity.Set(Character.Wallet, wallet);
         tx.Rollback();
     }
     PrintWallet("after rolled-back +5000 credits", dbe, probe);
@@ -160,7 +166,10 @@ EntityId probe = default, mover = default;
         long before = reader.Open(probe).Read(Character.Wallet).Credits;
         using (var w = dbe.CreateQuickTransaction())
         {
-            w.OpenMut(probe).Write(Character.Wallet).Credits += 10;
+            var entity = w.OpenMut(probe);
+            var walletCopy = entity.Read(Character.Wallet);
+            walletCopy.Credits += 10;
+            entity.Set(Character.Wallet, walletCopy);
             w.Commit();
         }
         long after = reader.Open(probe).Read(Character.Wallet).Credits;

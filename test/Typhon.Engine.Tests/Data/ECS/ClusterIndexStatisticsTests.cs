@@ -155,7 +155,7 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         clusterState.MutationsSinceRebuild = 0;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(StatsArch.Ranked) = new StatsRanked(3, 999);
+            tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(3, 999));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -166,7 +166,7 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         // Same write shape, but the indexed field genuinely changes.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(StatsArch.Ranked) = new StatsRanked(7, 999);
+            tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(7, 999));
             tx.Commit();
         }
         dbe.WriteTickFence(3);
@@ -198,7 +198,7 @@ class ClusterIndexStatisticsTests : TestBase<ClusterIndexStatisticsTests>
         clusterState.MutationsSinceRebuild = 0;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(StatsArch.Ranked) = new StatsRanked(2, 10);
+            tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(2, 10));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

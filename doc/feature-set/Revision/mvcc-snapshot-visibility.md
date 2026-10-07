@@ -43,9 +43,11 @@ if (ro.QueryRead<Stats>(heroId.RawValue, out var stats))  // resolves the revisi
 
 using var uow = dbe.CreateUnitOfWork();
 using var tx = uow.CreateTransaction();
-ref var s = ref tx.OpenMut(heroId).Write(Hero.Stats);
-s.Hp -= 10;                                                // uncommitted — invisible to every other reader
-ref readonly var seen = ref tx.Open(heroId).Read(Hero.Stats);
+var entity = tx.OpenMut(heroId);
+var s = entity.Read(Hero.Stats);
+s.Hp -= 10;
+entity.Set(Hero.Stats, s);                                                // uncommitted — invisible to every other reader
+var seen = tx.Open(heroId).Read(Hero.Stats);
 // seen.Hp reflects the write above: read-your-own-writes via tx's local cache, not the chain walk
 tx.Commit();
 ```
@@ -55,7 +57,7 @@ tx.Commit();
 using var snapshot = PointInTimeAccessor.Create(dbe);
 var worker = snapshot.GetWorkerAccessor(0);
 var entity = worker.Open(heroId);                          // throws if not found/visible at snapshot.TSN
-ref readonly var hp = ref entity.Read(Hero.Stats);
+var hp = entity.Read(Hero.Stats);
 ```
 
 | API | Not-found / not-yet-visible / deleted |

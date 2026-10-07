@@ -256,7 +256,10 @@ unsafe class ZoneMapUnseenClusterTests : TestBase<ZoneMapUnseenClusterTests>
 
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
             {
-                tx.OpenMut(ids[target]).Write(ZmUnseenArch.Item).Key = count + 1000;
+                var opened = tx.OpenMut(ids[target]);
+                var item = opened.Read(ZmUnseenArch.Item);
+                item.Key = count + 1000;
+                opened.Set(ZmUnseenArch.Item, item);
                 tx.Commit();
             }
 
@@ -357,7 +360,10 @@ class ZoneMapUnseenClusterRecoveryTests : TestBase<ZoneMapUnseenClusterRecoveryT
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
             {
                 Assert.That(tx.Open(ids[0]).Read(ZmUnseenArch.Item).Key, Is.EqualTo(1L), "premise: the replay restored the spawns");
-                tx.OpenMut(ids[target]).Write(ZmUnseenArch.Item).Key = count + 1000;
+                var entity = tx.OpenMut(ids[target]);
+                var itemCopy = entity.Read(ZmUnseenArch.Item);
+                itemCopy.Key = count + 1000;
+                entity.Set(ZmUnseenArch.Item, itemCopy);
                 tx.Commit();
             }
 

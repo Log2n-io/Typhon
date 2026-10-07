@@ -1,11 +1,11 @@
 ---
 uid: feature-ecs-entity-lifecycle-crud-index
 title: 'Entity Lifecycle & CRUD API'
-description: 'Zero-copy EntityRef / EntityRefMut handles for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API.'
+description: 'EntityRef / EntityRefMut handles for Spawn, Open, Read, Set, Destroy, Enable/Disable — the sole entity manipulation API, safe for the life of their transaction.'
 ---
 
 # Entity Lifecycle & CRUD API
-> Zero-copy EntityRef / EntityRefMut handles for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API.
+> EntityRef / EntityRefMut handles for Spawn, Open, Read, Set, Destroy, Enable/Disable — the sole entity manipulation API, safe for the life of their transaction.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟢 Start Here · **Category:** [Ecs](../README.md)
 
@@ -21,9 +21,11 @@ writes several components on the same entity, that's redundant hashmap work per 
 transaction's TSN, and return a handle — a `ref struct` caching the per-slot component locations. The handle's
 type carries the access: `Open` / `TryOpen` return a read-only `EntityRef`, `OpenMut` / `TryOpenMut` an
 `EntityRefMut` that also writes (and converts implicitly to `EntityRef`). Writing through a read-only open does not
-compile. From there, `Read<T>(Comp<T>)` / `Write<T>(Comp<T>)` resolve a component slot in O(1) and return a typed
-ref straight into chunk or cluster memory: `Versioned` writes copy-on-write into a new revision, `SingleVersion`/`Transient`
-writes mutate in place. At `Spawn`, an omitted `Versioned` component is *absent* — no chunk and no revision
+compile. From there, `Read<T>(Comp<T>)` returns a copy of the component and `Set<T>(Comp<T>, in T)` stores one, each
+resolving the slot in O(1): `Versioned` sets copy-on-write into a new revision, `SingleVersion`/`Transient` sets write in
+place. Values go in and out by copy, never as a reference into the page, so a handle and everything it returned stay
+valid whatever its transaction does next; zero-copy access is cluster iteration's
+([Entity Clusters](../entity-clusters.md)). At `Spawn`, an omitted `Versioned` component is *absent* — no chunk and no revision
 chain are allocated for it — while an omitted `SingleVersion`/`Transient` component is zero-initialized and
 disabled. The entity is staged invisibly until commit; `Destroy` tombstones it
 (cascade-deleting configured children) — data is freed later by deferred GC, never by the destroying
@@ -56,14 +58,15 @@ tx.Commit();
 using var rtx = dbe.CreateQuickTransaction();
 if (rtx.TryOpen(id, out EntityRef e))             // try-pattern — no exception on a stale reference
 {
-    ref readonly Position pos = ref e.Read(Unit.Pos);
+    Position pos = e.Read(Unit.Pos);
 }
 
 // ─── Write — OpenMut once, write/disable several components ───
 using var wtx = dbe.CreateQuickTransaction();
 EntityRefMut m = wtx.OpenMut(id);
-ref Position p = ref m.Write(Unit.Pos);
+Position p = m.Read(Unit.Pos);
 p.X += 1f;
+m.Set(Unit.Pos, p);
 m.Disable(Unit.Stats);          // O(1) bit flip — data preserved, not freed, instantly re-enable-able
 wtx.Commit();
 
@@ -71,7 +74,9 @@ wtx.Commit();
 using var ttx = dbe.CreateQuickTransaction();
 if (ttx.TryOpenMut(id, out EntityRefMut t))
 {
-    t.Write(Unit.Stats).Health -= 10;
+    var stats = t.Read(Unit.Stats);
+    stats.Health -= 10;
+    t.Set(Unit.Stats, stats);
 }
 bool alive = ttx.IsAlive(id);   // the existence probe — a lookup, no open
 ttx.Commit();
@@ -84,10 +89,12 @@ dtx.Commit();
 
 ## ⚠️ Guarantees & limits
 
-- One LinearHash probe per `Open`/`OpenMut`/`TryOpen`/`TryOpenMut`, amortized across every subsequent `Read`/`Write`
+- One LinearHash probe per `Open`/`OpenMut`/`TryOpen`/`TryOpenMut`, amortized across every subsequent `Read`/`Set`
   on that handle (~1-5ns per component for `SingleVersion`/`Transient`). Measured open-plus-one-access, warm caches,
   50 000 cluster entities in spawn order, Ryzen 9 7950X (`Typhon.Benchmark --aa-bench`, 2026-09-25): ~90 ns for
-  `tx.Open` + `Read`, ~100 ns for `tx.OpenMut` + `Write`, ~55 ns / ~75 ns through `tx.For<T>()`. Expect more when
+  `tx.Open` + `Read`, ~100 ns for `tx.OpenMut` + a write, ~55 ns / ~75 ns through `tx.For<T>()`. The copy itself costs
+  nothing measurable up to 64-byte components; a 512-byte one adds ~24 ns to an open + read and ~40 ns to a read-modify-set
+  (#1199). Expect more when
   the lookup misses the CPU cache (random ids over a large table). For "write it if it still
   exists", `TryOpenMut` is that one probe — not `TryOpen` followed by `OpenMut`.
 - Every accessor — `Transaction` / `EntityAccessor`, `PointInTimeAccessor` workers, `ArchetypeAccessor<TArch>`
@@ -100,10 +107,17 @@ dtx.Commit();
 - `EntityRef` and `EntityRefMut` are `ref struct`s — stack-only, cannot escape their creating accessor/transaction,
   cannot be stored in a field or passed across threads. `EntityRefMut` → `EntityRef` is an implicit copy, so
   read-only helpers take an `EntityRef`.
-- `Write<T>` is the dirty boundary — marks dirty (or stages copy-on-write) the moment it's called; no separate
-  `MarkDirty` step.
+- A handle stays valid for its whole transaction: no member returns a reference into a page (rule EP-03). A transaction
+  refreshes its epoch every 128 opens, spawns or enumerated entities, so a long one holds a bounded set of pages; a
+  handle whose page was let go of in between finds it again on its next call.
+- To change one field, read the component, change the copy and `Set` it back. `Set<T>` is the dirty boundary — it
+  marks dirty (or stages copy-on-write) and stores the value in one call; no separate `MarkDirty` step.
+- A stored component's `ComponentCollection` is changed through `EntityRefMut.CreateComponentCollectionAccessor(comp,
+  ref copy, ref copy.Field)`: on a `Versioned` component it creates the new revision first, so the committed revision's
+  buffer is cloned, never edited in place, and on dispose it stores the buffer it ended on into the component — no `Set`
+  is needed for the collection.
 - Writing a `Versioned` component requires a full `Transaction` — a bare `EntityAccessor` or `PointInTimeAccessor`
-  worker accessor throws on `Write` to a `Versioned` slot (read-only there).
+  worker accessor throws on `Set` to a `Versioned` slot (read-only there).
 - `Spawn`/`SpawnBatch` entities are invisible to other transactions until commit (`BornTSN = commit TSN`);
   `Destroy` only tombstones (`DiedTSN = commit TSN`) — entries/chunks are reclaimed by deferred GC once no live
   transaction can still see the entity.
@@ -117,10 +131,11 @@ dtx.Commit();
 
 ## 🧪 Tests
 
-- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — Spawn/Open/OpenMut/Read/Write core paths, `TryOpen` on a stale id, rollback-doesn't-leak-chunks
+- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — Spawn/Open/OpenMut/Read/Set core paths, `TryOpen` on a stale id, rollback-doesn't-leak-chunks
 - [EntityDestroyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityDestroyTests.cs) — Destroy tombstoning, visibility after commit vs. same-transaction, cascade through `EntityLink`
 - [EnableDisableTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EnableDisableTests.cs) — Enable/Disable bit-flip semantics, data preservation across re-enable, MVCC visibility of enabled-bits history
-- [EntityRefMutTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityRefMutTests.cs) — the read-only / writable type split, `TryOpenMut` / `IsAlive` on every accessor, the mutation check on a read-only transaction
+- [EntityRefMutTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityRefMutTests.cs) — the read-only / writable type split, no member returning a reference, `TryOpenMut` / `IsAlive` on every accessor, the mutation check on a read-only transaction
+- [EntityHandleLifetimeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityHandleLifetimeTests.cs) — a handle reads and sets its own entity after its page was evicted under it; a read-only transaction opening more entities than the cache holds keeps a bounded set of pages
 
 ## 🔗 Related
 

@@ -47,8 +47,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx.OpenMut(e1).Write(ClAnt.Position);
+            var entity = tx.OpenMut(e1);
+            var pos = entity.Read(ClAnt.Position);
             pos.X = 99f;
+            entity.Set(ClAnt.Position, pos);
             tx.Commit();
         }
 
@@ -77,7 +79,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         {
             for (int i = 0; i < 5; i++)
             {
-                tx.OpenMut(ids[i]).Write(ClAnt.Position).X = i * 10f;
+                var entity = tx.OpenMut(ids[i]);
+                var position = entity.Read(ClAnt.Position);
+                position.X = i * 10f;
+                entity.Set(ClAnt.Position, position);
             }
             tx.Commit();
         }
@@ -109,8 +114,14 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 10f;
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 20f; // second write
+            var target = tx.OpenMut(e1);
+            var position = target.Read(ClAnt.Position);
+            position.X = 10f;
+            target.Set(ClAnt.Position, position);
+            var opened = tx.OpenMut(e1);
+            var positionCopy = opened.Read(ClAnt.Position);
+            positionCopy.X = 20f;
+            opened.Set(ClAnt.Position, positionCopy); // second write
             tx.Commit();
         }
 
@@ -143,7 +154,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 42f;
+            var entity = tx.OpenMut(e1);
+            var position = entity.Read(ClAnt.Position);
+            position.X = 42f;
+            entity.Set(ClAnt.Position, position);
             tx.Commit();
         }
 
@@ -167,7 +181,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 42f;
+            var entity = tx.OpenMut(e1);
+            var position = entity.Read(ClAnt.Position);
+            position.X = 42f;
+            entity.Set(ClAnt.Position, position);
             tx.Commit();
         }
 
@@ -239,7 +256,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Write to cluster entity
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(antId).Write(ClAnt.Position).X = 99f;
+            var opened = tx.OpenMut(antId);
+            var position = opened.Read(ClAnt.Position);
+            position.X = 99f;
+            opened.Set(ClAnt.Position, position);
             tx.Commit();
         }
 
@@ -248,7 +268,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Write to Versioned entity (non-cluster) — dirty tracking is separate
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(unitId).Write(ClUnit.Health).Current = 50;
+            var target = tx.OpenMut(unitId);
+            var health = target.Read(ClUnit.Health);
+            health.Current = 50;
+            target.Set(ClUnit.Health, health);
             tx.Commit();
         }
 
@@ -276,7 +299,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Write then destroy in separate transaction
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 42f;
+            var target = tx.OpenMut(e1);
+            var position = target.Read(ClAnt.Position);
+            position.X = 42f;
+            target.Set(ClAnt.Position, position);
             tx.Commit();
         }
 
@@ -339,7 +365,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         {
             for (int i = 0; i < count; i++)
             {
-                tx.OpenMut(ids[i]).Write(ClAnt.Position).X = i * 10f;
+                var target = tx.OpenMut(ids[i]);
+                var position = target.Read(ClAnt.Position);
+                position.X = i * 10f;
+                target.Set(ClAnt.Position, position);
             }
             tx.Commit();
         }
@@ -381,7 +410,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         {
             for (int i = 0; i < clusterSize; i++)
             {
-                tx.OpenMut(ids[i]).Write(ClAnt.Position).X = 100f + i;
+                var opened = tx.OpenMut(ids[i]);
+                var position = opened.Read(ClAnt.Position);
+                position.X = 100f + i;
+                opened.Set(ClAnt.Position, position);
             }
             tx.Commit();
         }
@@ -412,7 +444,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         {
             for (int i = 0; i < clusterSize; i++)
             {
-                tx.OpenMut(newIds[i]).Write(ClAnt.Position).X = 200f + i;
+                var target = tx.OpenMut(newIds[i]);
+                var positionCopy = target.Read(ClAnt.Position);
+                positionCopy.X = 200f + i;
+                target.Set(ClAnt.Position, positionCopy);
             }
             tx.Commit();
         }
@@ -450,8 +485,14 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Write both, then destroy e1 in the same tick
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 99f;
-            tx.OpenMut(e2).Write(ClAnt.Position).X = 88f;
+            var target = tx.OpenMut(e1);
+            var positionCopy = target.Read(ClAnt.Position);
+            positionCopy.X = 99f;
+            target.Set(ClAnt.Position, positionCopy);
+            var opened = tx.OpenMut(e2);
+            var position = opened.Read(ClAnt.Position);
+            position.X = 88f;
+            opened.Set(ClAnt.Position, position);
             tx.Commit();
         }
 
@@ -516,7 +557,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
                     int start = threadId * perThread;
                     for (int i = 0; i < perThread; i++)
                     {
-                        tx.OpenMut(ids[start + i]).Write(ClAnt.Position).X = threadId * 1000f + i;
+                        var opened = tx.OpenMut(ids[start + i]);
+                        var position = opened.Read(ClAnt.Position);
+                        position.X = threadId * 1000f + i;
+                        opened.Set(ClAnt.Position, position);
                     }
                     tx.Commit();
                 }
@@ -579,8 +623,14 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Write only 1 entity in cluster 1 and 1 entity in cluster 3 (skip cluster 2)
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[0]).Write(ClAnt.Position).X = 999f;                          // cluster 1
-            tx.OpenMut(ids[clusterSize * 2]).Write(ClAnt.Position).X = 888f;             // cluster 3
+            var opened = tx.OpenMut(ids[0]);
+            var positionCopy = opened.Read(ClAnt.Position);
+            positionCopy.X = 999f;
+            opened.Set(ClAnt.Position, positionCopy);                          // cluster 1
+            var target = tx.OpenMut(ids[clusterSize * 2]);
+            var position = target.Read(ClAnt.Position);
+            position.X = 888f;
+            target.Set(ClAnt.Position, position);             // cluster 3
             tx.Commit();
         }
 
@@ -610,7 +660,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Tick 1: write + fence
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 10f;
+            var entity = tx.OpenMut(e1);
+            var positionCopy = entity.Read(ClAnt.Position);
+            positionCopy.X = 10f;
+            entity.Set(ClAnt.Position, positionCopy);
             tx.Commit();
         }
         dbe.WriteTickFence(1);
@@ -623,7 +676,10 @@ class ClusterDirtyTests : TestBase<ClusterDirtyTests>
         // Tick 3: write again + fence
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(e1).Write(ClAnt.Position).X = 20f;
+            var target = tx.OpenMut(e1);
+            var position = target.Read(ClAnt.Position);
+            position.X = 20f;
+            target.Set(ClAnt.Position, position);
             tx.Commit();
         }
         Assert.That(clusterState.ClusterDirtyBitmap.HasDirty, Is.True, "Dirty after tick 3 write");

@@ -47,7 +47,10 @@ sealed class HeadingTests : TestBase<HeadingTests>
     private static void Turn(DatabaseEngine dbe, EntityId entity, double yaw)
     {
         using var tx = dbe.CreateQuickTransaction();
-        tx.OpenMut(entity).Write(ProjCreature.Bounds).Speed = (float)yaw;
+        var target = tx.OpenMut(entity);
+        var boundsCopy = target.Read(ProjCreature.Bounds);
+        boundsCopy.Speed = (float)yaw;
+        target.Set(ProjCreature.Bounds, boundsCopy);
         tx.Commit();
     }
 

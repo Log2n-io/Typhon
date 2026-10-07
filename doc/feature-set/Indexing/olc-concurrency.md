@@ -46,8 +46,7 @@ foreach (var hit in range) { /* ... */ }
 
 // Thread B — concurrent insert on the same index, only latches the leaf it touches
 using var tx2 = engine.CreateQuickTransaction();
-EntityRef e = tx2.Spawn<PlayerArchetype>();
-e.Write(PlayerArchetype.P).Name = "Diego";
+tx2.Spawn<PlayerArchetype>(PlayerArchetype.P.Set(new Player { Name = "Diego" }));
 tx2.Commit();
 ```
 

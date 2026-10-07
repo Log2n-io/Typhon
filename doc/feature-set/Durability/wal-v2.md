@@ -42,7 +42,9 @@ services
 using var uow = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit);
 using var tx = uow.CreateTransaction();
 var e = tx.OpenMut(soldier);
-e.Write(Unit.Health).Current -= 25;
+var health = e.Read(Unit.Health);
+health.Current -= 25;
+e.Set(Unit.Health, health);
 tx.Commit();   // batch appended now; durable on the next GroupCommit flush
 ```
 

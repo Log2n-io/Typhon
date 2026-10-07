@@ -318,13 +318,17 @@ internal sealed class TradeSystem : CallbackSystem
                 continue;
             }
 
-            long amount = Math.Min(10L, from.Read(Character.Wallet).Credits);
+            var payer = from.Read(Character.Wallet);
+            long amount = Math.Min(10L, payer.Credits);
             if (amount <= 0 || !ctx.Transaction.TryOpenMut(_roster[bi], out var to))
             {
                 continue;
             }
-            from.Write(Character.Wallet).Credits -= amount;
-            to.Write(Character.Wallet).Credits += amount;
+            payer.Credits -= amount;
+            from.Set(Character.Wallet, payer);
+            var payee = to.Read(Character.Wallet);
+            payee.Credits += amount;
+            to.Set(Character.Wallet, payee);
         }
     }
 

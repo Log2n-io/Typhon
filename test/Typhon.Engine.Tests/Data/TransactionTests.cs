@@ -147,8 +147,10 @@ class TransactionTests : TestBase<TransactionTests>
             Assert.That(e1.IsNull, Is.False, "A valid entity id must be non-null");
 
             a.A = aChanged;
-            ref var wa = ref t.OpenMut(e1).Write(CompABCArch.A);
+            var target = t.OpenMut(e1);
+            var wa = target.Read(CompABCArch.A);
             wa = a;
+            target.Set(CompABCArch.A, wa);
 
             var res = t.Commit();
             Assert.That(res, Is.True, "Transaction commit should be successful");
@@ -192,8 +194,10 @@ class TransactionTests : TestBase<TransactionTests>
             Assert.That(ar.A, Is.EqualTo(a.A), "Read in the second transaction should retrieve the component created in the earlier one");
 
             var a2 = new CompA(12);
-            ref var wa2 = ref t.OpenMut(e1).Write(CompABCArch.A);
+            var target = t.OpenMut(e1);
+            var wa2 = target.Read(CompABCArch.A);
             wa2 = a2;
+            target.Set(CompABCArch.A, wa2);
 
             var ar2 = t.Open(e1).Read(CompABCArch.A);
             Assert.That(ar2.A, Is.EqualTo(a2.A), "Read after update should reflect the updated value");
@@ -241,8 +245,10 @@ class TransactionTests : TestBase<TransactionTests>
             using var t = dbe.CreateQuickTransaction();
 
             var a2 = new CompA(12);
-            ref var wa2 = ref t.OpenMut(e1).Write(CompABCArch.A);
+            var target = t.OpenMut(e1);
+            var wa2 = target.Read(CompABCArch.A);
             wa2 = a2;
+            target.Set(CompABCArch.A, wa2);
 
             var ar2 = t.Open(e1).Read(CompABCArch.A);
             Assert.That(ar2.A, Is.EqualTo(a2.A), "Read after update should reflect the updated value");
@@ -288,8 +294,10 @@ class TransactionTests : TestBase<TransactionTests>
             var longRunningValue = new CompA(200, 300, 400);
             var longRunningTransaction = dbe.CreateQuickTransaction();
             {
-                ref var w = ref longRunningTransaction.OpenMut(e1).Write(CompAArch.A);
+                var opened = longRunningTransaction.OpenMut(e1);
+                var w = opened.Read(CompAArch.A);
                 w = longRunningValue;
+                opened.Set(CompAArch.A, w);
                 curRevisionCount++;
             }
 
@@ -311,8 +319,10 @@ class TransactionTests : TestBase<TransactionTests>
                     using var t = dbe.CreateQuickTransaction();
 
                     var a = CompA.Create(Rand);
-                    ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+                    var target = t.OpenMut(e1);
+                    var w = target.Read(CompAArch.A);
                     w = a;
+                    target.Set(CompAArch.A, w);
                     curRevisionCount++;
 
                     // revisions.Add((commit, a));
@@ -388,8 +398,10 @@ class TransactionTests : TestBase<TransactionTests>
 
                 lbR2 = bR2;
 
-                ref var w = ref t3.OpenMut(capturedE1).Write(CompABCArch.B);
+                var target = t3.OpenMut(capturedE1);
+                var w = target.Read(CompABCArch.B);
                 w = lbR2;
+                target.Set(CompABCArch.B, w);
                 t3.Commit();
             });
 
@@ -811,8 +823,10 @@ class TransactionTests : TestBase<TransactionTests>
             using var t = dbe.CreateQuickTransaction();
             t.Open(e1).Read(CompAArch.A);
             var updated = new CompA(999);
-            ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+            var target = t.OpenMut(e1);
+            var w = target.Read(CompAArch.A);
             w = updated;
+            target.Set(CompAArch.A, w);
             Assert.That(t.Rollback(), Is.True);
         }
 
@@ -933,8 +947,10 @@ class TransactionTests : TestBase<TransactionTests>
             var existing = t.Open(e1).Read(CompAArch.A);
             Assert.That(existing.A, Is.EqualTo(10));
             var updated = new CompA(20);
-            ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+            var target = t.OpenMut(e1);
+            var w = target.Read(CompAArch.A);
             w = updated;
+            target.Set(CompAArch.A, w);
             Assert.That(t.Commit(), Is.True);
         }
 
@@ -968,15 +984,19 @@ class TransactionTests : TestBase<TransactionTests>
         // T1 reads and updates
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(e1).Read(CompAArch.A);
-        ref var u1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+        var opened = t1.OpenMut(e1);
+        var u1 = opened.Read(CompAArch.A);
         u1 = new CompA(100);
+        opened.Set(CompAArch.A, u1);
 
         // T2 reads, updates, and commits first
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(e1).Read(CompAArch.A);
-            ref var u2 = ref t2.OpenMut(e1).Write(CompAArch.A);
+            var target = t2.OpenMut(e1);
+            var u2 = target.Read(CompAArch.A);
             u2 = new CompA(200);
+            target.Set(CompAArch.A, u2);
             Assert.That(t2.Commit(), Is.True);
         }
 
@@ -1021,15 +1041,19 @@ class TransactionTests : TestBase<TransactionTests>
         // T1 reads and updates
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(e1).Read(CompAArch.A);
-        ref var u1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+        var target = t1.OpenMut(e1);
+        var u1 = target.Read(CompAArch.A);
         u1 = new CompA(100);
+        target.Set(CompAArch.A, u1);
 
         // T2 reads, updates, and commits first
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(e1).Read(CompAArch.A);
-            ref var u2 = ref t2.OpenMut(e1).Write(CompAArch.A);
+            var opened = t2.OpenMut(e1);
+            var u2 = opened.Read(CompAArch.A);
             u2 = new CompA(200);
+            opened.Set(CompAArch.A, u2);
             Assert.That(t2.Commit(), Is.True);
         }
 
@@ -1252,8 +1276,10 @@ class TransactionTests : TestBase<TransactionTests>
             using var t = dbe.CreateQuickTransaction();
             t.Open(e1).Read(CompAArch.A);
 
-            ref var w2 = ref t.OpenMut(e2).Write(CompAArch.A);
+            var target = t.OpenMut(e2);
+            var w2 = target.Read(CompAArch.A);
             w2 = new CompA(200);
+            target.Set(CompAArch.A, w2);
 
             t.Destroy(e3);
 
@@ -1332,8 +1358,10 @@ class TransactionTests : TestBase<TransactionTests>
         {
             using var t = dbe.CreateQuickTransaction();
             t.Open(e1).Read(CompAArch.A);
-            ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+            var entity = t.OpenMut(e1);
+            var w = entity.Read(CompAArch.A);
             w = new CompA(777);
+            entity.Set(CompAArch.A, w);
             Assert.That(t.Rollback(), Is.True);
         }
 
@@ -1404,15 +1432,19 @@ class TransactionTests : TestBase<TransactionTests>
         // T1 reads and updates
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(e1).Read(CompAArch.A);
-        ref var u1 = ref t1.OpenMut(e1).Write(CompAArch.A);
+        var target = t1.OpenMut(e1);
+        var u1 = target.Read(CompAArch.A);
         u1 = new CompA(100);
+        target.Set(CompAArch.A, u1);
 
         // T2 reads, updates, and commits first — creates a conflict
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(e1).Read(CompAArch.A);
-            ref var u2 = ref t2.OpenMut(e1).Write(CompAArch.A);
+            var entity = t2.OpenMut(e1);
+            var u2 = entity.Read(CompAArch.A);
             u2 = new CompA(200);
+            entity.Set(CompAArch.A, u2);
             Assert.That(t2.Commit(), Is.True);
         }
 
@@ -1476,8 +1508,10 @@ class TransactionTests : TestBase<TransactionTests>
 
         using var t = dbe.CreateQuickTransaction();
         // Perform a mutation to move state to InProgress
-        ref var w = ref t.OpenMut(e1).Write(CompAArch.A);
+        var entity = t.OpenMut(e1);
+        var w = entity.Read(CompAArch.A);
         w = new CompA(20);
+        entity.Set(CompAArch.A, w);
         Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.InProgress));
         Assert.That(t.Rollback(), Is.True);
         Assert.That(t.State, Is.EqualTo(Transaction.TransactionState.Rollbacked));

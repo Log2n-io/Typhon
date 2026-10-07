@@ -669,7 +669,10 @@ sealed unsafe class WideBodyDeferralTests : TestBase<WideBodyDeferralTests>
     private static void Rename(DatabaseEngine engine, EntityId id, string name)
     {
         using var tx = engine.CreateQuickTransaction();
-        tx.OpenMut(id).Write(ProjLabelled.Label).Name = name;
+        var target = tx.OpenMut(id);
+        var labelCopy = target.Read(ProjLabelled.Label);
+        labelCopy.Name = name;
+        target.Set(ProjLabelled.Label, labelCopy);
         tx.Commit();
     }
 }

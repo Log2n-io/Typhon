@@ -203,12 +203,14 @@ public sealed class ChatChecks
         var player = tx.OpenMut(entity);
 
         // Parked and not deciding anything: a player that wandered off mid-case would move the distance under test.
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
         state.Activity = PlayerActivity.Idle;
         state.ActivityTicks = int.MaxValue / 2;
-        ref var move = ref player.Write(Player.Move);
+        player.Set(Player.State, state);
+        var move = player.Read(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
+        player.Set(Player.Move, move);
 
         var at = default(PlayerPlacement);
         at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);

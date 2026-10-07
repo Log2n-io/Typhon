@@ -402,7 +402,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     /// <summary>
     /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="EntityAccessor.Open(EntityId)"/> +
-    /// <see cref="EntityRef.TryRead{T}"/>. Multiple Where calls chain as AND (each must pass).
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>. Multiple Where calls chain as AND (each must pass).
     /// </summary>
     /// <remarks>Targeted scan (index-first) is not yet available — always uses broad scan.</remarks>
     public EcsQuery<TArchetype> Where<T>(Func<T, bool> predicate) where T : unmanaged
@@ -3886,7 +3886,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Iterates pre-collected query results, yielding read-only <see cref="EntityRef"/>s with zero-copy component access.
+    /// Iterates pre-collected query results, yielding read-only <see cref="EntityRef"/>s; their component reads return copies.
     /// To write, open the entity with <see cref="EntityAccessor.OpenMut"/> or <see cref="EntityAccessor.TryOpenMut"/>.
     /// </summary>
     [PublicAPI]

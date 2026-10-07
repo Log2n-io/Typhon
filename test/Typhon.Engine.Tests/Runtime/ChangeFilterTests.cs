@@ -167,8 +167,10 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
             dag.CallbackSystem("Writer", ctx =>
             {
                 Interlocked.Increment(ref ticksSeen);
-                ref var pos = ref ctx.Transaction.OpenMut(entityId).Write(SvEcsUnit.Position);
+                var opened = ctx.Transaction.OpenMut(entityId);
+                var pos = opened.Read(SvEcsUnit.Position);
                 pos.X += 1.0f;
+                opened.Set(SvEcsUnit.Position, pos);
             });
 
             dag.QuerySystem("Filtered", ctx =>
@@ -225,8 +227,10 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
         // Write a component to trigger DirtyBitmap
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx2.OpenMut(e1).Write(SvEcsUnit.Position);
+            var target = tx2.OpenMut(e1);
+            var pos = target.Read(SvEcsUnit.Position);
             pos.X = 99f;
+            target.Set(SvEcsUnit.Position, pos);
             tx2.Commit();
         }
 
@@ -279,8 +283,10 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
                 {
-                    ref var pos = ref ctx.Transaction.OpenMut(e1).Write(SvEcsUnit.Position);
+                    var target = ctx.Transaction.OpenMut(e1);
+                    var pos = target.Read(SvEcsUnit.Position);
                     pos.X = 99f;
+                    target.Set(SvEcsUnit.Position, pos);
                     Interlocked.Exchange(ref writerDone, 1);
                 }
             });
@@ -351,8 +357,10 @@ class ChangeFilterTests : TestBase<ChangeFilterTests>
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 2)
                 {
-                    ref var hp = ref ctx.Transaction.OpenMut(soldier).Write(SvEcsSoldier.Health);
+                    var target = ctx.Transaction.OpenMut(soldier);
+                    var hp = target.Read(SvEcsSoldier.Health);
                     hp.Current = 50;
+                    target.Set(SvEcsSoldier.Health, hp);
                 }
             });
 

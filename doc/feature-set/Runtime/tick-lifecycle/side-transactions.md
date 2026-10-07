@@ -41,10 +41,12 @@ void ProcessTrade(TickContext ctx, TradeRequest trade)
     using var tradeTx = ctx.CreateSideTransaction(DurabilityMode.Immediate);
     var buyerMut = tradeTx.OpenMut(trade.BuyerId);
     var sellerMut = tradeTx.OpenMut(trade.SellerId);
-    ref Wallet bw = ref buyerMut.Write(Player.Wallet);
-    ref Wallet sw = ref sellerMut.Write(Player.Wallet);
+    Wallet bw = buyerMut.Read(Player.Wallet);
+    Wallet sw = sellerMut.Read(Player.Wallet);
     bw.Gold -= trade.Price;
+    buyerMut.Set(Player.Wallet, bw);
     sw.Gold += trade.Price;
+    sellerMut.Set(Player.Wallet, sw);
 
     tradeTx.Commit();   // FUA WAL flush — durable now, independent of the tick's main UoW.
 }

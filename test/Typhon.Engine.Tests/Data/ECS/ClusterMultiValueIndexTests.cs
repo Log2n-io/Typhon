@@ -111,7 +111,7 @@ class ClusterMultiValueIndexTests : TestBase<ClusterMultiValueIndexTests>
         // In-place SV mutation — index maintenance is deferred to the fence.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(moved).Write(TbSvArch.Data) = new TbSvData(20, 1);
+            tx.OpenMut(moved).Set(TbSvArch.Data, new TbSvData(20, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -139,7 +139,7 @@ class ClusterMultiValueIndexTests : TestBase<ClusterMultiValueIndexTests>
         // fence drain — which is the branch that used Remove(key) and took the sibling with it.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(doomed).Write(TbSvArch.Data) = new TbSvData(10, 99);
+            tx.OpenMut(doomed).Set(TbSvArch.Data, new TbSvData(10, 99));
             tx.Destroy(doomed);
             tx.Commit();
         }
@@ -168,14 +168,14 @@ class ClusterMultiValueIndexTests : TestBase<ClusterMultiValueIndexTests>
         // which only holds if the first move wrote its new element id back to the cluster tail.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(a).Write(TbSvArch.Data) = new TbSvData(20, 1);
+            tx.OpenMut(a).Set(TbSvArch.Data, new TbSvData(20, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(b).Write(TbSvArch.Data) = new TbSvData(20, 2);
+            tx.OpenMut(b).Set(TbSvArch.Data, new TbSvData(20, 2));
             tx.Commit();
         }
         dbe.WriteTickFence(3);

@@ -78,8 +78,10 @@ public class RpgWorldSimulationScenario : IScenario
                                 var cur = entity.Read(PlayerArch.Position);
                                 var dx = (float)(localRand.NextDouble() - 0.5) * 20f;
                                 var dy = (float)(localRand.NextDouble() - 0.5) * 20f;
-                                ref var wp = ref t.OpenMut(id).Write(PlayerArch.Position);
+                                var opened = t.OpenMut(id);
+                                var wp = opened.Read(PlayerArch.Position);
                                 wp.Bounds = SwgWorkload.Move(cur.Bounds, dx, dy);
+                                opened.Set(PlayerArch.Position, wp);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -100,8 +102,10 @@ public class RpgWorldSimulationScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var wallet = entity.Read(PlayerArch.Wallet);
-                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                var target = t.OpenMut(id);
+                                var ww = target.Read(PlayerArch.Wallet);
                                 ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-100, 200));
+                                target.Set(PlayerArch.Wallet, ww);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -212,8 +216,10 @@ public class RpgCombatScenario : IScenario
                             {
                                 var wallet = entity.Read(PlayerArch.Wallet);
                                 var swing = localRand.Next(-50, 100); // Negative = cost
-                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                var target = t.OpenMut(id);
+                                var ww = target.Read(PlayerArch.Wallet);
                                 ww.Credits = Math.Max(0, wallet.Credits + swing);
+                                target.Set(PlayerArch.Wallet, ww);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -223,8 +229,10 @@ public class RpgCombatScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var player = entity.Read(PlayerArch.Player);
-                                ref var wp = ref t.OpenMut(id).Write(PlayerArch.Player);
+                                var opened = t.OpenMut(id);
+                                var wp = opened.Read(PlayerArch.Player);
                                 wp.Level = Math.Clamp(player.Level + localRand.Next(-1, 2), 1, 90);
+                                opened.Set(PlayerArch.Player, wp);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -234,8 +242,10 @@ public class RpgCombatScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var wallet = entity.Read(PlayerArch.Wallet);
-                                ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                var entity2 = t.OpenMut(id);
+                                var ww = entity2.Read(PlayerArch.Wallet);
                                 ww.BankCredits = wallet.BankCredits + localRand.Next(0, 500);
+                                entity2.Set(PlayerArch.Wallet, ww);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -367,8 +377,10 @@ public class RpgQuestingScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var item = entity.Read(ItemArch.Item);
-                                ref var wi = ref t.OpenMut(id).Write(ItemArch.Item);
+                                var target = t.OpenMut(id);
+                                var wi = target.Read(ItemArch.Item);
                                 wi.Decay = Math.Clamp(item.Decay + localRand.Next(-5, 10), 0, 100);
+                                target.Set(ItemArch.Item, wi);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }

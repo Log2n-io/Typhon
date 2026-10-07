@@ -493,7 +493,7 @@ reclaimed.
         SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
   scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
          Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
-         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.Write,
+         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.WriteRef,
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
   on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with

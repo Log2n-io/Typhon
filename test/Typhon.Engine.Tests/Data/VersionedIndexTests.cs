@@ -51,8 +51,10 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
 
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var d = ref t.OpenMut(e1Id).Write(CompDArch.D);
+            var opened = t.OpenMut(e1Id);
+            var d = opened.Read(CompDArch.D);
             d = new CompD(5.0f, 20, 6.0);
+            opened.Set(CompDArch.D, d);
             t.Commit();
         }
 
@@ -99,8 +101,10 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
 
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var d = ref t.OpenMut(moved).Write(CompDArch.D);
+            var target = t.OpenMut(moved);
+            var d = target.Read(CompDArch.D);
             d = new CompD(5.0f, 10, 2.0);
+            target.Set(CompDArch.D, d);
             t.Commit();
         }
 

@@ -104,9 +104,9 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Entity & Archetype Model | Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-archetype-model.md) |
-| Entity Lifecycle & CRUD API | Zero-copy EntityRef accessor for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-lifecycle-crud/README.md) |
-| &nbsp;&nbsp;↳ Generated Multi-Component Accessors | Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/generated-multi-component-accessors.md) |
+| Entity & Archetype Model | Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed component handles — the schema backbone of every other ECS feature. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-archetype-model.md) |
+| Entity Lifecycle & CRUD API | EntityRef / EntityRefMut handles for Spawn, Open, Read, Set, Destroy, Enable/Disable — Read returns a copy, Set stores one; the sole entity manipulation API. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-lifecycle-crud/README.md) |
+| &nbsp;&nbsp;↳ Generated Multi-Component Accessors | A source-generated Values struct and ReadAll / WriteAll reading or setting every archetype component in one call. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/generated-multi-component-accessors.md) |
 | &nbsp;&nbsp;↳ Batch & SoA Spawn | Bulk entity creation — shared-value batches or per-entity SoA spans — amortizing per-call overhead across thousands of entities. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/batch-soa-spawn.md) |
 | &nbsp;&nbsp;↳ Enable/Disable Components | O(1) per-component bit-flip toggle — data preserved, not freed, with its own MVCC snapshot isolation independent of the component's StorageMode. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/enable-disable-components.md) |
 | Storage Modes | Pick durability and write cost per component type — from microsecond ACID to nanosecond scratch memory, in one engine. | ✅ Implemented | 🟢 Start Here | [→](Ecs/storage-modes/README.md) |

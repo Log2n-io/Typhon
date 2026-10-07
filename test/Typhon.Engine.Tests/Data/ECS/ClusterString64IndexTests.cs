@@ -175,7 +175,7 @@ class ClusterString64IndexTests : TestBase<ClusterString64IndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClusterS64Arch.Data) = new ClusterS64Named((String64)"after", 1);
+            tx.OpenMut(id).Set(ClusterS64Arch.Data, new ClusterS64Named((String64)"after", 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -220,7 +220,7 @@ class ClusterString64IndexTests : TestBase<ClusterString64IndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClusterS64Arch.Data) = new ClusterS64Named((String64)after, 1);
+            tx.OpenMut(id).Set(ClusterS64Arch.Data, new ClusterS64Named((String64)after, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

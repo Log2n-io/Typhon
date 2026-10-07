@@ -45,7 +45,9 @@ try
 {
     using var tx = dbe.CreateQuickTransaction();
     var e = tx.OpenMut(playerId);
-    e.Write(Player.Wallet).Gold -= price;
+    var wallet = e.Read(Player.Wallet);
+    wallet.Gold -= price;
+    e.Set(Player.Wallet, wallet);
     tx.Commit();
 }
 catch (TyphonTimeoutException ex)

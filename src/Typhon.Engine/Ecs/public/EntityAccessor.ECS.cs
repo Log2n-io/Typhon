@@ -212,7 +212,7 @@ public unsafe partial class EntityAccessor
             throw new InvalidOperationException($"Teleport to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
         }
 
-        ref var stored = ref mut.Write(spatial);
+        ref var stored = ref mut.WriteRef(spatial);
         stored = value;
         if (state.SpatialSlot.RealmKeyInSpatialComponent)
         {
@@ -339,6 +339,163 @@ public unsafe partial class EntityAccessor
     private protected void ThrowEntityNotFound(EntityId id) => throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Cluster base resolution — shared by both resolvers and by a handle's re-resolve (#1199)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>The cluster accessors of one archetype in <see cref="_clusterCache"/>.</summary>
+    private struct ClusterCacheEntry
+    {
+        public ChunkAccessor<PersistentStore> Persistent;
+        public ChunkAccessor<TransientStore> Transient;
+        public long LastUse;
+        public ushort ArchetypeId;
+        public bool Live;
+        public bool HasPersistent;
+        public bool HasTransient;
+    }
+
+    internal const int ClusterCacheWays = 4;
+
+    [InlineArray(ClusterCacheWays)]
+    private struct ClusterCache
+    {
+        private ClusterCacheEntry _entry;
+    }
+
+    /// <summary>
+    /// The cluster cache entry of <paramref name="archetypeId"/>, created on a miss in place of the least recently used one. Only the persistent accessor
+    /// reports what it lets go of to <see cref="ClusterGeneration"/>: Transient pages live in pinned native blocks and are never evicted, so a pointer into
+    /// one outlives its accessor's slot.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref ClusterCacheEntry EnsureClusterCache(ArchetypeEngineState es, ushort archetypeId)
+    {
+        ref var mru = ref _clusterCache[_clusterCacheMru];
+        if (mru.Live && mru.ArchetypeId == archetypeId)
+        {
+            return ref mru;
+        }
+        return ref EnsureClusterCacheMiss(es, archetypeId);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ref ClusterCacheEntry EnsureClusterCacheMiss(ArchetypeEngineState es, ushort archetypeId)
+    {
+        int victim = 0;
+        long oldest = long.MaxValue;
+        for (int i = 0; i < ClusterCacheWays; i++)
+        {
+            ref var entry = ref _clusterCache[i];
+            if (!entry.Live)
+            {
+                // A free way beats any live one.
+                if (oldest != long.MinValue)
+                {
+                    victim = i;
+                    oldest = long.MinValue;
+                }
+                continue;
+            }
+            if (entry.ArchetypeId == archetypeId)
+            {
+                entry.LastUse = ++_clusterCacheClock;
+                _clusterCacheMru = (byte)i;
+                return ref entry;
+            }
+            if (entry.LastUse < oldest)
+            {
+                victim = i;
+                oldest = entry.LastUse;
+            }
+        }
+
+        ref var e = ref _clusterCache[victim];
+        if (e.Live)
+        {
+            DisposeClusterCacheEntry(ref e);
+        }
+        var persistentSegment = es.ClusterState.ClusterSegment;
+        e.HasPersistent = persistentSegment != null;
+        if (persistentSegment != null)
+        {
+            e.Persistent = persistentSegment.CreateChunkAccessor();
+            e.Persistent.TrackGeneration(ClusterGeneration);
+        }
+        var transientSegment = es.ClusterState.TransientSegment;
+        e.HasTransient = transientSegment != null;
+        if (transientSegment != null)
+        {
+            e.Transient = transientSegment.CreateChunkAccessor();
+        }
+        e.ArchetypeId = archetypeId;
+        e.LastUse = ++_clusterCacheClock;
+        e.Live = true;
+        _clusterCacheMru = (byte)victim;
+        return ref e;
+    }
+
+    private static void DisposeClusterCacheEntry(ref ClusterCacheEntry entry)
+    {
+        if (entry.HasPersistent)
+        {
+            entry.Persistent.Dispose();
+        }
+        if (entry.HasTransient)
+        {
+            entry.Transient.Dispose();
+        }
+        entry.Live = false;
+        entry.HasPersistent = false;
+        entry.HasTransient = false;
+    }
+
+    private protected void DisposeClusterCache()
+    {
+        for (int i = 0; i < ClusterCacheWays; i++)
+        {
+            ref var entry = ref _clusterCache[i];
+            if (entry.Live)
+            {
+                DisposeClusterCacheEntry(ref entry);
+            }
+        }
+        _clusterCacheClock = 0;
+        _clusterCacheMru = 0;
+    }
+
+    /// <summary>
+    /// Resolve <paramref name="result"/>'s cluster bases: the primary one (PersistentStore for mixed/SV, TransientStore for pure-Transient) and, for a
+    /// mixed archetype, the Transient one. Stamps the handle with the generation its pointers are valid under.
+    /// </summary>
+    private protected void ResolveClusterBases(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable, ref EntityRef result)
+    {
+        ref var cache = ref EnsureClusterCache(es, archetypeId);
+        result._clusterBase = cache.HasPersistent
+            ? cache.Persistent.GetChunkAddress(clusterChunkId, writable)
+            : cache.Transient.GetChunkAddress(clusterChunkId, writable);
+        if (cache.HasTransient && cache.HasPersistent)
+        {
+            result._transientClusterBase = cache.Transient.GetChunkAddress(clusterChunkId, writable);
+        }
+
+        // Read after both resolves: a slot evicted to make room for them bumped the generation, and these pointers are valid under the new value.
+        result._resolveGen = ClusterGeneration.Value;
+        result._resolvedWritable = writable;
+    }
+
+    /// <summary>
+    /// The primary cluster base of a handle whose cached one may be gone: its accessor let go of a page since it resolved (#1199). Resolved again
+    /// through this accessor's cluster cache, from the cluster id the handle kept, and valid until <see cref="ClusterGeneration"/> moves.
+    /// </summary>
+    internal byte* ReresolveClusterBase(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable)
+    {
+        ref var cache = ref EnsureClusterCache(es, archetypeId);
+        return cache.HasPersistent
+            ? cache.Persistent.GetChunkAddress(clusterChunkId, writable)
+            : cache.Transient.GetChunkAddress(clusterChunkId, writable);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Entity resolution — simplified (no spawn/destroy/CompRevInfo caching)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -374,6 +531,7 @@ public unsafe partial class EntityAccessor
 
         // Skip EpochGuard if we're already in an epoch scope (PTA workers enter once in InitLightweight).
         // This eliminates per-entity PinCurrentThread/UnpinCurrentThread overhead.
+        // No NoteEntityOpen here: only PTA workers resolve through this base, and their epoch is refreshed once per system (see NoteEntityOpen).
         var needsGuard = !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope;
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
 
@@ -426,48 +584,7 @@ public unsafe partial class EntityAccessor
             int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
             byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
-            // Cache cluster accessor for same-archetype repeated lookups
-            if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
-            {
-                if (_hasClusterCache)
-                {
-                    _clusterCacheAccessor.Dispose();
-                }
-                if (_hasTransientClusterCache)
-                {
-                    _transientClusterCacheAccessor.Dispose();
-                    _hasTransientClusterCache = false;
-                }
-
-                if (es.ClusterState.ClusterSegment != null)
-                {
-                    _clusterCacheAccessor = es.ClusterState.ClusterSegment.CreateChunkAccessor();
-                }
-                if (es.ClusterState.TransientSegment != null)
-                {
-                    _transientClusterCacheAccessor = es.ClusterState.TransientSegment.CreateChunkAccessor();
-                    _hasTransientClusterCache = true;
-                }
-                _clusterCacheArchId = id.ArchetypeId;
-                _hasClusterCache = true;
-            }
-
-            // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-            if (es.ClusterState.ClusterSegment != null)
-            {
-                result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-            }
-            else
-            {
-                result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-            }
-
-            // Mixed archetype: also set TransientStore base
-            if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
-            {
-                result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-            }
-
+            ResolveClusterBases(es, id.ArchetypeId, clusterChunkId, writable, ref result);
             result._clusterSlotIndex = slotIndex;
             result._clusterChunkId = clusterChunkId;
             result._clusterLayout = es.ClusterState.Layout;
@@ -575,7 +692,8 @@ public unsafe partial class EntityAccessor
     /// <summary>
     /// Non-generic counterpart to <see cref="ReadEcsComponentData{T}"/>: resolves the raw storage pointer for a component instance without a compile-time type
     /// parameter. Returns a pointer to the component's field data (already past <see cref="ComponentInfo.ComponentOverhead"/>); the caller reads
-    /// <c>ComponentStorageSize</c> bytes and decodes fields by offset. Backs <see cref="EntityRef.ReadRaw"/> for runtime tooling (the Workbench Data Browser).
+    /// <c>ComponentStorageSize</c> bytes and decodes fields by offset. Backs <see cref="EntityRef.ReadRaw(int, Span{byte})"/> for runtime tooling
+    /// (the Workbench Data Browser).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int location, bool isOwnSpawn)
@@ -675,7 +793,7 @@ public unsafe partial class EntityAccessor
 
     /// <summary>
     /// Capture old indexed field values before the first SV in-place mutation per entity per tick.
-    /// Called from <see cref="EntityRefMut.Write{T}(Comp{T})"/> for SingleVersion components with indexed fields.
+    /// Called from <see cref="EntityRefMut.Set{T}(Comp{T}, in T)"/> for SingleVersion components with indexed fields.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void ShadowIndexedFields<T>(ComponentTable table, int chunkId, EntityId entityId) where T : unmanaged
@@ -823,7 +941,7 @@ public unsafe partial class EntityAccessor
     internal void NoteSvInPlaceWrite() => _didInPlaceSvWrite = true;
 
     /// <summary>
-    /// Records the cache page a SingleVersion value is written into in place, through the ref <see cref="EntityRefMut.Write{T}(Comp{T})"/> returns (PS-10,
+    /// Records the cache page a SingleVersion value is written into in place, through the internal ref <c>EntityRefMut.WriteRef</c> returns (PS-10,
     /// #1172). The resolve mapped the page dirty through a chunk accessor without a ChangeSet, which records nothing: unrecorded, an eviction before the
     /// next fence reloads the old value. By address, with no page lookup, since it runs once per written component. A cluster without a persistent segment
     /// lives in the transient store and needs nothing.

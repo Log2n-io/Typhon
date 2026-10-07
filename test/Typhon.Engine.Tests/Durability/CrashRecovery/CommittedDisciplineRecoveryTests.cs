@@ -130,7 +130,7 @@ internal sealed class CommittedDisciplineRecoveryTests
 
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
-                tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+                tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));
                 tx.Commit();
             }
 
@@ -150,7 +150,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             Assert.That(tx.IsAlive(id), Is.True, "Commit-discipline entity must survive a hard crash via WAL replay");
 
             var e = tx.Open(id);
-            ref readonly var pos = ref e.Read(CmEntity.Position);
+            var pos = e.Read(CmEntity.Position);
             // Position was written under Commit discipline (Immediate) ⇒ a fsynced WAL Slot record ⇒ recovered exactly (AC-2).
             Assert.That(pos.X, Is.EqualTo(99f), "Commit-discipline write must be recovered (AC-2) — got the pre-write value, durability lost");
             Assert.That(pos.Y, Is.EqualTo(88f), "Commit-discipline write Y must be recovered");
@@ -244,7 +244,7 @@ internal sealed class CommittedDisciplineRecoveryTests
                 using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
                 if (op == PausedOp.Write)
                 {
-                    tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+                    tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));
                 }
                 else
                 {
@@ -334,7 +334,7 @@ internal sealed class CommittedDisciplineRecoveryTests
         var failed = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
         try
         {
-            failed.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+            failed.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));
             // The probe sits between the floor's store and the frame's publish. Only this thread's append fails; nothing else appends here, so the
             // guard is a defence.
             var committerThread = Environment.CurrentManagedThreadId;
@@ -414,7 +414,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(1, 1)), CmEntity.Wallet.Set(new CmWallet(50)));
-                tx.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);   // same transaction as the Spawn
+                tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));   // same transaction as the Spawn
                 tx.Commit();
             }
 
@@ -431,7 +431,7 @@ internal sealed class CommittedDisciplineRecoveryTests
             using var tx = dbe.CreateQuickTransaction();
             Assert.That(tx.IsAlive(id), Is.True, "a Commit-discipline spawn must survive a hard crash via WAL replay (CM-06)");
 
-            ref readonly var pos = ref tx.Open(id).Read(CmEntity.Position);
+            var pos = tx.Open(id).Read(CmEntity.Position);
             Assert.That(pos.X, Is.EqualTo(99f), "recovery restored the spawn value, not the same-transaction write");
             Assert.That(pos.Y, Is.EqualTo(88f), "recovery restored the spawn value, not the same-transaction write");
         }
@@ -467,21 +467,21 @@ internal sealed class CommittedDisciplineRecoveryTests
             // TickFence churn on e2 (interleaved "noise" — may be lost across the crash).
             using (var tf = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
             {
-                tf.OpenMut(e2).Write(CmEntity.Position) = new CmPosition(222, 222);
+                tf.OpenMut(e2).Set(CmEntity.Position, new CmPosition(222, 222));
                 tf.Commit();
             }
 
             // Commit-discipline write on e1 (zero-loss).
             using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
-                cm.OpenMut(e1).Write(CmEntity.Position) = new CmPosition(11, 11);
+                cm.OpenMut(e1).Set(CmEntity.Position, new CmPosition(11, 11));
                 cm.Commit();
             }
 
             // More TickFence churn on e2.
             using (var tf = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
             {
-                tf.OpenMut(e2).Write(CmEntity.Position) = new CmPosition(444, 444);
+                tf.OpenMut(e2).Set(CmEntity.Position, new CmPosition(444, 444));
                 tf.Commit();
             }
 
@@ -489,8 +489,8 @@ internal sealed class CommittedDisciplineRecoveryTests
             using (var cm = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
             {
                 var e = cm.OpenMut(e1);
-                e.Write(CmEntity.Position) = new CmPosition(33, 33);
-                e.Write(CmEntity.Wallet) = new CmWallet(777);
+                e.Set(CmEntity.Position, new CmPosition(33, 33));
+                e.Set(CmEntity.Wallet, new CmWallet(777));
                 cm.Commit();
             }
 

@@ -123,7 +123,13 @@ static class WriteProfile
             for (int w = 0; w < 500; w++)
             {
                 using var t = dbe.CreateQuickTransaction();
-                for (int i = 0; i < WriteCount; i++) t.OpenMut(vIds[i]).Write(WpVersionedArch.Data).Value = i;
+                for (int i = 0; i < WriteCount; i++)
+                {
+                    var entity = t.OpenMut(vIds[i]);
+                    var data = entity.Read(WpVersionedArch.Data);
+                    data.Value = i;
+                    entity.Set(WpVersionedArch.Data, data);
+                }
                 t.Commit();
             }
             dbe.FlushDeferredCleanups();
@@ -133,7 +139,13 @@ static class WriteProfile
             for (int w = 0; w < 500; w++)
             {
                 using var t = dbe.CreateQuickTransaction();
-                for (int i = 0; i < WriteCount; i++) t.OpenMut(svIds[i]).Write(WpSvArch.Data).Value = i;
+                for (int i = 0; i < WriteCount; i++)
+                {
+                    var entity = t.OpenMut(svIds[i]);
+                    var data = entity.Read(WpSvArch.Data);
+                    data.Value = i;
+                    entity.Set(WpSvArch.Data, data);
+                }
                 t.Commit();
             }
         }
@@ -147,7 +159,10 @@ static class WriteProfile
                 using var t = dbe.CreateQuickTransaction();
                 for (int i = 0; i < WriteCount; i++)
                 {
-                    t.OpenMut(vIds[i]).Write(WpVersionedArch.Data).Value = iter + i;
+                    var opened = t.OpenMut(vIds[i]);
+                    var data = opened.Read(WpVersionedArch.Data);
+                    data.Value = iter + i;
+                    opened.Set(WpVersionedArch.Data, data);
                 }
                 t.Commit();
             }
@@ -159,7 +174,10 @@ static class WriteProfile
                 using var t = dbe.CreateQuickTransaction();
                 for (int i = 0; i < WriteCount; i++)
                 {
-                    t.OpenMut(svIds[i]).Write(WpSvArch.Data).Value = iter + i;
+                    var entity2 = t.OpenMut(svIds[i]);
+                    var data2 = entity2.Read(WpSvArch.Data);
+                    data2.Value = iter + i;
+                    entity2.Set(WpSvArch.Data, data2);
                 }
                 t.Commit();
             }

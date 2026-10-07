@@ -61,6 +61,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private ChangeSet _changeSet;
     private TStore _store;
     private EpochManager _epochManager;
+    private ResolveGeneration _generation;     // bumped when a slot lets go of its page (#1199); null unless a handle resolves through this accessor
 
     // === Base address for computing memPageIndex on-demand (saves 64 bytes vs storing _memPageIndices[16]) ===
     private byte* _memPagesBaseAddr;           // 8 bytes
@@ -76,6 +77,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
 
 
     public ChunkBasedSegment<TStore> Segment => _segment;
+
+    /// <summary>
+    /// Report every page this accessor lets go of to <paramref name="generation"/>: a handle that cached a pointer resolved here then knows to
+    /// re-resolve it (#1199).
+    /// </summary>
+    internal void TrackGeneration(ResolveGeneration generation) => _generation = generation;
 
     /// <summary>
     /// The ChangeSet used for dirty page tracking. Internal setter allows BTree's warm accessor to switch ChangeSets between operations without full
@@ -501,6 +508,11 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             return;
         }
 
+        if (_generation != null)
+        {
+            _generation.Value++;
+        }
+
         var memPageIndex = GetMemPageIndexFromSlot(slot);
         var mask = 1u << slot;
 
@@ -597,6 +609,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         if (_segment == null)
         {
             return;
+        }
+
+        if (_generation != null)
+        {
+            _generation.Value++;
+            _generation = null;
         }
 
         // Guard against stale ThreadStatic warm cache: if the PagedMMF has been disposed

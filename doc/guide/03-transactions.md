@@ -43,12 +43,14 @@ Inside a transaction you spawn, mutate, and destroy:
 using (var tx = dbe.CreateQuickTransaction())
 {
     var e = tx.OpenMut(scout);                 // open for mutation
-    e.Write(Character.Wallet).Credits += 100;   // Write<T> returns a ref you mutate in place
+    var wallet = e.Read(Character.Wallet);
+    wallet.Credits += 100;
+    e.Set(Character.Wallet, wallet);   // Read gave a copy; Set stores it back
     tx.Commit();
 }
 ```
 
-- `OpenMut(id)` opens an entity for writing; `Write(Character.Wallet)` returns a `ref` to the component so you mutate it directly.
+- `OpenMut(id)` opens an entity for writing; `Read(Character.Wallet)` returns a copy, and `Set(Character.Wallet, wallet)` stores the changed copy back. Point access never hands out a reference into storage, so a handle stays safe for the whole transaction.
 - `Spawn<T>(...)` / `Destroy(id)` create and remove entities (ch.1).
 - `Commit()` makes the transaction's changes visible to later snapshots.
 - `Rollback()` (or simply disposing without `Commit`) discards them.
@@ -128,4 +130,4 @@ You can now write, commit, roll back, and reason about what survives a crash and
 
 **Concepts** (the mental model — one page each): [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [Storage mode](../key-concepts/storage-mode.md) · [Durability — mode & discipline](../key-concepts/durability.md) · [Tick fence](../key-concepts/tick-fence.md).
 
-**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(CommitDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRefMut.Write<T>` · `Commit()` / `Rollback()`.
+**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(CommitDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRefMut.Set<T>` · `Commit()` / `Rollback()`.

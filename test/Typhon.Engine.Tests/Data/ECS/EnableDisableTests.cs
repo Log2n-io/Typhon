@@ -124,7 +124,7 @@ class EnableDisableTests : TestBase<EnableDisableTests>
 
         Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
 
-        ref readonly var vr = ref t.Open(id).Read(EcsUnit.Velocity);
+        var vr = t.Open(id).Read(EcsUnit.Velocity);
         Assert.That(vr.Dx, Is.EqualTo(9f));
     }
 
@@ -319,7 +319,7 @@ class EnableDisableTests : TestBase<EnableDisableTests>
             Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.False);
 
             // Position data should be readable
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
+            var pos = entity.Read(EcsUnit.Position);
             Assert.That(pos.X, Is.EqualTo(10));
         }
     }
@@ -426,7 +426,7 @@ class EnableDisableTests : TestBase<EnableDisableTests>
         {
             var entity = t.Open(id);
             Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
-            ref readonly var vel = ref entity.Read(EcsUnit.Velocity);
+            var vel = entity.Read(EcsUnit.Velocity);
             Assert.That(vel.Dx, Is.EqualTo(7));
             Assert.That(vel.Dy, Is.EqualTo(8));
             Assert.That(vel.Dz, Is.EqualTo(9));
@@ -539,7 +539,7 @@ class EnableDisableTests : TestBase<EnableDisableTests>
             var entity = t.Open(id);
             Assert.That(entity.IsEnabled(EcsUnit.Velocity), Is.True);
 
-            ref readonly var vr = ref entity.Read(EcsUnit.Velocity);
+            var vr = entity.Read(EcsUnit.Velocity);
             var v = vr;
             Assert.That(v.Dx, Is.EqualTo(4f), "the supplied value must persist across the commit");
         }

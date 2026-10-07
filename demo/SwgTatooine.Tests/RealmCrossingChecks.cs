@@ -237,15 +237,17 @@ public sealed class RealmCrossingChecks
     {
         using var tx = sim.Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
         Assert.That(tx.TryOpenMut(id, out var player), Is.True, $"player {id} is not there to move");
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
 
         // Inside with a counter no run reaches, as SimBridge.Open sets it for a dungeon party: PlayerThink would otherwise walk the player straight back out
         // through the door and take the case's precondition with it.
         state.Activity = PlayerActivity.Inside;
         state.ActivityTicks = int.MaxValue / 2;
-        ref var motion = ref player.Write(Player.Move);
+        player.Set(Player.State, state);
+        var motion = player.Read(Player.Move);
         motion.VelX = 0f;
         motion.VelZ = 0f;
+        player.Set(Player.Move, motion);
         var at = default(PlayerPlacement);
         at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
         tx.Teleport(id, Player.Bounds, new RealmId(realm), in at);

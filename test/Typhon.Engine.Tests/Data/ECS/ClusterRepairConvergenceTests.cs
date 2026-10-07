@@ -546,7 +546,7 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         for (var i = 0; i < ids.Count; i++)
         {
             var eref = tx.Open(ids[i]);
-            ref readonly var pos = ref eref.Read(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             Assert.That(pos.Tag, Is.EqualTo(i), $"EntityMap resolved entity {i} to a slot holding tag {pos.Tag}");
         }
 

@@ -179,7 +179,7 @@ public sealed partial class Character : Archetype<Character>
 - `[Archetype]` marks it an archetype. Its identity is the CLR type name `Character` (or `[Archetype(Name="...")]`); the engine auto-assigns a per-process catalog id and a persisted per-DB routing id — you never pick a number.
 - `Archetype<Character>` (the class names itself) gives it a compile-time identity.
 - Each `Register<T>()` declares a component slot; the static `Comp<T>` handle (`Character.Transform`) is how you refer to that slot when spawning, reading, and querying.
-- **`partial` matters:** Typhon's source generator ships *inside* the `Typhon` package, so it's already active — it's what emits the module-init barrier that self-registers your archetype (above). On a `partial` archetype it *also* generates typed bulk accessors (`Character.ReadAll` / `ReadWriteAll`); we don't use those until [ch.2](02-modeling.md), but keeping the class `partial` now costs nothing and lets the generator add them without a later change.
+- **`partial` matters:** Typhon's source generator ships *inside* the `Typhon` package, so it's already active — it's what emits the module-init barrier that self-registers your archetype (above). On a `partial` archetype it *also* generates typed bulk accessors (`Character.ReadAll` / `WriteAll`); we don't use those until [ch.2](02-modeling.md), but keeping the class `partial` now costs nothing and lets the generator add them without a later change.
 
 Note that one archetype freely **mixes storage modes** — `Character` has all three. The mode lives on each component *type*, not on the archetype.
 

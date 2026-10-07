@@ -79,7 +79,7 @@ sealed class InPlaceClusterWriteSurvivalTests : TestBase<InPlaceClusterWriteSurv
     }
 
     /// <summary>
-    /// The same for a point write: <c>Write</c> on a SingleVersion component writes the cluster slot in place through the ref it returns, and the committed
+    /// The same for a point write: <c>Set</c> on a SingleVersion component writes the cluster slot in place, and the committed
     /// value must read back after the cache has evicted every page its own rules let it evict, before any fence has logged the write (#1172). It lost 2 338
     /// of 4 096 writes in the fence fixture that found it. Both overloads: by handle and by type.
     /// </summary>
@@ -99,8 +99,16 @@ sealed class InPlaceClusterWriteSurvivalTests : TestBase<InPlaceClusterWriteSurv
             foreach (var id in workload.Creatures)
             {
                 var entity = tx.OpenMut(id);
-                ref var ai = ref byType ? ref entity.Write<ProjAi>() : ref entity.Write(ProjCreature.Ai);
+                var ai = byType ? entity.Read<ProjAi>() : entity.Read(ProjCreature.Ai);
                 ai.ThinkCooldown += 1_000_003;
+                if (byType)
+                {
+                    entity.Set(in ai);
+                }
+                else
+                {
+                    entity.Set(ProjCreature.Ai, ai);
+                }
                 written[id] = ai.ThinkCooldown;
             }
 

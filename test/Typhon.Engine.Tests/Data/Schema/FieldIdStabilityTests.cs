@@ -207,7 +207,7 @@ class FieldIdStabilityTests : TestBase<FieldIdStabilityTests>
 
             // Verify data is intact
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(CompEvolArch.Comp);
+            var comp = t.Open(entityId).Read(CompEvolArch.Comp);
             Assert.That(comp.A, Is.EqualTo(42));
             Assert.That(comp.B, Is.EqualTo(3.14f));
         }

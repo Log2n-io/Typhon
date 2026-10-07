@@ -318,7 +318,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
 
         using (var t = dbe.CreateQuickTransaction(cell.Durability, cell.Discipline))
         {
-            t.OpenMut(ids[3]).Write(AxVerTrMulti.S) = new AxTrCore { Key = 900, Bucket = 900, Weight = 900, Tag = 900 };
+            t.OpenMut(ids[3]).Set(AxVerTrMulti.S, new AxTrCore { Key = 900, Bucket = 900, Weight = 900, Tag = 900 });
             t.Destroy(ids[3]);
             Assert.That(t.Commit(), Is.True);
         }
@@ -339,7 +339,7 @@ internal sealed class ClusterIndexMatrixTests : TestBase<ClusterIndexMatrixTests
 
         using (var t = dbe.CreateQuickTransaction(cell.Durability, cell.Discipline))
         {
-            t.OpenMut(ids[3]).Write(AxVerTrMulti.P) = new AxVerMulti { Key = 900, Bucket = 900, Weight = 900, Tag = 900 };
+            t.OpenMut(ids[3]).Set(AxVerTrMulti.P, new AxVerMulti { Key = 900, Bucket = 900, Weight = 900, Tag = 900 });
             t.Destroy(ids[3]);
             Assert.That(t.Commit(), Is.True);
         }

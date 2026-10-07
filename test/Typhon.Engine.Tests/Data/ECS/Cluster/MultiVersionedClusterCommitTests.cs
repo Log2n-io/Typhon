@@ -131,8 +131,8 @@ class MultiVersionedClusterCommitTests : TestBase<MultiVersionedClusterCommitTes
             for (var i = 0; i < EntityCount; i++)
             {
                 var e = tx.OpenMut(ids[i]);
-                e.Write(MvArch.Small) = new MvSmall((i + 1) % TagCount, i + 1000);
-                e.Write(MvArch.Large) = new MvLarge((i + 2) % TagCount, i + 2000, i + 2000);
+                e.Set(MvArch.Small, new MvSmall((i + 1) % TagCount, i + 1000));
+                e.Set(MvArch.Large, new MvLarge((i + 2) % TagCount, i + 2000, i + 2000));
             }
 
             tx.Commit();
@@ -187,8 +187,8 @@ class MultiVersionedClusterCommitTests : TestBase<MultiVersionedClusterCommitTes
             for (var i = 0; i < EntityCount; i++)
             {
                 var e = tx.OpenMut(ids[i]);
-                e.Write(MvArch.Small) = new MvSmall(1, i + 1000);
-                e.Write(MvArch.Large) = new MvLarge(2, i + 2000, i + 3000);
+                e.Set(MvArch.Small, new MvSmall(1, i + 1000));
+                e.Set(MvArch.Large, new MvLarge(2, i + 2000, i + 3000));
             }
 
             tx.Commit();

@@ -962,8 +962,10 @@ class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
         try
         {
             using var tx = dbe.CreateQuickTransaction();
-            ref var w = ref tx.OpenMut(id).Write(CompDArch.D);
+            var opened = tx.OpenMut(id);
+            var w = opened.Read(CompDArch.D);
             w.B = 42;
+            opened.Set(CompDArch.D, w);
             tx.Commit();
         }
         finally

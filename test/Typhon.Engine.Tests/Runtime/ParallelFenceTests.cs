@@ -246,12 +246,13 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
                     for (int i = 0; i < EntityCount; i++)
                     {
                         var eref = tx.OpenMut(ids[i]);
-                        ref var pos = ref eref.Write(ClMigUnit.Pos);
+                        var pos = eref.Read(ClMigUnit.Pos);
                         float nx = pos.Bounds.MinX + 30f;
                         float ny = pos.Bounds.MinY + 7f;
                         if (nx >= 950f) nx = 50f;
                         if (ny >= 950f) ny = 50f;
                         pos.Bounds = new AABB2F { MinX = nx, MinY = ny, MaxX = nx, MaxY = ny };
+                        eref.Set(ClMigUnit.Pos, pos);
                     }
                     tx.Commit();
                 }
@@ -367,8 +368,9 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
                 {
                     using var tx = dbe.CreateQuickTransaction();
                     var eref = tx.OpenMut(id);
-                    ref var pos = ref eref.Write(ClMigUnit.Pos);
+                    var pos = eref.Read(ClMigUnit.Pos);
                     pos.Bounds = new AABB2F { MinX = 350f, MinY = 450f, MaxX = 350f, MaxY = 450f };
+                    eref.Set(ClMigUnit.Pos, pos);
                     tx.Commit();
                     Volatile.Write(ref moved, true);
                 }

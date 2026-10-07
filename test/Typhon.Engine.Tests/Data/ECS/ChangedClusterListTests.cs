@@ -154,7 +154,9 @@ class ChangedClusterListTests : TestBase<ChangedClusterListTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var e = tx.OpenMut(ids[2]);
-            e.Write(ClSpatialUnit.Meta).Tag = 99;
+            var metaCopy = e.Read(ClSpatialUnit.Meta);
+            metaCopy.Tag = 99;
+            e.Set(ClSpatialUnit.Meta, metaCopy);
             tx.Commit();
         }
 

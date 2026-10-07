@@ -222,7 +222,7 @@ public class QueryViewBenchmarks : IDisposable
                 ref var item = ref _cycleItems[idx];
                 item.Rarity = item.Rarity >= 3 ? 0 : 3;
                 var entity = tx.OpenMut(_cyclePKs[idx]);
-                entity.Write(BenchItemArch.Item) = item;
+                entity.Set(BenchItemArch.Item, item);
             }
             tx.Commit();
         }

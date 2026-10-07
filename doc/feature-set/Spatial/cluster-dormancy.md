@@ -40,7 +40,7 @@ clusterState.SleepThresholdTicks = 120;     // 60 Hz tick rate: 2s with no write
 clusterState.HeartbeatIntervalTicks = 300;  // wake briefly every 5s regardless, for an idle re-check
 
 // From here on dormancy is fully automatic — no per-system opt-in needed. Normal component writes
-// (OpenMut().Write(...)) reset the sleep counter and wake a sleeping cluster; every QuerySystem against
+// (OpenMut().Set(...)) reset the sleep counter and wake a sleeping cluster; every QuerySystem against
 // this archetype, tier-filtered or not, silently skips clusters that are Sleeping.
 schedule.QuerySystem("IdleDrift", ctx =>
 {
@@ -64,7 +64,7 @@ schedule.QuerySystem("IdleDrift", ctx =>
   path for a `[SpatialIndex]`-marked field, e.g. movement) deliberately does **not** mark the slot dirty, so
   it neither resets the sleep counter nor wakes a sleeping cluster. A cluster whose entities only move via
   `WriteSpatial` can go to sleep, and stay asleep, while still moving — resetting the counter requires a
-  normal `Transaction.OpenMut().Write(...)` on some other field, or an explicit `SetDirty` call after
+  normal `Transaction.OpenMut().Set(...)` on some other field, or an explicit `SetDirty` call after
   `WriteSpatial`.
 - **Only two wake triggers exist today**: a dirty write and the heartbeat timer. Proximity-based wake
   ("another entity approached") and tier-promotion wake ("camera moved closer") are not implemented — a

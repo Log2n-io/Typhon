@@ -176,7 +176,9 @@ public class WorkloadBenchmarks
         var entity = t.Open(eid);
         _ = entity.Read(WorkArch.Work);
         var mutEntity = t.OpenMut(eid);
-        mutEntity.Write(WorkArch.Work).Value = 99;
+        var workCopy = mutEntity.Read(WorkArch.Work);
+        workCopy.Value = 99;
+        mutEntity.Set(WorkArch.Work, workCopy);
         t.Destroy(eid);
         t.Commit();
     }
@@ -197,9 +199,10 @@ public class WorkloadBenchmarks
         for (int i = 0; i < 10; i++)
         {
             var entity = t.OpenMut(_entityIds[i]);
-            ref var comp = ref entity.Write(WorkArch.Work);
+            var comp = entity.Read(WorkArch.Work);
             comp.Value = i + 1000;
             comp.Timestamp = DateTime.UtcNow.Ticks;
+            entity.Set(WorkArch.Work, comp);
         }
         t.Commit();
     }
@@ -234,7 +237,9 @@ public class WorkloadBenchmarks
         var entity = t.Open(eid);
         _ = entity.Read(WorkMultiArch.Work);
         var mutEntity = t.OpenMut(eid);
-        mutEntity.Write(WorkMultiArch.Work).Value = 99;
+        var work = mutEntity.Read(WorkMultiArch.Work);
+        work.Value = 99;
+        mutEntity.Set(WorkMultiArch.Work, work);
         t.Commit();
     }
 

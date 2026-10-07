@@ -11,13 +11,22 @@ namespace Typhon.Engine;
 /// </summary>
 /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
 [PublicAPI]
-public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanaged
+public unsafe ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanaged
 {
     private VariableSizedBufferSegment<T, PersistentStore> _vsbs;
     private ref ComponentCollection<T> _field;
     private ChunkAccessor<PersistentStore> _ca;
     private readonly int _initialBufferId;
     private readonly ChangeSet _changeSet;
+
+    // Write-back (#1199): an accessor made by EntityRefMut.CreateComponentCollectionAccessor edits a COPY of a stored component, so on Dispose it stores the
+    // buffer it ended on into the component itself. Without it the stored revision would keep the original buffer id — whose extra reference a clone has
+    // already released — until the caller remembered to Set the copy. Null for an accessor on a value not stored yet.
+    private readonly EntityAccessor _writeBackOwner;
+    private readonly EntityId _writeBackEntity;
+    private readonly int _writeBackComponentTypeId;
+    private readonly int _writeBackOffset;
+    private readonly delegate*<EntityAccessor, EntityId, int, int, int, void> _writeBack;
 
     /// <summary>Binds an accessor to collection field <paramref name="field"/> and its backing buffer segment, capturing a chunk accessor from <paramref name="changeSet"/>.</summary>
     /// <param name="changeSet">Change set the buffer mutations are threaded through (dirty tracking and commit).</param>
@@ -32,11 +41,30 @@ public ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanag
         _initialBufferId = field._bufferId;
     }
 
-    /// <summary>Commits the pending buffer writes and releases the underlying chunk accessor.</summary>
+    /// <summary>An accessor on a copy of a stored component, which writes its final buffer id back into that component on dispose (#1199).</summary>
+    internal ComponentCollectionAccessor(ChangeSet changeSet, VariableSizedBufferSegment<T, PersistentStore> vsbs, ref ComponentCollection<T> field,
+        EntityAccessor owner, EntityId entity, int componentTypeId, int fieldOffset, delegate*<EntityAccessor, EntityId, int, int, int, void> writeBack)
+        : this(changeSet, vsbs, ref field)
+    {
+        _writeBackOwner = owner;
+        _writeBackEntity = entity;
+        _writeBackComponentTypeId = componentTypeId;
+        _writeBackOffset = fieldOffset;
+        _writeBack = writeBack;
+    }
+
+    /// <summary>
+    /// Commits the pending buffer writes and releases the underlying chunk accessor. An accessor made through an entity handle then stores the buffer it
+    /// ended on (a clone, or one allocated for an empty collection) into the stored component.
+    /// </summary>
     public void Dispose()
     {
         _ca.CommitChanges();
         _ca.Dispose();
+        if (_writeBack != null && _field._bufferId != _initialBufferId)
+        {
+            _writeBack(_writeBackOwner, _writeBackEntity, _writeBackComponentTypeId, _writeBackOffset, _field._bufferId);
+        }
     }
 
     /// <summary>

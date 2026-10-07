@@ -76,8 +76,10 @@ public class MixedWorkloadScenario : IScenario
                                 if (t.TryOpen(id, out var entity))
                                 {
                                     var power = entity.Read(FactoryArch.Power);
-                                    ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                    var target = t.OpenMut(id);
+                                    var wp = target.Read(FactoryArch.Power);
                                     wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-100, 200));
+                                    target.Set(FactoryArch.Power, wp);
                                 }
                             }
                             else if (_factoryIds.Count > 0)
@@ -165,9 +167,11 @@ public class MixedWorkloadScenario : IScenario
                                 if (t.TryOpen(id, out var entity))
                                 {
                                     var wallet = entity.Read(PlayerArch.Wallet);
-                                    ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                                    var opened = t.OpenMut(id);
+                                    var ww = opened.Read(PlayerArch.Wallet);
                                     ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-20, 30));
                                     ww.BankCredits = wallet.BankCredits + localRand.Next(10, 100);
+                                    opened.Set(PlayerArch.Wallet, ww);
                                 }
                             }
                             else if (_playerIds.Count > 0)
@@ -297,9 +301,11 @@ public class HighContentionScenario : IScenario
                         {
                             var wallet = entity.Read(PlayerArch.Wallet);
                             // Every worker tries to update the same player's wallet
-                            ref var ww = ref t.OpenMut(id).Write(PlayerArch.Wallet);
+                            var opened = t.OpenMut(id);
+                            var ww = opened.Read(PlayerArch.Wallet);
                             ww.Credits = Math.Max(0, wallet.Credits + localRand.Next(-50, 100));
                             ww.BankCredits = wallet.BankCredits + localRand.Next(0, 50);
+                            opened.Set(PlayerArch.Wallet, ww);
 
                             stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                         }

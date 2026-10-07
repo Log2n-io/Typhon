@@ -50,16 +50,20 @@ public struct BuildingComponent
 // SingleVersion — the value is in the cluster slot at once; the index catches up at the fence.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    ref ShipComponent hull = ref tx.OpenMut(shipId).Write(ShipArchetype.Hull);
+    var target = tx.OpenMut(shipId);
+    ShipComponent hull = target.Read(ShipArchetype.Hull);
     hull.Bounds = newBounds;
+    target.Set(ShipArchetype.Hull, hull);
     tx.Commit();
 }
 
 // Versioned — the commit copies the new value into the cluster slot and marks the cluster dirty.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    ref BuildingComponent b = ref tx.OpenMut(buildingId).Write(BuildingArchetype.Footprint);
+    var entity = tx.OpenMut(buildingId);
+    BuildingComponent b = entity.Read(BuildingArchetype.Footprint);
     b.Footprint = newFootprint;
+    entity.Set(BuildingArchetype.Footprint, b);
     tx.Commit();
 }
 
