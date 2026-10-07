@@ -15,7 +15,7 @@ Some component data is genuinely throwaway between runs — animation state, inp
 targeting info. Paying any persistence cost (WAL, checkpoint, page-cache writeback) for data nobody needs to
 survive a crash is pure overhead. `Transient` removes that cost entirely: the data lives only in process
 memory, is structurally part of the same ECS entity as your durable components, and uses the same
-`Read<T>()`/`Write<T>()` API as every other mode.
+`Read<T>()`/`Set<T>()` API as every other mode.
 
 ## ⚙️ How it works (in brief)
 
@@ -46,8 +46,9 @@ tx.Commit();
 
 using var tx2 = dbe.CreateQuickTransaction();
 var e = tx2.OpenMut(id);
-ref var anim = ref e.Write(Actor.Anim);
-anim.Time += dt;               // ~40 ns write, no dirty tracking, no WAL
+var anim = e.Read(Actor.Anim);
+anim.Time += dt;
+e.Set(Actor.Anim, anim);               // ~40 ns write, no dirty tracking, no WAL
 ```
 
 | Option | Default | Effect |

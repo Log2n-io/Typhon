@@ -79,7 +79,9 @@ class SmartTeleportationTests : TestBase<SmartTeleportationTests>
             foreach (var (id, x, y) in moves)
             {
                 var eref = tx.OpenMut(id);
-                eref.Write(ClMigUnit.Pos).Bounds = PointAt(x, y).Bounds;
+                var pos = eref.Read(ClMigUnit.Pos);
+                pos.Bounds = PointAt(x, y).Bounds;
+                eref.Set(ClMigUnit.Pos, pos);
             }
 
             tx.Commit();

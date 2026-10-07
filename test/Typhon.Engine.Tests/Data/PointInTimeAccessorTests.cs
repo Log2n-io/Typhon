@@ -111,7 +111,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessor = PointInTimeAccessor.Create(dbe);
         var wa = accessor.GetWorkerAccessor(0);
         var entity = wa.Open(id);
-        ref readonly var data = ref entity.Read(PtaArchVersioned.Data);
+        var data = entity.Read(PtaArchVersioned.Data);
         Assert.That(data.Value, Is.EqualTo(42));
     }
 
@@ -131,7 +131,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessor = PointInTimeAccessor.Create(dbe);
         var wa = accessor.GetWorkerAccessor(0);
         var entity = wa.Open(id);
-        ref readonly var data = ref entity.Read(PtaArchSingleVersion.Data);
+        var data = entity.Read(PtaArchSingleVersion.Data);
         Assert.That(data.Value, Is.EqualTo(99));
     }
 
@@ -151,7 +151,7 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessor = PointInTimeAccessor.Create(dbe);
         var wa = accessor.GetWorkerAccessor(0);
         var entity = wa.Open(id);
-        ref readonly var data = ref entity.Read(PtaArchTransient.Data);
+        var data = entity.Read(PtaArchTransient.Data);
         Assert.That(data.Value, Is.EqualTo(77));
     }
 
@@ -213,8 +213,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessor = PointInTimeAccessor.Create(dbe);
         var wa = accessor.GetWorkerAccessor(0);
         var entity = wa.OpenMut(id);
-        ref var data = ref entity.Write(PtaArchSingleVersion.Data);
+        var data = entity.Read(PtaArchSingleVersion.Data);
         data.Value = 200;
+        entity.Set(PtaArchSingleVersion.Data, data);
 
         // Read back through same accessor
         var entity2 = wa.Open(id);
@@ -237,8 +238,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using var accessor = PointInTimeAccessor.Create(dbe);
         var wa = accessor.GetWorkerAccessor(0);
         var entity = wa.OpenMut(id);
-        ref var data = ref entity.Write(PtaArchTransient.Data);
+        var data = entity.Read(PtaArchTransient.Data);
         data.Value = 300;
+        entity.Set(PtaArchTransient.Data, data);
 
         var entity2 = wa.Open(id);
         Assert.That(entity2.Read(PtaArchTransient.Data).Value, Is.EqualTo(300));
@@ -264,7 +266,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         var entity = wa.OpenMut(id);
         try
         {
-            ref var _ = ref entity.Write(PtaArchVersioned.Data);
+            var _ = entity.Read(PtaArchVersioned.Data);
+            entity.Set(PtaArchVersioned.Data, _);
             Assert.Fail("Expected InvalidOperationException for Versioned write");
         }
         catch (InvalidOperationException)
@@ -338,8 +341,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
-            ref var data = ref entity.Write(PtaArchVersioned.Data);
+            var data = entity.Read(PtaArchVersioned.Data);
             data.Value = 200;
+            entity.Set(PtaArchVersioned.Data, data);
             t.Commit();
         }
 
@@ -376,8 +380,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
-            ref var data = ref entity.Write(PtaArchVersioned.Data);
+            var data = entity.Read(PtaArchVersioned.Data);
             data.Value = 200;
+            entity.Set(PtaArchVersioned.Data, data);
             t.Commit();
         }
 
@@ -410,8 +415,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var e = t.OpenMut(id);
-            ref var d = ref e.Write(PtaArchVersioned.Data);
+            var d = e.Read(PtaArchVersioned.Data);
             d.Value = 20;
+            e.Set(PtaArchVersioned.Data, d);
             t.Commit();
         }
 
@@ -556,8 +562,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
                 for (int j = 0; j < entitiesPerThread; j++)
                 {
                     var entity = wa.OpenMut(ids[start + j]);
-                    ref var data = ref entity.Write(PtaArchSingleVersion.Data);
+                    var data = entity.Read(PtaArchSingleVersion.Data);
                     data.Value = (i + 1) * 1000 + j;
+                    entity.Set(PtaArchSingleVersion.Data, data);
                 }
             }
             catch (Exception ex)
@@ -625,8 +632,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
                     for (int j = start; j < start + count && j < svIds.Length; j++)
                     {
                         var entity = wa.OpenMut(svIds[j]);
-                        ref var data = ref entity.Write(PtaArchSingleVersion.Data);
+                        var data = entity.Read(PtaArchSingleVersion.Data);
                         data.Value = threadIdx * 10000 + j;
+                        entity.Set(PtaArchSingleVersion.Data, data);
                     }
                 }
                 else
@@ -695,8 +703,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var e = t.OpenMut(id);
-            ref var d = ref e.Write(PtaArchVersioned.Data);
+            var d = e.Read(PtaArchVersioned.Data);
             d.Value = 2;
+            e.Set(PtaArchVersioned.Data, d);
             t.Commit();
         }
 
@@ -856,10 +865,12 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         var entity = wa.OpenMut(id);
 
         // Write SV and Transient
-        ref var svData = ref entity.Write(PtaArchMixed.SV);
+        var svData = entity.Read(PtaArchMixed.SV);
         svData.Value = 200;
-        ref var trData = ref entity.Write(PtaArchMixed.T);
+        entity.Set(PtaArchMixed.SV, svData);
+        var trData = entity.Read(PtaArchMixed.T);
         trData.Value = 300;
+        entity.Set(PtaArchMixed.T, trData);
 
         // Read Versioned (should still work)
         Assert.That(entity.Read(PtaArchMixed.V).Value, Is.EqualTo(10));
@@ -873,7 +884,8 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         try
         {
             var e = wa.OpenMut(id);
-            ref var _ = ref e.Write(PtaArchMixed.V);
+            var _ = e.Read(PtaArchMixed.V);
+            e.Set(PtaArchMixed.V, _);
             Assert.Fail("Expected InvalidOperationException for Versioned write");
         }
         catch (InvalidOperationException)
@@ -962,21 +974,23 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
                         // 2. Write SV on mixed entity (non-overlapping: each thread owns its chunk)
                         {
                             var e = wa.OpenMut(mixedIds[i]);
-                            ref var sv = ref e.Write(PtaArchMixed.SV);
+                            var sv = e.Read(PtaArchMixed.SV);
                             int expected = pass == 0 ? i * 100 : threadIdx * 100000 + i * 100 + (pass - 1);
                             if (sv.Value != expected)
                             {
                                 errors.Add(new Exception($"T{threadIdx} P{pass}: Mixed.SV[{i}] expected {expected}, got {sv.Value}"));
                             }
                             sv.Value = threadIdx * 100000 + i * 100 + pass;
+                            e.Set(PtaArchMixed.SV, sv);
                             ops++;
                         }
 
                         // 3. Write Transient on mixed entity
                         {
                             var e = wa.OpenMut(mixedIds[i]);
-                            ref var tr = ref e.Write(PtaArchMixed.T);
+                            var tr = e.Read(PtaArchMixed.T);
                             tr.Value = threadIdx * 200000 + i;
+                            e.Set(PtaArchMixed.T, tr);
                             ops++;
                         }
 
@@ -994,8 +1008,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
                         // 5. Write standalone SV entity
                         {
                             var e = wa.OpenMut(svIds[i]);
-                            ref var d = ref e.Write(PtaArchSingleVersion.Data);
+                            var d = e.Read(PtaArchSingleVersion.Data);
                             d.Value = threadIdx * 300000 + i + pass;
+                            e.Set(PtaArchSingleVersion.Data, d);
                             ops++;
                         }
 
@@ -1087,8 +1102,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var e = t.OpenMut(id);
-            ref var d = ref e.Write(PtaArchVersioned.Data);
+            var d = e.Read(PtaArchVersioned.Data);
             d.Value = 100;
+            e.Set(PtaArchVersioned.Data, d);
             t.Commit();
         }
 
@@ -1105,8 +1121,9 @@ class PointInTimeAccessorTests : TestBase<PointInTimeAccessorTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var e = t.OpenMut(id);
-            ref var d = ref e.Write(PtaArchVersioned.Data);
+            var d = e.Read(PtaArchVersioned.Data);
             d.Value = 200;
+            e.Set(PtaArchVersioned.Data, d);
             t.Commit();
         }
 

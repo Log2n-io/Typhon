@@ -264,8 +264,10 @@ class StatisticsRebuildTests : TestBase<StatisticsRebuildTests>
         // Update with changed index field increments further
         using var t2 = dbe.CreateQuickTransaction();
         var d2 = new CompD(2.0f, 20, 2.0); // all fields changed
-        ref var w = ref t2.OpenMut(id).Write(CompDArch.D);
+        var opened = t2.OpenMut(id);
+        var w = opened.Read(CompDArch.D);
         w = d2;
+        opened.Set(CompDArch.D, w);
         t2.Commit();
 
         Assert.That(ClusterOf(dbe, ct).MutationsSinceRebuild, Is.GreaterThan(afterCreate));

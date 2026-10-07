@@ -862,27 +862,27 @@ public static class AxisArchetypes
         switch (c.Shape)
         {
             case StorageShape.PureSv:
-                e.Write(AxSpPureSv.P) = core;
-                e.Write(AxSpPureSv.Sp) = svSp;
+                e.Set(AxSpPureSv.P, core);
+                e.Set(AxSpPureSv.Sp, svSp);
                 break;
             case StorageShape.PureVersioned:
-                e.Write(AxSpPureVer.P) = vcore;
-                e.Write(AxSpPureVer.Sp) = verSp;
+                e.Set(AxSpPureVer.P, vcore);
+                e.Set(AxSpPureVer.Sp, verSp);
                 break;
             case StorageShape.SvPlusVersioned:
-                e.Write(AxSpSvVer.P) = core;
-                e.Write(AxSpSvVer.S) = vcore;
-                e.Write(AxSpSvVer.Sp) = svSp;
+                e.Set(AxSpSvVer.P, core);
+                e.Set(AxSpSvVer.S, vcore);
+                e.Set(AxSpSvVer.Sp, svSp);
                 break;
             case StorageShape.SvPlusTransient:
-                e.Write(AxSpSvTr.P) = core;
-                e.Write(AxSpSvTr.S) = tr;
-                e.Write(AxSpSvTr.Sp) = svSp;
+                e.Set(AxSpSvTr.P, core);
+                e.Set(AxSpSvTr.S, tr);
+                e.Set(AxSpSvTr.Sp, svSp);
                 break;
             default:
-                e.Write(AxSpVerTr.P) = vcore;
-                e.Write(AxSpVerTr.S) = tr;
-                e.Write(AxSpVerTr.Sp) = verSp;
+                e.Set(AxSpVerTr.P, vcore);
+                e.Set(AxSpVerTr.S, tr);
+                e.Set(AxSpVerTr.Sp, verSp);
                 break;
         }
     }
@@ -1009,19 +1009,19 @@ public static class AxisArchetypes
         switch (c.Shape)
         {
             case StorageShape.PureSv:
-                e.Write(AxSpPureSv.Sp) = svSp;
+                e.Set(AxSpPureSv.Sp, svSp);
                 break;
             case StorageShape.PureVersioned:
-                e.Write(AxSpPureVer.Sp) = verSp;
+                e.Set(AxSpPureVer.Sp, verSp);
                 break;
             case StorageShape.SvPlusVersioned:
-                e.Write(AxSpSvVer.Sp) = svSp;
+                e.Set(AxSpSvVer.Sp, svSp);
                 break;
             case StorageShape.SvPlusTransient:
-                e.Write(AxSpSvTr.Sp) = svSp;
+                e.Set(AxSpSvTr.Sp, svSp);
                 break;
             default:
-                e.Write(AxSpVerTr.Sp) = verSp;
+                e.Set(AxSpVerTr.Sp, verSp);
                 break;
         }
     }
@@ -1084,72 +1084,72 @@ public static class AxisArchetypes
         switch (c.Shape, c.Index)
         {
             case (StorageShape.PureSv, IndexShape.None):
-                e.Write(AxPureSvNone.P) = new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureSvNone.P, new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureSv, IndexShape.Unique):
-                e.Write(AxPureSvUniq.P) = new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureSvUniq.P, new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureSv, _):
-                e.Write(AxPureSvMulti.P) = new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureSvMulti.P, new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
 
             case (StorageShape.PureVersioned, IndexShape.None):
-                e.Write(AxPureVerNone.P) = new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureVerNone.P, new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureVersioned, IndexShape.Unique):
-                e.Write(AxPureVerUniq.P) = new AxVerUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureVerUniq.P, new AxVerUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureVersioned, _):
-                e.Write(AxPureVerMulti.P) = new AxVerMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureVerMulti.P, new AxVerMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
 
             case (StorageShape.PureTransient, IndexShape.None):
-                e.Write(AxPureTrNone.P) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureTrNone.P, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureTransient, IndexShape.Unique):
-                e.Write(AxPureTrUniq.P) = new AxTrUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureTrUniq.P, new AxTrUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.PureTransient, _):
-                e.Write(AxPureTrMulti.P) = new AxTrMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxPureTrMulti.P, new AxTrMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
 
             case (StorageShape.SvPlusVersioned, IndexShape.None):
-                e.Write(AxSvVerNone.P) = new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvVerNone.S) = new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvVerNone.P, new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvVerNone.S, new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.SvPlusVersioned, IndexShape.Unique):
-                e.Write(AxSvVerUniq.P) = new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvVerUniq.S) = new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvVerUniq.P, new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvVerUniq.S, new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.SvPlusVersioned, _):
-                e.Write(AxSvVerMulti.P) = new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvVerMulti.S) = new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvVerMulti.P, new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvVerMulti.S, new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
 
             case (StorageShape.SvPlusTransient, IndexShape.None):
-                e.Write(AxSvTrNone.P) = new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvTrNone.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvTrNone.P, new AxSvCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvTrNone.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.SvPlusTransient, IndexShape.Unique):
-                e.Write(AxSvTrUniq.P) = new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvTrUniq.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvTrUniq.P, new AxSvUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvTrUniq.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.SvPlusTransient, _):
-                e.Write(AxSvTrMulti.P) = new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxSvTrMulti.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxSvTrMulti.P, new AxSvMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxSvTrMulti.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
 
             case (StorageShape.VerPlusTransient, IndexShape.None):
-                e.Write(AxVerTrNone.P) = new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxVerTrNone.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxVerTrNone.P, new AxVerCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxVerTrNone.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             case (StorageShape.VerPlusTransient, IndexShape.Unique):
-                e.Write(AxVerTrUniq.P) = new AxVerUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxVerTrUniq.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxVerTrUniq.P, new AxVerUniq { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxVerTrUniq.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
             default:
-                e.Write(AxVerTrMulti.P) = new AxVerMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
-                e.Write(AxVerTrMulti.S) = new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag };
+                e.Set(AxVerTrMulti.P, new AxVerMulti { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
+                e.Set(AxVerTrMulti.S, new AxTrCore { Key = key, Bucket = bucket, Weight = weight, Tag = tag });
                 break;
         }
     }

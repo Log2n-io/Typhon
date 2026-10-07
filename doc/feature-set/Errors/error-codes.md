@@ -24,7 +24,9 @@ try
 {
     using var tx = dbe.CreateQuickTransaction();
     var e = tx.OpenMut(soldier);
-    e.Write(Unit.Health).Current -= 25;
+    var health = e.Read(Unit.Health);
+    health.Current -= 25;
+    e.Set(Unit.Health, health);
     tx.Commit();
 }
 catch (TyphonException ex)

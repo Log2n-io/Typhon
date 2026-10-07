@@ -321,8 +321,10 @@ public abstract class TestBase{
             }
 
             a.Update(Rand);
-            ref var w = ref cur.OpenMut(ids[i]).Write(CompAArch.A);
+            var entity = cur.OpenMut(ids[i]);
+            var w = entity.Read(CompAArch.A);
             w = a;
+            entity.Set(CompAArch.A, w);
         }
 
         if (t == null)

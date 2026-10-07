@@ -84,7 +84,7 @@ class ClusterViewDeltaTests : TestBase<ClusterViewDeltaTests>
         // In-place SV write — the index and view delta are produced at the tick fence, not at commit.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(TbSvArch.Data) = new TbSvData(10, 1);
+            tx.OpenMut(id).Set(TbSvArch.Data, new TbSvData(10, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

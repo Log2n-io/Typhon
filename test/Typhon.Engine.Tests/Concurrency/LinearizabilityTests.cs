@@ -138,7 +138,10 @@ internal sealed class EngineState : IDisposable
 
         using (var tx = _uow.CreateTransaction())
         {
-            tx.OpenMut(id).Write(LinValueArch.C).V = value + EcsModel.UpdateOffset;
+            var target = tx.OpenMut(id);
+            var cCopy = target.Read(LinValueArch.C);
+            cCopy.V = value + EcsModel.UpdateOffset;
+            target.Set(LinValueArch.C, cCopy);
             tx.Commit();
         }
     }

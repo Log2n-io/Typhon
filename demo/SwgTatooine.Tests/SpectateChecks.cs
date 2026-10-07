@@ -476,12 +476,14 @@ public sealed class SpectateChecks
     {
         using var tx = sim.Dbe.CreateQuickTransaction();
         var player = tx.OpenMut(entity);
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
         state.Activity = PlayerActivity.Idle;
         state.ActivityTicks = int.MaxValue / 2;
-        ref var move = ref player.Write(Player.Move);
+        player.Set(Player.State, state);
+        var move = player.Read(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
+        player.Set(Player.Move, move);
 
         var at = default(PlayerPlacement);
         at.SetAt(32f, 32f, 0f, player.Read(Player.Bounds).HalfExtent);

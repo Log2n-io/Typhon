@@ -25,7 +25,10 @@ class VersionedPublishOrderTests : TestBase<VersionedPublishOrderTests>
     private static void Update(DatabaseEngine dbe, EntityId id, long key)
     {
         using var tx = dbe.CreateQuickTransaction();
-        tx.OpenMut(id).Write(PdItemArch.Item).Key = key;
+        var target = tx.OpenMut(id);
+        var item = target.Read(PdItemArch.Item);
+        item.Key = key;
+        target.Set(PdItemArch.Item, item);
         tx.Commit();
     }
 

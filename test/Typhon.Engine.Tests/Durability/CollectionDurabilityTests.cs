@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -360,7 +359,7 @@ internal sealed class CollectionDurabilityTests
     /// </summary>
     /// <remarks>
     /// The idiom <c>ClusterComponentCollectionTests</c> and <c>PayloadPayloadWorkload</c> both use. Spawning first and then writing through
-    /// <c>OpenMut(id).Write(...)</c> in the same transaction NREs inside <c>Transaction.BuildCommitBatch</c>'s Commit-staged path — see #713.
+    /// <c>OpenMut(id)</c> in the same transaction NREs inside <c>Transaction.BuildCommitBatch</c>'s Commit-staged path — see #713.
     /// </remarks>
     private static void FillCollection(Transaction tx, ref ComponentCollection<int> field, int i)
     {
@@ -746,8 +745,9 @@ internal sealed class CollectionDurabilityTests
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var v = tx.OpenMut(target).Write(CcVersionedArch.C);
-            using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+            var handle = tx.OpenMut(target);
+            var v = handle.Read(CcVersionedArch.C);
+            using (var cca = handle.CreateComponentCollectionAccessor(CcVersionedArch.C, ref v, ref v.Items))
             {
                 cca.Add(sentinel);
             }
@@ -896,11 +896,29 @@ internal sealed class CollectionDurabilityTests
         {
             for (var i = 0; i < versioned.Count; i++)
             {
-                ref var v = ref tx.OpenMut(versioned[i]).Write(CcVersionedArch.C);
-                FillCollection(tx, ref v.Items, i);
+                // A stored component's collection changes through its handle (#1199): for the Versioned one, the accessor makes the new revision
+                // first, so a buffer the committed revision holds is cloned rather than edited in place.
+                var versionedEntity = tx.OpenMut(versioned[i]);
+                var v = versionedEntity.Read(CcVersionedArch.C);
+                using (var cca = versionedEntity.CreateComponentCollectionAccessor(CcVersionedArch.C, ref v, ref v.Items))
+                {
+                    for (var el = 0; el < ElementCountOf(i); el++)
+                    {
+                        cca.Add(ElementValue(i, el));
+                    }
+                }
+                versionedEntity.Set(CcVersionedArch.C, v);
 
-                ref var s = ref tx.OpenMut(single[i]).Write(CcSingleArch.C);
-                FillCollection(tx, ref s.Items, i);
+                var singleEntity = tx.OpenMut(single[i]);
+                var s = singleEntity.Read(CcSingleArch.C);
+                using (var cca = singleEntity.CreateComponentCollectionAccessor(CcSingleArch.C, ref s, ref s.Items))
+                {
+                    for (var el = 0; el < ElementCountOf(i); el++)
+                    {
+                        cca.Add(ElementValue(i, el));
+                    }
+                }
+                singleEntity.Set(CcSingleArch.C, s);
             }
 
             Assert.That(tx.Commit(), Is.True, "the post-bulk fill must commit");
@@ -968,7 +986,10 @@ internal sealed class CollectionDurabilityTests
         using var tx = dbe.CreateQuickTransaction();
         foreach (var id in single)
         {
-            tx.OpenMut(id).Write(CcSingleArch.C).Seq += 1000;
+            var entity = tx.OpenMut(id);
+            var cCopy = entity.Read(CcSingleArch.C);
+            cCopy.Seq += 1000;
+            entity.Set(CcSingleArch.C, cCopy);
         }
 
         Assert.That(tx.Commit(), Is.True, "the tick-fence-discipline update must commit");

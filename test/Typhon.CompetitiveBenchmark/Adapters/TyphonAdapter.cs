@@ -166,7 +166,7 @@ public sealed class TyphonAdapter : IEngineAdapter
             case Config.Versioned:
             {
                 using var t = _dbe.CreateQuickTransaction(WriteMode);
-                t.OpenMut(_ids[key]).Write(VValArch.Data).Value = value;
+                t.OpenMut(_ids[key]).Set(VValArch.Data, new VVal { Value = value });
                 t.Commit();
                 break;
             }
@@ -174,14 +174,14 @@ public sealed class TyphonAdapter : IEngineAdapter
             {
                 // Discipline MUST be selected at tx creation, before any write (CM-02).
                 using var t = _dbe.CreateQuickTransaction(WriteMode, CommitDiscipline.Commit);
-                t.OpenMut(_ids[key]).Write(SvValArch.Data).Value = value;
+                t.OpenMut(_ids[key]).Set(SvValArch.Data, new SvVal { Value = value });
                 t.Commit();
                 break;
             }
             default: // SvLean / TickFence
             {
                 using var t = _dbe.CreateQuickTransaction(WriteMode);
-                t.OpenMut(_ids[key]).Write(SvValArch.Data).Value = value;
+                t.OpenMut(_ids[key]).Set(SvValArch.Data, new SvVal { Value = value });
                 t.Commit();
                 break;
             }

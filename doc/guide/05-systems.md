@@ -111,9 +111,10 @@ internal sealed class MoveSystem : QuerySystem
         foreach (EntityId id in ctx.Entities)             // the filtered set for this chunk
         {
             var e = ctx.Accessor.OpenMut(id);             // per-worker accessor (§5)
-            ref var t = ref e.Write(Character.Transform);
+            var t = e.Read(Character.Transform);
             t.Pos = new Point2F { X = Wrap(t.Pos.X + t.Vel.X * ctx.DeltaTime),
                                   Y = Wrap(t.Pos.Y + t.Vel.Y * ctx.DeltaTime) };
+            e.Set(Character.Transform, t);
         }
     }
 
@@ -170,10 +171,11 @@ internal sealed class RegenSystem : QuerySystem
         foreach (EntityId id in ctx.Entities)
         {
             var e = ctx.Accessor.OpenMut(id);
-            ref var h = ref e.Write(Character.Ham);
+            var h = e.Read(Character.Ham);
             h.Health = Math.Min(h.MaxHealth, h.Health + 1);
             h.Action = Math.Min(h.MaxAction, h.Action + 2);   // Action recovers fastest
             h.Mind   = Math.Min(h.MaxMind,   h.Mind + 1);
+            e.Set(Character.Ham, h);
         }
     }
 }
@@ -373,7 +375,7 @@ Two honest caveats before you reach for it.
 
 First, **it is not wired to a public API yet.** The thresholds live on the archetype's internal cluster state, so turning dormancy on today needs the same `InternalsVisibleTo` access the engine's own sample hosts build under. Only the `ClusterSleepState` enum is public.
 
-Second, and more likely to surprise you: **`WriteSpatial` deliberately doesn't mark a slot dirty.** That's the barrier `BoundsSyncSystem` uses to keep the spatial index honest, and it is the *high-frequency* write on a moving entity — so a cluster whose entities only ever move through the spatial barrier can fall asleep, and stay asleep, while still moving. Our shard is safe by accident: `MoveSystem` writes `Transform` through `ctx.Accessor.OpenMut(id).Write(...)`, which does mark dirty, so movement keeps its own clusters awake. If your movement path is *only* the spatial barrier, dormancy will quietly stop dispatching it.
+Second, and more likely to surprise you: **`WriteSpatial` deliberately doesn't mark a slot dirty.** That's the barrier `BoundsSyncSystem` uses to keep the spatial index honest, and it is the *high-frequency* write on a moving entity — so a cluster whose entities only ever move through the spatial barrier can fall asleep, and stay asleep, while still moving. Our shard is safe by accident: `MoveSystem` writes `Transform` through `ctx.Accessor.OpenMut(id).Set(...)`, which does mark dirty, so movement keeps its own clusters awake. If your movement path is *only* the spatial barrier, dormancy will quietly stop dispatching it.
 
 ### Step four: checkerboard the systems that read their neighbours
 

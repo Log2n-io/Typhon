@@ -287,13 +287,13 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
 
 A runtime strict-mode check, opt-in in every build (see DV-01), that catches declaration drift.
 
-### DV-01: Write<T> requires declared Writes<T> or SideWrites<T> `[strict-mode][opt-in]`
-  pre  EntityRefMut.Write<T>() called from inside dispatched system body
+### DV-01: Set<T> requires declared Writes<T> or SideWrites<T> `[strict-mode][opt-in]`
+  pre  EntityRefMut.Set<T>() (WriteRef) called from inside dispatched system body
   pre  the check is ENABLED — it is gated on CheckConfig.DeclaredAccessActive, a static readonly bool read from
        configuration key `Typhon:Checks:DeclaredAccess`, which defaults to FALSE (including in Debug builds)
   invariant when enabled: SystemAccessValidator.Current is set to the executing system's descriptor
   invariant typeof(T) ∈ descriptor.Writes ∪ descriptor.SideWrites OR descriptor.HasAnyDeclaration == false
-  scope: SystemAccessValidator.AssertWrite, EntityRefMut.Write
+  scope: SystemAccessValidator.AssertWrite, EntityRefMut.WriteRef
   on_violation: throws InvalidAccessException with system name + undeclared type + declared set
   release_behavior: available in Release; when the gate is off the JIT constant-folds the branch away — zero overhead
   rationale: 🔴 CORRECTED 2026-07-27. This rule was tagged [debug-only] and claimed `[Conditional("DEBUG")] strips the

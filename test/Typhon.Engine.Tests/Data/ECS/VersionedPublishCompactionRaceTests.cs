@@ -54,7 +54,10 @@ class VersionedPublishCompactionRaceTests : TestBase<VersionedPublishCompactionR
     private static void Commit(DatabaseEngine dbe, EntityId id, long credits)
     {
         using var tx = dbe.CreateQuickTransaction();
-        tx.OpenMut(id).Write(PcWalletArch.Wallet).Credits = credits;
+        var target = tx.OpenMut(id);
+        var walletCopy = target.Read(PcWalletArch.Wallet);
+        walletCopy.Credits = credits;
+        target.Set(PcWalletArch.Wallet, walletCopy);
         tx.Commit();
     }
 
@@ -274,7 +277,10 @@ class VersionedPublishCompactionRaceTests : TestBase<VersionedPublishCompactionR
                                 Interlocked.Increment(ref stale);
                             }
 
-                            tx.OpenMut(ids[e]).Write(PcWalletArch.Wallet).Credits = expected[e] + 1;
+                            var opened = tx.OpenMut(ids[e]);
+                            var wallet = opened.Read(PcWalletArch.Wallet);
+                            wallet.Credits = expected[e] + 1;
+                            opened.Set(PcWalletArch.Wallet, wallet);
                             tx.Commit();
                             expected[e]++;
                         }

@@ -206,7 +206,8 @@ internal static class FenceIndexPhaseBench
                 for (var i = 0; i < migrants; i++)
                 {
                     var id = ids[(cursor + i) % ids.Count];
-                    ref var pos = ref tx.OpenMut(id).Write(FpBenchUnit.Pos);
+                    var target = tx.OpenMut(id);
+                    var pos = target.Read(FpBenchUnit.Pos);
                     var nx = pos.Bounds.MinX + CellSize;
                     if (nx >= WorldMax - 1)
                     {
@@ -214,6 +215,7 @@ internal static class FenceIndexPhaseBench
                     }
 
                     pos.Bounds = new AABB2F { MinX = nx, MinY = pos.Bounds.MinY, MaxX = nx, MaxY = pos.Bounds.MaxY };
+                    target.Set(FpBenchUnit.Pos, pos);
                 }
 
                 cursor += migrants;

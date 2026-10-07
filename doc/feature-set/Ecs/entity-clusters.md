@@ -51,8 +51,9 @@ while (clusters.MoveNext())
 
 // Random single-entity access — same archetype, same API, transparently cluster-backed.
 var entity = ants.OpenMut(someAntId);
-ref var pos = ref entity.Write(Ant.Position);
+var pos = entity.Read(Ant.Position);
 pos.X += 1;
+entity.Set(Ant.Position, pos);
 ```
 
 ## ⚠️ Guarantees & limits

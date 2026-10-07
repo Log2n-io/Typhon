@@ -112,14 +112,16 @@ sealed class CollectionTests : TestBase<CollectionTests>
     {
         using (var tx = harness.Engine.CreateQuickTransaction())
         {
-            ref var bag = ref tx.OpenMut(id).Write(ProjBagged.Bag);
-            using (var accessor = tx.CreateComponentCollectionAccessor(ref bag.Items))
+            var opened = tx.OpenMut(id);
+            var bag = opened.Read(ProjBagged.Bag);
+            using (var accessor = opened.CreateComponentCollectionAccessor(ProjBagged.Bag, ref bag, ref bag.Items))
             {
                 foreach (var item in items)
                 {
                     accessor.Add(item);
                 }
             }
+            opened.Set(ProjBagged.Bag, bag);
 
             tx.Commit();
         }
@@ -404,7 +406,10 @@ sealed class CollectionTests : TestBase<CollectionTests>
             {
                 foreach (var bag in bags)
                 {
-                    tx.OpenMut(bag).Write(ProjBagged.Bag).Level = (int)tick;
+                    var entity = tx.OpenMut(bag);
+                    var bagCopy = entity.Read(ProjBagged.Bag);
+                    bagCopy.Level = (int)tick;
+                    entity.Set(ProjBagged.Bag, bagCopy);
                 }
 
                 tx.Commit();

@@ -126,8 +126,10 @@ class RealmFenceTests : TestBase<RealmFenceTests>
             using var wtx = dbe.CreateQuickTransaction();
             foreach (var (id, realm, tag) in moves)
             {
-                ref var pos = ref wtx.OpenMut(id).Write(RealmUnit.Pos);
+                var target = wtx.OpenMut(id);
+                var pos = target.Read(RealmUnit.Pos);
                 pos = new RealmPos { Bounds = BoxOf(round, tag), Realm = rotate ? (ushort)((realm + 1) % RealmCount) : realm, Tag = tag };
+                target.Set(RealmUnit.Pos, pos);
             }
 
             wtx.Commit();

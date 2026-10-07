@@ -109,6 +109,33 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
         Assert.That(meta.TransientSlotMask, Is.Not.EqualTo(0));
     }
 
+    /// <summary>
+    /// #1173 / #1194: reading or setting a Transient component BY TYPE on a mixed archetype goes to the Transient segment, as by handle does. The by-type
+    /// paths had no Transient branch: they addressed the slot through the persistent cluster base and layout.
+    /// </summary>
+    [Test]
+    public void ByType_ReadAndSet_OfATransientComponent_OnAMixedArchetype_UseItsOwnSegment()
+    {
+        using var dbe = SetupEngine();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClT6MixedSvT>(ClT6MixedSvT.Pos.Set(new ClT6SvPos(1, 2)), ClT6MixedSvT.Vel.Set(new ClT6TransVel(3, 4)));
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var e = tx.OpenMut(id);
+            Assert.That(e.Read<ClT6TransVel>().VX, Is.EqualTo(3f), "a by-type read of the Transient component read another segment");
+
+            e.Set(new ClT6TransVel(30, 40));
+            Assert.That(e.Read(ClT6MixedSvT.Vel).VX, Is.EqualTo(30f), "a by-type set did not reach the Transient segment");
+            Assert.That(e.Read(ClT6MixedSvT.Pos).X, Is.EqualTo(1f), "a by-type set wrote into the persistent segment");
+            tx.Commit();
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // 2 — Spawn and Read
     // ═══════════════════════════════════════════════════════════════════════
@@ -163,7 +190,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
         // Write to Transient component
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClT6MixedSvT.Vel) = new ClT6TransVel(99f, 88f);
+            tx.OpenMut(id).Set(ClT6MixedSvT.Vel, new ClT6TransVel(99f, 88f));
             tx.Commit();
         }
 
@@ -344,7 +371,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
         // Write to Transient component
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClT6MixedSvT.Vel) = new ClT6TransVel(99f, 88f);
+            tx.OpenMut(id).Set(ClT6MixedSvT.Vel, new ClT6TransVel(99f, 88f));
             tx.Commit();
         }
 
@@ -392,9 +419,9 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var e = tx.OpenMut(id);
-            e.Write(ClT6ThreeWay.Pos) = new ClT6SvPos(10f, 20f);      // SV: in-place
-            e.Write(ClT6ThreeWay.Vel) = new ClT6TransVel(30f, 40f);    // Transient: in-place (different segment)
-            e.Write(ClT6ThreeWay.Health) = new ClT6VHealth(999);        // Versioned: COW
+            e.Set(ClT6ThreeWay.Pos, new ClT6SvPos(10f, 20f));      // SV: in-place
+            e.Set(ClT6ThreeWay.Vel, new ClT6TransVel(30f, 40f));    // Transient: in-place (different segment)
+            e.Set(ClT6ThreeWay.Health, new ClT6VHealth(999));        // Versioned: COW
             tx.Commit();
         }
 

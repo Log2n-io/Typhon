@@ -1,30 +1,29 @@
 ---
 uid: feature-ecs-entity-lifecycle-crud-generated-multi-component-accessors
 title: 'Generated Multi-Component Accessors'
-description: 'Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call.'
+description: 'A source-generated Values struct and ReadAll / WriteAll methods that read or set every archetype component in one call.'
 ---
 
 # Generated Multi-Component Accessors
-> Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call.
+> A source-generated `Values` struct and `ReadAll` / `WriteAll` methods that read or set every archetype component in one call.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Ecs](../README.md)
 
 ## 🎯 What it solves
 
 Reading or writing several components on the same entity through raw `EntityRef` calls needs N+1 lines — one
-`Open`/`OpenMut` plus one `Read`/`Write` per component. For archetypes with four or five components that
-clutters game-loop code with repetitive boilerplate, and a generic `out T1, out T2, ...` alternative would copy
-data instead of returning zero-copy refs. The `ArchetypeAccessorGenerator` emits named, zero-copy multi-component
-accessors directly on the archetype class so one call resolves every declared component.
+`Open`/`OpenMut` plus one `Read`/`Set` per component. For archetypes with four or five components that clutters
+game-loop code with repetitive boilerplate. The `ArchetypeAccessorGenerator` emits named multi-component accessors
+directly on the archetype class so one call reads, or sets, every declared component.
 
 ## ⚙️ How it works (in brief)
 
-For any `[Archetype]` class declared `partial`, the source generator emits nested `Refs` / `MutRefs` ref
-structs — one `ref readonly` (or `ref`) field per `Comp<T>` the archetype declares, named to match the field —
-plus static `ReadAll(tx, id)` / `ReadWriteAll(tx, id)` methods. Internally these call `tx.Open`/`OpenMut` exactly
-once, then `entity.Read`/`Write` by handle for every component — the same O(1)-per-component cost as hand-written
-code, just without the repetition. Child archetypes get a `Refs`/`MutRefs` that includes every inherited
-component first, routed through the declaring parent class's `Comp<T>` handle for correct slot resolution.
+For any `[Archetype]` class declared `partial`, the source generator emits a nested `Values` struct — one field per
+`Comp<T>` the archetype declares, named to match it — plus static `ReadAll(tx, id)` and `WriteAll(tx, id, in values)`
+methods. `ReadAll` calls `tx.Open` once, then `entity.Read` by handle for every component, and returns the copies.
+`WriteAll` calls `tx.OpenMut` once, then `entity.Set` by handle for every component. Child archetypes get a `Values`
+that includes every inherited component first, routed through the declaring parent class's `Comp<T>` handle for
+correct slot resolution.
 
 ## 💻 Usage
 
@@ -43,38 +42,39 @@ partial class Soldier : Archetype<Soldier, Unit>
 }
 
 // ─── Read every component in one call ───
-Unit.Refs r = Unit.ReadAll(tx, id);
-float x = r.Pos.X;
-float dx = r.Vel.Dx;
+Unit.Values v = Unit.ReadAll(tx, id);
+float x = v.Pos.X;
+float dx = v.Vel.Dx;
 
 // ─── Inherited archetype — parent components included, parent-first ───
-Soldier.Refs sr = Soldier.ReadAll(tx, soldierId);
-float sx = sr.Pos.X;        // from Unit
-int hp = sr.Health.Current; // own
+Soldier.Values s = Soldier.ReadAll(tx, soldierId);
+float sx = s.Pos.X;        // from Unit
+int hp = s.Health.Current; // own
 
-// ─── Write every component in one call ───
-Unit.MutRefs m = Unit.ReadWriteAll(tx, id);
-m.Pos.X = 999;
-m.Vel.Dx = 42;
+// ─── Change some fields, then set every component in one call ───
+var u = Unit.ReadAll(tx, id);
+u.Pos.X = 999;
+u.Vel.Dx = 42;
+Unit.WriteAll(tx, id, u);
 tx.Commit();
 ```
 
 ## ⚠️ Guarantees & limits
 
 - The archetype class must be declared `partial`; if it isn't, the generator silently skips it — no
-  `Refs`/`MutRefs`/`ReadAll`/`ReadWriteAll` are emitted, and no diagnostic is raised.
-- `Refs`/`MutRefs` are `ref struct` — stack-only, same lifetime constraints as `EntityRef`; cannot be stored in
-  a field, boxed, or escape the call site.
-- Cost is one `Open`/`OpenMut` (~90–100 ns warm, see [the CRUD page](README.md)) plus N ref assignments (~1-5ns each for `SingleVersion`/`Transient`);
-  `Versioned` fields additionally pay the per-`Write` copy-on-write allocation.
+  `Values`/`ReadAll`/`WriteAll` are emitted, and no diagnostic is raised.
+- `Values` holds copies, like `EntityRef.Read`: it is an ordinary struct, valid after the transaction, and changing it
+  changes nothing until `WriteAll` (rule EP-03).
+- Cost is one `Open`/`OpenMut` (~90–100 ns warm, see [the CRUD page](README.md)) plus one copy per component;
+  `Versioned` fields additionally pay the per-`Set` copy-on-write allocation.
 - Generated field names match the `Comp<T>` declarations exactly — there is no positional `C1`/`C2` form to
   disambiguate.
-- `ReadWriteAll` opens the entity read-write and exposes every field mutably at once; there is no generated
-  partial-write overload — use `EntityRefMut.Write` directly when only a subset of components needs mutation.
+- `WriteAll` sets every component, which marks every one dirty and copies-on-write every `Versioned` one; when only
+  a subset changes, `Set` those through `EntityRefMut` directly.
 
 ## 🧪 Tests
 
-- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — `ReadAll`/`ReadWriteAll` zero-copy round-trip, inherited-archetype field inclusion, mutate-then-verify-persisted
+- [EntitySpawnTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntitySpawnTests.cs) — `ReadAll`/`WriteAll` round-trip, inherited-archetype field inclusion, change-then-verify-persisted
 
 ## 🔗 Related
 

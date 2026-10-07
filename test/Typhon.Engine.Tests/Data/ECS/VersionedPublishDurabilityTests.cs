@@ -122,7 +122,10 @@ unsafe class VersionedPublishDurabilityTests : TestBase<VersionedPublishDurabili
             using var dbe = OpenEngine(scope);
             using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
             {
-                tx.OpenMut(id).Write(PdItemArch.Item).Key = 1200;
+                var target = tx.OpenMut(id);
+                var item = target.Read(PdItemArch.Item);
+                item.Key = 1200;
+                target.Set(PdItemArch.Item, item);
                 tx.Commit();
             }
 

@@ -538,7 +538,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             var entity = readTx.Open(ids[i]);
             Assert.That(entity.IsValid, Is.True, $"Entity {i} not valid");
-            ref readonly var readPos = ref entity.Read(ClAnt.Position);
+            var readPos = entity.Read(ClAnt.Position);
             Assert.That(readPos.X, Is.EqualTo((float)i), $"Entity {i} Position.X");
             Assert.That(readPos.Y, Is.EqualTo(i * 10f), $"Entity {i} Position.Y");
         }
@@ -744,10 +744,10 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         var accessor = readTx.For<ClAnt>();
         var entity = accessor.Open(id);
         Assert.That(entity.IsValid, Is.True);
-        ref readonly var rp = ref entity.Read(ClAnt.Position);
+        var rp = entity.Read(ClAnt.Position);
         Assert.That(rp.X, Is.EqualTo(123f));
         Assert.That(rp.Y, Is.EqualTo(456f));
-        ref readonly var rm = ref entity.Read(ClAnt.Movement);
+        var rm = entity.Read(ClAnt.Movement);
         Assert.That(rm.VX, Is.EqualTo(7f));
         Assert.That(rm.VY, Is.EqualTo(8f));
         accessor.Dispose();
@@ -828,10 +828,10 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         // foreach iteration should return correct data
         foreach (var entity in qTx.Query<ClAnt>())
         {
-            ref readonly var rp = ref entity.Read(ClAnt.Position);
+            var rp = entity.Read(ClAnt.Position);
             Assert.That(rp.X, Is.EqualTo(42f));
             Assert.That(rp.Y, Is.EqualTo(84f));
-            ref readonly var rm = ref entity.Read(ClAnt.Movement);
+            var rm = entity.Read(ClAnt.Movement);
             Assert.That(rm.VX, Is.EqualTo(7f));
             Assert.That(rm.VY, Is.EqualTo(3f));
         }
@@ -876,7 +876,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             var entity = readTx.Open(ids[i]);
             Assert.That(entity.IsValid, Is.True, $"Entity {i} not valid");
-            ref readonly var rp = ref entity.Read(ClAnt.Position);
+            var rp = entity.Read(ClAnt.Position);
             Assert.That(rp.X, Is.EqualTo(i * 10f), $"Entity {i} Position.X wrong");
             Assert.That(rp.Y, Is.EqualTo(i * 20f), $"Entity {i} Position.Y wrong");
         }

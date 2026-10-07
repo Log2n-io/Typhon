@@ -99,13 +99,15 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         for (var k = 0; k < EntityCount / 4; k++)
         {
             var i = order[k];
-            // Absolute values from the seed, never derived from what Write() hands back: the two arms write through different transaction kinds, and
-            // whether the ref is a copy of the current value or a fresh staging buffer is not this fixture's business.
+            // Absolute values from the seed, never derived from a value read back: the two arms write through different transaction kinds, and
+            // whether a read sees the current value or a fresh staging buffer is not this fixture's business.
             var x = (float)(rng.NextDouble() * (WorldMax - 2f)) + 1f;
             var y = (float)(rng.NextDouble() * (WorldMax - 2f)) + 1f;
-            ref var pos = ref tx.OpenMut(ids[i]).Write(ClMigUnit.Pos);
+            var target = tx.OpenMut(ids[i]);
+            var pos = target.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y };
             pos.Tag = (k & 1) == 0 ? EntityCount + k : i;
+            target.Set(ClMigUnit.Pos, pos);
         }
     }
 

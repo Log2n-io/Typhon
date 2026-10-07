@@ -249,8 +249,9 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(e2);
-            ref var pos = ref eref.Write(ClCohUnit.Pos);
+            var pos = eref.Read(ClCohUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 15f, MinY = 15f, MaxX = 15f, MaxY = 15f };
+            eref.Set(ClCohUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -351,7 +352,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
             for (int i = 0; i < cellCenters.Length; i++)
             {
                 var eref = tx.OpenMut(movedEntities[i]);
-                ref var pos = ref eref.Write(ClCohUnit.Pos);
+                var pos = eref.Read(ClCohUnit.Pos);
                 // One unit to the right/up of the anchor — gives a 1x1 tight AABB.
                 pos.Bounds = new AABB2F
                 {
@@ -360,6 +361,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
                     MaxX = cellCenters[i].x - 39f,
                     MaxY = cellCenters[i].y - 39f,
                 };
+                eref.Set(ClCohUnit.Pos, pos);
             }
             tx.Commit();
         }
@@ -457,8 +459,9 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(migrant);
-            ref var pos = ref eref.Write(ClCohUnit.Pos);
+            var pos = eref.Read(ClCohUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 150f, MinY = 50f, MaxX = 150f, MaxY = 50f };
+            eref.Set(ClCohUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -521,8 +524,9 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         {
             tx.Destroy(e2);
             var eref = tx.OpenMut(e1);
-            ref var pos = ref eref.Write(ClCohUnit.Pos);
+            var pos = eref.Read(ClCohUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 11f, MinY = 11f, MaxX = 11f, MaxY = 11f };
+            eref.Set(ClCohUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -578,8 +582,9 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(e2);
-            ref var pos = ref eref.Write(ClCohUnit.Pos);
+            var pos = eref.Read(ClCohUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 20f, MinY = 20f, MaxX = 20f, MaxY = 20f };
+            eref.Set(ClCohUnit.Pos, pos);
             tx.Commit();
         }
         dbe.WriteTickFence(2);

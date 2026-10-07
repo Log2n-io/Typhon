@@ -658,13 +658,25 @@ public class MarketHardeningTests
                                 item.Price = newPrice;
                                 item.TradeCount++;
                                 item.LastTradeSeq = s;
-                                tx.OpenMut(itemId).Write(MkItemArch.Item) = item;
+                                tx.OpenMut(itemId).Set(MkItemArch.Item, item);
 
-                                // One entity at a time: no ref is held across the next OpenMut.
-                                tx.OpenMut(EntityId.FromRawValue(traderIds[payer])).Write(MkTraderArch.Wallet).Credits -= amount;
-                                tx.OpenMut(EntityId.FromRawValue(traderIds[payee])).Write(MkTraderArch.Wallet).Credits += amount;
-                                tx.OpenMut(EntityId.FromRawValue(traderIds[fromSlot])).Write(MkTraderArch.Trader).ItemsOwned--;
-                                tx.OpenMut(EntityId.FromRawValue(traderIds[toSlot])).Write(MkTraderArch.Trader).ItemsOwned++;
+                                // One entity at a time: read, change the copy, set it back.
+                                var target = tx.OpenMut(EntityId.FromRawValue(traderIds[payer]));
+                                var walletCopy = target.Read(MkTraderArch.Wallet);
+                                walletCopy.Credits -= amount;
+                                target.Set(MkTraderArch.Wallet, walletCopy);
+                                var opened = tx.OpenMut(EntityId.FromRawValue(traderIds[payee]));
+                                var wallet = opened.Read(MkTraderArch.Wallet);
+                                wallet.Credits += amount;
+                                opened.Set(MkTraderArch.Wallet, wallet);
+                                var entity2 = tx.OpenMut(EntityId.FromRawValue(traderIds[fromSlot]));
+                                var traderCopy = entity2.Read(MkTraderArch.Trader);
+                                traderCopy.ItemsOwned--;
+                                entity2.Set(MkTraderArch.Trader, traderCopy);
+                                var entity3 = tx.OpenMut(EntityId.FromRawValue(traderIds[toSlot]));
+                                var trader = entity3.Read(MkTraderArch.Trader);
+                                trader.ItemsOwned++;
+                                entity3.Set(MkTraderArch.Trader, trader);
 
                                 var auditId = tx.Spawn<MkAuditArch>(MkAuditArch.Audit.Set(new MkAudit
                                 {

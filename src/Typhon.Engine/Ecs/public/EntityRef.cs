@@ -6,8 +6,8 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Read-only, zero-copy entity handle. A ref struct that copies the EntityRecord from the per-archetype LinearHash and provides typed component reads
-/// via cached Location ChunkIds.
+/// Read-only entity handle. A ref struct that copies the EntityRecord from the per-archetype LinearHash and provides typed component reads via cached
+/// Location ChunkIds. Reads return copies, so the handle stays valid for its whole transaction (#1199).
 /// </summary>
 /// <remarks>
 /// <para>Created by <c>Open</c> / <c>TryOpen</c> on any accessor. It has no write member: writes go through <see cref="EntityRefMut"/>, returned by
@@ -33,7 +33,7 @@ public unsafe ref struct EntityRef
 
     /// <summary>
     /// Per-slot revision-chain ROOT chunk ids for Versioned slots (0 = not resolved via point-open). Set by <c>Transaction.ResolveEntity</c> so the
-    /// first <see cref="EntityRefMut.Write{T}(Comp{T})"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index
+    /// first <see cref="EntityRefMut.Set{T}(Comp{T}, in T)"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index
     /// lookup —
     /// read-only resolves no longer populate <c>ComponentInfo.SingleCache</c> (deferred-insert: the cache holds only written/spawned entries).
     /// </summary>
@@ -56,6 +56,16 @@ public unsafe ref struct EntityRef
     internal byte _clusterSlotIndex;                // Slot within cluster (0..63)
     internal int _clusterChunkId;                   // Cluster chunk ID (for dirty tracking: entityIndex = chunkId * 64 + slot)
     internal ArchetypeClusterInfo _clusterLayout;   // Layout info for offset computation
+
+    /// <summary>
+    /// <see cref="EntityAccessor.ClusterGeneration"/> when <see cref="_clusterBase"/> was resolved. While it still matches, the accessor slot that
+    /// resolved the base holds its page; once it moves, <see cref="ClusterBase"/> re-resolves from <see cref="_clusterChunkId"/> (#1199).
+    /// <see cref="_transientClusterBase"/> needs no such check: Transient pages live in pinned native blocks and are never evicted.
+    /// </summary>
+    internal int _resolveGen;
+
+    /// <summary>True when the base was resolved for writing (<c>OpenMut</c>): a re-resolve maps the page dirty again.</summary>
+    internal bool _resolvedWritable;
 
     /// <summary>
     /// The realm the entity is in (Realms): its cluster's — what an event it emits names as its point's realm (<c>RouteNear(point, realm)</c>). Realm 0
@@ -206,25 +216,36 @@ public unsafe ref struct EntityRef
     public readonly bool IsValid => !_id.IsNull;
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Component access — by handle (O(1), preferred)
+    // Cluster base — re-resolved when the accessor let go of its page (#1199)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Read a component by handle. Zero-copy — returns a ref into the chunk page (or cluster slot).</summary>
+    /// <summary>
+    /// The primary cluster base, valid for the current call: the cached one while the accessor still holds its page, otherwise resolved again. Call only
+    /// when <see cref="_clusterBase"/> is non-null (a cluster-stored entity); its null-ness never changes.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public readonly ref readonly T Read<T>(Comp<T> comp) where T : unmanaged
-    {
-        byte slot = _archetype.GetSlot(comp._componentTypeId);
-        // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
-        // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
-        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
-        {
-            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
-        }
-        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
-        }
+    internal readonly byte* ClusterBase() => _resolveGen == _accessor.ClusterGeneration.Value ? _clusterBase : ReresolveClusterBase();
 
+    /// <summary>
+    /// Resolve the cluster base again and memoize it. <c>readonly</c>, and it still writes, for the reason given on <see cref="ResolveVersionedSlot"/>: the
+    /// memo is a cache, invisible to callers, written through the receiver itself.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly byte* ReresolveClusterBase()
+    {
+        ref var self = ref Unsafe.AsRef(in this);
+        self._clusterBase = _accessor.ReresolveClusterBase(_engineState, _id.ArchetypeId, _clusterChunkId, _resolvedWritable);
+        self._resolveGen = _accessor.ClusterGeneration.Value;
+        return self._clusterBase;
+    }
+
+    /// <summary>
+    /// Zero-copy core of every read: the component at <paramref name="slot"/>, MVCC-correct, in the cache or in this transaction's staging. The reference
+    /// is valid for the current call only, which is why the public reads copy out of it (#1199). Callers have validated <paramref name="slot"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly ref readonly T ReadSlotRef<T>(byte slot) where T : unmanaged
+    {
         if (_clusterBase != null)
         {
             // Transient slots read from TransientStore cluster segment (mixed archetypes only; for pure-T, _clusterBase IS the TS base)
@@ -250,7 +271,7 @@ public unsafe ref struct EntityRef
                     return ref Unsafe.AsRef<T>(stagedPtr);
                 }
             }
-            return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
+            return ref Unsafe.AsRef<T>(ClusterBase() + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
         }
 
         int chunkId2 = _locations[slot];
@@ -259,11 +280,37 @@ public unsafe ref struct EntityRef
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Component access — by handle (O(1), preferred)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Read a component by handle: a copy of its value at this handle's snapshot. A copy, not a reference into the page, so nothing this returns can go
+    /// stale whatever the transaction does next (#1199); zero-copy access is cluster iteration's (<see cref="ClusterRef{TArch}"/>).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly T Read<T>(Comp<T> comp) where T : unmanaged
+    {
+        byte slot = _archetype.GetSlot(comp._componentTypeId);
+        // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
+        // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
+        }
+        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
+        }
+
+        return ReadSlotRef<T>(slot);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Component access — by type (slot lookup, slower)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Read a component by type. Resolves slot via archetype metadata.</summary>
-    public readonly ref readonly T Read<T>() where T : unmanaged
+    /// <summary>Read a component by type: a copy, as <see cref="Read{T}(Comp{T})"/>. Resolves the slot via archetype metadata.</summary>
+    public readonly T Read<T>() where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (CheckConfig.Enabled && typeId < 0)
@@ -276,31 +323,7 @@ public unsafe ref struct EntityRef
             ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
         }
 
-        if (_clusterBase != null)
-        {
-            // Versioned slots read from content chunk for MVCC correctness
-            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
-            {
-                EnsureVersionedResolved(slot);
-                int chunkId = _locations[slot];
-                var table = _engineState.SlotToComponentTable[slot];
-                return ref _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
-            }
-            // Commit-discipline read-your-own-writes: see this tx's staged value (point reads only; bulk spans read HEAD).
-            if (_accessor.Discipline == CommitDiscipline.Commit)
-            {
-                byte* stagedPtr = _accessor.TryGetStagedPtr(typeof(T), (long)_id.RawValue);
-                if (stagedPtr != null)
-                {
-                    return ref Unsafe.AsRef<T>(stagedPtr);
-                }
-            }
-            return ref Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
-        }
-
-        int chunkId2 = _locations[slot];
-        var table2 = _engineState.SlotToComponentTable[slot];
-        return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
+        return ReadSlotRef<T>(slot);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -324,49 +347,36 @@ public unsafe ref struct EntityRef
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Attempt to read a component by type. Returns false if the archetype doesn't declare the component or it's disabled.
-    /// Returns a copy (not ref) since out parameters can't be ref readonly.
-    /// For zero-copy, use <c>if (entity.IsEnabled(comp)) { ref readonly var v = ref entity.Read(comp); }</c>.
+    /// Attempt to read a component by type: a copy, as <see cref="Read{T}()"/>. Returns false if the archetype doesn't declare the component or it's
+    /// disabled.
     /// </summary>
     public readonly bool TryRead<T>(out T value) where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        if (typeId < 0 || !_archetype.TryGetSlot(typeId, out byte slot))
+        if (typeId < 0 || !_archetype.TryGetSlot(typeId, out byte slot) || (_enabledBits & (1 << slot)) == 0)
         {
             value = default;
             return false;
         }
+
+        value = ReadSlotRef<T>(slot);
+        return true;
+    }
+
+    /// <summary>
+    /// Attempt to read a component by handle: a copy, as <see cref="Read{T}(Comp{T})"/>. Returns false if the component is disabled on this entity.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool TryRead<T>(Comp<T> comp, out T value) where T : unmanaged
+    {
+        byte slot = _archetype.GetSlot(comp._componentTypeId);
         if ((_enabledBits & (1 << slot)) == 0)
         {
             value = default;
             return false;
         }
 
-        if (_clusterBase != null)
-        {
-            // Transient slots read from TransientStore cluster segment
-            if (_transientClusterBase != null && (_archetype.TransientSlotMask & (1 << slot)) != 0)
-            {
-                value = Unsafe.AsRef<T>(_transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
-                return true;
-            }
-            // Versioned slots read from content chunk (_locations populated by chain walk), not cluster slot.
-            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
-            {
-                EnsureVersionedResolved(slot);
-                int chunkId = _locations[slot];
-                var table = _engineState.SlotToComponentTable[slot];
-                value = _accessor.ReadEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
-                return true;
-            }
-
-            value = Unsafe.AsRef<T>(_clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
-            return true;
-        }
-
-        int chunkId2 = _locations[slot];
-        var table2 = _engineState.SlotToComponentTable[slot];
-        value = _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
+        value = ReadSlotRef<T>(slot);
         return true;
     }
 
@@ -379,71 +389,102 @@ public unsafe ref struct EntityRef
 
     /// <summary>
     /// The registered name of the component at <paramref name="slot"/> — matches <c>ComponentTable.Definition.Name</c> (the join key for the schema layout).
-    /// Pairs with <see cref="ReadRaw"/> for runtime, non-generic component decode.
+    /// Pairs with <see cref="ReadRaw(int, Span{byte})"/> for runtime, non-generic component decode.
     /// </summary>
     public readonly string GetComponentName(int slot)
     {
-        if ((uint)slot >= (uint)_archetype.ComponentCount)
+        if ((uint)slot >= _archetype.ComponentCount)
         {
             throw new ArgumentOutOfRangeException(nameof(slot));
         }
         return _engineState.SlotToComponentTable[slot].Definition.Name;
     }
 
+    /// <summary>The storage size in bytes of the component at <paramref name="slot"/>: the buffer <see cref="ReadRaw(int, Span{byte})"/> needs.</summary>
+    public readonly int GetComponentSize(int slot)
+    {
+        if ((uint)slot >= _archetype.ComponentCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(slot));
+        }
+        return _engineState.SlotToComponentTable[slot].Definition.ComponentStorageSize;
+    }
+
     /// <summary>
-    /// Read the raw storage bytes of the component at <paramref name="slot"/> — the non-generic counterpart to <see cref="Read{T}()"/> for tooling that decodes
-    /// components by field layout at runtime (e.g. the Workbench Data Browser). The returned span points directly into mapped page / cluster memory (zero-copy)
-    /// and is valid only while this <see cref="EntityRef"/> is alive. Its length is the component's storage size; field values are decoded by the caller using
-    /// the component's field offsets. MVCC-correct: Versioned slots resolve to the content visible at the owning transaction's snapshot. Works regardless of the
-    /// component's enabled state — query <see cref="IsEnabled(byte)"/> separately to render disabled components.
+    /// Copy the raw storage bytes of the component at <paramref name="slot"/> into <paramref name="destination"/> — the non-generic counterpart to
+    /// <see cref="Read{T}()"/> for tooling that decodes components by field layout at runtime (e.g. the Workbench Data Browser). Returns the number of bytes
+    /// copied: the component's storage size (<see cref="GetComponentSize"/>), or 0 when the slot holds no content. Field values are decoded by the caller
+    /// using the component's field offsets. MVCC-correct: Versioned slots resolve to the content visible at the owning transaction's snapshot. Works
+    /// regardless of the component's enabled state — query <see cref="IsEnabled(byte)"/> separately to render disabled components.
     /// <para>
-    /// Prefer the typed <see cref="Read{T}()"/> / <see cref="TryRead{T}(out T)"/> whenever the component type is known at compile time — they return a typed
-    /// (zero-copy) ref with no manual offset decoding. Reach for <see cref="ReadRaw"/> only when the component type is not available statically.
+    /// A copy for the same reason <see cref="Read{T}(Comp{T})"/> is one: a span into the page could outlive it (#1199). Prefer the typed reads whenever the
+    /// component type is known at compile time.
     /// </para>
     /// </summary>
-    public readonly ReadOnlySpan<byte> ReadRaw(int slot)
+    /// <exception cref="ArgumentException"><paramref name="destination"/> is shorter than the component.</exception>
+    /// <seealso cref="ReadRaw(int)"/>
+    public readonly int ReadRaw(int slot, Span<byte> destination)
     {
-        if ((uint)slot >= (uint)_archetype.ComponentCount)
+        if ((uint)slot >= _archetype.ComponentCount)
         {
             throw new ArgumentOutOfRangeException(nameof(slot));
         }
 
         var table = _engineState.SlotToComponentTable[slot];
         int size = table.Definition.ComponentStorageSize;
+        if (destination.Length < size)
+        {
+            throw new ArgumentException($"The destination holds {destination.Length} bytes; the component needs {size}.", nameof(destination));
+        }
 
+        byte* src;
         if (_clusterBase != null)
         {
-            // Transient slot: TransientStore cluster segment (mixed archetypes; for pure-T, _clusterBase IS the TS base so this branch is skipped).
             if (_transientClusterBase != null && (_archetype.TransientSlotMask & (1 << slot)) != 0)
             {
-                byte* tp = _transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
-                return new ReadOnlySpan<byte>(tp, size);
+                // Transient slot: TransientStore cluster segment (mixed archetypes; for pure-T, _clusterBase IS the TS base so this branch is skipped).
+                src = _transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
             }
-            // Versioned slot: read from the content chunk resolved by the revision-chain walk (MVCC-correct), not the cluster HEAD cache.
-            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
+            else if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
             {
+                // Versioned slot: read from the content chunk resolved by the revision-chain walk (MVCC-correct), not the cluster HEAD cache.
                 EnsureVersionedResolved(slot);
                 int vChunkId = _locations[slot];
                 if (vChunkId == 0)
                 {
-                    return default;
+                    return 0;
                 }
-                byte* vp = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId,
+                src = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], vChunkId,
                     _isOwnSpawn);
-                return new ReadOnlySpan<byte>(vp, size);
             }
-            // SV cluster slot: direct SoA pointer.
-            byte* cp = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
-            return new ReadOnlySpan<byte>(cp, size);
+            else
+            {
+                // SV cluster slot: direct SoA pointer.
+                src = ClusterBase() + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
+            }
+        }
+        else
+        {
+            int chunkId = _locations[slot];
+            if (chunkId == 0)
+            {
+                return 0;
+            }
+            src = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId, _isOwnSpawn);
         }
 
-        int chunkId = _locations[slot];
-        if (chunkId == 0)
-        {
-            return default;
-        }
-        byte* p = _accessor.ReadEcsComponentDataRaw(table, _archetype._componentTypeIds[slot], _archetype._slotToComponentType[slot], chunkId, _isOwnSpawn);
-        return new ReadOnlySpan<byte>(p, size);
+        new ReadOnlySpan<byte>(src, size).CopyTo(destination);
+        return size;
+    }
+
+    /// <summary>
+    /// The raw storage bytes of the component at <paramref name="slot"/>, copied into a new array: the convenience form of
+    /// <see cref="ReadRaw(int, Span{byte})"/> for tooling, which allocates once per call. Empty when the slot holds no content.
+    /// </summary>
+    public readonly ReadOnlySpan<byte> ReadRaw(int slot)
+    {
+        var copy = new byte[GetComponentSize(slot)];
+        return copy.AsSpan(0, ReadRaw(slot, copy));
     }
 
 }

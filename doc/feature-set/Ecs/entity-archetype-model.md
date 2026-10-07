@@ -1,11 +1,11 @@
 ﻿---
 uid: feature-ecs-entity-archetype-model
 title: 'Entity & Archetype Model'
-description: 'Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature.'
+description: 'Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed component handles — the schema backbone of every other ECS feature.'
 ---
 
 # Entity & Archetype Model
-> Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature.
+> Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed component handles — the schema backbone of every other ECS feature.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟢 Start Here · **Category:** [Ecs](./README.md)
 
@@ -54,8 +54,8 @@ var id = t.Spawn<House>(
     House.HouseInfo.Set(new HouseData { Residents = 4 }));
 
 var house = t.Open(id);
-ref readonly var placement = ref house.Read(Building.Placement); // inherited slot, zero-copy
-ref readonly var info = ref house.Read(House.HouseInfo);
+var placement = house.Read(Building.Placement); // inherited slot
+var info = house.Read(House.HouseInfo);
 
 t.Commit();
 ```
@@ -70,8 +70,8 @@ t.Commit();
 ## ⚠️ Guarantees & limits
 
 - **Schema enforcement at creation**: `Spawn<T>` accepts values for any subset of the archetype's components — there is no "entity missing a required component" error class. An omitted component is *absent*, not zero-filled: reading it fails the same way reading a disabled one does, and `Enable(comp, in value)` is how you supply one later.
-- **O(1) entity→component routing**: one lookup per `Open`/`OpenMut` resolves all component locations for that entity; `Read`/`Write` afterward are direct, ~1-5ns for SingleVersion/Transient, ~50-100ns for Versioned (MVCC revision walk).
-- **Zero-copy access**: `Read` returns `ref readonly T`, `Write` returns `ref T` — no struct copies into or out of storage.
+- **O(1) entity→component routing**: one lookup per `Open`/`OpenMut` resolves all component locations for that entity; `Read`/`Set` afterward copy the component out or in directly for SingleVersion/Transient; Versioned adds the MVCC revision walk (~50-100ns).
+- **Safe point access, zero-copy iteration**: `Read` returns a copy and `Set` copies a value in, so a handle is safe for its whole transaction (#1199); cluster iteration hands out spans straight into storage, valid until the enumerator's next `MoveNext`.
 - **Stale references always miss, safely**: `EntityKey` is monotonic and never recycled, so there's no version field and no ABA hazard — a held `EntityId` for a destroyed entity simply fails to resolve.
 - **Polymorphic slot stability**: a component inherited from a parent archetype sits at the same slot index in every descendant, so handles like `Building.Placement` work uniformly across `Building`, `House`, and any other subclass.
 - **Archetype identity is the type name, routing is per-DB**: an archetype is identified by its CLR type name (override with `[Archetype(Name = "...")]`); the engine auto-assigns a per-process catalog id and a per-DB routing id (persisted in `ArchetypeR1` and re-matched by name on reopen). The routing id is embedded in every persisted `EntityId`. Renaming stays safe — `[Archetype(Name = "New", PreviousName = "Old")]` re-matches the old name on reopen and carries the data forward.

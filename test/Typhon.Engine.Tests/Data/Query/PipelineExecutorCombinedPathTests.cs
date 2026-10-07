@@ -251,7 +251,10 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
 
         using (var txWrite = dbe.CreateQuickTransaction())
         {
-            txWrite.OpenMut(ids5).Write(CompDArch.D).B = 999;
+            var target = txWrite.OpenMut(ids5);
+            var dCopy = target.Read(CompDArch.D);
+            dCopy.B = 999;
+            target.Set(CompDArch.D, dCopy);
             txWrite.Commit();
         }
 
@@ -401,7 +404,7 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
         // Mutate entity 0: Category 0 → 4
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[0]).Write(PipeSvArch.Data) = new PipeSvData(4, 999);
+            tx.OpenMut(ids[0]).Set(PipeSvArch.Data, new PipeSvData(4, 999));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -494,7 +497,7 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
         // Mutate entity 5 in a separate transaction: B stays 5, A changes from 7.5 to 100
         using (var txWrite = dbe.CreateQuickTransaction())
         {
-            txWrite.OpenMut(ids[5]).Write(CompDArch.D) = new CompD(100.0f, 5, 12.5);
+            txWrite.OpenMut(ids[5]).Set(CompDArch.D, new CompD(100.0f, 5, 12.5));
             txWrite.Commit();
         }
 

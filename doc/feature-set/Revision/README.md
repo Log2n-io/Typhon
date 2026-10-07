@@ -13,7 +13,7 @@ description: 'The per-component MVCC revision-chain subsystem: stores every live
 
 | Feature | Summary | Status | Level |
 |---|---|---|---|
-| [Revision Append & Chain Growth](revision-append-write-path.md) | Every write to a `Versioned` component creates a new immutable revision instead of overwriting the old one — `Spawn` allocates, `Write<T>()` appends, `Destroy` tombstones | ✅ Implemented | 🔵 Core |
+| [Revision Append & Chain Growth](revision-append-write-path.md) | Every write to a `Versioned` component creates a new immutable revision instead of overwriting the old one — `Spawn` allocates, `Set<T>()` appends, `Destroy` tombstones | ✅ Implemented | 🔵 Core |
 | [MVCC Snapshot Visibility](mvcc-snapshot-visibility.md) | Reads resolve to the latest revision committed at-or-before the reader's transaction TSN, with read-your-own-writes and explicit `RevisionReadStatus` outcomes (Success/NotFound/SnapshotInvisible/Deleted) | ✅ Implemented | 🔵 Core |
 | [Write-Conflict Baseline Tracking](optimistic-conflict-baseline.md) | Every chain append records the new and prior revision as the comparison baseline used by commit-time conflict detection and `ConcurrencyConflictHandler`s | ✅ Implemented | 🟣 Advanced |
 | [Revision Garbage Collection & Compaction](revision-gc-compaction.md) | Bounded-memory chain cleanup keyed off `MinTSN`, preserving a sentinel for in-flight readers and collapsing fully-dead chains to trigger entity removal | ✅ Implemented | 🟣 Advanced |

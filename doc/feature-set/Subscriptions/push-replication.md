@@ -40,7 +40,9 @@ if (ham[slot].Health != newHealth)
 
 // An entity reached by id — a command's target:
 var target = ctx.Transaction.OpenMut(id);
-target.Write(Character.Ham).Health -= 10;
+var hamCopy = target.Read(Character.Ham);
+hamCopy.Health -= 10;
+target.Set(Character.Ham, hamCopy);
 ctx.Subscriptions.Replicate(in target);
 ```
 

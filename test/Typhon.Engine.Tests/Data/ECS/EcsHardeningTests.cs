@@ -192,7 +192,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
 
         var entity2 = t.Open(id);
         Assert.That(entity2.IsEnabled(EcsUnit.Velocity), Is.True);
-        ref readonly var read = ref entity2.Read(EcsUnit.Velocity);
+        var read = entity2.Read(EcsUnit.Velocity);
         Assert.That(read.Dx, Is.EqualTo(1.5f));
     }
 
@@ -264,7 +264,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
 
         // Data still intact after disable/enable cycle
         var entity = t.Open(id);
-        ref readonly var v = ref entity.Read(EcsUnit.Velocity);
+        var v = entity.Read(EcsUnit.Velocity);
         Assert.That(v.Dx, Is.EqualTo(4f));
     }
 
@@ -368,7 +368,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         foreach (var entity in t.Query<EcsUnit>())
         {
             Assert.That(entity.Id, Is.EqualTo(id));
-            ref readonly var p = ref entity.Read(EcsUnit.Position);
+            var p = entity.Read(EcsUnit.Position);
             Assert.That(p.X, Is.EqualTo(10f));
             count++;
         }
@@ -500,7 +500,9 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var mut = t.OpenMut(id);
-            mut.Write(MixedModeArchetype.Versioned).Value = 999;
+            var versioned = mut.Read(MixedModeArchetype.Versioned);
+            versioned.Value = 999;
+            mut.Set(MixedModeArchetype.Versioned, versioned);
             t.Commit();
         }
 
@@ -739,7 +741,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
             // Open via implicit EntityLink → EntityId conversion
             var entity = t.Open(link);
             Assert.That(entity.IsValid, Is.True);
-            ref readonly var bag = ref entity.Read(CascadeBag.Bag);
+            var bag = entity.Read(CascadeBag.Bag);
             Assert.That(bag.Capacity, Is.EqualTo(42));
         }
     }
@@ -762,15 +764,16 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(link);
-            ref var bag = ref entity.Write(CascadeBag.Bag);
+            var bag = entity.Read(CascadeBag.Bag);
             bag.Capacity = 99;
+            entity.Set(CascadeBag.Bag, bag);
             t.Commit();
         }
 
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.Open(link);
-            ref readonly var bag = ref entity.Read(CascadeBag.Bag);
+            var bag = entity.Read(CascadeBag.Bag);
             Assert.That(bag.Capacity, Is.EqualTo(99));
         }
     }
@@ -854,11 +857,11 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
             Assert.That(entity.IsValid, Is.True);
 
             // Can read the base component through the entity
-            ref readonly var vehicleData = ref entity.Read(HVehicle.Vehicle);
+            var vehicleData = entity.Read(HVehicle.Vehicle);
             Assert.That(vehicleData.Speed, Is.EqualTo(250f));
 
             // Can also read derived components (entity is actually a HSportsCar)
-            ref readonly var sportsData = ref entity.Read(HSportsCar.Sports);
+            var sportsData = entity.Read(HSportsCar.Sports);
             Assert.That(sportsData.Turbo, Is.EqualTo(1.5f));
         }
     }
@@ -885,7 +888,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         {
             Assert.That(t.IsAlive(midLink), Is.True);
             var entity = t.Open(midLink);
-            ref readonly var carData = ref entity.Read(HCar.Car);
+            var carData = entity.Read(HCar.Car);
             Assert.That(carData.Doors, Is.EqualTo(4));
         }
     }
@@ -994,13 +997,13 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         var entity = t.Open(id);
 
         // Read using each level's Comp<T> handle
-        ref readonly var vr = ref entity.Read(HVehicle.Vehicle);
+        var vr = entity.Read(HVehicle.Vehicle);
         Assert.That(vr.Speed, Is.EqualTo(200f));
 
-        ref readonly var cr = ref entity.Read(HCar.Car);
+        var cr = entity.Read(HCar.Car);
         Assert.That(cr.Doors, Is.EqualTo(4));
 
-        ref readonly var sr = ref entity.Read(HSportsCar.Sports);
+        var sr = entity.Read(HSportsCar.Sports);
         Assert.That(sr.Turbo, Is.EqualTo(1.5f));
     }
 
@@ -1175,7 +1178,7 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         {
             var entity = t.Open(id);
             Assert.That(entity.IsEnabled(EcsUnit.Position), Is.True);
-            ref readonly var p = ref entity.Read(EcsUnit.Position);
+            var p = entity.Read(EcsUnit.Position);
             Assert.That(p.X, Is.EqualTo(10f));
             Assert.That(p.Y, Is.EqualTo(20f));
             Assert.That(p.Z, Is.EqualTo(30f));

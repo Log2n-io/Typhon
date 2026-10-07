@@ -203,7 +203,7 @@ public sealed class BulkLoadSession : IDisposable
     }
 
     /// <summary>
-    /// Bulk-update a component on an entity. Convenience for <c>OpenMut(entity).Write&lt;T&gt;()</c>.
+    /// Bulk-update a component on an entity. Convenience for <c>OpenMut(entity).Set(value)</c>.
     /// </summary>
     /// <typeparam name="T">Component type (must be <c>unmanaged</c> — blittable; matches engine convention).</typeparam>
     /// <param name="entity">Bulk-spawned entity id.</param>
@@ -214,7 +214,7 @@ public sealed class BulkLoadSession : IDisposable
         ThrowIfClosed();
         RecycleTransactionIfNeeded();
         var er = _currentTransaction.OpenMut(entity);
-        er.Write<T>() = value;
+        er.Set(in value);
         EntitiesUpdated++;
         _spawnsInCurrentTx++;
         ReleaseDirtyMarksIfNeeded();

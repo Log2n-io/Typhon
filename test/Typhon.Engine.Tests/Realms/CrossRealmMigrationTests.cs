@@ -5,12 +5,15 @@ using NUnit.Framework;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
+// ReSharper disable AccessToDisposedClosure
+
 namespace Typhon.Engine.Tests.Realms;
 
 /// <summary>
-/// Realms C4: an entity changes realm by writing its <c>[RealmKey]</c> — through the write barrier, <c>OpenMut</c> or <c>Teleport</c>. The write is
-/// validated at the call; the next fence moves the entity into the new realm's cell (a mandatory crossing, hysteresis or not); until then no realm's
-/// query returns it from the wrong frame; an invalid key written through a raw path is reverted at the fence, never thrown there (D-2).
+/// Realms C4: an entity changes realm by writing its <c>[RealmKey]</c> — through the write barrier, <c>OpenMut</c> + <c>Set</c> or <c>Teleport</c>.
+/// The write is validated at the call; the next fence moves the entity into the new realm's cell (a mandatory crossing, hysteresis or not); until then
+/// no realm's query returns it from the wrong frame; an invalid key written through a raw path (a cluster span) is reverted at the fence, never thrown
+/// there (D-2).
 /// </summary>
 [TestFixture]
 class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
@@ -63,6 +66,38 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
                     if (cluster.GetEntityId(slot) == id)
                     {
                         cluster.WriteSpatial(RealmUnit.Pos, slot, value);
+                        tx.Commit();
+                        return;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        Assert.Fail("entity not found");
+    }
+
+    /// <summary>The entity's key rewritten through the cluster's raw span — the one path no validation sees.</summary>
+    private static void RawKeyWriteOf(DatabaseEngine dbe, EntityId id, ushort realm)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var accessor = tx.For<RealmUnit>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    if (cluster.GetEntityId(slot) == id)
+                    {
+#pragma warning disable TYPHON009 // Deliberately around the barrier: the raw write is what the fence's revert exists for.
+                        cluster.GetSpan(RealmUnit.Pos)[slot].Realm = realm;
+#pragma warning restore TYPHON009
+                        cluster.MarkDirty(RealmUnit.Pos);
                         tx.Commit();
                         return;
                     }
@@ -167,8 +202,7 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
         var id = SpawnOne(dbe, At(5, 5, 0));
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx.OpenMut(id).Write(RealmUnit.Pos);
-            pos = At(40, 40, 2);
+            tx.OpenMut(id).Set(RealmUnit.Pos, At(40, 40, 2));
             tx.Commit();
         }
 
@@ -209,12 +243,7 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
         using var dbe = TwoRealms();
         var id = SpawnOne(dbe, At(5, 5, 0));
         var cs = StateOf(dbe);
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            ref var pos = ref tx.OpenMut(id).Write(RealmUnit.Pos);
-            pos.Realm = 1;   // unregistered: no pre-store check exists on a ref write
-            tx.Commit();
-        }
+        RawKeyWriteOf(dbe, id, 1);   // unregistered, through the raw span: nothing validates it; the fence reverts it
 
         Assert.DoesNotThrow(() => dbe.WriteTickFence(2));
         Assert.That(cs.LastTickRealmKeyReverts, Is.EqualTo(1));
@@ -302,22 +331,82 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
         Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2), "placed in realm 2 at commit — no fence needed, no phantom flag on cluster 0");
     }
 
+    /// <summary>A pending spawn's key changed through <c>Set</c> is validated too: refused at the call, and the spawn lands in its validated realm.</summary>
     [Test]
-    public void AnInvalidKeyWrittenIntoAPendingSpawn_IsPlacedInTheValidatedRealm()
+    [VerifiesRule("RM-05")]
+    public void ASetIntoAPendingSpawn_WithAnInvalidKey_Throws_AndTheSpawnKeepsItsRealm()
     {
         using var dbe = TwoRealms();
-        var cs = StateOf(dbe);
         EntityId id;
         using (var tx = dbe.CreateQuickTransaction())
         {
             id = tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(5, 5, 2)));
-            ref var pos = ref tx.OpenMut(id).Write(RealmUnit.Pos);
-            pos.Realm = 1;   // unregistered, written in place into the staged spawn
-            Assert.DoesNotThrow(() => tx.Commit());
+            var opened = tx.OpenMut(id);
+            var pos = opened.Read(RealmUnit.Pos);
+            pos.Realm = 1;
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(RealmUnit.Pos, pos), "an unregistered realm, refused at the call");
+            Assert.That(opened.Read(RealmUnit.Pos).Realm, Is.EqualTo(2), "nothing was stored");
+            tx.Commit();
         }
 
         Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2));
-        using var rtx = dbe.CreateQuickTransaction();
-        Assert.That(rtx.Open(id).Read(RealmUnit.Pos).Realm, Is.EqualTo(2), "the key is corrected to the realm it was placed in");
+    }
+
+    /// <summary>
+    /// D-2 kept a raw path for <c>Set</c> while it handed out a reference (#997). Since #1199 it takes the value, so it validates a realm change at the
+    /// call like <c>Teleport</c>: an invalid key throws in application code and nothing is stored, by handle and by type.
+    /// </summary>
+    [Test]
+    [VerifiesRule("RM-05")]
+    public void Set_IntoAnUnregisteredRealm_Throws_AtTheCall_AndStoresNothing()
+    {
+        using var dbe = TwoRealms();
+        var id = SpawnOne(dbe, At(5, 5, 0));
+        var cs = StateOf(dbe);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var target = tx.OpenMut(id);
+            var pos = target.Read(RealmUnit.Pos);
+            pos.Realm = 1;
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(RealmUnit.Pos, pos), "by handle");
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(in pos), "by type");
+            Assert.That(target.Read(RealmUnit.Pos).Realm, Is.EqualTo(0), "nothing was stored");
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+        Assert.That(cs.LastTickRealmKeyReverts, Is.Zero, "nothing reached the fence to revert");
+        Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void Set_RealmChange_ToANonFinitePosition_Throws_AtTheCall()
+    {
+        using var dbe = TwoRealms();
+        var id = SpawnOne(dbe, At(5, 5, 0));
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(RealmUnit.Pos, At(float.NaN, 5, 2)));
+        Assert.That(tx.Open(id).Read(RealmUnit.Pos).Realm, Is.EqualTo(0), "nothing was stored");
+    }
+
+    /// <summary>
+    /// A barrier-only archetype's fence runs no dirty scan. A realm change through <c>Set</c> is flagged as <c>Teleport</c> flags it, so the fence
+    /// still moves the entity — unflagged, it would stay in its old realm's cluster, hidden from every realm's queries.
+    /// </summary>
+    [Test]
+    [VerifiesRule("RM-05")]
+    public void Set_RealmChange_MovesABarrierOnlyArchetype_WhoseFenceRunsNoDirtyScan()
+    {
+        using var dbe = TwoRealms();
+        dbe.SetSpatialBarrierOnly<RealmUnit>();
+        var id = SpawnOne(dbe, At(5, 5, 0));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(RealmUnit.Pos, At(30, 30, 2));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+        Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2));
     }
 }

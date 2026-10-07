@@ -119,7 +119,10 @@ class DurableLsnAccessorTests : TestBase<DurableLsnAccessorTests>
         {
             foreach (var id in ckpt)
             {
-                tx.OpenMut(id).Write(DurLsnCkpt.Data).Value++;
+                var entity = tx.OpenMut(id);
+                var data = entity.Read(DurLsnCkpt.Data);
+                data.Value++;
+                entity.Set(DurLsnCkpt.Data, data);
             }
 
             tx.Commit();
@@ -185,7 +188,10 @@ class DurableLsnAccessorTests : TestBase<DurableLsnAccessorTests>
         {
             foreach (var id in ids)
             {
-                tx.OpenMut(id).Write(DurLsnWalled.Data).Value++;
+                var opened = tx.OpenMut(id);
+                var dataCopy = opened.Read(DurLsnWalled.Data);
+                dataCopy.Value++;
+                opened.Set(DurLsnWalled.Data, dataCopy);
             }
 
             tx.Commit();

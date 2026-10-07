@@ -83,7 +83,10 @@ class QueryChunkPlanTests : TestBase<QueryChunkPlanTests>
                 {
                     foreach (var id in ids)
                     {
-                        ctx.Transaction.OpenMut(id).Write(QcpUnit.Score).Value++;
+                        var target = ctx.Transaction.OpenMut(id);
+                        var score = target.Read(QcpUnit.Score);
+                        score.Value++;
+                        target.Set(QcpUnit.Score, score);
                     }
 
                     Interlocked.Increment(ref ticks);

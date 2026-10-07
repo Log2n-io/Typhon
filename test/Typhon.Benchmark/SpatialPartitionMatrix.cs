@@ -1231,8 +1231,10 @@ public static class SpatialPartitionMatrix
                                 continue;
                             }
 
-                            ref var p = ref tx.OpenMut(ids[i]).Write(comp);
+                            var opened = tx.OpenMut(ids[i]);
+                            var p = opened.Read(comp);
                             write(ref p, xs[i], ys[i], zs[i], halfExtent, i);
+                            opened.Set(comp, p);
                             spatialWritesApplied++;
                         }
                     }
@@ -2015,7 +2017,7 @@ public static class SpatialPartitionMatrix
                 var found = 0;
                 for (var i = 0; i < ids.Length; i++)
                 {
-                    ref readonly var p = ref tx.Open(ids[i]).Read(comp);
+                    var p = tx.Open(ids[i]).Read(comp);
                     var (x, y, z) = read(in p);
                     if (Math.Abs(x - cx) <= half && Math.Abs(y - cy) <= half && (dim == 2 || Math.Abs(z - cz) <= half))
                     {

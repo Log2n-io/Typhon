@@ -200,12 +200,14 @@ public sealed partial class SimBridge
                 var p = player.Read(Player.Bounds);
                 home.Add((p.X, p.Z));
                 party.Add(id);
-                ref var state = ref player.Write(Player.State);
+                var state = player.Read(Player.State);
                 state.Activity = PlayerActivity.Inside;
-                state.ActivityTicks = int.MaxValue / 2;   // PlayerThink leaves a dungeon party alone; Close sends it home
-                ref var motion = ref player.Write(Player.Move);
+                state.ActivityTicks = int.MaxValue / 2;
+                player.Set(Player.State, state);   // PlayerThink leaves a dungeon party alone; Close sends it home
+                var motion = player.Read(Player.Move);
                 motion.VelX = 0f;
                 motion.VelZ = 0f;
+                player.Set(Player.Move, motion);
                 var at = default(PlayerPlacement);
                 at.SetAt(c + ((party.Count % 5) - 2) * 2f, 6f, 0f, p.HalfExtent);
                 tx.Teleport(id, Player.Bounds, new RealmId(realm), in at);
@@ -237,9 +239,10 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                ref var state = ref player.Write(Player.State);
+                var state = player.Read(Player.State);
                 state.Activity = PlayerActivity.Idle;
                 state.ActivityTicks = 10 * _config.TickRateHz;
+                player.Set(Player.State, state);
                 var at = default(PlayerPlacement);
                 // Home is on the planet — the teleport below names RealmId.Default — so the ground is the planet's.
                 var home = dungeon.Home[i];

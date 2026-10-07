@@ -75,8 +75,10 @@ public class BaselineScenario : IScenario
 
                         // Pattern 3: Update the entity (credit the player's wallet)
                         sw = Stopwatch.GetTimestamp();
-                        ref var ww = ref t.OpenMut(entityId).Write(PlayerArch.Wallet);
+                        var target = t.OpenMut(entityId);
+                        var ww = target.Read(PlayerArch.Wallet);
                         ww.Credits = readWallet.Credits + rand.Next(1, 1000);
+                        target.Set(PlayerArch.Wallet, ww);
 
                         var committed = t.Commit();
                         if (committed)

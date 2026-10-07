@@ -286,7 +286,7 @@ internal sealed class WalFlushTargetTests
     {
         var log = (DurabilityLog)dbe.DurabilityLog;
         var failed = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
-        failed.OpenMut(id).Write(CmEntity.Position) = new CmPosition(99, 88);
+        failed.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));
 
         var committerThread = Environment.CurrentManagedThreadId;
         log.AfterFloorProbe = () =>

@@ -286,7 +286,9 @@ foreach (var cluster in clusters)
 
 // Or for an entity reached by id — a command's target:
 var target = ctx.Transaction.OpenMut(id);
-target.Write(Character.Ham).Health -= damage;
+var hamCopy = target.Read(Character.Ham);
+hamCopy.Health -= damage;
+target.Set(Character.Ham, hamCopy);
 ctx.Subscriptions.Replicate(in target);
 ```
 
@@ -351,8 +353,11 @@ internal sealed class CommandSystem : CallbackSystem
         foreach (ref readonly var move in subs.Commands<MoveTo>())
         {
             if (!_characters.TryGetValue(move.Session, out var me)) continue;
-            ctx.Transaction.OpenMut(me).Write(Character.Intent).Target =
+            var opened = ctx.Transaction.OpenMut(me);
+            var intent = opened.Read(Character.Intent);
+            intent.Target =
                 new Point2F { X = move.Value.X, Y = move.Value.Y };
+            opened.Set(Character.Intent, intent);
         }
 
         foreach (ref readonly var attack in subs.Commands<Attack>())
@@ -367,7 +372,9 @@ internal sealed class CommandSystem : CallbackSystem
             }
 
             var victim = ctx.Transaction.OpenMut(target);
-            victim.Write(Character.Ham).Health -= 10;
+            var ham = victim.Read(Character.Ham);
+            ham.Health -= 10;
+            victim.Set(Character.Ham, ham);
             subs.Replicate(in victim);
         }
     }

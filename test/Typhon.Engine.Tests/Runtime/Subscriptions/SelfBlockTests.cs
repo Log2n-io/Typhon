@@ -58,7 +58,8 @@ unsafe class SelfBlockTests : TestBase<SelfBlockTests>
     private static void SetWallet(DatabaseEngine dbe, EntityId entity, long? credits = null, int? items = null)
     {
         using var tx = dbe.CreateQuickTransaction();
-        ref var wallet = ref tx.OpenMut(entity).Write(ProjPlayer.Wallet);
+        var target = tx.OpenMut(entity);
+        var wallet = target.Read(ProjPlayer.Wallet);
         if (credits is { } c)
         {
             wallet.Credits = c;
@@ -68,6 +69,7 @@ unsafe class SelfBlockTests : TestBase<SelfBlockTests>
         {
             wallet.ItemCount = i;
         }
+        target.Set(ProjPlayer.Wallet, wallet);
 
         tx.Commit();
     }

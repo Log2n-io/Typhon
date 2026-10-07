@@ -140,8 +140,10 @@ internal sealed class AppendBeforePublishTests
         using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
         {
             using var tx = uow.CreateTransaction();
-            ref var w = ref tx.OpenMut(id).Write(CompAArch.A);
+            var target = tx.OpenMut(id);
+            var w = target.Read(CompAArch.A);
             w = new CompA(42);
+            target.Set(CompAArch.A, w);
             tx.Commit();
             uow.Flush();
         }
@@ -218,8 +220,10 @@ internal sealed class AppendBeforePublishTests
             for (int i = 1; i <= n; i++)
             {
                 using var tx = uow.CreateTransaction();
-                ref var w = ref tx.OpenMut(id).Write(CompAArch.A);
+                var opened = tx.OpenMut(id);
+                var w = opened.Read(CompAArch.A);
                 w = new CompA(i);
+                opened.Set(CompAArch.A, w);
                 tx.Commit();
             }
 

@@ -45,7 +45,10 @@ reader.OpenRead(unit, Unit.Health);
 for (var i = 0; i < 50; i++)
 {
     using var writer = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
-    writer.OpenMut(unit).Write(Unit.Health).Current -= 1;
+    var entity = writer.OpenMut(unit);
+    var health = entity.Read(Unit.Health);
+    health.Current -= 1;
+    entity.Set(Unit.Health, health);
     writer.Commit();                    // each commit queues cleanup, blocked by `reader`
 }
 

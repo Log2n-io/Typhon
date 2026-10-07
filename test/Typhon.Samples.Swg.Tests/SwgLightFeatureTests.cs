@@ -152,7 +152,10 @@ public sealed class SwgLightFeatureTests
         // A committed write sticks.
         using (var tx = _engine.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(Character.Wallet).Credits += 40;
+            var entity = tx.OpenMut(id);
+            var wallet = entity.Read(Character.Wallet);
+            wallet.Credits += 40;
+            entity.Set(Character.Wallet, wallet);
             Assert.That(tx.Commit(), Is.True);
         }
         using (var tx = _engine.CreateQuickTransaction())
@@ -163,7 +166,10 @@ public sealed class SwgLightFeatureTests
         // A rolled-back write does not.
         using (var tx = _engine.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(Character.Wallet).Credits += 5000;
+            var target = tx.OpenMut(id);
+            var walletCopy = target.Read(Character.Wallet);
+            walletCopy.Credits += 5000;
+            target.Set(Character.Wallet, walletCopy);
             tx.Rollback();
         }
         using (var tx = _engine.CreateQuickTransaction())

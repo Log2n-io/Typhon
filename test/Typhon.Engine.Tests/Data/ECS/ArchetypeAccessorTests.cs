@@ -108,10 +108,10 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var entity = accessor.Open(id);
 
         Assert.That(entity.IsValid, Is.True);
-        ref readonly var p = ref entity.Read(SvUnit.Position);
+        var p = entity.Read(SvUnit.Position);
         Assert.That(p.X, Is.EqualTo(10f));
         Assert.That(p.Y, Is.EqualTo(20f));
-        ref readonly var v = ref entity.Read(SvUnit.Velocity);
+        var v = entity.Read(SvUnit.Velocity);
         Assert.That(v.Dx, Is.EqualTo(1f));
         Assert.That(v.Dy, Is.EqualTo(2f));
         accessor.Dispose();
@@ -137,7 +137,7 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         {
             var entity = accessor.Open(ids[i]);
             Assert.That(entity.IsValid, Is.True);
-            ref readonly var p = ref entity.Read(SvUnit.Position);
+            var p = entity.Read(SvUnit.Position);
             Assert.That(p.X, Is.EqualTo((float)i));
         }
         accessor.Dispose();
@@ -182,16 +182,17 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using var writeTx = dbe.CreateQuickTransaction();
         var accessor = writeTx.For<SvUnit>();
         var entity = accessor.OpenMut(id);
-        ref var wp = ref entity.Write(SvUnit.Position);
+        var wp = entity.Read(SvUnit.Position);
         wp.X = 99f;
         wp.Y = 88f;
+        entity.Set(SvUnit.Position, wp);
         accessor.Dispose();
         writeTx.Commit();
 
         // Verify
         using var verifyTx = dbe.CreateQuickTransaction();
         var va = verifyTx.For<SvUnit>();
-        ref readonly var vp = ref va.Open(id).Read(SvUnit.Position);
+        var vp = va.Open(id).Read(SvUnit.Position);
         Assert.That(vp.X, Is.EqualTo(99f));
         Assert.That(vp.Y, Is.EqualTo(88f));
         va.Dispose();
@@ -211,17 +212,18 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using var moveTx = dbe.CreateQuickTransaction();
         var accessor = moveTx.For<SvUnit>();
         var entity = accessor.OpenMut(id);
-        ref var p = ref entity.Write(SvUnit.Position);
-        ref readonly var v = ref entity.Read(SvUnit.Velocity);
+        var p = entity.Read(SvUnit.Position);
+        var v = entity.Read(SvUnit.Velocity);
         p.X += v.Dx;
         p.Y += v.Dy;
+        entity.Set(SvUnit.Position, p);
         accessor.Dispose();
         moveTx.Commit();
 
         // Verify: (100+5, 200-3) = (105, 197)
         using var verifyTx = dbe.CreateQuickTransaction();
         var va = verifyTx.For<SvUnit>();
-        ref readonly var result = ref va.Open(id).Read(SvUnit.Position);
+        var result = va.Open(id).Read(SvUnit.Position);
         Assert.That(result.X, Is.EqualTo(105f));
         Assert.That(result.Y, Is.EqualTo(197f));
         va.Dispose();
@@ -244,7 +246,7 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var accessor = readTx.For<VUnit>();
         var entity = accessor.Open(id);
         Assert.That(entity.IsValid, Is.True);
-        ref readonly var s = ref entity.Read(VUnit.Stats);
+        var s = entity.Read(VUnit.Stats);
         Assert.That(s.Health, Is.EqualTo(100));
         Assert.That(s.MaxHealth, Is.EqualTo(100));
         accessor.Dispose();
@@ -285,7 +287,10 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using (var writeTx = dbe.CreateQuickTransaction())
         {
             var accessor = writeTx.For<MixedUnit>();
-            accessor.OpenMut(id).Write(MixedUnit.Data).Score = 99;
+            var target = accessor.OpenMut(id);
+            var dataCopy = target.Read(MixedUnit.Data);
+            dataCopy.Score = 99;
+            target.Set(MixedUnit.Data, dataCopy);
             accessor.Dispose();
             writeTx.Commit();
         }
@@ -311,15 +316,16 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using var writeTx = dbe.CreateQuickTransaction();
         var accessor = writeTx.For<VUnit>();
         var entity = accessor.OpenMut(id);
-        ref var ws = ref entity.Write(VUnit.Stats);
+        var ws = entity.Read(VUnit.Stats);
         ws.Health = 42;
+        entity.Set(VUnit.Stats, ws);
         accessor.Dispose();
         writeTx.Commit();
 
         // Verify the Versioned write persisted
         using var verifyTx = dbe.CreateQuickTransaction();
         var va = verifyTx.For<VUnit>();
-        ref readonly var result = ref va.Open(id).Read(VUnit.Stats);
+        var result = va.Open(id).Read(VUnit.Stats);
         Assert.That(result.Health, Is.EqualTo(42));
         Assert.That(result.MaxHealth, Is.EqualTo(100)); // untouched field
         va.Dispose();
@@ -344,8 +350,9 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         for (int i = 0; i < ids.Length; i++)
         {
             var entity = accessor.OpenMut(ids[i]);
-            ref var ws = ref entity.Write(VUnit.Stats);
+            var ws = entity.Read(VUnit.Stats);
             ws.Health = i * 10;
+            entity.Set(VUnit.Stats, ws);
         }
         accessor.Dispose();
         writeTx.Commit();
@@ -355,7 +362,7 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var va = verifyTx.For<VUnit>();
         for (int i = 0; i < ids.Length; i++)
         {
-            ref readonly var result = ref va.Open(ids[i]).Read(VUnit.Stats);
+            var result = va.Open(ids[i]).Read(VUnit.Stats);
             Assert.That(result.Health, Is.EqualTo(i * 10), $"Entity {i}");
             Assert.That(result.MaxHealth, Is.EqualTo(1000), $"Entity {i} MaxHealth");
         }
@@ -381,9 +388,9 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         var entity = accessor.Open(id);
         Assert.That(entity.IsValid, Is.True);
 
-        ref readonly var p = ref entity.Read(MixedUnit.Position);
+        var p = entity.Read(MixedUnit.Position);
         Assert.That(p.X, Is.EqualTo(5f));
-        ref readonly var d = ref entity.Read(MixedUnit.Data);
+        var d = entity.Read(MixedUnit.Data);
         Assert.That(d.Score, Is.EqualTo(42));
         accessor.Dispose();
     }
@@ -402,11 +409,13 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using var writeTx = dbe.CreateQuickTransaction();
         var accessor = writeTx.For<MixedUnit>();
         var entity = accessor.OpenMut(id);
-        ref var wp = ref entity.Write(MixedUnit.Position);
+        var wp = entity.Read(MixedUnit.Position);
         wp.X = 77f;
         wp.Y = 33f;
-        ref var wd = ref entity.Write(MixedUnit.Data);
+        entity.Set(MixedUnit.Position, wp);
+        var wd = entity.Read(MixedUnit.Data);
         wd.Score = 999;
+        entity.Set(MixedUnit.Data, wd);
         accessor.Dispose();
         writeTx.Commit();
 
@@ -414,10 +423,10 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         using var verifyTx = dbe.CreateQuickTransaction();
         var va = verifyTx.For<MixedUnit>();
         var ve = va.Open(id);
-        ref readonly var vp = ref ve.Read(MixedUnit.Position);
+        var vp = ve.Read(MixedUnit.Position);
         Assert.That(vp.X, Is.EqualTo(77f));
         Assert.That(vp.Y, Is.EqualTo(33f));
-        ref readonly var vd = ref ve.Read(MixedUnit.Data);
+        var vd = ve.Read(MixedUnit.Data);
         Assert.That(vd.Score, Is.EqualTo(999));
         va.Dispose();
     }
@@ -439,15 +448,15 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
         // Read via standard path
         using var stdTx = dbe.CreateQuickTransaction();
         var stdEntity = stdTx.Open(id);
-        ref readonly var stdPos = ref stdEntity.Read(SvUnit.Position);
-        ref readonly var stdVel = ref stdEntity.Read(SvUnit.Velocity);
+        var stdPos = stdEntity.Read(SvUnit.Position);
+        var stdVel = stdEntity.Read(SvUnit.Velocity);
 
         // Read via ArchetypeAccessor
         using var aaTx = dbe.CreateQuickTransaction();
         var aa = aaTx.For<SvUnit>();
         var aaEntity = aa.Open(id);
-        ref readonly var aaPos = ref aaEntity.Read(SvUnit.Position);
-        ref readonly var aaVel = ref aaEntity.Read(SvUnit.Velocity);
+        var aaPos = aaEntity.Read(SvUnit.Position);
+        var aaVel = aaEntity.Read(SvUnit.Velocity);
 
         // Must be identical
         Assert.That(aaPos.X, Is.EqualTo(stdPos.X));
@@ -468,12 +477,12 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
 
         // Read via standard path
         using var stdTx = dbe.CreateQuickTransaction();
-        ref readonly var stdStats = ref stdTx.Open(id).Read(VUnit.Stats);
+        var stdStats = stdTx.Open(id).Read(VUnit.Stats);
 
         // Read via ArchetypeAccessor
         using var aaTx = dbe.CreateQuickTransaction();
         var aa = aaTx.For<VUnit>();
-        ref readonly var aaStats = ref aa.Open(id).Read(VUnit.Stats);
+        var aaStats = aa.Open(id).Read(VUnit.Stats);
 
         Assert.That(aaStats.Health, Is.EqualTo(stdStats.Health));
         Assert.That(aaStats.MaxHealth, Is.EqualTo(stdStats.MaxHealth));

@@ -121,8 +121,10 @@ internal sealed class LifecycleChurnWorkload : IRecoveryWorkload
             {
                 if (rand.Next(2) == 0)
                 {
-                    ref var w = ref tx.OpenMut(id).Write(CompABArch.A);
+                    var target = tx.OpenMut(id);
+                    var w = target.Read(CompABArch.A);
                     w = new CompA(rand.Next(), (float)rand.NextDouble(), rand.NextDouble());
+                    target.Set(CompABArch.A, w);
                 }
             }
 
@@ -364,7 +366,10 @@ internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
         {
             foreach (var id in ids)
             {
-                tx.OpenMut(id).Write(MixArch.A).X = unchecked((int)0xBADBAD);
+                var opened = tx.OpenMut(id);
+                var aCopy = opened.Read(MixArch.A);
+                aCopy.X = unchecked((int)0xBADBAD);
+                opened.Set(MixArch.A, aCopy);
             }
 
             tx.Commit();
@@ -376,8 +381,12 @@ internal sealed class MixedDisciplineWorkload : IRecoveryWorkload
             for (int i = 0; i < ids.Count; i++)
             {
                 var e = tx.OpenMut(ids[i]);
-                e.Write(MixArch.A).X = i + 1_000;
-                e.Write(MixArch.B).Y = i + 2_000;
+                var a2 = e.Read(MixArch.A);
+                a2.X = i + 1_000;
+                e.Set(MixArch.A, a2);
+                var bCopy = e.Read(MixArch.B);
+                bCopy.Y = i + 2_000;
+                e.Set(MixArch.B, bCopy);
             }
 
             tx.Commit();
@@ -463,13 +472,13 @@ internal static class ShapeOps
         switch (shape)
         {
             case PostRecoveryShape.Flat:
-                tx.OpenMut(id).Write(CompAArch.A) = new CompA(k + 1, k, k);
+                tx.OpenMut(id).Set(CompAArch.A, new CompA(k + 1, k, k));
                 break;
             case PostRecoveryShape.FlatIndexed:
-                tx.OpenMut(id).Write(CompDArch.D) = new CompD(k * 1.5f, k * 100, k * 2.5);
+                tx.OpenMut(id).Set(CompDArch.D, new CompD(k * 1.5f, k * 100, k * 2.5));
                 break;
             case PostRecoveryShape.ClusterSv:
-                tx.OpenMut(id).Write(SvIndexedArch.S) = new SvIndexed(k * 7, k);
+                tx.OpenMut(id).Set(SvIndexedArch.S, new SvIndexed(k * 7, k));
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(shape), shape, "unhandled shape");

@@ -39,7 +39,8 @@ public class InputDrain : CallbackSystem
     {
         // Drain network command queues, write results into components via ctx.Transaction.
         var entity = ctx.Transaction.OpenMut(someEntityId);
-        ref var cmd = ref entity.Write<PendingCommand>();
+        var cmd = entity.Read<PendingCommand>();
+        entity.Set<PendingCommand>(cmd);
         // ...
     }
 }

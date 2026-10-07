@@ -530,17 +530,19 @@ public unsafe partial class Transaction : EntityAccessor
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Creates a mutable accessor over a <see cref="ComponentCollection{T}"/> field, bound to this transaction's <see cref="ChangeSet"/> so edits are tracked
-    /// for commit/rollback.
+    /// Creates a mutable accessor over a <see cref="ComponentCollection{T}"/> field of a component value that is not stored yet — one being built for a
+    /// spawn — or to read one back; bound to this transaction's <see cref="ChangeSet"/> so edits are tracked for commit/rollback.
     /// </summary>
+    /// <remarks>
+    /// To change the collection of a component an entity already holds, use <see cref="EntityRefMut.CreateComponentCollectionAccessor{T, TElem}"/>: on a
+    /// Versioned component it creates the new revision first, so the buffer the committed revision points to is cloned rather than edited in place.
+    /// Through this method, a copy read from a Versioned component would edit that buffer in place (#1199).
+    /// </remarks>
     /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
     /// <param name="field">Reference to the collection field to wrap.</param>
     /// <returns>A mutable accessor over the collection's backing buffer.</returns>
-    public ComponentCollectionAccessor<T> CreateComponentCollectionAccessor<T>(ref ComponentCollection<T> field) where T : unmanaged
-    {
-        AssertThreadAffinity();
-        return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
-    }
+    public ComponentCollectionAccessor<T> CreateComponentCollectionAccessor<T>(ref ComponentCollection<T> field) where T : unmanaged =>
+        CreateComponentCollectionAccessorCore(ref field);
 
     /// <summary>
     /// Returns a read-only enumerator that streams the elements of a <see cref="ComponentCollection{T}"/> field without allocating.
@@ -1201,7 +1203,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <para>
     /// For <see cref="StorageMode.SingleVersion"/> there is no revision chain to walk (<c>ComponentTable</c> allocates
     /// <c>CompRevTableSegment</c> only for Versioned), so the read goes through <see cref="EntityAccessor.TryOpen"/> +
-    /// <see cref="EntityRef.TryRead{T}"/>, which resolve the cluster-or-flat slot location and apply
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>, which resolve the cluster-or-flat slot location and apply
     /// BornTSN/DiedTSN visibility. Before issue #623 this method assumed the Versioned layout unconditionally and threw a
     /// bare <see cref="NullReferenceException"/> from the chain walker on any SingleVersion component — which is what made
     /// FK navigation unusable on the storage mode the engine steers hot ECS data toward.
@@ -1276,8 +1278,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         var entityId = Unsafe.As<long, EntityId>(ref pk);
         var entity = OpenMut(entityId);
-        ref var target = ref entity.Write<T>();
-        target = comp;
+        entity.Set(in comp);
         return true;
     }
 

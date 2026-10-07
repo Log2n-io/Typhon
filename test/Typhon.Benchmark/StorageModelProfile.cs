@@ -376,8 +376,8 @@ internal static class StorageModelProfile
                 for (var i = 0; i < N; i++)
                 {
                     var e = tx.OpenMut(ids[i]);
-                    e.Write(SmMixed2V.A) = new SmA(i + 1, i + 1);
-                    e.Write(SmMixed2V.C) = new SmC(i + 1, i + 1, i + 1, i + 1);
+                    e.Set(SmMixed2V.A, new SmA(i + 1, i + 1));
+                    e.Set(SmMixed2V.C, new SmC(i + 1, i + 1, i + 1, i + 1));
                 }
 
                 tx.Commit();
@@ -453,7 +453,7 @@ internal static class StorageModelProfile
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < OpCount; i++)
             {
-                tx.OpenMut(pureIds[i]).Write(SmPureV.Health) = new SmHealth(round, 100);
+                tx.OpenMut(pureIds[i]).Set(SmPureV.Health, new SmHealth(round, 100));
             }
 
             tx.Commit();
@@ -467,7 +467,7 @@ internal static class StorageModelProfile
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < OpCount; i++)
             {
-                tx.OpenMut(idxIds[i]).Write(SmPureVIdx.Ranked) = new SmRanked(i % 8, round);
+                tx.OpenMut(idxIds[i]).Set(SmPureVIdx.Ranked, new SmRanked(i % 8, round));
             }
 
             tx.Commit();
@@ -481,7 +481,7 @@ internal static class StorageModelProfile
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < OpCount; i++)
             {
-                tx.OpenMut(idxIds[i]).Write(SmPureVIdx.Ranked) = new SmRanked((i + round) % 8, round);
+                tx.OpenMut(idxIds[i]).Set(SmPureVIdx.Ranked, new SmRanked((i + round) % 8, round));
             }
 
             tx.Commit();
@@ -494,7 +494,7 @@ internal static class StorageModelProfile
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < OpCount; i++)
             {
-                tx.OpenMut(mixedIds[i]).Write(SmMixed.Ranked) = new SmRanked(i % 8, round);
+                tx.OpenMut(mixedIds[i]).Set(SmMixed.Ranked, new SmRanked(i % 8, round));
             }
 
             tx.Commit();
@@ -513,7 +513,7 @@ internal static class StorageModelProfile
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < OpCount; i++)
             {
-                tx.OpenMut(pure3Ids[i]).Write(SmPureV3.A) = new SmA(round, i);
+                tx.OpenMut(pure3Ids[i]).Set(SmPureV3.A, new SmA(round, i));
             }
 
             tx.Commit();
@@ -527,9 +527,9 @@ internal static class StorageModelProfile
             for (var i = 0; i < OpCount; i++)
             {
                 var e = tx.OpenMut(pure3Ids[i]);
-                e.Write(SmPureV3.A) = new SmA(round, i);
-                e.Write(SmPureV3.B) = new SmB(round);
-                e.Write(SmPureV3.C) = new SmC(round, i, round, i);
+                e.Set(SmPureV3.A, new SmA(round, i));
+                e.Set(SmPureV3.B, new SmB(round));
+                e.Set(SmPureV3.C, new SmC(round, i, round, i));
             }
 
             tx.Commit();

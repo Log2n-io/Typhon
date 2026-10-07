@@ -125,9 +125,10 @@ public class ComponentTableBenchmarks
     {
         using var t = _dbe.CreateQuickTransaction();
         var entity = t.OpenMut(_entityIds[0]);
-        ref var comp = ref entity.Write(DataBenchArch.Data);
+        var comp = entity.Read(DataBenchArch.Data);
         comp.Value = 9999;
         comp.Timestamp = DateTime.UtcNow.Ticks;
+        entity.Set(DataBenchArch.Data, comp);
         t.Commit();
     }
 }

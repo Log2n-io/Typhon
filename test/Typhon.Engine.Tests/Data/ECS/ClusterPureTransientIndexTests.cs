@@ -185,7 +185,7 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
         // 999 is far outside [10, 13] — the spawn-time zone map prunes the whole cluster unless the fence recomputed it.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[2]).Write(PtIdxArch.Runtime) = new PtIdxRuntime(999, 1);
+            tx.OpenMut(ids[2]).Set(PtIdxArch.Runtime, new PtIdxRuntime(999, 1));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -224,7 +224,7 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(moved).Write(PtIdxArch.Runtime) = new PtIdxRuntime(42, 2);
+            tx.OpenMut(moved).Set(PtIdxArch.Runtime, new PtIdxRuntime(42, 2));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

@@ -10,7 +10,7 @@ description: 'An archetype is the fixed shape of an entity — the set of compon
 
 An archetype is declared once as a `sealed partial class Unit : Archetype<Unit>` marked `[Archetype]`. Its identity is the CLR type name (or `[Archetype(Name="...")]`); it self-registers at assembly load, and the engine auto-assigns a per-process catalog id and a persisted per-DB routing id — no numeric id is author-set. Each `Register<T>()` declares a component slot and yields a static `Comp<T>` handle (`Unit.Position`) — the compile-time key you use to spawn, read, and query that component.
 
-Marking the class **`partial`** lets Typhon's source generator add typed bulk accessors (`Unit.ReadAll` / `ReadWriteAll`). Archetypes can also inherit (`Archetype<TSelf, TParent>`) to share a common component prefix. An [entity](xref:concept-entity) is one instance of an archetype.
+Marking the class **`partial`** lets Typhon's source generator add typed bulk accessors (`Unit.ReadAll` / `WriteAll`). Archetypes can also inherit (`Archetype<TSelf, TParent>`) to share a common component prefix. An [entity](xref:concept-entity) is one instance of an archetype.
 
 ## How it relates
 

@@ -319,8 +319,10 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
                 {
                     for (var i = 0; i < 16 && i < live.Count; i++)
                     {
-                        ref var comp = ref tx.OpenMut(live[i]).Write(EwUnit.C);
+                        var entity = tx.OpenMut(live[i]);
+                        var comp = entity.Read(EwUnit.C);
                         comp.Key = 500_000 + n * 512 + i;
+                        entity.Set(EwUnit.C, comp);
                     }
 
                     if (live.Count > 32)

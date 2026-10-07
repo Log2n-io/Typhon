@@ -21,13 +21,16 @@ common short case.
 ## ⚙️ How it works (in brief)
 
 A `ComponentCollection<T>` field is 4 bytes — a buffer id, nothing else. The elements live in a separate pool, shared
-by every `ComponentCollection<T>` field across every archetype that uses that element type `T`. Mutation goes through
-`Transaction.CreateComponentCollectionAccessor` (append-only `Add`, plus `ElementCount`/`GetAllElements` for bulk
-read); read-only iteration goes through `Transaction.GetReadOnlyCollectionEnumerator` (cheap `foreach`, no write
-intent). On a `SingleVersion` component the buffer is owned in place by the one committed slot, mutated directly. On
+by every `ComponentCollection<T>` field across every archetype that uses that element type `T`. A stored component's
+collection is changed through `EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy, ref copy.Field)` on a copy
+read from the handle; on dispose the accessor stores the buffer it ended on into the component, so no `Set` is needed for
+the collection. A value not stored yet (one being built for a spawn) and bulk reads go
+through `Transaction.CreateComponentCollectionAccessor` (append-only `Add`, plus `ElementCount`/`GetAllElements`).
+Read-only iteration goes through `Transaction.GetReadOnlyCollectionEnumerator` (cheap `foreach`, no write intent). On a `SingleVersion` component the buffer is owned in place by the one committed slot, mutated directly. On
 a `Versioned` component an overwrite duplicates the buffer id into the new revision and bumps a reference count; the
 first mutation through that still-shared buffer clones it (copy-on-write), so an older MVCC snapshot keeps observing
-the contents it originally read. `T` must be `unmanaged` — the same blittability constraint as a component field.
+the contents it originally read. The handle's accessor creates the new revision before it hands out the accessor:
+that is what makes the buffer shared, so the clone happens (#1199). `T` must be `unmanaged` — the same blittability constraint as a component field.
 
 ## 💻 Usage
 
@@ -44,17 +47,33 @@ public struct Waypoint   // plain struct, not an archetype — no identity, no i
     public float Speed;
 }
 
-// Append elements
-EntityRefMut path = tx.OpenMut(pathId);
-ref PathData data = ref path.Write<PathData>();
-using (var cca = tx.CreateComponentCollectionAccessor(ref data.Waypoints))
+[Archetype]
+partial class Path : Archetype<Path>
 {
-    cca.Add(new Waypoint { Position = p0, Speed = 4.5f });
-    cca.Add(new Waypoint { Position = p1, Speed = 3.0f });
+    public static readonly Comp<PathData> Data = Register<PathData>();
 }
 
+// Build the collection of a new value, then spawn it
+var fresh = new PathData { TotalLength = 0 };
+using (var cca = tx.CreateComponentCollectionAccessor(ref fresh.Waypoints))
+{
+    cca.Add(new Waypoint { Position = p0, Speed = 4.5f });
+}
+EntityId pathId = tx.Spawn<Path>(Path.Data.Set(in fresh));
+
+// Append to a stored component: through the handle — disposing the accessor stores the collection
+EntityRefMut path = tx.OpenMut(pathId);
+PathData data = path.Read(Path.Data);
+using (var cca = path.CreateComponentCollectionAccessor(Path.Data, ref data, ref data.Waypoints))
+{
+    cca.Add(new Waypoint { Position = p1, Speed = 3.0f });
+}
+// Changing another field too? Set the copy afterwards — it carries the same buffer.
+data.TotalLength += Vector3.Distance(p0, p1);
+path.Set(Path.Data, data);
+
 // Bulk read
-var read = tx.Open(pathId).Read<PathData>();
+var read = tx.Open(pathId).Read(Path.Data);
 using var cca2 = tx.CreateComponentCollectionAccessor(ref read.Waypoints);
 Span<Waypoint> all = stackalloc Waypoint[cca2.ElementCount];
 cca2.GetAllElements(all);
@@ -79,6 +98,9 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
   leaving an orphaned buffer with nothing to reference it.
 - Public API is append-and-bulk-read (`Add`, `GetAllElements`, the read-only enumerator) — no per-element
   remove/replace through `ComponentCollectionAccessor<T>`.
+- Change a stored component's collection through the handle, never through `Transaction.CreateComponentCollectionAccessor`
+  on a copy: on a `Versioned` component the transaction's accessor would edit, in place, the buffer the committed
+  revision still points to, and an older snapshot would see the change.
 - Insertion order is preserved; there is no secondary index over collection contents — finding "the entity whose
   collection contains X" requires an application-level scan, not a query.
 - **Crash safety:** collection content is WAL-logged at commit alongside the component value — durability follows
@@ -88,13 +110,14 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
 
 ## 🧪 Tests
 
-- [ComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — `Versioned` create/read/update, reference-count bump, copy-on-write clone on shared-buffer mutation, destroy frees the buffer
+- [ComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — `Versioned` create/read/update, reference-count bump, copy-on-write clone on shared-buffer mutation, an older snapshot unaffected by a handle-made change, destroy frees the buffer
 - [SvComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SvComponentCollectionTests.cs) — `SingleVersion` in-place update (no new buffer), migrate/rollback buffer lifecycle, registering one on `Transient` throws
 - [ClusterComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterComponentCollectionTests.cs) — collection field on a clustered `Versioned` archetype: spawn/update/migrate/destroy
 
 ## 🔗 Related
 
 - Source: `src/Typhon.Engine/Ecs/public/ComponentCollection.cs` (`ComponentCollectionAccessor<T>`),
+  `src/Typhon.Engine/Ecs/public/EntityRefMut.cs` (`CreateComponentCollectionAccessor`),
   `src/Typhon.Engine/Transactions/public/Transaction.cs` (`CreateComponentCollectionAccessor`, `GetReadOnlyCollectionEnumerator`)
 - Related features: [Entity Relationships](./entity-relationships.md)
 

@@ -230,7 +230,7 @@ class ClusterViewPopulationTests : TestBase<ClusterViewPopulationTests>
         {
             for (var i = 0; i < ids.Length; i++)
             {
-                tx3.OpenMut(ids[i]).Write(VpSvArch.Item) = new VpSvItem(100 + i, i + 1000);
+                tx3.OpenMut(ids[i]).Set(VpSvArch.Item, new VpSvItem(100 + i, i + 1000));
             }
             tx3.Commit();
         }
@@ -299,7 +299,7 @@ class ClusterViewPopulationTests : TestBase<ClusterViewPopulationTests>
         // OUT → IN
         using (var tx3 = dbe.CreateQuickTransaction())
         {
-            tx3.OpenMut(mover).Write(VpSvArch.Item) = new VpSvItem(99, 0);
+            tx3.OpenMut(mover).Set(VpSvArch.Item, new VpSvItem(99, 0));
             tx3.Commit();
         }
         dbe.WriteTickFence(2);
@@ -314,7 +314,7 @@ class ClusterViewPopulationTests : TestBase<ClusterViewPopulationTests>
         // IN → OUT
         using (var tx5 = dbe.CreateQuickTransaction())
         {
-            tx5.OpenMut(mover).Write(VpSvArch.Item) = new VpSvItem(0, 0);
+            tx5.OpenMut(mover).Set(VpSvArch.Item, new VpSvItem(0, 0));
             tx5.Commit();
         }
         dbe.WriteTickFence(3);

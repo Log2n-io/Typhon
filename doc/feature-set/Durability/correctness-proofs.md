@@ -44,7 +44,9 @@ error handling:
 using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
 using var tx = uow.CreateTransaction();
 var trade = tx.OpenMut(tradeId);
-trade.Write(Trade.Status).Current = TradeStatus.Settled;
+var status = trade.Read(Trade.Status);
+status.Current = TradeStatus.Settled;
+trade.Set(Trade.Status, status);
 
 try
 {

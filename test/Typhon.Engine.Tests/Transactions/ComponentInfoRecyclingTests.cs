@@ -132,14 +132,20 @@ class ComponentInfoRecyclingTests : TestBase<ComponentInfoRecyclingTests>
         // Committed: 10.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.For<RecycleArch>().OpenMut(id).Write(RecycleArch.Ver).Value = 10;
+            var target = tx.For<RecycleArch>().OpenMut(id);
+            var verCopy = target.Read(RecycleArch.Ver);
+            verCopy.Value = 10;
+            target.Set(RecycleArch.Ver, verCopy);
             tx.Commit();
         }
 
         // Written and rolled back: 99 lives only in that transaction's revision cache.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.For<RecycleArch>().OpenMut(id).Write(RecycleArch.Ver).Value = 99;
+            var opened = tx.For<RecycleArch>().OpenMut(id);
+            var ver = opened.Read(RecycleArch.Ver);
+            ver.Value = 99;
+            opened.Set(RecycleArch.Ver, ver);
             tx.Rollback();
         }
 

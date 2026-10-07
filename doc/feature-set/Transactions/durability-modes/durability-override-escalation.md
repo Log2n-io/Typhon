@@ -43,8 +43,10 @@ foreach (var mob in npcs)
 // One critical operation mid-batch — escalate via its own UoW
 using (var drop = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
 {
-    ref var inv = ref drop.OpenMut(playerId).Write(Player.Inventory);
+    var entity = drop.OpenMut(playerId);
+    var inv = entity.Read(Player.Inventory);
     inv.Add(legendaryItem);
+    entity.Set(Player.Inventory, inv);
     drop.Commit();                // ~15-85µs — durable on return, independent of `uow`'s mode
 }
 
@@ -56,8 +58,10 @@ await uow.FlushAsync();           // flush the remaining buffered batch
 void GrantRareDrop(ref TickContext ctx, EntityId playerId, ItemId item)
 {
     using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate);
-    ref var inv = ref side.OpenMut(playerId).Write(Player.Inventory);
+    var entity = side.OpenMut(playerId);
+    var inv = entity.Read(Player.Inventory);
     inv.Add(item);
+    entity.Set(Player.Inventory, inv);
     side.Commit();
 }
 ```

@@ -38,8 +38,10 @@ void RebaseDelta(ref ConcurrencyConflictSolver solver)
 
 using var t = dbe.CreateQuickTransaction();
 t.Open(playerId).Read(GoldArch.Gold);
-ref var w = ref t.OpenMut(playerId).Write(GoldArch.Gold);
-w.Amount -= 10;                 // spend 10 gold
+var entity = t.OpenMut(playerId);
+var w = entity.Read(GoldArch.Gold);
+w.Amount -= 10;
+entity.Set(GoldArch.Gold, w);                 // spend 10 gold
 
 t.Commit(RebaseDelta);          // conflicting writers rebase instead of clobbering each other
 ```

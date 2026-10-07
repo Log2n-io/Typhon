@@ -296,7 +296,7 @@ public unsafe partial class Transaction
     /// and persisted as <c>ArchetypeR1.RoutingId</c>). No subtree / polymorphic expansion.</param>
     /// <returns>
     /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the routing id is unknown or has no engine state. Pair each
-    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw"/> to decode component values without a compile-time type.
+    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw(int, Span{byte})"/> to decode component values without a compile-time type.
     /// </returns>
     public List<EntityId> EnumerateArchetypeEntities(ushort routingId)
     {
@@ -1304,6 +1304,7 @@ public unsafe partial class Transaction
     private protected override EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
         AssertThreadAffinity();
+        NoteEntityOpen();   // #1189: every 128 opens the transaction moves its epoch forward, read-only included
 
 
         if (id.IsNull)
@@ -1431,48 +1432,7 @@ public unsafe partial class Transaction
                 int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
                 byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
-                // Reuse the cluster cache accessor — keyed by archetype
-                if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
-                {
-                    if (_hasClusterCache)
-                    {
-                        _clusterCacheAccessor.Dispose();
-                    }
-                    if (_hasTransientClusterCache)
-                    {
-                        _transientClusterCacheAccessor.Dispose();
-                        _hasTransientClusterCache = false;
-                    }
-
-                    if (es.ClusterState.ClusterSegment != null)
-                    {
-                        _clusterCacheAccessor = es.ClusterState.ClusterSegment.CreateChunkAccessor();
-                    }
-                    if (es.ClusterState.TransientSegment != null)
-                    {
-                        _transientClusterCacheAccessor = es.ClusterState.TransientSegment.CreateChunkAccessor();
-                        _hasTransientClusterCache = true;
-                    }
-                    _clusterCacheArchId = id.ArchetypeId;
-                    _hasClusterCache = true;
-                }
-
-                // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-                if (es.ClusterState.ClusterSegment != null)
-                {
-                    result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-                else
-                {
-                    result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
-                // Mixed archetype: also set TransientStore base for Transient component reads
-                if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
-                {
-                    result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
+                ResolveClusterBases(es, id.ArchetypeId, clusterChunkId, writable, ref result);
                 result._clusterSlotIndex = slotIndex;
                 result._clusterChunkId = clusterChunkId;
                 result._clusterLayout = es.ClusterState.Layout;

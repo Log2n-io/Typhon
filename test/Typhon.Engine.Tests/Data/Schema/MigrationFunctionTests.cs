@@ -250,16 +250,16 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
 
             using var t = dbe.CreateQuickTransaction();
 
-            ref readonly var r1 = ref t.Open(entityId1).Read(MigPlayerV2Arch.Comp);
+            var r1 = t.Open(entityId1).Read(MigPlayerV2Arch.Comp);
             Assert.That(r1.Health, Is.EqualTo(1.0f));
             Assert.That(r1.Mana, Is.EqualTo(50));
             Assert.That(r1.Shield, Is.EqualTo(0));
 
-            ref readonly var r2 = ref t.Open(entityId2).Read(MigPlayerV2Arch.Comp);
+            var r2 = t.Open(entityId2).Read(MigPlayerV2Arch.Comp);
             Assert.That(r2.Health, Is.EqualTo(0.75f));
             Assert.That(r2.Mana, Is.EqualTo(200));
 
-            ref readonly var r3 = ref t.Open(entityId3).Read(MigPlayerV2Arch.Comp);
+            var r3 = t.Open(entityId3).Read(MigPlayerV2Arch.Comp);
             Assert.That(r3.Health, Is.EqualTo(0.0f));
             Assert.That(r3.Mana, Is.EqualTo(0));
         }
@@ -311,7 +311,7 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var result = ref t.Open(entityId).Read(MigChainV3Arch.Comp);
+            var result = t.Open(entityId).Read(MigChainV3Arch.Comp);
             Assert.That(result.Value, Is.EqualTo(42.0));
             Assert.That(result.TotalScore, Is.EqualTo(110L)); // 100 + 10
         }
@@ -425,7 +425,7 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var result = ref t.Open(entityId).Read(MigByteV2Arch.Comp);
+            var result = t.Open(entityId).Read(MigByteV2Arch.Comp);
             Assert.That(result.A, Is.EqualTo(100.0f));
             Assert.That(result.B, Is.EqualTo(42));
         }
@@ -495,11 +495,11 @@ class MigrationFunctionTests : TestBase<MigrationFunctionTests>
 
             // Verify both old (migrated) and new entities
             using var t2 = dbe.CreateQuickTransaction();
-            ref readonly var r1 = ref t2.Open(entityId1).Read(MigPlayerV2Arch.Comp);
+            var r1 = t2.Open(entityId1).Read(MigPlayerV2Arch.Comp);
             Assert.That(r1.Health, Is.EqualTo(0.8f));
             Assert.That(r1.Mana, Is.EqualTo(300));
 
-            ref readonly var r2 = ref t2.Open(entityId2).Read(MigPlayerV2Arch.Comp);
+            var r2 = t2.Open(entityId2).Read(MigPlayerV2Arch.Comp);
             Assert.That(r2.Health, Is.EqualTo(0.5f));
             Assert.That(r2.Mana, Is.EqualTo(999));
             Assert.That(r2.Shield, Is.EqualTo(50));

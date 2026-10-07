@@ -111,22 +111,26 @@ public sealed class AttackEventChecks
 
         // Combat, and for longer than the window: the activity mix re-rolls, and a player that wandered out of Combat half
         // way through would fail this for a reason that is not the event's.
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
         state.Activity = PlayerActivity.Combat;
         state.ActivityTicks = int.MaxValue / 2;
-        ref var move = ref player.Write(Player.Move);
+        player.Set(Player.State, state);
+        var move = player.Read(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
+        player.Set(Player.Move, move);
 
         // The target and the weapon, set outright. Left to the simulation, the player would acquire a target on the
         // weapon's own scan cadence and then wait out `MinAttackDelaySec` — seconds of simulated time, which on the paced
         // serve path is seconds of wall clock, for a case whose subject is one event's trip to the wire. `PlayerCombatTick`
         // still does the deciding: it re-checks the target's range and kind, and refuses a blow it does not like.
-        ref var session = ref player.Write(Player.Session);
+        var session = player.Read(Player.Session);
         session.Target = chosen.Id;
         session.TargetKind = CombatTargetKind.Creature;
-        ref var vitals = ref player.Write(Player.Vitals);
+        player.Set(Player.Session, session);
+        var vitals = player.Read(Player.Vitals);
         vitals.AttackCooldown = 0;
+        player.Set(Player.Vitals, vitals);
 
         // Two metres: inside both the 75 m weapon and the 6 m melee reach.
         var at = default(PlayerPlacement);

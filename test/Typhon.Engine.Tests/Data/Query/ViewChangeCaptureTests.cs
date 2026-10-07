@@ -66,8 +66,10 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var d = new CompD(1.0f, 20, 2.0); // Only B changed: 10 → 20
-            ref var w = ref t.OpenMut(entityId).Write(CompDArch.D);
+            var target = t.OpenMut(entityId);
+            var w = target.Read(CompDArch.D);
             w = d;
+            target.Set(CompDArch.D, w);
             t.Commit();
             updateTsn = t.TSN;
         }
@@ -189,8 +191,10 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var d = new CompD(5.0f, 20, 6.0);
-            ref var w = ref t.OpenMut(entityId).Write(CompDArch.D);
+            var opened = t.OpenMut(entityId);
+            var w = opened.Read(CompDArch.D);
             w = d;
+            opened.Set(CompDArch.D, w);
             t.Commit();
         }
 
@@ -244,8 +248,10 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var d = new CompD(5.0f, 10, 2.0);
-            ref var w = ref t.OpenMut(entityId).Write(CompDArch.D);
+            var entity = t.OpenMut(entityId);
+            var w = entity.Read(CompDArch.D);
             w = d;
+            entity.Set(CompDArch.D, w);
             t.Commit();
         }
 
@@ -279,8 +285,10 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var d = new CompD(1.0f, 20, 2.0);
-            ref var w = ref t.OpenMut(entityId).Write(CompDArch.D);
+            var entity = t.OpenMut(entityId);
+            var w = entity.Read(CompDArch.D);
             w = d;
+            entity.Set(CompDArch.D, w);
             t.Commit();
         }
 
@@ -331,8 +339,10 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var d = new CompD(5.0f, 20, 6.0);
-            ref var w = ref t.OpenMut(entityId).Write(CompDArch.D);
+            var entity = t.OpenMut(entityId);
+            var w = entity.Read(CompDArch.D);
             w = d;
+            entity.Set(CompDArch.D, w);
             t.Commit();
         }
 

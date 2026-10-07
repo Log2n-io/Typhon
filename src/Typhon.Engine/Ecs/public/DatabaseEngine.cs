@@ -4551,6 +4551,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // is transient and is rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs below.
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
                         clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
+                        meta.RealmKeySlotMask = clusterState.SpatialSlot.HasRealmKey ? (ushort)(1 << clusterState.SpatialSlot.RealmKeySlot) : (ushort)0;
 
                         // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)

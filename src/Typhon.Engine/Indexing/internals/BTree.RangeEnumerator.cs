@@ -33,6 +33,7 @@ internal abstract partial class BTree<TKey, TStore>
         private int _nodeItemCount;
         private int _leafVersion;
         private bool _disposed;
+        private readonly bool _countedLive;   // counted in EntityAccessor.LiveIndexCursors: holds a node across calls, so no per-operation epoch refresh (#1199)
         private readonly IComparer<TKey> _comparer;
         private readonly TKey _boundKey;
         private readonly bool _bounded;
@@ -68,6 +69,7 @@ internal abstract partial class BTree<TKey, TStore>
             _currentNode = tree._linkList;
             _currentIndex = -1;
             _disposed = false;
+            _countedLive = false;
 
             try
             {
@@ -85,6 +87,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
+            _countedLive = true;
+            EntityAccessor.LiveIndexCursors++;
         }
 
         /// <summary>
@@ -105,6 +109,7 @@ internal abstract partial class BTree<TKey, TStore>
             _hasLastKey = false;
             _finished = false;
             _disposed = false;
+            _countedLive = false;
             _currentIndex = -1;
             _nodeItemCount = 0;
             _leafVersion = 0;
@@ -158,6 +163,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
+            _countedLive = true;
+            EntityAccessor.LiveIndexCursors++;
         }
 
         /// <summary>Positions the cursor for forward iteration starting at the leaf containing minKey.</summary>
@@ -429,6 +436,10 @@ internal abstract partial class BTree<TKey, TStore>
             if (!_disposed)
             {
                 _disposed = true;
+                if (_countedLive && EntityAccessor.LiveIndexCursors > 0)
+                {
+                    EntityAccessor.LiveIndexCursors--;
+                }
                 _span.Dispose();
                 _accessor.Dispose();
             }

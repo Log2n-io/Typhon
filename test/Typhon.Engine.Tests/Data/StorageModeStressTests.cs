@@ -85,7 +85,10 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
                     int start = threadId * EntitiesPerThread;
                     for (int i = 0; i < EntitiesPerThread; i++)
                     {
-                        tx.OpenMut(allIds[start + i]).Write(SvTestArchetype.SvComp).Value = 1000 + threadId * 100 + i;
+                        var opened = tx.OpenMut(allIds[start + i]);
+                        var svComp = opened.Read(SvTestArchetype.SvComp);
+                        svComp.Value = 1000 + threadId * 100 + i;
+                        opened.Set(SvTestArchetype.SvComp, svComp);
                     }
                     tx.Commit();
                 }
@@ -182,7 +185,10 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
                     int start = threadId * EntitiesPerThread;
                     for (int i = 0; i < EntitiesPerThread; i++)
                     {
-                        tx.OpenMut(ids[start + i]).Write(SvTestArchetype.SvComp).Value = threadId * 1000 + i;
+                        var entity = tx.OpenMut(ids[start + i]);
+                        var svComp = entity.Read(SvTestArchetype.SvComp);
+                        svComp.Value = threadId * 1000 + i;
+                        entity.Set(SvTestArchetype.SvComp, svComp);
                     }
                     tx.Commit();
                 }
@@ -218,7 +224,10 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
         // New writes after tick fence produce fresh dirty bits
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(ids[0]).Write(SvTestArchetype.SvComp).Value = 9999;
+            var target = tx.OpenMut(ids[0]);
+            var svCompCopy = target.Read(SvTestArchetype.SvComp);
+            svCompCopy.Value = 9999;
+            target.Set(SvTestArchetype.SvComp, svCompCopy);
             tx.Commit();
         }
         if (clusterState != null)
@@ -365,9 +374,15 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
                     for (int i = 0; i < perThread; i++)
                     {
                         var entity = tx.OpenMut(ids[start + i]);
-                        entity.Write(MixedModeArchetype.Versioned).Value = 5000 + threadId * 100 + i;
-                        entity.Write(MixedModeArchetype.SV).Value = 6000 + threadId * 100 + i;
-                        entity.Write(MixedModeArchetype.Trans).Value = 7000 + threadId * 100 + i;
+                        var versioned = entity.Read(MixedModeArchetype.Versioned);
+                        versioned.Value = 5000 + threadId * 100 + i;
+                        entity.Set(MixedModeArchetype.Versioned, versioned);
+                        var sV = entity.Read(MixedModeArchetype.SV);
+                        sV.Value = 6000 + threadId * 100 + i;
+                        entity.Set(MixedModeArchetype.SV, sV);
+                        var trans = entity.Read(MixedModeArchetype.Trans);
+                        trans.Value = 7000 + threadId * 100 + i;
+                        entity.Set(MixedModeArchetype.Trans, trans);
                     }
                     tx.Commit();
                 }
@@ -446,7 +461,10 @@ class StorageModeStressTests : TestBase<StorageModeStressTests>
         {
             for (int i = 0; i < entityCount; i++)
             {
-                tx.OpenMut(ids[i]).Write(SvTestArchetype.SvComp).Value = i + 5000;
+                var target = tx.OpenMut(ids[i]);
+                var svComp = target.Read(SvTestArchetype.SvComp);
+                svComp.Value = i + 5000;
+                target.Set(SvTestArchetype.SvComp, svComp);
             }
             tx.Commit();
         }

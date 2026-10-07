@@ -460,6 +460,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Test hook (PS-15): invoked when a requester starts waiting on a slot that is not ready yet. Null in production.</summary>
     internal Action<int> SlotNotReadyWaitProbe { get; set; }
 
+    /// <summary>Test hook (PS-15, #1201): invoked with the memory page index when a reclaim's unlocked first pass has found the slot a candidate, before
+    /// it takes the slot's lock — the window in which another thread can claim the slot. Null in production.</summary>
+    internal Action<int> ReclaimBeforeLockProbe { get; set; }
+
+    /// <summary>Test hook (PS-15, #1201): invoked with the memory page index when a reclaim, under the slot's lock, has withdrawn its "ready" and fenced,
+    /// before it re-checks the slot's protections. Null in production.</summary>
+    internal Action<int> ReclaimReadyWithdrawnProbe { get; set; }
+
+    /// <summary>Whether a slot is marked ready (PS-15). Test seam.</summary>
+    internal bool IsSlotReadyForTests(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).SlotReady);
+
     /// <summary>Test hook (#1127): replaces the task recorded for a slot's read, given the file page index — for instance with one that fails
     /// once the real read has landed. Null in production.</summary>
     internal Func<int, Task<int>, Task<int>> RecordedReadInterceptor { get; set; }
@@ -2121,6 +2132,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         // Second pass, under lock
+        ReclaimBeforeLockProbe?.Invoke(memPageIndex);
         try
         {
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.PageCacheLockTimeout);
@@ -2129,23 +2141,28 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 ThrowHelper.ThrowLockTimeout("PageCache/TryAcquire", TimeoutOptions.Current.PageCacheLockTimeout);
             }
 
-            // Drop the slot's read task if it completed successfully. A failed one stays: the slot's next owner overwrites or drops it.
-            if (info.ReadPending && _readTasks.TryGetValue(memPageIndex, out var readTask) && readTask.IsCompletedSuccessfully)
-            {
-                DropReadTask(memPageIndex, info);
-            }
-
-            // PS-15: withdraw "ready" BEFORE re-checking the epoch, with a full fence between the two. A requester tags AccessEpoch (a full-fence CAS)
-            // and then re-reads SlotReady and FilePageIndex, so one of us sees the other: either the re-check below finds the requester's tag and
-            // backs off, or the requester finds the slot not ready and looks the page up again. Without it, a tag landing between the re-check and the
-            // FilePageIndex reset below would hand the requester a slot that is being reclaimed. Restored on every back-off.
-            var wasReady = Volatile.Read(ref info.SlotReady);
-            Volatile.Write(ref info.SlotReady, false);
-            Interlocked.MemoryBarrier();
-
             // We need to check the state again, because another thread might have changed between the first and second pass
             if (info.PageState is PageState.Free or PageState.Idle)
             {
+                // Drop the slot's read task if it completed successfully. A failed one stays: the slot's next owner overwrites or drops it. Not for a
+                // slot claimed since the first pass: its read is its owner's, and its requesters complete it — short-read check included (#1201).
+                if (info.ReadPending && _readTasks.TryGetValue(memPageIndex, out var readTask) && readTask.IsCompletedSuccessfully)
+                {
+                    DropReadTask(memPageIndex, info);
+                }
+
+                // PS-15: withdraw "ready" BEFORE re-checking the epoch, with a full fence between the two. A requester tags AccessEpoch (a full-fence
+                // CAS) and then re-reads SlotReady and FilePageIndex, so one of us sees the other: either the re-check below finds the requester's tag
+                // and backs off, or the requester finds the slot not ready and looks the page up again. Without it, a tag landing between the re-check
+                // and the FilePageIndex reset below would hand the requester a slot that is being reclaimed. Restored on every back-off.
+                // Only on a slot this lock holds Free or Idle, whose "ready" no one else writes. Another thread may have claimed the slot since the
+                // first pass: it is then Allocating, and its owner sets "ready" without this lock — a withdraw and restore here would put back the
+                // value read before the owner's write and erase it, leaving the page published and never ready (#1201).
+                var wasReady = Volatile.Read(ref info.SlotReady);
+                Volatile.Write(ref info.SlotReady, false);
+                Interlocked.MemoryBarrier();
+                ReclaimReadyWithdrawnProbe?.Invoke(memPageIndex);
+
                 // Re-check all protection layers under lock (may have changed since first pass)
                 if (info.PageState == PageState.Idle && (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasDebt(info)
                                                          || Volatile.Read(ref info.AccessEpoch) >= minActiveEpoch))
@@ -2191,7 +2208,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
             else
             {
-                Volatile.Write(ref info.SlotReady, wasReady);
                 return false;
             }
         }

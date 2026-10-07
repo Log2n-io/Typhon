@@ -380,7 +380,10 @@ static class ParallelDispatchBenchmark
                 {
                     foreach (var id in ctx.Entities)
                     {
-                        ctx.Accessor.OpenMut(id).Write(PdSvArch.Data).Value++;
+                        var target = ctx.Accessor.OpenMut(id);
+                        var dataCopy = target.Read(PdSvArch.Data);
+                        dataCopy.Value++;
+                        target.Set(PdSvArch.Data, dataCopy);
                     }
                 }, input: () => view, parallel: true);
             }

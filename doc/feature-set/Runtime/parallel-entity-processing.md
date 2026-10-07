@@ -54,8 +54,9 @@ public class MovementSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);     // PTA — no per-entity dictionary lookup
-            ref var pos = ref entity.Write<EcsPosition>();
+            var pos = entity.Read<EcsPosition>();
             pos.X += entity.Read<EcsVelocity>().X * ctx.DeltaTime;
+            entity.Set<EcsPosition>(pos);
         }
     }
 }

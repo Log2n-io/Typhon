@@ -119,7 +119,7 @@ class TransientIndexTests : TestBase<TransientIndexTests>
         // Mutate Category 10 → 20
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TiTransientData(20, 200);
+            tx.OpenMut(id).Set(comp, new TiTransientData(20, 200));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -152,7 +152,7 @@ class TransientIndexTests : TestBase<TransientIndexTests>
         // Write same Category value
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TiTransientData(42, 200); // Category unchanged
+            tx.OpenMut(id).Set(comp, new TiTransientData(42, 200)); // Category unchanged
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -267,12 +267,12 @@ class TransientIndexTests : TestBase<TransientIndexTests>
         // Two mutations in same tick: 1→2, then 2→3
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TiTransientData(2, 200);
+            tx.OpenMut(id).Set(comp, new TiTransientData(2, 200));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TiTransientData(3, 300);
+            tx.OpenMut(id).Set(comp, new TiTransientData(3, 300));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -306,7 +306,7 @@ class TransientIndexTests : TestBase<TransientIndexTests>
         // Mutate then destroy in same tick
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TiTransientData(20, 200);
+            tx.OpenMut(id).Set(comp, new TiTransientData(20, 200));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())

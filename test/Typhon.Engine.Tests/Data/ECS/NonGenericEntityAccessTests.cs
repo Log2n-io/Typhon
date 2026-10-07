@@ -168,7 +168,7 @@ class NonGenericEntityAccessTests : TestBase<NonGenericEntityAccessTests>
 
         // Raw bytes must reinterpret to exactly what the typed read returns — storage-mode-agnostic correctness.
         var decoded = MemoryMarshal.Read<EcsPosition>(raw);
-        ref readonly var typed = ref e.Read(EcsUnit.Position);
+        var typed = e.Read(EcsUnit.Position);
         Assert.That(decoded.X, Is.EqualTo(typed.X));
         Assert.That(decoded.Y, Is.EqualTo(typed.Y));
         Assert.That(decoded.Z, Is.EqualTo(typed.Z));

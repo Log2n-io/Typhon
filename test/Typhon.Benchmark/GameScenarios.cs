@@ -967,8 +967,10 @@ internal static class GameScenarios
                         xs[i] += vx[i];
                         ys[i] += vy[i];
                         zs[i] += vz[i];
-                        ref var p = ref tx.OpenMut(ids[i]).Write(GameEntity.Pos);
+                        var opened = tx.OpenMut(ids[i]);
+                        var p = opened.Read(GameEntity.Pos);
                         Write(ref p, xs[i], ys[i], zs[i], half, i);
+                        opened.Set(GameEntity.Pos, p);
                     }
 
                     tx.Commit();

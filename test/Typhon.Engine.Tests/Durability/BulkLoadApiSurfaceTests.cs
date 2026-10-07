@@ -188,7 +188,9 @@ internal sealed class BulkLoadApiSurfaceTests
             var a = new CompA(1, 0f, 0d);
             id = bulk.Spawn<CompAArch>(CompAArch.A.Set(in a));
             Assert.That(bulk.TryOpenMut(id, out var entity), Is.True);
-            entity.Write(CompAArch.A).A = 55;
+            var aCopy = entity.Read(CompAArch.A);
+            aCopy.A = 55;
+            entity.Set(CompAArch.A, aCopy);
             Assert.That(bulk.TryOpenMut(new EntityId(id.EntityKey + 1_000, id.ArchetypeId), out var missing), Is.False);
             Assert.That(missing.IsValid, Is.False);
             bulk.CompleteBulkLoad();

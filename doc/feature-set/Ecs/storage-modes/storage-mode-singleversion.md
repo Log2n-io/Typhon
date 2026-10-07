@@ -48,8 +48,9 @@ tx.Commit();
 
 using var tx2 = dbe.CreateQuickTransaction();
 var e = tx2.OpenMut(id);
-ref var pos = ref e.Write(Unit.Pos);
-pos.X += dtVelocityX;          // in-place — visible to every reader immediately, no commit needed for visibility
+var pos = e.Read(Unit.Pos);
+pos.X += dtVelocityX;
+e.Set(Unit.Pos, pos);          // in-place — visible to every reader immediately, no commit needed for visibility
 tx2.Commit();
 
 // Once per game tick, after all systems have run:
@@ -115,7 +116,7 @@ lookups and +5–9 % on a non-unique key returning 1 000 rows.
 - An ordered query ignores a `!=` condition, whether or not anything was written (#1185).
 - An ordered query on an archetype whose only indexed component is `Transient` returns nothing (#1186).
 - A write through the bulk cluster API (`ClusterRef.GetSpan` / `Get`) is never seen by the indexes, not even at the
-  fence: write indexed fields through `OpenMut(...).Write(...)` until #1187 is fixed.
+  fence: write indexed fields through `OpenMut(...).Set(...)` until #1187 is fixed.
 - An entity destroyed after a write, whose slot a spawn reuses before the fence: an ordered query returns the new entity
   twice, and after the fence the indexes answer keys no entity holds (#1188).
 - `Transaction.EnumerateIndex` and foreign-key navigation read the index without testing values; they are not queries and
