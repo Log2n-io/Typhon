@@ -45,7 +45,7 @@ public sealed partial class Ant : Archetype<Ant>
 
 The archetype's **identity is the CLR type name** (or `[Archetype(Name = "…")]` if you want a name decoupled from the class). The engine auto-assigns a per-process **catalog id** and a per-DB **routing id** (persisted in `ArchetypeR1`, re-matched by name on reopen) — no numeric id is set in source, and a DB can hold up to 65,536 archetypes. The `Register<T>()` calls declare components. CRTP (`Archetype<Ant>`) gives compile-time type identity. Archetypes **self-register up-front** via a generated `[ModuleInitializer]` barrier at assembly load — lock-guarded and thread-safe, not lazy first-access reflection.
 
-The class is declared **`partial`** so a source generator can extend it — see **[§5 Generated accessors](#generated-accessors--readall--readwriteall)** below. Without `partial` the archetype still works for `Spawn` / `Open` / `OpenMut`, but the generated typed bulk accessors aren't emitted.
+The class is declared **`partial`** so a source generator can extend it — see **[§5 Generated accessors](#generated-accessors--readall--writeall)** below. Without `partial` the archetype still works for `Spawn` / `Open` / `OpenMut`, but the generated typed bulk accessors aren't emitted.
 
 To **rename** an archetype (or its backing class) without losing its persisted data, keep the old identity as a hatch: `[Archetype(Name = "NewName", PreviousName = "OldName")]` — the engine matches `PreviousName` against `ArchetypeR1` on reopen and adopts the existing routing id. This mirrors the component/field rename hatches in [04-schema](04-schema.md).
 
