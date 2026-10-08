@@ -343,6 +343,12 @@ public unsafe partial class Transaction : EntityAccessor
                 _hasEntityMapCache = false;
             }
 
+            // The component and cluster accessors hold a slot reference on every page cached in their slots, which no epoch releases. Reset recycles the
+            // component entries without disposing them, and a transaction dropped by a full pool is never reset at all: left here, those pages could
+            // never be evicted again. MarketHardeningTests' snapshot, read in short read-only transactions, left 94 % of its cache that way.
+            FlushAccessors();
+            DisposeClusterCache();
+
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
             // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
@@ -363,6 +369,12 @@ public unsafe partial class Transaction : EntityAccessor
         ProcessDeferredCleanups();
         dbe.LogTxDispose(tsn, "FlushAccessors");
         FlushAccessors();
+        DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
+        if (_hasEntityMapCache)
+        {
+            _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
+            _hasEntityMapCache = false;
+        }
 
         // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
         // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that

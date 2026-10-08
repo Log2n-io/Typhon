@@ -2,10 +2,13 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
@@ -671,59 +674,369 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>The highest writeback debt, in percent of the cache, at which <see cref="WriteAheadOfTheHook"/> still lets the hook run first.</summary>
     private const int MaxWriteAheadThresholdPercent = 50;
 
+    /// <summary>The most pages a write batch holds. A batch is settled — WAL flush, fsync, debt discharged — before the next one starts.</summary>
+    private const int WriteBatchMaxPages = 8192;
+
+    /// <summary>How long a batch may spend writing before it is settled: what bounds the wait of a writer the cache holds back, on any device.</summary>
+    private static readonly long WriteBatchMaxTicks = Stopwatch.Frequency / 10;
+
+    /// <summary>
+    /// Pages handed to one <see cref="PagedMMF.WritePagesForCheckpoint"/> call: the unit a writer takes, and the granularity of the time budget.
+    /// </summary>
+    private const int WriteSubBatchPages = 1024;
+
+    /// <summary>
+    /// Sub-batches written at once, one by this thread and the others by <see cref="WaveWriters"/>. The data file is buffered and opened for overlapped I/O,
+    /// so writes through its one handle proceed in parallel: measured 3.7 µs per 8 KiB page with four writers against 9.6 µs with one (sorted random
+    /// offsets over a 9 GiB file). The fsync that follows does not change — at ~17 µs per scattered page it is what bounds the checkpoint once the writes
+    /// are parallel.
+    /// </summary>
+    private const int WriteWorkers = 4;
+
+    /// <summary>A smaller <see cref="WriteBatchMaxPages"/>, 0 for the default: lets a test see a pass settled batch by batch. Test seam.</summary>
+    internal int WriteBatchMaxPagesForTest { get; set; }
+
+    /// <summary>A smaller <see cref="WriteSubBatchPages"/>, 0 for the default: lets a test write parallel waves with few pages. Test seam.</summary>
+    internal int WriteSubBatchPagesForTest { get; set; }
+
+    /// <summary>Waves this manager has written with more than one sub-batch at once. Diagnostic: lets a test prove the parallel path ran.</summary>
+    internal long ParallelWaveCount;
+
+    /// <summary>Created on the first wave with more than one sub-batch, so that a manager whose passes stay small starts no thread.</summary>
+    private WaveWriters _waveWriters;
+
+    // The wave being written, read by every writer of the wave: published by WaveWriters.Run's release of the writers, read back after its wait.
+    private int[] _wavePending;
+    private long[] _waveCapturedGen;
+    private readonly int[] _waveStarts = new int[WriteWorkers];
+    private readonly int[] _waveCounts = new int[WriteWorkers];
+    private readonly int[] _waveWritten = new int[WriteWorkers];
+    private CheckpointWriteFilter _waveFilter;
+
     /// <summary>
     /// Captures and writes <paramref name="pending"/>, retrying for up to <see cref="MaxCoveragePasses"/> passes the pages a live writer held. On return
-    /// <paramref name="pending"/> holds the last pass's pages, the <paramref name="stillSkipped"/> still owed at its tail.
+    /// <paramref name="pending"/> holds exactly the pages still owed after the last pass — <paramref name="stillSkipped"/> of them.
     /// </summary>
+    /// <remarks>
+    /// <para><b>In batches, each settled before the next is written.</b> A page's debt is discharged only after an fsync covering its write (CP-03), so a
+    /// pass that settled only at its end freed nothing until it had written everything it collected — under a write storm, the whole cache: 8 GiB at
+    /// ~22k pages/s while every writer waiting for a slot timed out after 5 s (MarketHardeningTests, 75M items). A batch ends at
+    /// <see cref="WriteBatchMaxPages"/> pages or <see cref="WriteBatchMaxTicks"/> of writing, whichever comes first, then flushes the WAL through what its
+    /// copies can reflect (CK-02), fsyncs and settles its pages: the cache frees pages every few hundred milliseconds, at the cost of one fsync per
+    /// batch instead of one per pass.</para>
+    /// <para><b>Ordered.</b> Protected directory pages first — their persist fsyncs the file, so ahead of every plain write of the pass it can only cover
+    /// what an earlier batch already flushed the WAL for — then by file position (<see cref="PagedMMF.OrderForCheckpointWrite"/>). The protected pages
+    /// are written by this thread, in order, and only protected pages; the rest in waves of up to <see cref="WriteWorkers"/> disjoint sub-batches written
+    /// in parallel, and only plain pages. A page whose kind changed after the order was taken is left for the next pass, which orders it again — so no
+    /// protected fsync ever runs after a plain write its batch has not settled.</para>
+    /// </remarks>
     /// <returns>The pages written.</returns>
     private int WriteDirtyPages(ref int[] pending, ref WaitContext ctx, out int stillSkipped)
     {
         var writtenTotal = 0;
         stillSkipped = 0;
+        var maxPages = WriteBatchMaxPagesForTest > 0 ? WriteBatchMaxPagesForTest : WriteBatchMaxPages;
+        var subPages = Math.Min(WriteSubBatchPagesForTest > 0 ? WriteSubBatchPagesForTest : WriteSubBatchPages, maxPages);
+        var batch = new List<(int Start, int Count)>();
         for (int pass = 0; pass < MaxCoveragePasses; pass++)
         {
-            // One slot per page this pass: the generation each page's snapshot covers, sampled under the ACW
-            // sentinel inside WritePagesForCheckpoint. Publishing THESE values after the fsync is what
-            // discharges the pages' writeback debt — a page re-modified between its capture and now has a
-            // higher generation and therefore stays owed, which is CP-04 falling out of the comparison.
-            var capturedGen = new long[pending.Length];
-            _mmf.WritePagesForCheckpoint(pending, _stagingPool, out var writtenThisPass, capturedGen);
+            var protectedCount = _mmf.OrderForCheckpointWrite(pending);
+            LogCheckpointPass(pending.Length);
 
-            if (writtenThisPass > 0)
+            // One slot per page this pass: the generation each page's snapshot covers, sampled under the ACW sentinel inside WritePagesForCheckpoint.
+            // Publishing THESE values after the fsync is what discharges the pages' writeback debt — a page re-modified between its capture and now has a
+            // higher generation and therefore stays owed, which is CP-04 falling out of the comparison. Rented: a pass under a storm is a million pages.
+            var capturedGen = ArrayPool<long>.Shared.Rent(pending.Length);
+            var skipped = new List<int>();
+            try
             {
-                // CK-02 flush2: the captured page copies just written may reflect records up to the current flush
-                // target — every record whose frame was PUBLISHED, since AP-01 orders a commit's page effects strictly
-                // after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes
-                // durable, so the data file can never hold a change whose record could still be lost
-                // (captured ⊆ durable, composing with AP-01 — 04 §3).
-                _walManager.RequestFlush();
-                _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
-
-                using (TyphonEvent.BeginCheckpointFsync())
+                var position = 0;
+                while (position < pending.Length)
                 {
-                    _mmf.FlushToDisk();
-                }
+                    var batchStart = Stopwatch.GetTimestamp();
+                    var batchPlanned = 0;
+                    var batchPages = 0;
+                    batch.Clear();
+                    while (position < pending.Length && batchPlanned < maxPages && Stopwatch.GetTimestamp() - batchStart < WriteBatchMaxTicks)
+                    {
+                        // A wave of disjoint sub-batches, within what the batch has left. Each call partitions its own range: written pages to the front,
+                        // skipped ones to the back. The protected pages that lead the pass are a wave of their own, on this thread.
+                        var waveSize = 0;
+                        var budget = maxPages - batchPlanned;
+                        if (position < protectedCount)
+                        {
+                            _waveStarts[0] = position;
+                            _waveCounts[0] = Math.Min(Math.Min(subPages, protectedCount - position), budget);
+                            waveSize = 1;
+                            _waveFilter = CheckpointWriteFilter.ProtectedOnly;
+                        }
+                        else
+                        {
+                            for (var start = position; waveSize < WriteWorkers && start < pending.Length && budget > 0; waveSize++)
+                            {
+                                var count = Math.Min(Math.Min(subPages, pending.Length - start), budget);
+                                _waveStarts[waveSize] = start;
+                                _waveCounts[waveSize] = count;
+                                start += count;
+                                budget -= count;
+                            }
 
-                for (int i = 0; i < writtenThisPass; i++)
-                {
-                    _mmf.MarkCaptured(pending[i], capturedGen[i]);
+                            _waveFilter = CheckpointWriteFilter.PlainOnly;
+                        }
+
+                        WriteWave(pending, capturedGen, waveSize);
+
+                        for (var j = 0; j < waveSize; j++)
+                        {
+                            var (start, count, written) = (_waveStarts[j], _waveCounts[j], _waveWritten[j]);
+                            if (written > 0)
+                            {
+                                batch.Add((start, written));
+                                batchPages += written;
+                            }
+
+                            for (var i = start + written; i < start + count; i++)
+                            {
+                                skipped.Add(pending[i]);
+                            }
+
+                            batchPlanned += count;
+                            position = start + count;
+                        }
+                    }
+
+                    if (batchPages > 0)
+                    {
+                        SettleBatch(pending, capturedGen, batch, ref ctx);
+                        writtenTotal += batchPages;
+                    }
                 }
             }
+            finally
+            {
+                ArrayPool<long>.Shared.Return(capturedGen);
+            }
 
-            writtenTotal += writtenThisPass;
-            stillSkipped = pending.Length - writtenThisPass;
+            stillSkipped = skipped.Count;
+            if (stillSkipped > 0)
+            {
+                LogCheckpointPagesSkipped(stillSkipped);
+            }
+
+            // Retry exactly the skipped pages, not the whole dirty set — new commits dirtying other pages must not block this cycle. After the last pass
+            // they are what the caller reads as the owed tail.
+            pending = skipped.ToArray();
             if (stillSkipped == 0)
             {
                 break;
             }
-
-            // Retry exactly the skipped pages (now partitioned into the tail), not the whole dirty set — new commits dirtying other pages must not block this cycle.
-            var retry = new int[stillSkipped];
-            Array.Copy(pending, writtenThisPass, retry, 0, stillSkipped);
-            pending = retry;
         }
 
         return writtenTotal;
+    }
+
+    /// <summary>Writes the wave's <paramref name="size"/> sub-batches: in parallel, unless one sub-batch or a test intercepting page writes.</summary>
+    private void WriteWave(int[] pending, long[] capturedGen, int size)
+    {
+        _wavePending = pending;
+        _waveCapturedGen = capturedGen;
+        try
+        {
+            if (size == 1 || _mmf.PageWriteInterceptor != null)
+            {
+                // One after the other when a test intercepts page writes: a simulated crash at write k must leave nothing written after it.
+                for (var j = 0; j < size; j++)
+                {
+                    WriteSubBatch(j);
+                }
+
+                return;
+            }
+
+            _waveWriters ??= new WaveWriters(WriteWorkers - 1, WriteSubBatch);
+            ParallelWaveCount++;
+            _waveWriters.Run(size);
+        }
+        finally
+        {
+            _wavePending = null;
+            _waveCapturedGen = null;
+        }
+    }
+
+    /// <summary>Writes sub-batch <paramref name="j"/> of the current wave: its range of the pass's pages, on whichever thread runs it.</summary>
+    private void WriteSubBatch(int j)
+    {
+        var (start, count) = (_waveStarts[j], _waveCounts[j]);
+        _mmf.WritePagesForCheckpoint(_wavePending.AsSpan(start, count), _stagingPool, out var written, _waveCapturedGen.AsSpan(start, count), _waveFilter);
+        _waveWritten[j] = written;
+    }
+
+    /// <summary>
+    /// The threads that write a wave's other sub-batches while the checkpoint thread writes the first (CK-15). Dedicated, never the thread pool's: the
+    /// writers a full cache holds back may be pool threads, and the wave that frees them must not wait for the pool to grow.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Run"/> publishes the wave by releasing each writer's semaphore and reads the results back after the countdown — both full fences, on x64 and
+    /// arm64. A failure surfaces as itself, never wrapped: the cycle classifies what it catches (CK-06), and when several sub-batches fail the one rethrown
+    /// is a fatal one if any is, so a transient fault can never mask it.
+    /// </remarks>
+    private sealed class WaveWriters : IDisposable
+    {
+        private readonly Action<int> _write;
+        private readonly Thread[] _threads;
+        private readonly SemaphoreSlim[] _go;
+        private readonly CountdownEvent _done = new(1);
+        private readonly Exception[] _errors;
+        private readonly object _gate = new();
+        private bool _stopping;
+
+        public WaveWriters(int threads, Action<int> write)
+        {
+            _write = write;
+            _threads = new Thread[threads];
+            _go = new SemaphoreSlim[threads];
+            _errors = new Exception[threads + 1];
+            for (var i = 0; i < threads; i++)
+            {
+                var index = i + 1;
+                _go[i] = new SemaphoreSlim(0);
+                _threads[i] = new Thread(() => Loop(index)) { IsBackground = true, Name = $"Typhon-CheckpointWriter-{index}" };
+                _threads[i].Start();
+            }
+        }
+
+        /// <summary>Writes sub-batches 0 to <paramref name="size"/> − 1, the first on this thread, each other on its writer; returns once all have.</summary>
+        public void Run(int size)
+        {
+            lock (_gate)
+            {
+                Array.Clear(_errors);
+                if (_stopping)
+                {
+                    // Disposed under a cycle still running (a shutdown that timed out): finish on this thread rather than wait for writers that are gone.
+                    for (var j = 0; j < size; j++)
+                    {
+                        Write(j);
+                    }
+                }
+                else
+                {
+                    _done.Reset(size - 1);
+                    for (var j = 1; j < size; j++)
+                    {
+                        _go[j - 1].Release();
+                    }
+
+                    Write(0);
+                    _done.Wait();
+                }
+
+                RethrowFirstFailure();
+            }
+        }
+
+        private void Write(int j)
+        {
+            try
+            {
+                _write(j);
+            }
+            catch (Exception e)
+            {
+                _errors[j] = e;
+            }
+        }
+
+        private void Loop(int index)
+        {
+            while (true)
+            {
+                _go[index - 1].Wait();
+                if (Volatile.Read(ref _stopping))
+                {
+                    return;
+                }
+
+                Write(index);
+                _done.Signal();
+            }
+        }
+
+        private void RethrowFirstFailure()
+        {
+            Exception first = null;
+            foreach (var e in _errors)
+            {
+                if (e == null)
+                {
+                    continue;
+                }
+
+                if (e is not TyphonException { IsTransient: true })
+                {
+                    ExceptionDispatchInfo.Capture(e).Throw();
+                }
+
+                first ??= e;
+            }
+
+            if (first != null)
+            {
+                ExceptionDispatchInfo.Capture(first).Throw();
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                Volatile.Write(ref _stopping, true);
+            }
+
+            foreach (var go in _go)
+            {
+                go.Release();
+            }
+
+            foreach (var thread in _threads)
+            {
+                thread.Join();
+            }
+
+            foreach (var go in _go)
+            {
+                go.Dispose();
+            }
+
+            _done.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Makes one batch durable and discharges it: the WAL flushed through what the copies can reflect (CK-02 flush2), then the data fsync, then each page's
+    /// captured generation published (CP-03).
+    /// </summary>
+    private void SettleBatch(int[] pending, long[] capturedGen, List<(int Start, int Count)> batch, ref WaitContext ctx)
+    {
+        // The captured page copies just written may reflect records up to the current flush target — every record whose frame was PUBLISHED, since AP-01
+        // orders a commit's page effects strictly after its append returns. Flush the WAL through that point BEFORE the data fsync makes those bytes durable,
+        // so the data file can never hold a change whose record could still be lost (captured ⊆ durable, composing with AP-01 — 04 §3).
+        _walManager.RequestFlush();
+        _walManager.WaitForDurable(_walManager.LastPublishedLsn, ref ctx);
+
+        using (TyphonEvent.BeginCheckpointFsync())
+        {
+            _mmf.FlushToDisk();
+        }
+
+        foreach (var (start, count) in batch)
+        {
+            for (var i = start; i < start + count; i++)
+            {
+                _mmf.MarkCaptured(pending[i], capturedGen[i]);
+            }
+        }
     }
 
     private void RunCheckpointCycleCore(long targetLsn, CheckpointReason reason)
@@ -801,9 +1114,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             }
             cycleScope.DirtyPageCount = dirtyPages.Length;
 
-            // Step 3: Write dirty pages, retrying the skipped tail up to MaxCoveragePasses times. Each pass fsyncs its writes BEFORE decrementing their DirtyCounter
-            // so a written page is durable on the data file before it becomes evictable. WritePagesForCheckpoint partitions the array (written front, skipped back),
-            // so each retry re-attempts exactly the pages an active writer blocked last pass.
+            // Step 3: Write dirty pages, retrying the skipped ones up to MaxCoveragePasses times. Each batch of a pass fsyncs its writes BEFORE discharging
+            // their debt, so a written page is durable on the data file before it becomes evictable (CK-15). Each retry re-attempts exactly the pages an
+            // active writer blocked last pass.
             int writtenTotal = 0;
             int stillSkipped = 0;
             if (dirtyPages.Length > 0)
@@ -976,6 +1289,12 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         }
     }
 
+    [LoggerMessage(LogLevel.Information, "Checkpoint: writing {PageCount} dirty pages")]
+    private partial void LogCheckpointPass(int pageCount);
+
+    [LoggerMessage(LogLevel.Information, "Checkpoint: skipped {SkippedCount} pages with active writers")]
+    private partial void LogCheckpointPagesSkipped(int skippedCount);
+
     [LoggerMessage(LogLevel.Warning, "Checkpoint cycle hit a transient failure (Health=Degraded); retrying on the next cycle")]
     private partial void LogCheckpointTransient(Exception ex);
 
@@ -1002,6 +1321,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             WakeForcedWaiters(); // they stop waiting now, not when the shutdown cycle ends, which may be never if the thread was not started
             _wakeEvent.Set(); // Wake the thread so it sees _shutdown
             _thread?.Join(TimeSpan.FromSeconds(10));
+            _waveWriters?.Dispose();
 
             _wakeEvent.Dispose();
         }

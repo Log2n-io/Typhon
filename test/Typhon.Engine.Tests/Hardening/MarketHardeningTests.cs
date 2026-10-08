@@ -4,8 +4,10 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -127,7 +129,8 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// <c>TYPHON_MKT_CACHE_MIB</c> (8192), <c>TYPHON_MKT_THREADS</c> (half the cores, at least 2), <c>TYPHON_MKT_OPERATIONS</c> (1 000 000),
 /// <c>TYPHON_MKT_LORE_SAMPLE_PERMILLE</c> (lore checked after the storm, per thousand items; 50), <c>TYPHON_MKT_REOPEN_VERIFY</c>
 /// (0 None … 3 Standard; 3), <c>TYPHON_MKT_REBUILD</c> (1 forces a new build), <c>TYPHON_MKT_SEED</c> (945), <c>TYPHON_MKT_STALL_SECONDS</c> (120: no
-/// progress for that long fails the run).</para>
+/// progress for that long fails the run), <c>TYPHON_MKT_SAMPLES</c> (the per-second CSV; default <c>samples-&lt;start time&gt;.csv</c> in the database
+/// directory).</para>
 /// <para><b>Run it:</b> <c>dotnet test test/Typhon.Engine.Tests -c Release --filter "FullyQualifiedName~MarketHardeningTests"</c>, with the variables
 /// set. A 50 GiB run, for instance: <c>TYPHON_MKT_ITEMS=75000000</c>, <c>TYPHON_MKT_CACHE_MIB=8192</c>, <c>TYPHON_MKT_OPERATIONS=20000000</c>.</para>
 /// <para><b>Reuse.</b> Each run continues from the previous one's state and records its totals in <c>manifest.json</c>. A run that fails part-way
@@ -157,6 +160,7 @@ public class MarketHardeningTests
         public bool Rebuild;
         public int Seed;
         public int StallSeconds;
+        public string SamplesFile;
 
         public int TraderCount => Desks + Players;   // trader numbers 1..TraderCount
 
@@ -180,6 +184,7 @@ public class MarketHardeningTests
             Rebuild = Env("REBUILD", 0) != 0,
             Seed = (int)Env("SEED", 945),
             StallSeconds = (int)Env("STALL_SECONDS", 120),
+            SamplesFile = Environment.GetEnvironmentVariable("TYPHON_MKT_SAMPLES"),
         };
 
         private static long Env(string name, long fallback) =>
@@ -277,6 +282,7 @@ public class MarketHardeningTests
 
     private Config _c;
     private ConcurrentQueue<string> _errors;
+    private Sampler _sampler;
 
     private void Fail(string message)
     {
@@ -287,6 +293,46 @@ public class MarketHardeningTests
     }
 
     private static void Log(string message) => TestContext.Progress.WriteLine($"[market {DateTime.Now:HH:mm:ss}] {message}");
+
+    /// <summary>Logs a diagnostic built on a worker thread, where an exception would end the test process: a failure becomes a log line.</summary>
+    private static void TryLog(Func<string> message)
+    {
+        try
+        {
+            Log(message());
+        }
+        catch (Exception e)
+        {
+            try
+            {
+                Log($"diagnostic failed: {e.GetType().Name}: {e.Message}");
+            }
+            catch (Exception)
+            {
+                // Nothing left to report it to.
+            }
+        }
+    }
+
+    /// <summary>
+    /// After a stall: gives the stopped workers 30 s to leave, then ends the process if one is still inside the engine. Disposing the engine under a
+    /// worker would free the cache it is reading, so failing the test normally — which disposes it — is only safe once they have all left.
+    /// </summary>
+    private void AbandonIfStuck(Thread[] workers)
+    {
+        var deadline = Stopwatch.StartNew();
+        foreach (var t in workers)
+        {
+            var left = TimeSpan.FromSeconds(30) - deadline.Elapsed;
+            if (!t.Join(left > TimeSpan.Zero ? left : TimeSpan.Zero))
+            {
+                var message = $"{t.Name} is still inside the engine 30 s after the stall; ending the process rather than disposing the engine under it.\n"
+                              + string.Join("\n", _errors);
+                Log(message);
+                Environment.FailFast(message);
+            }
+        }
+    }
 
     private DatabaseEngine Open(long cacheMiB, OpenVerification verify) =>
         DatabaseEngine.Open(DatabaseFile(_c), o => o
@@ -305,6 +351,10 @@ public class MarketHardeningTests
         _errors = new ConcurrentQueue<string>();
         Log(_c.ToString());
         Directory.CreateDirectory(_c.Directory);
+        var samplesFile = _c.SamplesFile is { Length: > 0 } f ? f : Path.Combine(_c.Directory, $"samples-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
+        using var sampler = new Sampler(samplesFile);
+        _sampler = sampler;
+        Log($"sampling every second to {samplesFile}");
 
         var manifest = LoadOrBuild();
         var traderIds = ReadIds(TraderIdsFile(_c), _c.TraderCount + 1);
@@ -313,31 +363,40 @@ public class MarketHardeningTests
         // ── Stress ──
         State after;
         long runAudits;
+        sampler.Phase = "open";
         using (var dbe = Open(_c.CacheMiB, OpenVerification.Spine))
         {
+            using var tracked = sampler.Track(dbe, "snapshot");
             var runNo = manifest.Runs + 1;
+            Log($"census after open: {dbe.MMF.DescribeEvictionBlockers()}");
             var sw = Stopwatch.StartNew();
             var state = ReadState(dbe, traderIds, itemIds, lorePermille: 0);
             Log($"snapshot read in {sw.Elapsed.TotalSeconds:F1} s");
+            Log($"census after the snapshot: {dbe.MMF.DescribeEvictionBlockers()}");
             CheckConservation(state, manifest, "before the storm");
             CheckAuditCount(dbe, manifest.AuditEntries, "before the storm");
             AssertNoErrors("before the storm");
 
             var firstSeq = manifest.LastSeq + 1;
+            sampler.Phase = "storm";
             var auditIds = Storm(dbe, traderIds, itemIds, runNo, firstSeq, out var lastSeq);
             AssertNoErrors("during the storm");
             runAudits = auditIds.Count;
 
+            sampler.Phase = "state read";
             sw.Restart();
             after = ReadState(dbe, traderIds, itemIds, _c.LoreSamplePermille);
             Log($"state read in {sw.Elapsed.TotalSeconds:F1} s");
 
             // `state` becomes the expected state: the snapshot with this run's audit replayed over it.
+            sampler.Phase = "replay";
             var traded = Replay(dbe, state, auditIds);
             CompareStates(state, after, "replayed audit vs database");
             CheckConservation(after, manifest, "after the storm");
             CheckAuditCount(dbe, manifest.AuditEntries + runAudits, "after the storm");
+            sampler.Phase = "index check";
             CheckIndex(dbe, after, itemIds, firstSeq, traded);
+            sampler.Phase = "integrity check";
             CheckIntegrity(dbe, "after the storm");
             ReportCache(dbe);
             AssertNoErrors("after the storm");
@@ -347,27 +406,264 @@ public class MarketHardeningTests
             manifest.Runs = runNo;
             File.WriteAllText(ManifestFile(_c), JsonSerializer.Serialize(manifest));
             Log("closing");
+            sampler.Phase = "close";
         }
 
         // ── Reopen ──
+        sampler.Phase = "reopen";
         var reopen = Stopwatch.StartNew();
         using (var dbe = Open(_c.CacheMiB, _c.ReopenVerify))
         {
+            using var tracked = sampler.Track(dbe, "reread");
             Log($"reopened with {_c.ReopenVerify} verification in {reopen.Elapsed.TotalSeconds:F1} s");
             var reread = ReadState(dbe, traderIds, itemIds, _c.LoreSamplePermille);
             CompareStates(after, reread, "after reopen vs before close");
             CheckAuditCount(dbe, manifest.AuditEntries, "after reopen");
+            sampler.Phase = "integrity check (reopen)";
             CheckIntegrity(dbe, "after reopen");
             AssertNoErrors("after reopen");
+            sampler.Phase = "close (reopen)";
         }
 
+        sampler.Phase = "done";
         Log($"run {manifest.Runs} coherent: {runAudits:N0} transfers, {manifest.AuditEntries:N0} audit entries in total");
     }
 
     private void AssertNoErrors(string phase) =>
         Assert.That(_errors, Is.Empty, $"{phase}: {_errors.Count} problem(s)\n  " + string.Join("\n  ", _errors));
 
+    #region Sampling
+
+    /// <summary>
+    /// One CSV row per second for the whole run, so a run can be plotted and set against another instead of judged by its end totals: the phase, the
+    /// cache's unevictable slots by reason, its disk traffic and back-pressure, the checkpoint's progress, the storm's operations and the process's memory.
+    /// </summary>
+    /// <remarks>
+    /// The slot columns (<c>debt</c> to <c>unevictable</c>) are gauges. The others are cumulative counters of the engine being sampled, so a rate is the
+    /// difference between two rows divided by the difference of their <c>t_s</c> — and they restart with each engine: build, stress, reopen. The engine
+    /// columns are empty while no engine is tracked (opening, closing). A <c># start=</c> line gives the wall-clock time of <c>t_s</c> 0, to line rows up
+    /// with the log.
+    /// </remarks>
+    private sealed class Sampler : IDisposable
+    {
+        private const string Header =
+            "t_s,phase,slots_used,debt,acw,slot_ref,epoch_held,unevictable,pages_read,pages_written,bp_rounds,bp_peak_debt,bp_peak_epoch_held," +
+            "bp_longest_wait_ms,ckpt_cycles,ckpt_pressure_cycles,ckpt_pages_written,ops,private_mib,working_set_mib,managed_mib";
+
+        private readonly StreamWriter _out;
+        private readonly Thread _thread;
+        private readonly ManualResetEventSlim _stop = new();
+        private readonly object _gate = new();
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private DatabaseEngine _dbe;
+        private Func<long> _operations;
+
+        public volatile string Phase = "start";
+
+        public Sampler(string path)
+        {
+            _out = new StreamWriter(path) { AutoFlush = true };
+            _out.WriteLine(Header);
+            _out.WriteLine($"# start={DateTime.Now:O}");
+            _thread = new Thread(Run) { IsBackground = true, Name = "market-sampler" };
+            _thread.Start();
+        }
+
+        /// <summary>Samples <paramref name="dbe"/> until the returned scope ends, which must come before the engine is disposed.</summary>
+        public Tracking Track(DatabaseEngine dbe, string phase)
+        {
+            lock (_gate)
+            {
+                _dbe = dbe;
+                Phase = phase;
+            }
+
+            return new Tracking(this);
+        }
+
+        /// <summary>The storm's completed operations, read every sample while the engine stays tracked.</summary>
+        public void CountOperations(Func<long> read)
+        {
+            lock (_gate)
+            {
+                _operations = read;
+            }
+        }
+
+        public sealed class Tracking(Sampler owner) : IDisposable
+        {
+            public void Dispose()
+            {
+                lock (owner._gate)
+                {
+                    owner._dbe = null;
+                    owner._operations = null;
+                }
+            }
+        }
+
+        private void Run()
+        {
+            do
+            {
+                try
+                {
+                    Sample();
+                }
+                catch (Exception e)
+                {
+                    // A background thread's exception would end the test process; the row says what went wrong instead — unless writing is what failed.
+                    try
+                    {
+                        _out.WriteLine($"# sample failed at {_clock.Elapsed.TotalSeconds:F2} s: {e.GetType().Name}: {e.Message}");
+                    }
+                    catch (Exception)
+                    {
+                        // Nothing left to report it to: the run goes on without samples.
+                    }
+                }
+            } while (!_stop.Wait(1000));
+        }
+
+        private void Sample()
+        {
+            var row = new StringBuilder(256);
+            lock (_gate)
+            {
+                // Under the gate: the engine is untracked, then disposed, never the other way round; and the phase is the tracked engine's.
+                row.Append($"{_clock.Elapsed.TotalSeconds:F2},{Phase}");
+                var dbe = _dbe;
+                if (dbe != null)
+                {
+                    var mmf = dbe.MMF;
+                    var (debt, acw, slotRef, epochHeld, unevictable, total) = mmf.CountUnevictablePages();
+                    var m = mmf.GetMetrics();
+                    var ck = dbe.CheckpointManager;
+                    var waitMs = Stopwatch.GetElapsedTime(0, Volatile.Read(ref mmf.PeakBackpressureWaitTicks)).TotalMilliseconds;
+                    row.Append($",{total},{debt},{acw},{slotRef},{epochHeld},{unevictable},{m.ReadFromDiskCount},{m.PageWrittenToDiskCount}");
+                    row.Append($",{m.BackpressureWaitCount},{mmf.PeakBackpressureDebt},{mmf.PeakBackpressureEpochHeld},{waitMs:F0}");
+                    row.Append($",{ck?.TotalCheckpoints},{ck?.TotalPressureCheckpoints},{ck?.TotalPagesWritten},{_operations?.Invoke()}");
+                }
+                else
+                {
+                    row.Append(",,,,,,,,,,,,,,,,");
+                }
+            }
+
+            using var process = Process.GetCurrentProcess();
+            row.Append($",{process.PrivateMemorySize64 >> 20},{process.WorkingSet64 >> 20},{GC.GetTotalMemory(false) >> 20}");
+            _out.WriteLine(row.ToString());
+        }
+
+        public void Dispose()
+        {
+            _stop.Set();
+            _thread.Join();
+            Sample();
+            _out.Dispose();
+            _stop.Dispose();
+        }
+    }
+
+    #endregion
+
     #region Build
+
+    /// <summary>
+    /// The build's page writes, counted per file page through <see cref="PagedMMF.PageWriteInterceptor"/>. Every page a checkpoint writes counts once;
+    /// the async structural path calls the interceptor once per run, so a multi-page run counts at its first page only; and the build engine's close,
+    /// after the interceptor is removed, is not counted.
+    /// </summary>
+    private sealed class WriteCounter(int pages)
+    {
+        private readonly int[] _counts = new int[pages];
+        private readonly Dictionary<int, int> _beyond = new();
+
+        public void Count(int filePage)
+        {
+            if ((uint)filePage < (uint)_counts.Length)
+            {
+                Interlocked.Increment(ref _counts[filePage]);
+                return;
+            }
+
+            lock (_beyond)
+            {
+                _beyond[filePage] = _beyond.TryGetValue(filePage, out var n) ? n + 1 : 1;
+            }
+        }
+
+        /// <summary>Every page written and its writes.</summary>
+        public List<(int Page, int Writes)> Pages()
+        {
+            var pages = new List<(int, int)>();
+            for (var p = 0; p < _counts.Length; p++)
+            {
+                var n = Volatile.Read(ref _counts[p]);
+                if (n > 0)
+                {
+                    pages.Add((p, n));
+                }
+            }
+
+            lock (_beyond)
+            {
+                foreach (var (p, n) in _beyond)
+                {
+                    pages.Add((p, n));
+                }
+            }
+
+            return pages;
+        }
+    }
+
+    /// <summary>The build's page writes per segment kind: writes, distinct pages written, and writes per page.</summary>
+    private static void LogWriteCensus(DatabaseEngine dbe, WriteCounter writes)
+    {
+        // The segment kind of every file page, as an index into `kinds` (0: no segment).
+        var kinds = new List<string> { "unowned" };
+        var kindOf = new byte[dbe.MMF.FileSize / PagedMMF.PageSize + 1];
+        foreach (var seg in dbe.EnumerateStorageSegments())
+        {
+            var name = seg.Kind.ToString();
+            var kind = kinds.IndexOf(name);
+            if (kind < 0)
+            {
+                kind = kinds.Count;
+                kinds.Add(name);
+            }
+
+            foreach (var page in seg.Pages.Span)
+            {
+                if ((uint)page < (uint)kindOf.Length)
+                {
+                    kindOf[page] = (byte)kind;
+                }
+            }
+        }
+
+        var kindWrites = new long[kinds.Count];
+        var kindPages = new long[kinds.Count];
+        long total = 0;
+        var pages = writes.Pages();
+        foreach (var (page, n) in pages)
+        {
+            var kind = (uint)page < (uint)kindOf.Length ? kindOf[page] : 0;
+            kindWrites[kind] += n;
+            kindPages[kind]++;
+            total += n;
+        }
+
+        var parts = new List<string>();
+        foreach (var kind in Enumerable.Range(0, kinds.Count).Where(k => kindPages[k] > 0).OrderByDescending(k => kindWrites[k]))
+        {
+            parts.Add($"{kinds[kind]} {kindWrites[kind] * PagedMMF.PageSize / (1024.0 * 1024 * 1024):F2} GiB written over {kindPages[kind]:N0} pages "
+                      + $"(x{(double)kindWrites[kind] / kindPages[kind]:F1})");
+        }
+
+        Log($"build writes: {total * PagedMMF.PageSize / (1024.0 * 1024 * 1024):F2} GiB over {pages.Count:N0} pages — {string.Join("; ", parts)}");
+    }
 
     private Manifest LoadOrBuild()
     {
@@ -393,6 +689,12 @@ public class MarketHardeningTests
         long totalCredits = 0;
         using (var dbe = Open(_c.BuildCacheMiB, OpenVerification.Spine))
         {
+            using var tracked = _sampler.Track(dbe, "build");
+
+            // Every page write of the build, by file page: what the build writes, segment by segment, against what it ends up holding. Sized for the
+            // file the build is expected to make (~0.8 KiB per item), with room; pages past it are counted aside.
+            var writes = new WriteCounter((int)Math.Min(int.MaxValue, (long)_c.Items * 1024 / PagedMMF.PageSize + (1 << 20)));
+            dbe.MMF.PageWriteInterceptor = writes.Count;
             var options = new BulkLoadOptions { CheckpointTimeout = TimeSpan.FromMinutes(30) };
 
             using (var session = dbe.BeginBulkLoad(options))
@@ -430,6 +732,9 @@ public class MarketHardeningTests
 
             Log($"built in {sw.Elapsed.TotalSeconds:F0} s: data file {dbe.MMF.FileSize / (1024.0 * 1024 * 1024):F2} GiB, " +
                 $"{(double)dbe.MMF.FileSize / Math.Max(1, _c.Items):F0} bytes per item");
+            dbe.MMF.PageWriteInterceptor = null;
+            LogWriteCensus(dbe, writes);
+            _sampler.Phase = "build close";
         }
 
         WriteIds(TraderIdsFile(_c), traderIds);
@@ -541,8 +846,10 @@ public class MarketHardeningTests
         var seq = firstSeq - 1;
         long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0;
         var stop = 0;
+        var censusTaken = 0;
         var audits = new List<ulong>[_c.Threads];
         var threads = new Thread[_c.Threads];
+        _sampler.CountOperations(() => Interlocked.Read(ref done));
 
         for (var w = 0; w < _c.Threads; w++)
         {
@@ -720,6 +1027,14 @@ public class MarketHardeningTests
                 catch (Exception e)
                 {
                     Fail($"worker {worker}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
+
+                    // The timeout names two reasons a page stays in the cache; the census names all of them, taken while the other workers still hold
+                    // the cache as it was. Guarded: an exception escaping this thread would end the test process and lose the failure above.
+                    if (e is PageCacheBackpressureTimeoutException && Interlocked.Exchange(ref censusTaken, 1) == 0)
+                    {
+                        TryLog(() => $"back-pressure census: {dbe.MMF.DescribeEvictionBlockers()}");
+                    }
+
                     Volatile.Write(ref stop, 1);
                 }
             }) { IsBackground = true, Name = $"market-{w}" };
@@ -750,7 +1065,9 @@ public class MarketHardeningTests
                 else if (lastProgress.Elapsed.TotalSeconds > _c.StallSeconds)
                 {
                     Fail($"the storm made no progress for {_c.StallSeconds} s at {now:N0} operations");
+                    TryLog(() => $"stall census: {dbe.MMF.DescribeEvictionBlockers()}");
                     Volatile.Write(ref stop, 1);
+                    AbandonIfStuck(threads);
                     Assert.Fail(string.Join("\n", _errors));
                 }
             }
@@ -971,7 +1288,8 @@ public class MarketHardeningTests
         var fileBytes = dbe.MMF.FileSize;
         Log($"page cache: {cachePages:N0} pages over a {fileBytes / (1024.0 * 1024 * 1024):F2} GiB file; {m.ReadFromDiskCount:N0} pages read, " +
             $"{m.PageWrittenToDiskCount:N0} written in {m.WrittenOperationCount:N0} writes, {m.BackpressureWaitCount:N0} back-pressure rounds, " +
-            $"peaks: {dbe.MMF.PeakBackpressureDebt:N0} owed / {dbe.MMF.PeakBackpressureEpochHeld:N0} epoch-held");
+            $"peaks: {dbe.MMF.PeakBackpressureDebt:N0} owed / {dbe.MMF.PeakBackpressureEpochHeld:N0} epoch-held, longest back-pressure wait " +
+            $"{Stopwatch.GetElapsedTime(0, Volatile.Read(ref dbe.MMF.PeakBackpressureWaitTicks)).TotalMilliseconds:N0} ms");
         if (fileBytes > 2 * (_c.CacheMiB << 20) && m.ReadFromDiskCount <= cachePages)
         {
             Fail($"the file is over twice the cache, yet only {m.ReadFromDiskCount:N0} pages were read: the run never churned the cache");
