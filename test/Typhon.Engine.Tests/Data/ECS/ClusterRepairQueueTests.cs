@@ -50,9 +50,9 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
 
     private DatabaseEngine SetupEngine(float budgetMs, float criticalRatio = 1.0f, float agingRate = 0.05f, int queueMaxCells = 4096,
-        int worstClustersPerUnit = 8)
+        int worstClustersPerUnit = 8, IServiceProvider services = null)
     {
-        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var dbe = (services ?? ServiceProvider).GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
         dbe.RegisterComponentFromAccessor<ClMigScratch>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
@@ -641,24 +641,25 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
     /// timer — so what would break this is making the rank unconditional, which is exactly the tempting simplification.</para>
     /// <para><b>Ten per cent, and measured against the budget rather than against elapsed time.</b> The budget is what the queue exists to allocate, so it
     /// is the honest denominator; wall-clock would make the threshold a property of the machine.</para>
+    /// <para><b>Measured on a second run.</b> The numerator is wall-clock, and the first execution of the absorb and the rank in a process pays their JIT:
+    /// run alone, the test measured 3.5–3.9 ms of maintenance against 0.750 ms scheduled, every time, and passed only when another test had run the path
+    /// first (#1203). So the scenario runs once untimed on an engine of its own, over a file deleted afterwards, and the timed run starts warm.</para>
     /// </remarks>
     [Test]
     [VerifiesRule("TH-03")]
     public void QueueMaintenanceIsASmallFractionOfTheWorkItSchedules()
     {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var warm = SetupEngine(budgetMs: 1.0f, services: scope.ServiceProvider);
+            SpawnDegradedCells(warm);
+            RunTicks(warm, out _, out _);
+        }
+
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
-
-        var maintenanceMs = 0d;
-        var scheduledMs = 0d;
-
-        for (var tick = 2; tick <= 20; tick++)
-        {
-            dbe.WriteTickFence(tick);
-            var t = dbe.GetSpatialTelemetry(ArchetypeId);
-            maintenanceMs += t.RepairQueueMaintenanceMs;
-            scheduledMs += t.ReclusterBudgetUsedMs;
-        }
+        RunTicks(dbe, out var maintenanceMs, out var scheduledMs);
 
         Assert.Multiple(() =>
         {
@@ -673,6 +674,20 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
                 $"queue maintenance cost {maintenanceMs:F3} ms against {scheduledMs:F3} ms of scheduled work — more than a tenth, which is the point at "
                 + "which the queue starts costing more than it saves");
         });
+    }
+
+    /// <summary>Ticks 2 to 20, summing the queue's maintenance and the budget it scheduled.</summary>
+    private static void RunTicks(DatabaseEngine dbe, out double maintenanceMs, out double scheduledMs)
+    {
+        maintenanceMs = 0d;
+        scheduledMs = 0d;
+        for (var tick = 2; tick <= 20; tick++)
+        {
+            dbe.WriteTickFence(tick);
+            var t = dbe.GetSpatialTelemetry(ArchetypeId);
+            maintenanceMs += t.RepairQueueMaintenanceMs;
+            scheduledMs += t.ReclusterBudgetUsedMs;
+        }
     }
 
     /// <summary>
