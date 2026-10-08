@@ -37,12 +37,19 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
     /// <summary>VSBS for multi-value storage. Null when <see cref="PagedHashMapBase{TStore}._allowMultiple"/> is false.</summary>
     private readonly VariableSizedBufferSegment<TValue, TStore> _vsbs;
+    private readonly ChunkBasedSegment<TStore> _bufferSegment;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Constructor
     // ═══════════════════════════════════════════════════════════════════════
 
-    private PagedHashMap(ChunkBasedSegment<TStore> segment, int n0, bool allowMultiple = false) : base(segment, n0, allowMultiple)
+    /// <param name="segment">The map's own segment: its meta, buckets and overflow chunks, and nothing else (#1205).</param>
+    /// <param name="n0">The initial bucket count.</param>
+    /// <param name="bufferSegment">
+    /// Where a multi-value map keeps its value buffers, or <c>null</c> for a single-value map. A segment of their own: a bucket is addressed by its position
+    /// in the map's segment, so a buffer chunk there would sit where a split must put a bucket, and could never be moved out of the way.
+    /// </param>
+    private PagedHashMap(ChunkBasedSegment<TStore> segment, int n0, ChunkBasedSegment<TStore> bufferSegment) : base(segment, n0, bufferSegment != null)
     {
         _bucketCapacity = (segment.Stride - sizeof(PagedHashMapBucketHeader)) / (sizeof(TKey) + sizeof(TValue));
         Debug.Assert(_bucketCapacity >= 1, $"Stride {segment.Stride} too small for entry size {sizeof(TKey) + sizeof(TValue)}");
@@ -50,9 +57,10 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         _keysOffset = sizeof(PagedHashMapBucketHeader);
         _valuesOffset = sizeof(PagedHashMapBucketHeader) + _bucketCapacity * sizeof(TKey);
 
-        if (allowMultiple)
+        if (bufferSegment != null)
         {
-            _vsbs = new VariableSizedBufferSegment<TValue, TStore>(segment);
+            _bufferSegment = bufferSegment;
+            _vsbs = new VariableSizedBufferSegment<TValue, TStore>(bufferSegment);
         }
     }
 
@@ -261,7 +269,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -285,7 +293,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (!found && PackedMeta != packed)
+            if (!found && ReadPackedMeta() != packed)
             {
                 Interlocked.Increment(ref _olcRestarts);
                 continue;
@@ -306,7 +314,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -330,7 +338,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (!found && PackedMeta != packed)
+            if (!found && ReadPackedMeta() != packed)
             {
                 Interlocked.Increment(ref _olcRestarts);
                 continue;
@@ -385,7 +393,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
-            ovHeader.OlcVersion = 0;        // not independently latched
+            TagOverflowOwner(ref ovHeader, startChunkId - 1);   // not independently latched; startChunkId is the primary, bucket + 1
             ovHeader.EntryCount = 1;
             ovHeader.Flags = 0;
             ovHeader.Reserved = 0;
@@ -488,11 +496,12 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
     /// </summary>
     public bool Insert(TKey key, TValue value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
+        TrySplitIfNeeded(ref accessor, changeSet);   // before the write takes effect (see RawValuePagedHashMap.AppendUnderBucketLock)
         uint hash = ComputeHash(key);
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -505,7 +514,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -522,7 +531,15 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
                 // AllowMultiple: append value to existing VSBS buffer
                 int bufferId = Unsafe.As<TValue, int>(ref existingValue);
-                _vsbs.AddElement(bufferId, value, ref accessor);
+                var buffers = _bufferSegment.CreateChunkAccessor(changeSet);
+                try
+                {
+                    _vsbs.AddElement(bufferId, value, ref buffers);
+                }
+                finally
+                {
+                    buffers.Dispose();
+                }
 
                 // Re-fetch primary for unlock after potential VSBS allocation
                 byte* unlockAddr2 = accessor.GetChunkAddress(chunkId, true);
@@ -533,8 +550,18 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             if (_allowMultiple)
             {
                 // Key not found + AllowMultiple: create new buffer, store buffer ID
-                int bufferId = _vsbs.AllocateBuffer(ref accessor);
-                _vsbs.AddElement(bufferId, value, ref accessor);
+                int bufferId;
+                var buffers = _bufferSegment.CreateChunkAccessor(changeSet);
+                try
+                {
+                    bufferId = _vsbs.AllocateBuffer(ref buffers);
+                    _vsbs.AddElement(bufferId, value, ref buffers);
+                }
+                finally
+                {
+                    buffers.Dispose();
+                }
+
                 TValue bufferIdAsValue = Unsafe.As<int, TValue>(ref bufferId);
                 AppendEntry(chunkId, key, bufferIdAsValue, ref accessor, changeSet);
             }
@@ -549,8 +576,6 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             // Re-fetch primary for unlock after potential allocation
             byte* unlockAddr = accessor.GetChunkAddress(chunkId, true);
             new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
-
-            TrySplitIfNeeded(ref accessor, changeSet);
             return true;
         }
     }
@@ -560,12 +585,13 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
     /// </summary>
     public bool Upsert(TKey key, TValue value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
+        TrySplitIfNeeded(ref accessor, changeSet);   // before the write takes effect
         Debug.Assert(!_allowMultiple, "Upsert is not supported with AllowMultiple");
         uint hash = ComputeHash(key);
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -578,7 +604,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -597,8 +623,6 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
             byte* unlockAddr = accessor.GetChunkAddress(chunkId, true);
             new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
-
-            TrySplitIfNeeded(ref accessor, changeSet);
             return true;
         }
     }
@@ -612,7 +636,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -625,7 +649,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -637,7 +661,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 if (_allowMultiple)
                 {
                     int bufferId = Unsafe.As<TValue, int>(ref value);
-                    _vsbs.DeleteBuffer(bufferId, ref accessor);
+                    DeleteBuffer(bufferId, changeSet);
                 }
                 // Re-fetch primary for unlock after potential VSBS operations
                 byte* unlockAddr = accessor.GetChunkAddress(chunkId, true);
@@ -649,7 +673,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             latch.AbortWriteLock();
 
             // Re-check meta: split may have moved key to a different bucket
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 continue;
             }
@@ -669,7 +693,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -682,7 +706,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -691,7 +715,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             if (!ScanChain(chunkId, key, out TValue existingValue, ref accessor))
             {
                 latch.AbortWriteLock();
-                if (PackedMeta != packed)
+                if (ReadPackedMeta() != packed)
                 {
                     continue;
                 }
@@ -703,16 +727,24 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             // Walk buffer's stored chunk chain to find and remove the value
             int remaining = -1;
             int walkChunkId = bufferId;
-            while (walkChunkId != 0)
+            var buffers = _bufferSegment.CreateChunkAccessor(changeSet);
+            try
             {
-                remaining = _vsbs.DeleteElement(bufferId, walkChunkId, valueToRemove, ref accessor);
-                if (remaining != -1)
+                while (walkChunkId != 0)
                 {
-                    break;
+                    remaining = _vsbs.DeleteElement(bufferId, walkChunkId, valueToRemove, ref buffers);
+                    if (remaining != -1)
+                    {
+                        break;
+                    }
+                    // Value not in this chunk — advance to next via chunk header
+                    byte* walkAddr = buffers.GetChunkAddress(walkChunkId);
+                    walkChunkId = Unsafe.AsRef<VariableSizedBufferChunkHeader>(walkAddr).NextChunkId;
                 }
-                // Value not in this chunk — advance to next via chunk header
-                byte* walkAddr = accessor.GetChunkAddress(walkChunkId);
-                walkChunkId = Unsafe.AsRef<VariableSizedBufferChunkHeader>(walkAddr).NextChunkId;
+            }
+            finally
+            {
+                buffers.Dispose();
             }
 
             if (remaining == -1)
@@ -727,7 +759,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 // Buffer empty — remove key entirely from the hash map
                 RemoveFromChain(chunkId, key, out _, ref accessor);
                 Interlocked.Decrement(ref _entryCount);
-                _vsbs.DeleteBuffer(bufferId, ref accessor);
+                DeleteBuffer(bufferId, changeSet);
             }
 
             // Re-fetch primary for unlock after potential operations
@@ -745,13 +777,35 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
     /// Execute a split: redistribute entries from bucket <c>next</c> into old and new buckets
     /// using the finer modulus. Critical ordering: meta update BEFORE unlock.
     /// </summary>
-    protected override void ExecuteSplit(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    protected override bool ExecuteSplit(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         var (level, next, bucketCount) = ReadMeta();
+        if (bucketCount >= BucketCap)
+        {
+            return false;
+        }
+
         int mod = N0 << level;
         int newMod = mod << 1;
         int oldBucketId = next;
         int newBucketId = next + mod;
+
+        // The new bucket's chunk is its position (#1205): claimed before the old bucket is locked, or the split waits for a later insert.
+        var reservation = ChunkReservation<TStore>.Current;
+        reservation.Begin(Segment);
+        try
+        {
+            if (!ClaimBucketChunk(newBucketId, ref accessor, changeSet, reservation))
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            reservation.End();
+        }
+
+        int newChunkId = BucketChunkId(newBucketId);
 
         // Acquire write lock on old bucket (spin — must succeed)
         int oldChunkId = GetBucketChunkId(oldBucketId, ref accessor);
@@ -832,13 +886,8 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         // Rewrite old bucket with keep entries
         RewriteBucket(oldChunkId, keepKeys, keepValues, keepCount, ref accessor, changeSet);
 
-        // Allocate and write new bucket
-        int newChunkId = Segment.AllocateChunk(true, changeSet);
+        // Write the new bucket at the chunk its position names, claimed above
         WriteBucket(newChunkId, moveKeys, moveValues, moveCount, ref accessor, changeSet);
-
-        // Register new bucket in directory
-        EnsureDirectoryCapacity(newBucketId, ref accessor, changeSet);
-        SetBucketChunkId(newBucketId, newChunkId, ref accessor);
 
         // Free old overflow chunks
         for (int i = 0; i < overflowCount; i++)
@@ -847,19 +896,13 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         }
 
         // Update meta BEFORE unlock — readers unblocked by unlock must see new bucket layout
-        int newNext = next + 1;
-        int newLevel = level;
-        if (newNext >= mod)
-        {
-            newNext = 0;
-            newLevel = level + 1;
-        }
-        PackedMeta = PackMeta(newLevel, newNext, bucketCount + 1);
-        FlushMetaToChunk(ref accessor);
+        PublishBucketCount(bucketCount + 1);
+        PersistBucketCount(ref accessor);
 
         // Unlock old bucket (re-fetch after allocations)
         byte* unlockAddr = accessor.GetChunkAddress(oldChunkId, true);
         new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
+        return true;
     }
 
     /// <summary>
@@ -930,6 +973,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
 
         int prevChunkId = parentChunkId;
         int offset = 0;
+        var ownerBucket = parentChunkId - 1;   // the chain starts at the bucket's primary chunk, bucket + 1
 
         while (offset < entryCount)
         {
@@ -941,7 +985,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
             int writeCount = Math.Min(entryCount - offset, _bucketCapacity);
-            ovHeader.OlcVersion = 0;        // not independently latched
+            TagOverflowOwner(ref ovHeader, ownerBucket);   // not independently latched
             ovHeader.EntryCount = (byte)writeCount;
             ovHeader.Flags = 0;
             ovHeader.Reserved = 0;
@@ -969,14 +1013,14 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
     /// </summary>
     private void InsertDuringRebuild(TKey key, TValue value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
+        TrySplitIfNeeded(ref accessor, changeSet);
         uint hash = ComputeHash(key);
-        var (level, next, _) = UnpackMeta(PackedMeta);
+        var (level, next, _) = UnpackMeta(ReadPackedMeta());
         int bucket = ResolveBucket(hash, level, next, N0);
         int chunkId = GetBucketChunkId(bucket, ref accessor);
 
         AppendEntry(chunkId, key, value, ref accessor, changeSet);
         _entryCount++;
-        TrySplitIfNeeded(ref accessor, changeSet);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1232,28 +1276,48 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         Interlocked.Increment(ref _entryCount);
     }
 
+    /// <summary>Deletes value buffer <paramref name="bufferId"/>, through an accessor on the buffers' own segment.</summary>
+    private void DeleteBuffer(int bufferId, ChangeSet changeSet)
+    {
+        var buffers = _bufferSegment.CreateChunkAccessor(changeSet);
+        try
+        {
+            _vsbs.DeleteBuffer(bufferId, ref buffers);
+        }
+        finally
+        {
+            buffers.Dispose();
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Factory methods
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Create a new hash map on a fresh segment.
+    /// Create a new hash map on a fresh segment. A multi-value map passes <paramref name="bufferSegment"/>, a segment of its own for the value buffers.
     /// </summary>
-    public static PagedHashMap<TKey, TValue, TStore> Create(ChunkBasedSegment<TStore> segment, int initialBuckets = 64, bool allowMultiple = false, ChangeSet changeSet = null)
+    public static PagedHashMap<TKey, TValue, TStore> Create(ChunkBasedSegment<TStore> segment, int initialBuckets = 64,
+        ChunkBasedSegment<TStore> bufferSegment = null, ChangeSet changeSet = null)
     {
         Debug.Assert(initialBuckets > 0 && BitOperations.IsPow2(initialBuckets), "initialBuckets must be a positive power of 2");
+        if (bufferSegment == segment)
+        {
+            throw new ArgumentException("A multi-value map's buffers need a segment of their own: the map's buckets are addressed by position in its segment.",
+                nameof(bufferSegment));
+        }
 
         using var guard = EpochGuard.Enter(segment.Store.EpochManager);
 
-        var map = new PagedHashMap<TKey, TValue, TStore>(segment, initialBuckets, allowMultiple);
+        var map = new PagedHashMap<TKey, TValue, TStore>(segment, initialBuckets, bufferSegment);
         map.InitializeCreate(initialBuckets, changeSet);
         return map;
     }
 
     /// <summary>
-    /// Open an existing hash map from a persisted segment.
+    /// Open an existing hash map from a persisted segment. A multi-value map passes the segment its value buffers live in.
     /// </summary>
-    public static PagedHashMap<TKey, TValue, TStore> Open(ChunkBasedSegment<TStore> segment)
+    public static PagedHashMap<TKey, TValue, TStore> Open(ChunkBasedSegment<TStore> segment, ChunkBasedSegment<TStore> bufferSegment = null)
     {
         using var guard = EpochGuard.Enter(segment.Store.EpochManager);
 
@@ -1271,7 +1335,14 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             accessor.Dispose();
         }
 
-        var map = new PagedHashMap<TKey, TValue, TStore>(segment, n0, allowMultiple);
+        if (allowMultiple != (bufferSegment != null))
+        {
+            throw new ArgumentException(allowMultiple
+                ? "The map holds multiple values per key: open it with the segment its value buffers live in."
+                : "The map holds one value per key: it has no buffer segment.", nameof(bufferSegment));
+        }
+
+        var map = new PagedHashMap<TKey, TValue, TStore>(segment, n0, bufferSegment);
         map.InitializeOpen();
         return map;
     }
@@ -1294,7 +1365,8 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 map.InsertDuringRebuild(key, value, ref accessor, changeSet);
             }
 
-            map.FlushMetaToChunk(ref accessor);
+            map.PersistBucketCount(ref accessor);
+            map.PersistEntryCount(ref accessor);
         }
         finally
         {

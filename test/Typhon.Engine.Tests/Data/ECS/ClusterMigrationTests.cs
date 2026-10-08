@@ -820,8 +820,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         // Spawn B in the source cell — ClaimSlotInCell finds the source cell has zero clusters
         // (migration deallocated the empty cluster), so B lands in a fresh cluster. That cluster
-        // may reuse the same chunk id A originally occupied, since ChunkBasedSegment's free list
-        // returns recently-freed chunks first.
+        // may reuse the same chunk id A originally occupied, since ChunkBasedSegment hands
+        // freed chunks out again.
         EntityId idB;
         using (var tx = dbe.CreateQuickTransaction())
         {

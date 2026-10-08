@@ -1989,7 +1989,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// handed back out.
     /// </summary>
     /// <remarks>
-    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> keeps a free list — so without this a brand-new cluster inherits whatever the previous occupant of
+    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> reuses freed ids — so without this a brand-new cluster inherits whatever the previous occupant of
     /// that id left behind. That defeats <see cref="FreshClusterStaysUnknown"/> entirely: the fresh-cluster claim skips the fold precisely so the gate denies
     /// until the slot has contents, and it can only deny if the entry actually holds the sentinel. Concretely — cluster 7 drains with born=100, died=120 and
     /// is freed; a spawn at TSN 500 gets id 7 back and release-stores occupancy bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both

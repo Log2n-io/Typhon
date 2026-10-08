@@ -144,6 +144,30 @@ internal sealed class ChunkReservation<TStore> where TStore : struct, IPageStore
     }
 
     /// <summary>
+    /// Takes chunk <paramref name="chunkId"/> out of the calling thread's reservation on <paramref name="segment"/>, if the reservation holds it unused: for
+    /// a structure that needs that very chunk (a linear hash map's next bucket, #1205), which another allocation of the same thread may have reserved.
+    /// </summary>
+    internal static bool TryTakeReserved(ChunkBasedSegment<TStore> segment, int chunkId)
+    {
+        var r = t_instance;
+        if (r == null || r._depth == 0 || !ReferenceEquals(r._segment, segment))
+        {
+            return false;
+        }
+
+        for (var i = 0; i < r._chunkCount; i++)
+        {
+            if (r._chunks[i] == chunkId)
+            {
+                r._chunks[i] = r._chunks[--r._chunkCount];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Gives back a chunk taken with <see cref="AllocateUnderLatch"/> that a fault stopped the writer from linking: <see cref="End"/> then frees it with the
     /// rest, instead of leaving it allocated with nothing reaching it. No-op without an open reservation on <paramref name="segment"/>.
     /// </summary>
@@ -174,9 +198,24 @@ internal sealed class ChunkReservation<TStore> where TStore : struct, IPageStore
 
         try
         {
+            // Every chunk is freed even if one free throws: a chunk dropped here stays allocated and linked to nothing, and one the bucket frontier
+            // reaches defers every split for good (#1205).
+            Exception first = null;
             while (_chunkCount > 0)
             {
-                _segment.FreeChunk(_chunks[--_chunkCount]);
+                try
+                {
+                    _segment.FreeChunk(_chunks[--_chunkCount]);
+                }
+                catch (Exception e)
+                {
+                    first ??= e;
+                }
+            }
+
+            if (first != null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(first).Throw();
             }
         }
         finally

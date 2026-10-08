@@ -74,7 +74,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
         }
 
         TInserter inserter = default;
-        var packed = PackedMeta;
+        var packed = ReadPackedMeta();
 
         // The caller's contract, checked rather than trusted: if the state cannot hold the batch, some insert below would have wanted a split, and the
         // partitioning the caller built is already invalid. Loud here beats corrupt later.
@@ -136,7 +136,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
     {
         while (true)
         {
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 ThrowHelper.ThrowInvalidOp(
                     "InsertNewBulk saw the map resize mid-batch. The batch was sorted by bucket indices read before the split, so those indices no longer "
@@ -152,7 +152,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -262,7 +262,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
 
             var ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
-            ovHeader.OlcVersion = 0;
+            TagOverflowOwner(ref ovHeader, startChunkId - 1);   // startChunkId is the bucket's primary chunk, bucket + 1
             ovHeader.EntryCount = 1;
             ovHeader.Flags = 0;
             ovHeader.Reserved = 0;

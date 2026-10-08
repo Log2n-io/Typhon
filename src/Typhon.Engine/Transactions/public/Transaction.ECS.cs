@@ -2091,7 +2091,7 @@ public unsafe partial class Transaction
                 var es = _dbe._stateByRouting[archId];
                 if (es?.EntityMap != null)
                 {
-                    es.EntityMap.EnsureCapacity((int)es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
+                    es.EntityMap.EnsureCapacity(es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
                 }
             }
         }

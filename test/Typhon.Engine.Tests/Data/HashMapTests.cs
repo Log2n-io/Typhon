@@ -52,11 +52,9 @@ unsafe class PagedHashMapTests
     // ═══════════════════════════════════════════════════════════════════════
 
     [Test]
-    public void StructSizes_MetaAndDirectory_256Bytes()
+    public void StructSizes_MetaAndBucketHeader()
     {
         Assert.That(sizeof(PagedHashMapMeta), Is.EqualTo(256));
-        Assert.That(sizeof(PagedHashMapDirectory), Is.EqualTo(256));
-        Assert.That(sizeof(OverflowDirIndex), Is.EqualTo(256));
         Assert.That(sizeof(PagedHashMapBucketHeader), Is.EqualTo(12));
     }
 
@@ -82,30 +80,52 @@ unsafe class PagedHashMapTests
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PackMeta / UnpackMeta
+    // Hash state: level and split pointer derive from the bucket count (#1205)
     // ═══════════════════════════════════════════════════════════════════════
 
     [Test]
-    public void PackUnpackMeta_Roundtrip()
+    public void HashState_DerivesFromTheBucketCount()
     {
-        long packed = PagedHashMapBase<PersistentStore>.PackMeta(3, 100, 256);
-        var (level, next, bucketCount) = PagedHashMapBase<PersistentStore>.UnpackMeta(packed);
-
-        Assert.That(level, Is.EqualTo(3));
-        Assert.That(next, Is.EqualTo(100));
-        Assert.That(bucketCount, Is.EqualTo(256));
+        foreach (var (n0, bucketCount, level, next) in new[] { (256, 256L, 0, 0), (256, 257L, 0, 1), (256, 511L, 0, 255), (256, 512L, 1, 0), (64, 96L, 0, 32) })
+        {
+            Assert.That(PagedHashMapBase<PersistentStore>.HashStateOf(bucketCount, n0), Is.EqualTo((level, next)), $"N0 {n0}, {bucketCount} buckets");
+        }
     }
 
+    /// <summary>
+    /// The split pointer used to be stored in 24 bits and masked without a check: past 2²⁵ buckets it wrapped and lookups resolved to the wrong bucket. It is
+    /// derived now, so every count up to the cap round-trips — checked at both sides of the old wrap and at the cap.
+    /// </summary>
     [Test]
-    public void PackUnpackMeta_MaxValues()
+    public void HashState_RoundTrips_PastThe24BitPointer()
     {
-        // Level max: 255, Next max: 16,777,215 (24 bits), BucketCount max: int.MaxValue
-        long packed = PagedHashMapBase<PersistentStore>.PackMeta(255, 0x00FFFFFF, int.MaxValue);
-        var (level, next, bucketCount) = PagedHashMapBase<PersistentStore>.UnpackMeta(packed);
+        const int n0 = 256;
+        foreach (var bucketCount in new long[] { (1L << 25) - 1, 1L << 25, (1L << 25) + (1 << 24) + 1, PagedHashMapBase<PersistentStore>.MaxBucketCount - 1,
+                     PagedHashMapBase<PersistentStore>.MaxBucketCount })
+        {
+            var (level, next) = PagedHashMapBase<PersistentStore>.HashStateOf(bucketCount, n0);
+            Assert.That(((long)n0 << level) + next, Is.EqualTo(bucketCount), $"{bucketCount} buckets");
+            Assert.That(next, Is.InRange(0, (n0 << level) - 1), $"{bucketCount} buckets: the split pointer stays within its round");
+        }
+    }
 
-        Assert.That(level, Is.EqualTo(255));
-        Assert.That(next, Is.EqualTo(0x00FFFFFF));
-        Assert.That(bucketCount, Is.EqualTo(int.MaxValue));
+    /// <summary>
+    /// One bucket below the cap, the finer modulus is at its largest (2³⁰). Every hash must still resolve inside the map's buckets.
+    /// </summary>
+    [Test]
+    public void ResolveBucket_AtTheCap_StaysWithinTheBuckets()
+    {
+        const int n0 = 256;
+        var bucketCount = PagedHashMapBase<PersistentStore>.MaxBucketCount - 1;
+        var (level, next) = PagedHashMapBase<PersistentStore>.HashStateOf(bucketCount, n0);
+        var rng = new Random(1205);
+        for (var i = 0; i < 100_000; i++)
+        {
+            var bucket = PagedHashMapBase<PersistentStore>.ResolveBucket((uint)rng.NextInt64(0, uint.MaxValue + 1L), level, next, n0);
+            Assert.That(bucket, Is.InRange(0, bucketCount - 1));
+        }
+
+        Assert.That(PagedHashMapBase<PersistentStore>.ResolveBucket(uint.MaxValue, level, next, n0), Is.InRange(0, bucketCount - 1));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1117,9 +1137,10 @@ unsafe class PagedHashMapTests
             ref readonly var bHeader = ref Unsafe.AsRef<PagedHashMapBucketHeader>(accessor.GetChunkAddress(chunkId));
             Assert.That(bHeader.OverflowChunkId, Is.Not.EqualTo(-1), "Overflow should exist before split");
 
-            // Insert more entries to trigger split (need total > 4*30*0.75 = 90)
+            // Insert more entries to trigger split (need total > 4*30*0.75 = 90, and one insert more: a split runs at the start of the insert after
+            // the threshold is crossed, before that insert takes effect)
             int inserted = 0;
-            for (int candidate = 10000; inserted < 60; candidate++)
+            for (int candidate = 10000; inserted < 61; candidate++)
             {
                 uint hash = PagedHashMap<int, int, PersistentStore>.ComputeHashForTest(candidate);
                 int b = PagedHashMapBase<PersistentStore>.ResolveBucket(hash, 0, 0, n0);
@@ -2229,6 +2250,41 @@ unsafe class PagedHashMapTests
     // Phase 7 — AllowMultiple
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// A multi-value map keeps splitting: its value buffers live in a segment of their own. They used to share the map's, where the first buffer chunk
+    /// the bucket frontier reached carried no owner tag, could not be moved, and deferred every split from then on — 72 buckets for 20 000 keys, a load
+    /// of 9 (#1205 review).
+    /// </summary>
+    [Test]
+    public void AllowMultiple_ManyKeys_TheMapKeepsSplitting()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
+
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            for (var k = 1; k <= 6_000; k++)
+            {
+                map.Insert(k, k, ref accessor, null);
+            }
+
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+
+        Assert.That(map._splitsDeferred, Is.Zero, "nothing in the map's segment but buckets and overflow chunks");
+        Assert.That(map.LoadFactor, Is.LessThanOrEqualTo(1.0));
+        Assert.That(map.BucketCount, Is.GreaterThan(200), "6 000 keys at 30 per bucket and a 0.75 load: about 267 buckets");
+    }
+
     [Test]
     public void AllowMultiple_L32_InsertDuplicateKey_AppendsToBuffer()
     {
@@ -2236,7 +2292,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
-        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, allowMultiple: true);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
 
         Assert.That(map.AllowMultiple, Is.True);
 
@@ -2283,7 +2340,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
-        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, allowMultiple: true);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
 
         var depth = epochManager.EnterScope();
         try
@@ -2333,7 +2391,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
-        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, allowMultiple: true);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
 
         var depth = epochManager.EnterScope();
         try
@@ -2364,7 +2423,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
-        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, allowMultiple: true);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
 
         var depth = epochManager.EnterScope();
         try
@@ -2397,7 +2457,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 50, 256);
-        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 4, allowMultiple: true);
+        var buffers4 = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 4, bufferSegment: buffers4);
 
         var depth = epochManager.EnterScope();
         try
@@ -2436,7 +2497,8 @@ unsafe class PagedHashMapTests
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
 
         var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
-        var created = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, allowMultiple: true);
+        var buffers = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var created = PagedHashMap<int, int, PersistentStore>.Create(segment, 8, bufferSegment: buffers);
 
         var depth = epochManager.EnterScope();
         try
@@ -2453,7 +2515,7 @@ unsafe class PagedHashMapTests
         }
 
         // Reopen
-        var opened = PagedHashMap<int, int, PersistentStore>.Open(segment);
+        var opened = PagedHashMap<int, int, PersistentStore>.Open(segment, buffers);
         Assert.That(opened.AllowMultiple, Is.True);
         Assert.That(opened.EntryCount, Is.EqualTo(1));
 

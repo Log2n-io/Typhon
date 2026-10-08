@@ -62,7 +62,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
     {
         get
         {
-            var (_, _, bucketCount) = UnpackMeta(PackedMeta);
+            var (_, _, bucketCount) = UnpackMeta(ReadPackedMeta());
             return bucketCount;
         }
     }
@@ -79,7 +79,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int BucketIndexOf(TKey key)
     {
-        var (level, next, _) = UnpackMeta(PackedMeta);
+        var (level, next, _) = UnpackMeta(ReadPackedMeta());
         return ResolveBucket(ComputeHash(key), level, next, N0);
     }
 
@@ -213,7 +213,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
         }
 
         TUpdater applier = default;
-        var packed = PackedMeta;
+        var packed = ReadPackedMeta();
 
         AssertSortedByBucket<TEntry, TUpdater>(sortedByBucket);
 
@@ -243,7 +243,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
     {
         while (true)
         {
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 ThrowHelper.ThrowInvalidOp(
                     "UpdateValuesBulk saw the map resize mid-batch. The batch was sorted by bucket indices read before the split, so those indices no longer "
@@ -260,7 +260,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;

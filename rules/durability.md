@@ -392,6 +392,8 @@ CK-08 (flush-only cycles) are later increments.
             overwritten
   post: at open, ∃ ≥1 CRC-valid slot per protected page; selection = highest valid `PairGeneration`; both-invalid → open
         fails loudly (never a silent fallback)
+  invariant every directory page of a segment has a twin — the map page a directory needs only for its terminator, when its
+            entries end at a page's end, included — and the open walk registers the current slot of every page in the chain
   scope: META PAIR (C1): `ManagedPagedMMF.PersistMetaNow` (write: alternate slot + gen + CRC + fsync + flip), `LoadMeta` (read:
          both slots, pick highest valid gen), `MapReadOffset` (page 0 → current slot), `IsExternallyPersisted` (meta pair excluded
          from the checkpoint dirty-write). DIRECTORY TWINS (C2): `PersistProtectedPage` (the atomic write protocol under `_pairLock`,
@@ -408,7 +410,8 @@ CK-08 (flush-only cycles) are later increments.
                 on delete → silent mis-route of a reallocated page (STO-4)
   verified: MetaPairTests (meta) + DirectoryPairTests (directory): AlternatesSlots_GenerationMonotonic,
             TornCurrentSlot_ReopenSelectsSibling, BothSlotsCorrupt_OpenFailsLoudly, MultiExtensionSegment_RoundTripsReopen,
-            RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10) + falsification.
+            RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10),
+            ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot (#1206) + falsification.
             MetaPairStructuralFlushTests — the SOLE-WRITER property: after a full engine lifecycle both slots verify,
             their generations are consecutive, and shutdown writes strictly alternate. That is the property the
             violation below broke, and no earlier test covered it: every one above checks the pair's READ selection or
@@ -426,6 +429,14 @@ CK-08 (flush-only cycles) are later increments.
         integrity scanner on its first run against a HEALTHY database — nothing inside the engine could observe it,
         which is the argument for the scanner made by the scanner. Fixed by extending `SavePages`'s existing CK-05
         partition to skip externally-persisted pages entirely. Regression: `MetaPairStructuralFlushTests`.
+  note 🔴 VIOLATION FOUND + FIXED 2026-10-07 (#1206, found by #1205): a directory whose entries ended exactly at a page's end got its
+        terminator on a fresh map page with no twin, and `ResolveDirectoryPairsForLoad` stopped at the first page without
+        one — every later directory page went unregistered and was read from its PRIMARY slot, whatever its current slot.
+        A page persisted an even number of times holds its latest bytes in its twin, so the segment reopened short, at an
+        earlier terminator. Latent while every grow rewrote every directory page (both slots stayed within one grow of each
+        other); exposed when grows started writing only the pages they change: a 200M-entry entity map reopened 800 000
+        pages short, caught by the chain↔directory cross-check at load. Fixed: the terminator-only page gets its twin, so
+        every page the walk meets is paired.
   note: the durability watermarks (CheckpointLSN + CleanShutdown) are packed in `BK_DurabilityWatermarks` and flip atomically
         with the meta generation — the generation bump is the cycle's atomic commit point (M12). `BK_LastTickFenceLSN`
         consolidation is deferred (fence-as-records, M5).
@@ -1560,7 +1571,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never write a page the published segment can reach (the root, an existing map page, the old tail) before every step that can throw has
         succeeded
   requires: PS-09 (the latch helper the pins go through), PS-05 (a grow's local ChangeSet is released on the throw too)
-  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
+  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, ReleaseUnpublished,
          IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
          failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
          publishes), ChunkBasedSegment.GrowChunkCapacity
@@ -1577,8 +1588,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
         thrown; the pages then leak, which corrupts nothing since nothing references them.
   note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
-        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
-        (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity sets the new pages' room bits before `base.Grow`
+        and publishes only the capacity after it; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
 ### PS-12: A mem-page's address is computed in 64 bits, never in `int` `[fatal]` `[silent]`
   invariant ∀ expression of the form `memPagesBaseAddr + (memPageIndex × PageSize)`: the product is
@@ -1768,6 +1779,41 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             APublishedPage_IsAlwaysFound_WhileOtherSlotsChurnThroughItsChain (two threads churn slots through its bucket while two read;
             fails, unstaged, without the locked confirmation). EveryPublishedPage_IsFound_AndRemovingOneSlot_UnpublishesOnlyIt fails
             with a remove that ignores the slot (#1136)
+
+### PS-18: A chunk id names exactly one place in its segment `[fatal]` `[silent]`
+  invariant ∀ chunk id c < ChunkCapacity: GetChunkLocation(c) = (⌊(c − root) / d⌋ + 1, (c − root) mod d) with d the chunks per page and root the
+            root page's chunk count — exact division for every 32-bit id, so the offset lies in [0, d)
+  invariant ChunkCapacity = root + (pages − 1) · d ≤ MaxChunkCount (int.MaxValue − 1): a grow is clamped there, and an allocation that finds the
+            segment at the cap throws ResourceExhausted — the capacity never overflows an int
+  invariant growth costs the pages it adds: the page list keeps spare room (copied only when it runs out, doubling), the allocator's room bits live in
+            blocks that are added, never copied, and a grow pins, latches and re-verifies only the directory pages it writes (LogicalSegment: from the
+            one holding the old terminator on)
+  invariant the allocator's room bits are a superset of the truth: a page with a free chunk has its bit set. A free clears its chunk bit, then sets the
+            page's; an allocation that finds a page full clears the page's bit, then reads the page again and sets the bit back if a chunk was freed in
+            between — interlocked on both sides, so whichever runs second sees the other. An allocation that found no room grows the segment only if no
+            room or summary bit went from clear to set during its search (a set-back counts) and no clear is in flight; a free chunk above the
+            allocation floor is never grown past
+  invariant an allocation returns an id below the capacity published when its search began: it searches the pages that capacity covers, never the
+            page count — a grow publishes its pages, room bits set, before their capacity
+  scope: ChunkBasedSegment.GetChunkLocation, ChunkPageDivider, ChunkBasedSegment.ComputeCapacity, ChunkBasedSegment.GrowChunkCapacity,
+         ChunkBasedSegment.AllocateChunkInternal, ChunkBasedSegment.PagesCovering,
+         ChunkBasedSegment.TryAllocateOnPage, ChunkBasedSegment.MarkRoom, ChunkBasedSegment.NextPageWithRoom, ChunkBasedSegment.FreeChunk,
+         LogicalSegment.Grow, LogicalSegment.CreateOrGrow, LogicalSegment.VerifyDirectoryFrom
+  on_violation: the 32-bit magic multiplier it replaced (⌈2³²/d⌉, (c · m) ≫ 32) was exact only while c · (m · d − 2³²) < 2³²: past that, ids of
+                remainder d − 1 resolved to the next page at offset −1 — one stride before its chunk area, inside its header — and every read and
+                write of them landed there, silently: from chunk 6 100 999 at an 8-byte stride, 54 366 749 for revision chains (#1204). A grow that
+                copied the page list and re-read the whole directory each step was O(segment) per grow, quadratic over a segment's life (#1205). The
+                lock-free free list the room bits replaced lost pages to races by design, and under an allocation floor a lost page was grown past
+                for good; patching it took a loss counter, then a count for the rebuild's own race, and review still found two more (#1205)
+  verified: ChunkAddressingTests [VerifiesRule] — the divider against / for every chunks-per-page count from 1 to 4 000, at the ids the old multiplier
+            got wrong, at the top of the range and at random; a 6 200-page stride-8 segment locates chunk 6 100 999 on page 6 101 at offset 999, where
+            the old division read page 6 102 offset −1; the capacity stops at the chunk-id space at every geometry. SegmentGrowthTests [VerifiesRule]
+            — a segment grown to exact lengths across four directory pages, persisted at each, keeps its directory and its chain and reopens to the
+            same page list; a one-page grow of a three-page directory touches neither the root nor the first extension; a directory whose chain
+            ends early is refused at load. ChunkBasedSegmentBitmapL3Tests — a free between "page full" and the room bit's clear is not lost; a free behind the search is
+            taken rather than grown past; a bulk free from a mid-word start keeps every chunk below it; an allocation while a grow is held between
+            publishing its pages and their capacity returns an id below the capacity it sees.
+            EntityMapAddressingTests — every free chunk above the floor is used before the segment grows, stale bits on full pages included
 
 ---
 
@@ -1965,7 +2011,7 @@ of the LSN value).
             HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule]
 
 ### CS-05: The chunk summary is trusted only after the close that wrote it `[fatal][silent]`
-  invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and free-list membership, every
+  invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and page room bits, every
             archetype's active-cluster list and free-cluster head — after PersistEngineState's data fsync, with a fresh random
             nonce; the nonce reaches the data file in the same meta flip as the clean flag (CS-01). A close that cannot write the
             file, for any reason, records nonce 0, which nothing matches. Clearing the flag clears the nonce in the same flip
@@ -1975,7 +2021,7 @@ of the LSN value).
             capacity), and a cluster list only together with its segment's own entry and within its allocated count and capacity
   invariant nothing checks a summary's content against the pages: a summary that passes every guard above but is wrong — a bug in
             the capture — is trusted. Deliberate: the chunk bitmaps stay authoritative for allocation, so a wrong count never reuses a
-            chunk; a short count on a full segment grows it instead of rebuilding an empty free list for ever (AllocateChunkInternal).
+            chunk; a page recorded with room it lacks is cleared by the first allocation to look at it (the bits are a superset).
             What a wrong count still misleads is AllocatedChunkCount's readers, and the exposure the pages cannot catch is the
             active-cluster list, which ASummaryLoadedOpen_HoldsTheStateAScanWould pins
   invariant the summary is consumed by the open only and released when InitializeArchetypes ends, completed or not; the pages stay
@@ -2185,7 +2231,8 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
   invariant ∀ derived structure (secondary B+Tree indexes + their multi-value HEAD/TAIL buffers, occupancy bitmap,
             spatial index, AND the EntityMap of a *rebuildable* archetype): integrity doubt post-crash ⟹ rebuilt from
             primary data; never page-repaired, never trusted. The EntityMap is derived-on-crash because a torn EntityMap
-            page holds a hash directory of chunk-id POINTERS — trusting it dereferences garbage into a hard process crash
+            page holds chunk-id POINTERS (overflow links; a bucket count that addresses buckets by position, EMAP-01) —
+            trusting it dereferences garbage into a hard process crash
             *before* any loud-fail can fire (unlike opaque-byte component pages, which RB-04 catches post-hoc). An archetype
             is "rebuildable" iff it is cluster-eligible (cluster slots persist EntityKeys[N] + EnabledBits[C] +
             OccupancyBits — fully self-describing) OR all its non-Transient slots are Versioned (chain heads carry every
@@ -2258,7 +2305,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     A THIRD ordering applies on a migrating open: RebuildClusterFromChains must place the entities BEFORE anything reads
     the cluster, and the cluster head rebuild (ArchetypeClusterState.RebuildVersionedHeadFromChain) must run AFTER the
     EntityMap it reads has been re-derived — DatabaseEngine.DrainDeferredVersionedHeadRebuilds exists precisely to defer
-    it past that point. Running it earlier dereferences a torn EntityMap's hash directory into a hard process crash,
+    it past that point. Running it earlier dereferences a torn EntityMap's chunk-id pointers into a hard process crash,
     which is RB-01's own rationale applied one level down.
   on_violation: an index built over pre-scrub MVCC history carries stale/duplicate keys; a suspect resolved before
     rebuild misclassifies a to-be-discarded derived page; a cluster index built at open covers only the checkpointed half of

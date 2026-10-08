@@ -25,7 +25,7 @@ sealed class WholeSegmentScanTests
     public void TearDown() => SegmentGrowTestKit.DeleteBundles(_bundles);
 
     /// <summary>A chunk segment of <see cref="SegmentPages"/> pages, built and saved under a cache that holds it; returns its root.</summary>
-    private int BuildChunkSegment(string name)
+    private int BuildChunkSegment(string name, bool full = false)
     {
         using var provider = SegmentGrowTestKit.CreateProvider(memPageCount: SegmentPages * 2, name, _bundles);
         using var scope = provider.CreateScope();
@@ -35,7 +35,19 @@ sealed class WholeSegmentScanTests
         var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, SegmentPages, Stride, changeSet);
         for (var i = 0; i < SegmentPages; i++)
         {
-            segment.AllocateChunk(false, changeSet);   // a chunk or so per page, so the bitmaps hold something to count
+            segment.AllocateChunk(false, changeSet);   // something in the bitmaps to count
+        }
+
+        if (full)
+        {
+            // Every chunk taken but the last page's last: a search from the first page has every other page to look at.
+            var last = -1;
+            while (segment.FreeChunkCount > 0)
+            {
+                last = segment.AllocateChunk(false, changeSet);
+            }
+
+            segment.FreeChunk(last);
         }
 
         changeSet.SaveChanges();
@@ -66,22 +78,27 @@ sealed class WholeSegmentScanTests
         Assert.That(segment.AllocatedChunkCount, Is.EqualTo(SegmentPages + 1), "the scan counted every page's chunks (one is reserved at creation)");
     }
 
-    /// <summary>The free-list rebuild an allocation falls back to, on a segment larger than the cache, inside the allocating caller's epoch scope.</summary>
+    /// <summary>
+    /// An allocation's search across room bits on full pages — set when a summary recorded them before the pages filled — on a segment larger than the
+    /// cache, inside the allocating caller's epoch scope: each full page is looked at and released, and the free chunk on the last page is found.
+    /// </summary>
     [Test]
     [CancelAfter(60_000)]
     [VerifiesRule("EP-02")]
-    public void ARebuildOfTheFreeList_OnASegmentLargerThanTheCache_Completes()
+    public void ASearchAcrossFullPages_OnASegmentLargerThanTheCache_Completes()
     {
-        var root = BuildChunkSegment("ep02_rebuild");
-        using var provider = ReopenSmall("ep02_rebuild");
+        var root = BuildChunkSegment("ep02_search", full: true);
+        using var provider = ReopenSmall("ep02_search");
         using var scope = provider.CreateScope();
         var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
         var segment = pmmf.LoadChunkBasedSegment(root, Stride);
 
         using var guard = EpochGuard.Enter(pmmf.EpochManager);
-        segment.RebuildFreeListForTest();
+        segment.MarkEveryPageForTest();
+        var length = segment.Length;
 
-        Assert.That(segment.AllocateChunk(false), Is.GreaterThanOrEqualTo(0), "the rebuilt list hands out a free chunk");
+        Assert.That(segment.AllocateChunk(false), Is.GreaterThanOrEqualTo(0), "the search reaches the one free chunk");
+        Assert.That(segment.Length, Is.EqualTo(length), "found, not grown past");
     }
 
     /// <summary>The integrity check's walk of a segment's forward chain, on a segment larger than the cache, inside one epoch scope.</summary>

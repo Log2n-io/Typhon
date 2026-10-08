@@ -4,7 +4,6 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -648,8 +647,8 @@ public class ChunkBasedSegmentBitmapL3Tests
     {
         var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 20, 64);
 
-        // The segment grows freely up to maxPages (20 → 40 → 80 → 160), then the allocators leave `slack` chunks free: it runs near-full, the free
-        // list almost empty and allocate, free and rebuild racing, without an allocator ever finding it full, which is the only thing that grows it.
+        // The segment grows freely up to maxPages (20 → 40 → 80 → 160), then the allocators leave `slack` chunks free: it runs near-full, few pages
+        // with room and allocate, free and room-bit clears racing, without an allocator ever finding it full, which is the only thing that grows it.
         // The slack exceeds the four allocators, so no interleaving of theirs can use it up.
         const int maxPages = 160;
         const int slack = 64;
@@ -759,15 +758,88 @@ public class ChunkBasedSegmentBitmapL3Tests
 
         // Exact, not merely non-negative: `Allocated + Free == Capacity` holds by definition (Free IS Capacity - Allocated), so it could never fail.
         Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)), "the allocated count drifted from the bitmap");
+
+        // The property the room-bit protocol exists for, after real races: every page with a free chunk has its bit (PS-18).
+        for (var id = 1; id < segment.ChunkCapacity; id++)
+        {
+            if (!segment.IsChunkAllocated(id))
+            {
+                var page = segment.GetChunkLocation(id).segmentIndex;
+                Assert.That(segment.HasRoomBitForTest(page), Is.True, $"page {page} holds free chunk {id} but has no room bit");
+            }
+        }
     }
 
     /// <summary>
-    /// A free that lands while <c>RebuildFreeList</c> is running must still reach the allocated count. The rebuild used to overwrite the count with its
-    /// own popcount; a free on a page the scan had already passed was then lost, the count stayed one too high for good, and under load
-    /// <see cref="ChunkBasedSegment{TStore}.FreeChunkCount"/> went negative. Deterministic: the probe frees inside the rebuild, after the scan.
+    /// An allocation while a grow has published its pages but not yet their capacity: the new pages' room bits are set, and a search bounded by the page
+    /// count took a chunk there, an id at or past the capacity every other reader bounds by (seen once in the gate's concurrent allocate/free run). The
+    /// allocator searches the pages the published capacity covers, so the concurrent allocation waits on the grow and returns an id below the capacity
+    /// it sees. Deterministic: the probe allocates from a second thread while the grow is held between the two publications.
     /// </summary>
     [Test]
-    public void AFreeDuringTheFreeListRebuild_StillReachesTheAllocatedCount()
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-18")]
+    public void AnAllocationDuringAGrow_ReturnsAChunkBelowThePublishedCapacity()
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 2, 64);
+        while (segment.FreeChunkCount > 0)
+        {
+            segment.AllocateChunk(false);
+        }
+
+        var capacityBefore = segment.ChunkCapacity;
+        int concurrentId = -1, capacityAtReturn = -1;
+        Thread concurrent = null;
+        ChunkBasedSegment<PersistentStore>.GrowPagesPublishedForTest = s =>
+        {
+            if (!ReferenceEquals(s, segment) || concurrent != null)
+            {
+                return;
+            }
+
+            concurrent = new Thread(() =>
+            {
+                var depth = _epochManager.EnterScope();
+                try
+                {
+                    concurrentId = segment.AllocateChunk(false);
+                    capacityAtReturn = segment.ChunkCapacity;
+                }
+                finally
+                {
+                    _epochManager.ExitScope(depth);
+                }
+            });
+            concurrent.Start();
+
+            // The grow holds its lock: an allocation bounded by the published capacity waits on it and cannot return before this wait ends.
+            concurrent.Join(TimeSpan.FromMilliseconds(100));
+        };
+
+        try
+        {
+            var growingId = segment.AllocateChunk(false);
+            Assert.That(concurrent, Is.Not.Null, "premise: the allocation grew the segment");
+            Assert.That(concurrent.Join(TimeSpan.FromSeconds(4)), Is.True, "the concurrent allocation never returned");
+
+            Assert.That(concurrentId, Is.LessThan(capacityAtReturn), "an allocation returned a chunk past the capacity published when it returned");
+            Assert.That(capacityAtReturn, Is.GreaterThan(capacityBefore));
+            Assert.That(growingId, Is.Not.EqualTo(concurrentId));
+        }
+        finally
+        {
+            ChunkBasedSegment<PersistentStore>.GrowPagesPublishedForTest = null;
+        }
+    }
+
+    /// <summary>
+    /// A free on a page an allocation has just found full, landing before the allocation clears the page's room bit: the free's own room bit is already
+    /// set, so it changes nothing, and the clear would leave a page with a free chunk and no bit — found by no search until another free lands there. The
+    /// allocation reads the page again after the clear and sets the bit back. Deterministic: the probe frees between the "full" verdict and the clear.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-18")]
+    public void AFreeOnAPageFoundFull_IsNotLost()
     {
         var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
         var ids = new List<int>();
@@ -776,31 +848,119 @@ public class ChunkBasedSegmentBitmapL3Tests
             ids.Add(segment.AllocateChunk(false));
         }
 
-        int onFirstPage = ids[0];
-        int onLastPage = ids[^1];
-        Assert.That(segment.GetChunkLocation(onFirstPage).segmentIndex, Is.LessThan(segment.GetChunkLocation(onLastPage).segmentIndex),
-            "precondition: the two chunks must sit on different pages, the first one scanned before the other");
-
-        // One free chunk, and a free list that has lost track of it — what the lost race RebuildFreeList exists for leaves behind. The next allocation
-        // walks an empty list with the count below capacity, so it rebuilds.
-        segment.FreeChunk(onLastPage);
-        segment.GetType().GetField("_freeHead", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(segment, -1);
-
-        var fired = 0;
-        segment.RebuildFreeListProbe = () =>
+        var length = segment.Length;
+        var chunkOnPage = new Dictionary<int, int>();
+        foreach (var id in ids)
         {
-            if (Interlocked.Exchange(ref fired, 1) == 0)
+            chunkOnPage.TryAdd(segment.GetChunkLocation(id).segmentIndex, id);
+        }
+
+        // Every page full, every room bit set: the next allocation finds each full in turn. On the first, a free lands just before the clear.
+        segment.MarkEveryPageForTest();
+        var freed = -1;
+        segment.PageFullProbe = page =>
+        {
+            if (freed < 0 && chunkOnPage.TryGetValue(page, out var id))
             {
-                segment.FreeChunk(onFirstPage);   // page 0: the scan has already counted this chunk as allocated
+                freed = id;
+                segment.FreeChunk(id);
             }
         };
-        segment.AllocateChunk(false);
-        segment.RebuildFreeListProbe = null;
+        var allocated = segment.AllocateChunk(false);
+        segment.PageFullProbe = null;
 
-        Assert.That(fired, Is.EqualTo(1), "precondition: the allocation must have rebuilt the free list");
-        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)),
-            "the free made during the rebuild was overwritten by the scan's snapshot");
-        Assert.That(segment.FreeChunkCount, Is.EqualTo(1));
+        Assert.That(freed, Is.GreaterThanOrEqualTo(0), "premise: the probe freed a chunk on a page found full");
+        Assert.That(allocated, Is.EqualTo(freed), "the chunk freed in the window is the one handed out");
+        Assert.That(segment.Length, Is.EqualTo(length), "and the segment did not grow past it");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)));
+    }
+
+    /// <summary>
+    /// A free behind the search — on a page the allocation has already found full and cleared — sets that page's room bit after the search passed it. An
+    /// allocation that finds no room grows the segment only if no room bit went from clear to set meanwhile; here one did, so it searches again and takes
+    /// the freed chunk. Deterministic: the probe frees on the first page searched as the search finds the last one full.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-18")]
+    public void AFreeBehindTheSearch_IsTakenRatherThanGrownPast()
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
+        var ids = new List<int>();
+        while (segment.FreeChunkCount > 0)
+        {
+            ids.Add(segment.AllocateChunk(false));
+        }
+
+        var length = segment.Length;
+        var chunkOnPage = new Dictionary<int, int>();
+        foreach (var id in ids)
+        {
+            chunkOnPage.TryAdd(segment.GetChunkLocation(id).segmentIndex, id);
+        }
+
+        // Every page full, every room bit set: the search finds each full in turn and clears its bit. As it finds the last one full, a chunk is freed on
+        // the first page it searched that holds chunks — behind it.
+        segment.MarkEveryPageForTest();
+        var probed = new List<int>();
+        var freed = -1;
+        segment.PageFullProbe = page =>
+        {
+            probed.Add(page);
+            if (freed < 0 && probed.Count == length)
+            {
+                foreach (var behind in probed)
+                {
+                    if (behind != page && chunkOnPage.TryGetValue(behind, out var id))
+                    {
+                        freed = id;
+                        segment.FreeChunk(id);
+                        break;
+                    }
+                }
+            }
+        };
+        var allocated = segment.AllocateChunk(false);
+        segment.PageFullProbe = null;
+
+        Assert.That(freed, Is.GreaterThanOrEqualTo(0), "premise: the probe freed a chunk on a page the search had passed");
+        Assert.That(allocated, Is.EqualTo(freed), "the chunk freed behind the search is the one handed out");
+        Assert.That(segment.Length, Is.EqualTo(length), "and the segment did not grow past it");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)));
+    }
+
+    /// <summary>
+    /// <see cref="ChunkBasedSegment{TStore}.FreeAllChunksFrom"/> frees every chunk from its start on and none below — the start mid-word, on the first chunk
+    /// page and the second, so the bits below it in its own word are the ones at stake. Chunk 0 is never freed: a map's reset keeps its meta that way.
+    /// </summary>
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(70)]
+    [TestCase(130)]
+    public void FreeAllChunksFrom_FreesFromItsStartAndKeepsWhatIsBelow(int from)
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
+        while (segment.FreeChunkCount > 0)
+        {
+            segment.AllocateChunk(false);
+        }
+
+        var capacity = segment.ChunkCapacity;
+        var kept = Math.Max(1, from);
+
+        using (EpochGuard.Enter(_pmmf.EpochManager))
+        {
+            segment.FreeAllChunksFrom(from);
+        }
+
+        for (var id = 0; id < capacity; id++)
+        {
+            Assert.That(segment.IsChunkAllocated(id), Is.EqualTo(id < kept), $"chunk {id}");
+        }
+
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(kept));
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)));
+        Assert.That(segment.AllocateChunk(false), Is.GreaterThanOrEqualTo(kept), "a freed chunk is handed out again");
+        Assert.That(segment.Length, Is.EqualTo(3), "without growing");
     }
 
     /// <summary>Chunks whose bitmap bit is set: the ground truth the allocated count must equal.</summary>
