@@ -31,19 +31,12 @@ internal struct ChunkBasedSegmentHeader
 /// Logical Segment that stores fixed sized chunk of data.
 /// </summary>
 /// <remarks>
-/// Provides API to allocate chunks; the occupancy map is stored in the Metadata of each page.
-/// Free-page tracking uses a lock-free forward singly-linked list of pages with available chunks.
-/// Allocators walk the list, naturally distributing across pages. Exhausted pages are removed mid-walk.
-/// Freed pages are appended at the tail. The minimum chunk size is 8 bytes.
+/// Provides API to allocate chunks; the occupancy map is stored in the Metadata of each page. Which pages may have a free chunk is a bitmap, one bit per
+/// page with a summary bit per 64 pages, searched next-fit from the last page an allocation succeeded on (see <see cref="RoomBlock"/>). The minimum chunk
+/// size is 8 bytes.
 /// </remarks>
 public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : struct, IPageStore
 {
-    // ReSharper disable InconsistentNaming
-    private const int EMPTY_PAGE = -1;
-    private const int NOT_IN_LIST = -2;
-    private const int HEAD_SENTINEL = -3;
-    // ReSharper restore InconsistentNaming
-
     private readonly Lock _growLock = new();
     private readonly EpochManager _epochManager;
 
@@ -51,9 +44,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     private readonly int _rootChunkCount;
     private readonly int _otherChunkCount;
 
-    // Magic multiplier for fast division: quotient = (n * _divMagic) >> 32
-    // This replaces expensive division (~20-80 cycles) with multiply+shift (~3-4 cycles)
-    private readonly ulong _divMagic;
+    // Exact division of a chunk index by the chunks-per-page count, as one 64×64 multiply (#1204). See ChunkPageDivider.
+    private readonly ChunkPageDivider _pageDivider;
 
     // Alignment padding: ensures chunks start at stride-aligned absolute page offsets (for ACLP).
     private readonly int _rootAlignmentPadding;
@@ -64,31 +56,55 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     private readonly int _bitmapLongsOther;
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Lock-free forward linked list allocator state
+    // Page-room bitmap allocator state
     // ═══════════════════════════════════════════════════════════════════════
 
-    // Head of the forward linked list of pages with free chunks.
-    // EMPTY_PAGE = empty list. Reads/writes are naturally atomic on x64.
-    private int _freeHead;
+    /// <summary>
+    /// Room bits for 4 096 pages: one bit per page, set when the page may have a free chunk, and a summary bit per 64-page word, set when the word may be
+    /// non-zero. A segment holds them in blocks that are allocated once and never move: growth adds blocks to a new outer array holding the same ones, so
+    /// a bit set concurrently with a grow is never set on a copy that is then dropped (#1205).
+    /// </summary>
+    /// <remarks>
+    /// The bits are a superset of the truth: a page with a free chunk always has its bit set; a page with its bit set may be full. A free clears its chunk's
+    /// bit and then sets its page's; an allocation that finds a page full clears the page's bit and then reads the page again, setting the bit back if a
+    /// chunk was freed in between. Each step is an interlocked operation — a full fence on x64 and arm64 — so whichever of the two runs second sees the
+    /// other, and no page with a free chunk is left unmarked. The summary keeps the same rule one level up: a word that becomes non-zero sets its summary
+    /// bit, and a search that finds a summary bit over a zero word clears it, then reads the word again.
+    /// </remarks>
+    private sealed class RoomBlock
+    {
+        internal const int Shift = 12;
+        internal const int PageCount = 1 << Shift;
+        internal const int WordCount = PageCount >> 6;
+        internal readonly long[] Words = new long[WordCount];
+        internal long Summary;
+    }
+
+    private RoomBlock[] _roomBlocks = [];
+
+    // Bumped each time a room or summary bit goes from clear to set — by a free, or by an allocation setting back a bit it cleared. An allocation that
+    // found no room grows the segment only if it is unchanged since its search began; otherwise a bit was set behind the search, and it searches again.
+    private int _roomGeneration;
+
+    // Clears in flight: an allocation that clears a room or summary bit counts itself here until it has read the page or word again (and set the bit
+    // back if it had to). A search that ran inside that window skipped a bit about to be set back, so the grow decision waits for zero (#1205).
+    private int _transientClears;
+
+    // The page the last allocation succeeded on, where the next search starts (next fit). A hint: read and written without ordering.
+    private int _allocationCursor;
 
     // Total allocated chunks across all pages. Updated via Interlocked.Increment/Decrement.
     private int _allocatedCount;
 
-    // Per-page next pointer for the forward linked list.
-    // >= 0: successor page index (page is in the list)
-    // EMPTY_PAGE (-1): tail of the list (page is in the list)
-    // NOT_IN_LIST (-2): page is NOT in the list
-    private int[] _nextPage;
-
-    // Total chunk capacity (updated on Grow under _growLock)
+    // Total chunk capacity: written under _growLock with release semantics, read lock-free with acquire semantics — TryReserveChunk's callers on other
+    // threads gate on it.
     private int _capacity;
 
     /// <summary>
-    /// Test hook: runs inside <see cref="RebuildFreeList"/> after the bitmap scan and before the rebuilt list is published — the window in which
-    /// allocations and frees on other threads keep moving bits the scan has already read. Per segment, so a test using it stays parallel-safe. Null in
-    /// production, and the rebuild is a rare recovery path, so the check costs nothing that matters.
+    /// Test hook: runs when an allocation has found page <c>pageIndex</c> full, before it clears the page's room bit — the window in which a free on that
+    /// page may already have set the bit it is about to clear. Per segment, null in production.
     /// </summary>
-    internal Action RebuildFreeListProbe;
+    internal Action<int> PageFullProbe;
 
     /// <summary>This segment's engine-scoped <c>EW-01</c> tick-fence guard, cached by the structures built over it.</summary>
     internal ExclusiveWindow FenceWindow => Store.EpochManager?.FenceWindow;
@@ -131,10 +147,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         _rootChunkCount = ChunkCountRootPage;
         _otherChunkCount = ChunkCountPerPage;
 
-        // Precompute magic multiplier for fast division by _otherChunkCount
-        // Formula: magic = ceil(2^32 / divisor) = (2^32 + divisor - 1) / divisor
-        // This works for divisors where the maximum dividend fits in 32 bits
-        _divMagic = (0x1_0000_0000UL + (uint)_otherChunkCount - 1) / (uint)_otherChunkCount;
+        _pageDivider = new ChunkPageDivider(_otherChunkCount);
 
         // Bitmap longs per page type: ceil(chunks / 64)
         _bitmapLongsRoot = (ChunkCountRootPage + 63) >> 6;
@@ -208,18 +221,19 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             _store.UnlatchPageExclusive(memPageIdx);
         }
 
-        // Initialize allocator state for a fresh (empty) segment
-        _capacity = ComputeCapacity(length);
+        // Initialize allocator state for a fresh (empty) segment: every page that holds chunks has room.
+        Volatile.Write(ref _capacity, ComputeCapacity(length));
         _allocatedCount = 0;
-        _nextPage = new int[length];
-
-        // Build forward chain: page 0 → page 1 → ... → page N-1 → EMPTY_PAGE
-        _freeHead = 0;
-        for (int i = 0; i < length - 1; i++)
+        _allocationCursor = 0;
+        _roomBlocks = [];
+        EnsureRoomBlocks(length);
+        for (var i = 0; i < length; i++)
         {
-            _nextPage[i] = i + 1;
+            if (ChunksOnPage(i) > 0)
+            {
+                SetRoomUnsynchronized(i);
+            }
         }
-        _nextPage[length - 1] = EMPTY_PAGE;
 
         ReserveChunk(0);                    // Mark chunk 0 as allocated ("null" sentinel) — data already cleared above
         return true;
@@ -249,20 +263,19 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         }
 
         var length = Length;
-        _capacity = ComputeCapacity(length);
-        _nextPage = new int[length];
-        Array.Fill(_nextPage, NOT_IN_LIST);
-        _freeHead = EMPTY_PAGE;
+        Volatile.Write(ref _capacity, ComputeCapacity(length));
+        _allocationCursor = 0;
+        _roomBlocks = [];
+        EnsureRoomBlocks(length);
 
         if (summary != null && summary.PageCount == length && summary.AllocatedCount <= _capacity)
         {
             _allocatedCount = summary.AllocatedCount;
-            var lastInList = -1;
             for (var i = 0; i < length; i++)
             {
                 if (summary.HasRoom(i))
                 {
-                    LinkAtTail(i, ref lastInList);
+                    SetRoomUnsynchronized(i);
                 }
             }
 
@@ -292,7 +305,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         var length = Length;
         var pages = Pages;
         _allocatedCount = 0;
-        var lastInList = -1;
 
         // One page at a time (EP-02): an epoch-tagged read would hold every page of the segment for the open's scope, and a segment larger than the
         // cache would then wait for evictions its own tags forbid (#1144).
@@ -326,47 +338,33 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
             if (popcount < maxChunks) // page has free space
             {
-                LinkAtTail(i, ref lastInList);
+                SetRoomUnsynchronized(i);
             }
         }
     }
 
-    /// <summary>Appends page <paramref name="pageIndex"/> to the free list being built at load, single-threaded.</summary>
-    private void LinkAtTail(int pageIndex, ref int lastInList)
-    {
-        _nextPage[pageIndex] = EMPTY_PAGE; // mark as tail
-        if (lastInList >= 0)
-        {
-            _nextPage[lastInList] = pageIndex;
-        }
-        else
-        {
-            _freeHead = pageIndex;
-        }
-        lastInList = pageIndex;
-    }
-
     /// <summary>
-    /// The allocator state a clean close records for the next open (<see cref="ChunkSummaryFile"/>): the allocated count and which pages are in the free
-    /// list. Must run with nothing allocating or freeing — the close calls it after the final flush.
+    /// The allocator state a clean close records for the next open (<see cref="ChunkSummaryFile"/>): the allocated count and which pages have their room
+    /// bit set. Must run with nothing allocating or freeing — the close calls it after the final flush.
     /// </summary>
     /// <remarks>
-    /// The free list is a hint, not the truth: a page can be in it and full (allocation unlinks exhausted pages lazily) or, after a rare race, have room and
-    /// be out of it until <see cref="RebuildFreeList"/> runs. The summary records exactly what the running engine had, so a reopened engine behaves as this
-    /// one would have, and the count — exact by construction — is what callers read.
+    /// The room bits are a superset of the truth (<see cref="RoomBlock"/>): a page may be recorded with room and be full, which the first allocation to
+    /// look at it corrects. The summary records exactly what the running engine had, so a reopened engine behaves as this one would have, and the count —
+    /// exact by construction — is what callers read.
     /// </remarks>
     internal ChunkSegmentSummary CaptureSummary()
     {
         var length = Length;
-        var nextPage = _nextPage;
+        var blocks = Volatile.Read(ref _roomBlocks);
         var words = new ulong[ChunkSegmentSummary.WordCount(length)];
-        var n = Math.Min(length, nextPage.Length);
-        for (var i = 0; i < n; i++)
+        for (var w = 0; w < words.Length && (w >> 6) < blocks.Length; w++)
         {
-            if (nextPage[i] != NOT_IN_LIST)
-            {
-                words[i >> 6] |= 1UL << (i & 63);
-            }
+            words[w] = (ulong)Volatile.Read(ref blocks[w >> 6].Words[w & (RoomBlock.WordCount - 1)]);
+        }
+
+        if ((length & 63) != 0 && words.Length > 0)
+        {
+            words[^1] &= (1UL << (length & 63)) - 1;
         }
 
         return new ChunkSegmentSummary(RootPageIndex, length, _allocatedCount, words);
@@ -379,8 +377,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <param name="changeSet">Optional change set for tracking modifications.</param>
     /// <returns>True if growth occurred, false if already at maximum capacity.</returns>
     /// <remarks>
-    /// This method is thread-safe. It uses a lock to ensure only one thread grows the segment at a time.
-    /// After growth, new pages are spliced into the forward linked list.
+    /// This method is thread-safe. It uses a lock to ensure only one thread grows the segment at a time. The new pages' room bits are set before the pages
+    /// are published; an allocation searches only the pages the segment holds, so it never meets a page without them.
     /// </remarks>
     private bool GrowChunkCapacity(int minNewPageCount = 0, ChangeSet changeSet = null)
     {
@@ -394,10 +392,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             // produces unfriendly amortised behaviour for callers that just want "a bit more room". The cap keeps single-grow request size bounded while still
             // amortising O(log n) grow operations until the cap is reached.
             const int GrowDoublingCap = 1024;
-            var doubledOrAdditive = currentLength < GrowDoublingCap ? currentLength * 2 : currentLength + GrowDoublingCap;
-            var newLength = minNewPageCount > 0 ? Math.Max(doubledOrAdditive, minNewPageCount) : doubledOrAdditive;
+            var doubledOrAdditive = currentLength < GrowDoublingCap ? currentLength * 2L : currentLength + (long)GrowDoublingCap;
+            var newLength = (int)Math.Min(MaxPageCount, minNewPageCount > 0 ? Math.Max(doubledOrAdditive, minNewPageCount) : doubledOrAdditive);
 
-            // Check if we can grow
+            // Check if we can grow: the cap is the chunk-id space (MaxChunkCount), and an allocation that finds it exhausted throws ResourceExhausted.
             if (newLength <= currentLength)
             {
                 return false; // Already at maximum capacity
@@ -410,81 +408,21 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             var effectiveChangeSet = changeSet ?? localChangeSet;
             try
             {
-                // Grow the underlying logical segment (thread-safe, will allocate new pages)
+                // Room bits first: they exist and are set before any allocation can see the pages. If the grow fails, they mark pages past the segment's
+                // end, which no search reaches, and the next grow sets them again.
+                EnsureRoomBlocks(newLength);
+                MarkRoomRange(currentLength, newLength);
+
+                // Grow the underlying logical segment (thread-safe, will allocate new pages). It clears every new page in full — the chunk bitmap with it —
+                // and registers each with the change set (InitDataPages, PS-14), so nothing here writes a page after it is published.
                 base.Grow(newLength, effectiveChangeSet);
-
-                // Clear the page metadata (bitmap) for newly allocated pages and protect against checkpoint race
-                {
-                    var epoch = _store.EpochManager.GlobalEpoch;
-                    for (int i = currentLength; i < newLength; i++)
-                    {
-                        var page = GetPageExclusiveUnchecked(i, epoch, out var memPageIdx);
-                        page.Metadata<long>(0, _bitmapLongsOther).Clear();
-                        effectiveChangeSet?.AddByMemPageIndex(memPageIdx);
-
-                        // The clear above happened after base.Grow unlatched the page, so a checkpoint may already have
-                        // snapshotted the pre-clear bytes. Record the modification so the page stays owed and is rewritten —
-                        // the write in flight covers an older generation and cannot discharge this one.
-                        _store.MarkPageModified(memPageIdx);
-
-                        _store.UnlatchPageExclusive(memPageIdx);
-                    }
-                }
-
-                // Expand _nextPage array and chain new pages
-                var newNextPage = new int[newLength];
-                Array.Copy(_nextPage, newNextPage, currentLength);
-
-                // Chain new pages: currentLength → currentLength+1 → ... → newLength-1 → EMPTY_PAGE
-                for (int i = currentLength; i < newLength - 1; i++)
-                {
-                    newNextPage[i] = i + 1;
-                }
-                newNextPage[newLength - 1] = EMPTY_PAGE;
+                GrowPagesPublishedForTest?.Invoke(this);
 
                 var oldCapacity = _capacity;
-                _nextPage = newNextPage;
-                _capacity = ComputeCapacity(newLength);
+                Volatile.Write(ref _capacity, ComputeCapacity(newLength));
 
                 // Phase 5: Storage:ChunkSegment:Grow event.
                 TyphonEvent.EmitStorageChunkSegmentGrow(Stride, oldCapacity, _capacity);
-
-                // Splice new pages at tail of existing list
-                while (true)
-                {
-                    var head = _freeHead;
-                    if (head == EMPTY_PAGE)
-                    {
-                        // List is empty, make first new page the head
-                        if (Interlocked.CompareExchange(ref _freeHead, currentLength, EMPTY_PAGE) == EMPTY_PAGE)
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    // Walk to tail and link new chain
-                    var cur = head;
-                    while (true)
-                    {
-                        var next = _nextPage[cur];
-                        if (next == EMPTY_PAGE)
-                        {
-                            if (Interlocked.CompareExchange(ref _nextPage[cur], currentLength, EMPTY_PAGE) == EMPTY_PAGE)
-                            {
-                                goto spliced;
-                            }
-                            continue;
-                        }
-                        if (next == NOT_IN_LIST)
-                        {
-                            break; // cur removed, restart from head
-                        }
-                        cur = next;
-                    }
-                }
-                spliced:
-
                 return true;
             }
             finally
@@ -505,38 +443,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     {
         while (ChunkCapacity < minChunkCount)
         {
-            var pagesNeeded = 1 + ((minChunkCount - ChunkCountRootPage + ChunkCountPerPage - 1) / ChunkCountPerPage);
+            var pagesNeeded = (int)Math.Min(MaxPageCount, 1 + ((minChunkCount - (long)ChunkCountRootPage + ChunkCountPerPage - 1) / ChunkCountPerPage));
             if (!GrowChunkCapacity(pagesNeeded, changeSet))
             {
-                break;
+                // At MaxPageCount the segment cannot reach the count asked for: say so rather than return short to a caller that would index past it.
+                ThrowHelper.ThrowResourceExhausted("Storage/ChunkBasedSegment/EnsureCapacity", ResourceType.Memory, minChunkCount, ChunkCapacity);
             }
-        }
-    }
-
-    /// <summary>
-    /// Attempts to grow the segment if capacity is exhausted.
-    /// </summary>
-    /// <param name="changeSet">Optional ChangeSet to track dirty pages from growth. When provided, new pages are tracked
-    /// by the caller's ChangeSet (tied to a UoW lifecycle), preventing orphaned DirtyCounter increments that checkpoint
-    /// can consume before the caller protects the page.</param>
-    /// <returns>True if growth occurred or capacity was already available, false if at maximum capacity.</returns>
-    private bool GrowIfNeeded(ChangeSet changeSet = null)
-    {
-        // Quick check without lock - if we have free chunks, no need to grow
-        if (_allocatedCount < _capacity)
-        {
-            return true;
-        }
-
-        // Need to grow - acquire lock and double-check
-        lock (_growLock)
-        {
-            if (_allocatedCount < _capacity)
-            {
-                return true; // Another thread grew while we waited
-            }
-
-            return GrowChunkCapacity(changeSet: changeSet);
         }
     }
 
@@ -588,6 +500,151 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             using var accessor = CreateChunkAccessor(changeSet);
             accessor.ClearChunk(index);
         }
+    }
+
+    /// <summary>
+    /// Allocates chunk <paramref name="chunkId"/> itself, if it is free: the allocation a structure makes when the chunk's position is its address — the
+    /// next bucket of a linear hash map (#1205). Returns false, changing nothing, when the chunk is already allocated.
+    /// </summary>
+    /// <remarks>
+    /// Durability as <see cref="AllocateChunk(ChangeSet, ref ChunkAccessor{TStore})"/> (CP-04, #301): the bitmap page is registered with
+    /// <paramref name="changeSet"/>, and the chunk cleared through the caller's <paramref name="accessor"/>, which then holds its page until it is disposed.
+    /// The chunk must lie within the segment's capacity.
+    /// </remarks>
+    internal bool TryReserveChunk(int chunkId, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
+        var (pageIndex, chunkInPage) = GetChunkLocation(chunkId);
+        var wordIndex = chunkInPage >> 6;
+        var mask = 1L << (chunkInPage & 0x3F);
+
+        var epoch = _store.EpochManager.GlobalEpoch;
+        var page = GetPage(pageIndex, epoch, out var memPageIdx);
+        var prevBits = Interlocked.Or(ref page.Metadata<long>()[wordIndex], mask);
+        if ((prevBits & mask) != 0)
+        {
+            return false;
+        }
+
+        if (changeSet != null)
+        {
+            if (!changeSet.AddByMemPageIndex(memPageIdx))
+            {
+                changeSet.RegisterReDirty(memPageIdx);
+            }
+        }
+        else
+        {
+            _store.MarkPageModified(memPageIdx);
+        }
+
+        Interlocked.Increment(ref _allocatedCount);
+        accessor.ClearChunk(chunkId);
+        return true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Allocation floor
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Chunk id below which the allocator hands nothing out; 0 for every segment but one whose low chunks are addressed by position and taken one by one
+    // with TryReserveChunk — a linear hash map's buckets (#1205). Volatile: the allocator reads it lock-free, the map raises it as its buckets grow.
+    private volatile int _allocationFloor;
+
+    /// <summary>
+    /// Chunk id below which <see cref="AllocateChunk(ChangeSet, ref ChunkAccessor{TStore})"/> allocates nothing. Chunks below it can still be taken one by
+    /// one with <see cref="TryReserveChunk"/>, freed, and read: the floor only keeps the allocator out.
+    /// </summary>
+    internal int AllocationFloor => _allocationFloor;
+
+    /// <summary>Raises <see cref="AllocationFloor"/> to <paramref name="floor"/>; a lower value changes nothing.</summary>
+    internal void RaiseAllocationFloor(int floor)
+    {
+        var current = _allocationFloor;
+        while (floor > current)
+        {
+            var seen = Interlocked.CompareExchange(ref _allocationFloor, floor, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
+    }
+
+    /// <summary>Sets <see cref="AllocationFloor"/> outright, lower included: for a structure reset to empty, when nothing allocates concurrently.</summary>
+    /// <remarks>
+    /// Lowering it hands the allocator pages it never searched: the floor's own page may have had its room bit cleared while its only free chunks lay below
+    /// the floor. Those pages are marked; the first allocation to find one full clears it again.
+    /// </remarks>
+    internal void ResetAllocationFloor(int floor)
+    {
+        var previous = _allocationFloor;
+        _allocationFloor = floor;
+        var length = Length;
+        if (floor < previous && length > 0)
+        {
+            MarkRoomRange(Math.Min(LocateUnchecked(floor).Page, length), Math.Min(LocateUnchecked(previous).Page + 1, length));
+        }
+    }
+
+    /// <summary>
+    /// The page and in-page offset of chunk <paramref name="index"/>, without <see cref="GetChunkLocation"/>'s check that the page exists: for the floor,
+    /// which may sit past the segment's current end.
+    /// </summary>
+    private (int Page, int Offset) LocateUnchecked(int index)
+    {
+        if (index < _rootChunkCount)
+        {
+            return (0, index);
+        }
+
+        var adjusted = (uint)(index - _rootChunkCount);
+        var page = _pageDivider.Divide(adjusted);
+        return ((int)page + 1, (int)(adjusted - page * (uint)_otherChunkCount));
+    }
+
+    /// <summary>
+    /// Whether page <paramref name="pageIndex"/> has a free chunk at or above <paramref name="fromOffset"/>. Reads the page and releases it (EP-02): a search
+    /// that looks at many full pages pins none of them for the caller's epoch.
+    /// </summary>
+    private bool PageHasFreeChunkFrom(int pageIndex, int fromOffset)
+    {
+        var page = AcquirePageForRead(pageIndex, out var memPageIndex);
+        try
+        {
+            return HasFreeChunkFrom(page.MetadataReadOnly<long>(), BitmapLongsOnPage(pageIndex), ChunksOnPage(pageIndex), fromOffset);
+        }
+        finally
+        {
+            ReleasePageForRead(memPageIndex);
+        }
+    }
+
+    /// <summary>Whether a page's chunk bitmap has a clear bit at or above <paramref name="fromOffset"/>, below <paramref name="maxChunks"/>.</summary>
+    private static bool HasFreeChunkFrom(ReadOnlySpan<long> metadata, int bitmapLongs, int maxChunks, int fromOffset)
+    {
+        for (var w = fromOffset >> 6; w < bitmapLongs; w++)
+        {
+            var first = w * 64;
+            var free = ~metadata[w];
+            if (fromOffset > first)
+            {
+                free &= -1L << (fromOffset - first);
+            }
+
+            if (maxChunks - first < 64)
+            {
+                free &= (1L << (maxChunks - first)) - 1;
+            }
+
+            if (free != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -645,168 +702,203 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <summary>Called with the segment at the start of every allocation; a test throws from it to stand in for a failing grow. Test seam.</summary>
     internal static Action<object> AllocateFaultForTest;
 
+    /// <summary>Called with the segment by a grow between publishing its pages and publishing their capacity. Test seam.</summary>
+    internal static Action<object> GrowPagesPublishedForTest;
+
     private int AllocateChunkInternal(bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
     {
         AllocateFaultForTest?.Invoke(this);
-        int pass = 0;
-
-        restart:
-        int prev = HEAD_SENTINEL;
-        int cur = _freeHead;
-        int restarts = 0;
-        var length = Length;
-
-        while (cur != EMPTY_PAGE)
+        while (true)
         {
-            int next = _nextPage[cur];
+            var capacityAtStart = Volatile.Read(ref _capacity);
+            var generationAtStart = Volatile.Read(ref _roomGeneration);
 
-            if (next == NOT_IN_LIST)
+            // The pages the published capacity covers, not Length: a grow publishes its pages before their capacity, and a chunk taken on a page in
+            // between would be an id past the capacity every other reader bounds by. A search that finds those pages out of reach waits on the grow lock
+            // below, and searches again once the grow has published.
+            var length = PagesCovering(capacityAtStart);
+
+            // The allocation floor (#1205): nothing below it is the allocator's. Pages wholly below are not searched, and the floor's own page is searched
+            // from the floor's offset.
+            var floor = _allocationFloor;
+            var (floorPage, floorOffset) = floor > 0 ? LocateUnchecked(floor) : (0, 0);
+            if (floorPage < length)
             {
-                // cur was removed (Phase A) but predecessor still points here (Phase B failed).
-                // Fix stale head if needed, then restart from _freeHead with bounded counter.
-                restarts++;
-                if (restarts > length)
+                var start = Math.Clamp(_allocationCursor, floorPage, length - 1);
+                var chunkId = AllocateFrom(start, length, floorPage, floorOffset, clearContent, changeSet, ref accessor);
+                if (chunkId < 0 && start > floorPage)
                 {
-                    break; // fall through to pass++/RebuildFreeList
+                    chunkId = AllocateFrom(floorPage, start, floorPage, floorOffset, clearContent, changeSet, ref accessor);
                 }
 
-                if (cur == _freeHead)
+                if (chunkId >= 0)
                 {
-                    Interlocked.CompareExchange(ref _freeHead, EMPTY_PAGE, cur);
-                }
-
-                prev = HEAD_SENTINEL;
-                cur = _freeHead;
-                continue;
-            }
-
-            // Scan cur's bitmap for a free bit
-            var maxChunks = cur == 0 ? _rootChunkCount : _otherChunkCount;
-            var bitmapLongs = cur == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
-            var epoch = _store.EpochManager.GlobalEpoch;
-            var page = GetPage(cur, epoch, out var memPageIdx);
-            var metadata = page.Metadata<long>();
-
-            for (int w = 0; w < bitmapLongs; w++)
-            {
-                var word = metadata[w];
-                while (word != -1L)
-                {
-                    var bit = BitOperations.TrailingZeroCount(~word);
-                    var chunkInPage = w * 64 + bit;
-                    if (chunkInPage >= maxChunks)
-                    {
-                        goto pageExhausted;
-                    }
-
-                    var mask = 1L << bit;
-                    var prevBits = Interlocked.Or(ref metadata[w], mask);
-                    if ((prevBits & mask) != 0)
-                    {
-                        // Lost race — update word with current state and retry next bit
-                        word = prevBits | mask;
-                        continue;
-                    }
-
-                    // SUCCESS — chunk claimed.
-                    //
-                    // CRITICAL (#301): bitmap-write durability follows the same CP-04 pattern as MarkSlotDirty. EnsureDirtyAtLeast(1) is a no-op when DC was
-                    // already ≥1 — and the running checkpoint may have ALREADY snapshotted this page's bitmap word BEFORE our Interlocked.Or above. That
-                    // snapshot has bit=0 (pre-OR). After fsync, the snapshot's DC decrement takes DC to 0; the page becomes evictable; eviction + reload
-                    // restores bit=0 from disk — silently REVERTING our allocation. A subsequent AllocateChunk sees bit=0 and hands the SAME chunkId out a
-                    // second time (the DOUBLE-ALLOC we caught at scale with the ground-truth tracker). The fix: register the metadata page with the ChangeSet
-                    // (its AddByMemPageIndex does IncrementDirty on first registration); on re-registration, do an explicit IncrementDirty per CP-04.
-                    // ReleaseDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
-                    // the old EnsureDirtyAtLeast(1) — keeps the legacy behaviour for unit-test paths.
-                    if (changeSet != null)
-                    {
-                        if (!changeSet.AddByMemPageIndex(memPageIdx))
-                        {
-                            // Re-dirty path — routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
-                            // per-page mark count is tracked accurately and ReleaseDirtyMarks can drain the exact excess
-                            // via DecrementDirty (matching the checkpoint's own ack primitive). See #385.
-                            changeSet.RegisterReDirty(memPageIdx);
-                        }
-                    }
-                    else
-                    {
-                        _store.MarkPageModified(memPageIdx);
-                    }
-                    Interlocked.Increment(ref _allocatedCount);
-
-                    var chunkId = PageOffsetToChunkIndex(cur, chunkInPage);
-
-                    if (clearContent)
-                    {
-                        accessor.ClearChunk(chunkId);
-                    }
-
                     return chunkId;
                 }
             }
 
-            pageExhausted:
-            // Page appears exhausted — remove from list and continue from successor
-            RemoveFromFreeList(prev, cur, next);
-
-            // Guard against concurrent FreeChunk orphaning: if a chunk was freed during our scan,
-            // the page has free space but is now NOT_IN_LIST. Re-add to prevent permanent orphaning.
-            // Cost: ~5ns popcount on 1-2 longs — only on the rare "page exhausted" path.
-            if (_nextPage[cur] == NOT_IN_LIST)
-            {
-                var mc2 = cur == 0 ? _rootChunkCount : _otherChunkCount;
-                var bl2 = cur == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
-                var ep2 = _store.EpochManager.GlobalEpoch;
-                var pg2 = GetPage(cur, ep2, out _);
-                var md2 = pg2.MetadataReadOnly<long>();
-                if (CountAllocatedBits(md2, bl2, mc2) < mc2)
-                {
-                    AddToFreeList(cur);
-                }
-            }
-
-            cur = next;
-        }
-
-        // Walked entire list without success
-        pass++;
-        if (pass == 1)
-        {
-            goto restart;
-        }
-
-        // Two passes failed
-        if (_allocatedCount < _capacity)
-        {
-            RebuildFreeList();
-            if (Volatile.Read(ref _freeHead) != EMPTY_PAGE)
-            {
-                pass = 0;
-                goto restart;
-            }
-
-            // The bitmaps hold no free chunk, yet the count says some are free: the count is short. It is exact by construction while the engine runs,
-            // so only a chunk summary that recorded it wrong can do this (CS-05). Grow, as a full segment would, instead of rebuilding the same empty list
-            // for ever. A race with an allocation that has set its bit and not yet counted it lands here too, and costs one unneeded growth.
             lock (_growLock)
             {
-                if (Volatile.Read(ref _freeHead) == EMPTY_PAGE && !GrowChunkCapacity(changeSet: changeSet))
+                // No page above the floor had a free chunk — unless the segment grew meanwhile, a bit was set behind the search, or a clear is in
+                // flight (its page may be set back): then search again. A free that set no bit (the page's was already set) lands on a page the
+                // search either found or has yet to reach.
+                if (Volatile.Read(ref _capacity) == capacityAtStart && Volatile.Read(ref _roomGeneration) == generationAtStart
+                    && Volatile.Read(ref _transientClears) == 0 && !GrowChunkCapacity(changeSet: changeSet))
                 {
                     ThrowHelper.ThrowResourceExhausted("Storage/ChunkBasedSegment/AllocateChunk", ResourceType.Memory, _allocatedCount, _capacity);
                 }
             }
-
-            pass = 0;
-            goto restart;
         }
+    }
 
-        if (!GrowIfNeeded(changeSet))
+    /// <summary>
+    /// Allocates a chunk on the first page in [<paramref name="from"/>, <paramref name="to"/>) that has one free, searching the room bits; -1 when none
+    /// does.
+    /// </summary>
+    private int AllocateFrom(int from, int to, int floorPage, int floorOffset, bool clearContent, ChangeSet changeSet,
+        ref ChunkAccessor<TStore> accessor)
+    {
+        var blocks = Volatile.Read(ref _roomBlocks);
+        to = (int)Math.Min(to, (long)blocks.Length << RoomBlock.Shift);
+        var first = true;
+        var page = from;
+        while ((page = NextPageWithRoom(blocks, page, to)) >= 0)
         {
-            ThrowHelper.ThrowResourceExhausted("Storage/ChunkBasedSegment/AllocateChunk", ResourceType.Memory, _allocatedCount, _capacity);
+            var chunkId = TryAllocateOnPage(page, page == floorPage ? floorOffset : 0, !first, clearContent, changeSet, ref accessor);
+            if (chunkId >= 0)
+            {
+                // ReSharper disable once RedundantCheckBeforeAssignment
+                if (_allocationCursor != page)
+                {
+                    _allocationCursor = page;   // written only when it moves: its cache line is the one every allocation reads first
+                }
+
+                return chunkId;
+            }
+
+            first = false;
+            page++;
         }
 
-        pass = 0;
-        goto restart;
+        return -1;
+    }
+
+    /// <summary>
+    /// Takes a free chunk at or above <paramref name="pageFloor"/> on page <paramref name="pageIndex"/>, or finds it full: clears its room bit, then reads it
+    /// again and sets the bit back if a chunk was freed in between (see <see cref="RoomBlock"/>). -1 when the page is full.
+    /// </summary>
+    /// <remarks>
+    /// With <c>lookFirst</c> the page is read and released before it is claimed (EP-02). The first page a search tries is usually the one the last
+    /// allocation succeeded on and has room, so it is claimed at once; the pages after it are looked at first, so a search across stale bits on full pages
+    /// pins none of them for the caller's epoch.
+    /// </remarks>
+    private int TryAllocateOnPage(int pageIndex, int pageFloor, bool lookFirst, bool clearContent, ChangeSet changeSet,
+        ref ChunkAccessor<TStore> accessor)
+    {
+        while (true)
+        {
+            if (!lookFirst || PageHasFreeChunkFrom(pageIndex, pageFloor))
+            {
+                var chunkId = ClaimOnPage(pageIndex, pageFloor, clearContent, changeSet, ref accessor);
+                if (chunkId >= 0)
+                {
+                    return chunkId;
+                }
+            }
+
+            // Full: clear the bit, then look again — a free that set it before the clear would otherwise be lost with it.
+            PageFullProbe?.Invoke(pageIndex);
+            Interlocked.Increment(ref _transientClears);
+            try
+            {
+                ClearRoom(pageIndex);
+                if (!PageHasFreeChunkFrom(pageIndex, pageFloor))
+                {
+                    return -1;
+                }
+
+                MarkRoom(pageIndex);   // set back, as news: a search that skipped it while clear must search again
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _transientClears);
+            }
+
+            lookFirst = true;
+        }
+    }
+
+    /// <summary>Sets a free bit at or above <paramref name="pageFloor"/> in page <paramref name="pageIndex"/>'s chunk bitmap; -1 when there is none.</summary>
+    private int ClaimOnPage(int pageIndex, int pageFloor, bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
+        var maxChunks = ChunksOnPage(pageIndex);
+        var bitmapLongs = BitmapLongsOnPage(pageIndex);
+        var epoch = _store.EpochManager.GlobalEpoch;
+        var page = GetPage(pageIndex, epoch, out var memPageIdx);
+        var metadata = page.Metadata<long>();
+
+        for (int w = 0; w < bitmapLongs; w++)
+        {
+            var word = metadata[w];
+            var belowFloor = pageFloor - w * 64;
+            var floorMask = belowFloor <= 0 ? 0L : belowFloor >= 64 ? -1L : (1L << belowFloor) - 1;
+            word |= floorMask;
+            while (word != -1L)
+            {
+                var bit = BitOperations.TrailingZeroCount(~word);
+                var chunkInPage = w * 64 + bit;
+                if (chunkInPage >= maxChunks)
+                {
+                    return -1;
+                }
+
+                var mask = 1L << bit;
+                var prevBits = Interlocked.Or(ref metadata[w], mask);
+                if ((prevBits & mask) != 0)
+                {
+                    // Lost race — update word with current state and retry next bit
+                    word = prevBits | mask | floorMask;
+                    continue;
+                }
+
+                // SUCCESS — chunk claimed.
+                //
+                // CRITICAL (#301): bitmap-write durability follows the same CP-04 pattern as MarkSlotDirty. EnsureDirtyAtLeast(1) is a no-op when DC was
+                // already ≥1 — and the running checkpoint may have ALREADY snapshotted this page's bitmap word BEFORE our Interlocked.Or above. That
+                // snapshot has bit=0 (pre-OR). After fsync, the snapshot's DC decrement takes DC to 0; the page becomes evictable; eviction + reload
+                // restores bit=0 from disk — silently REVERTING our allocation. A subsequent AllocateChunk sees bit=0 and hands the SAME chunkId out a
+                // second time (the DOUBLE-ALLOC we caught at scale with the ground-truth tracker). The fix: register the metadata page with the ChangeSet
+                // (its AddByMemPageIndex does IncrementDirty on first registration); on re-registration, do an explicit IncrementDirty per CP-04.
+                // ReleaseDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
+                // the old EnsureDirtyAtLeast(1) — keeps the legacy behaviour for unit-test paths.
+                if (changeSet != null)
+                {
+                    if (!changeSet.AddByMemPageIndex(memPageIdx))
+                    {
+                        // Re-dirty path — routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
+                        // per-page mark count is tracked accurately and ReleaseDirtyMarks can drain the exact excess
+                        // via DecrementDirty (matching the checkpoint's own ack primitive). See #385.
+                        changeSet.RegisterReDirty(memPageIdx);
+                    }
+                }
+                else
+                {
+                    _store.MarkPageModified(memPageIdx);
+                }
+                Interlocked.Increment(ref _allocatedCount);
+
+                var chunkId = PageOffsetToChunkIndex(pageIndex, chunkInPage);
+
+                if (clearContent)
+                {
+                    accessor.ClearChunk(chunkId);
+                }
+
+                return chunkId;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -851,7 +943,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
     public void FreeChunk(int chunkId)
     {
-        // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would place it back in the free list and AllocateChunk would hand
+        // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would give its page room again and AllocateChunk would hand
         // it out, causing every caller to clobber the meta chunk.
         if (chunkId == 0)
         {
@@ -887,199 +979,299 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         _store.MarkPageModified(memPageIdx);
         Interlocked.Decrement(ref _allocatedCount);
 
-        // Add page to free list if not already present.
-        // AddToFreeList's CAS guard (_nextPage NOT_IN_LIST → EMPTY_PAGE) prevents duplicates.
-        AddToFreeList(pageIndex);
+        // The chunk bit first, then the page's room bit: an allocation that clears the room bit reads the page again afterwards (RoomBlock).
+        MarkRoom(pageIndex);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Forward linked list operations
-    // ═══════════════════════════════════════════════════════════════════════
-
     /// <summary>
-    /// Adds a page to the free list by appending at the tail.
-    /// Uses CAS on <see cref="_nextPage"/> to prevent duplicate insertions.
+    /// Frees every allocated chunk from <paramref name="firstChunkId"/> on, by the bitmaps, a page at a time: for a structure reset to empty
+    /// (<see cref="PagedHashMapBase{TStore}.ClearForRebuild"/>), with nothing allocating or freeing concurrently. Each page is read and released (EP-02),
+    /// so a reset of a segment larger than the cache pins none of it for the caller's epoch; one bitmap word at a time, not one chunk. Chunk 0 is never
+    /// freed.
     /// </summary>
-    private void AddToFreeList(int pageIndex)
+    internal void FreeAllChunksFrom(int firstChunkId)
     {
-        // Step 1: Claim — atomically mark page as "in list, at tail"
-        if (Interlocked.CompareExchange(ref _nextPage[pageIndex], EMPTY_PAGE, NOT_IN_LIST) != NOT_IN_LIST)
+        firstChunkId = Math.Max(1, firstChunkId);
+        if (firstChunkId >= ChunkCapacity)
         {
-            return; // page already in list
+            return;
         }
 
-        // Step 2: Try to become head of empty list
-        if (Interlocked.CompareExchange(ref _freeHead, pageIndex, EMPTY_PAGE) == EMPTY_PAGE)
+        var length = Length;
+        var (firstPage, firstOffset) = GetChunkLocation(firstChunkId);
+        var freed = 0;
+        for (var pageIndex = firstPage; pageIndex < length; pageIndex++)
         {
-            return; // sole node, done
-        }
-
-        // Step 3: Walk to tail and append (bounded to prevent infinite loops)
-        var maxIter = Length * 2;
-        for (int iter = 0; iter < maxIter; iter++)
-        {
-            var head = _freeHead;
-            if (head == EMPTY_PAGE)
+            if (ChunksOnPage(pageIndex) == 0)
             {
-                // List became empty, retry as head
-                if (Interlocked.CompareExchange(ref _freeHead, pageIndex, EMPTY_PAGE) == EMPTY_PAGE)
-                {
-                    return;
-                }
                 continue;
             }
 
-            // Head points to removed page — fix stale head and retry
-            if (_nextPage[head] == NOT_IN_LIST)
+            var page = AcquirePageForRead(pageIndex, out var memPageIndex);
+            try
             {
-                Interlocked.CompareExchange(ref _freeHead, EMPTY_PAGE, head);
-                continue;
-            }
-
-            var cur = head;
-            var walkBudget = maxIter;
-            while (walkBudget-- > 0)
-            {
-                var next = _nextPage[cur];
-                if (next == EMPTY_PAGE)
+                var metadata = page.Metadata<long>();
+                var from = pageIndex == firstPage ? firstOffset : 0;
+                var changed = false;
+                for (var w = from >> 6; w < BitmapLongsOnPage(pageIndex); w++)
                 {
-                    // Found tail, try to append
-                    if (Interlocked.CompareExchange(ref _nextPage[cur], pageIndex, EMPTY_PAGE) == EMPTY_PAGE)
+                    var keep = from > w * 64 ? (1L << (from - w * 64)) - 1 : 0L;   // the bits below the first chunk freed stay
+                    var word = metadata[w];
+                    var cleared = word & ~keep;
+                    if (cleared != 0)
                     {
-                        return; // success
+                        metadata[w] = word & keep;
+                        freed += BitOperations.PopCount((ulong)cleared);
+                        changed = true;
                     }
-                    // CAS failed — someone else appended or page was removed, re-read
-                    continue;
                 }
-                if (next == NOT_IN_LIST)
+
+                if (changed)
                 {
-                    // cur was removed, restart from head
-                    break;
+                    _store.MarkPageModified(memPageIndex);
                 }
-                cur = next;
+            }
+            finally
+            {
+                ReleasePageForRead(memPageIndex);
             }
         }
 
-        // Bounded iteration exhausted — page is already claimed (EMPTY_PAGE), leave it.
-        // It will be picked up by RebuildFreeList. This is a rare fallback path.
+        Interlocked.Add(ref _allocatedCount, -freed);
+        MarkRoomRange(firstPage, length);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Page-room bitmap
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Chunks page <paramref name="pageIndex"/> holds: the root's count or every other page's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ChunksOnPage(int pageIndex) => pageIndex == 0 ? _rootChunkCount : _otherChunkCount;
+
+    /// <summary>The 64-bit words of page <paramref name="pageIndex"/>'s chunk bitmap.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int BitmapLongsOnPage(int pageIndex) => pageIndex == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
 
     /// <summary>
-    /// Removes a page from the free list using two-phase mark + unlink.
-    /// Phase A (mark) is the linearization point; Phase B (unlink) failure is harmless.
+    /// Makes room blocks exist for pages [0, <paramref name="pageCount"/>): adds blocks to a new outer array that holds the existing ones, never copies a
+    /// block. Under the grow lock, or before the segment is shared.
     /// </summary>
-    private void RemoveFromFreeList(int prevPage, int pageIndex, int capturedNext)
+    private void EnsureRoomBlocks(int pageCount)
     {
-        // Phase A: Mark page as removed (linearization point)
-        if (Interlocked.CompareExchange(ref _nextPage[pageIndex], NOT_IN_LIST, capturedNext) != capturedNext)
+        var blocks = _roomBlocks;
+        var needed = (int)(((long)pageCount + RoomBlock.PageCount - 1) >> RoomBlock.Shift);
+        if (needed <= blocks.Length)
         {
-            return; // page already removed or next changed
+            return;
         }
 
-        // Phase B: Unlink from predecessor (best-effort)
-        if (prevPage == HEAD_SENTINEL)
+        var grown = new RoomBlock[needed];
+        Array.Copy(blocks, grown, blocks.Length);
+        for (var b = blocks.Length; b < needed; b++)
         {
-            Interlocked.CompareExchange(ref _freeHead, capturedNext, pageIndex);
+            grown[b] = new RoomBlock();
         }
-        else
+
+        Volatile.Write(ref _roomBlocks, grown);
+    }
+
+    /// <summary>Sets page <paramref name="pageIndex"/>'s room bit, for a segment no other thread sees yet (create, load).</summary>
+    private void SetRoomUnsynchronized(int pageIndex)
+    {
+        var block = _roomBlocks[pageIndex >> RoomBlock.Shift];
+        var w = (pageIndex & (RoomBlock.PageCount - 1)) >> 6;
+        block.Words[w] |= 1L << (pageIndex & 63);
+        block.Summary |= 1L << w;
+    }
+
+    /// <summary>Sets page <paramref name="pageIndex"/>'s room bit — the page has a free chunk — and its word's summary bit.</summary>
+    private void MarkRoom(int pageIndex)
+    {
+        if (SetRoomBit(pageIndex))
         {
-            Interlocked.CompareExchange(ref _nextPage[prevPage], capturedNext, pageIndex);
+            Interlocked.Increment(ref _roomGeneration);
         }
     }
 
-    /// <summary>Test seam: rebuilds the free list from the chunk bitmaps now, as an allocation that found no free chunk does.</summary>
-    internal void RebuildFreeListForTest()
+    /// <summary>Sets page <paramref name="pageIndex"/>'s room bit and, when its word was zero, the summary bit. True when the room bit was clear.</summary>
+    private bool SetRoomBit(int pageIndex)
     {
-        Volatile.Write(ref _freeHead, EMPTY_PAGE);   // otherwise the rebuild sees a valid list and returns
-        RebuildFreeList();
+        var block = Volatile.Read(ref _roomBlocks)[pageIndex >> RoomBlock.Shift];
+        var w = (pageIndex & (RoomBlock.PageCount - 1)) >> 6;
+        var bit = 1L << (pageIndex & 63);
+        var previous = Interlocked.Or(ref block.Words[w], bit);
+        if ((previous & bit) != 0)
+        {
+            return false;
+        }
+
+        if (previous == 0)
+        {
+            Interlocked.Or(ref block.Summary, 1L << w);
+        }
+
+        return true;
     }
 
-    /// <summary>
-    /// Rebuilds the free list from L0 bitmap truth when the list is empty but free space exists.
-    /// Recovers pages orphaned by rare concurrent race conditions.
-    /// Uses plain writes under <see cref="_growLock"/> — safe because the full reset makes all concurrent traversals see EMPTY_PAGE or NOT_IN_LIST and
-    /// fall through to rebuild/grow.
-    /// </summary>
-    private void RebuildFreeList()
+    /// <summary>Sets the room bits of pages [<paramref name="from"/>, <paramref name="to"/>), one interlocked operation per word.</summary>
+    private void MarkRoomRange(int from, int to)
     {
-        lock (_growLock)
+        if (from >= to)
         {
-            // Re-check under lock — another thread may have already rebuilt or grown.
-            var head = _freeHead;
-            if (head != EMPTY_PAGE && head >= 0 && _nextPage[head] != NOT_IN_LIST)
+            return;
+        }
+
+        var blocks = Volatile.Read(ref _roomBlocks);
+        for (var page = from; page < to;)
+        {
+            var block = blocks[page >> RoomBlock.Shift];
+            var w = (page & (RoomBlock.PageCount - 1)) >> 6;
+            var first = page & 63;
+            var count = Math.Min(64 - first, to - page);
+            var mask = count == 64 ? -1L : ((1L << count) - 1) << first;
+            Interlocked.Or(ref block.Words[w], mask);
+            Interlocked.Or(ref block.Summary, 1L << w);
+            page += count;
+        }
+
+        Interlocked.Increment(ref _roomGeneration);
+    }
+
+    /// <summary>Clears page <paramref name="pageIndex"/>'s room bit; the summary bit is cleared lazily, by the next search over a zero word.</summary>
+    private void ClearRoom(int pageIndex)
+    {
+        var block = Volatile.Read(ref _roomBlocks)[pageIndex >> RoomBlock.Shift];
+        Interlocked.And(ref block.Words[(pageIndex & (RoomBlock.PageCount - 1)) >> 6], ~(1L << (pageIndex & 63)));
+    }
+
+    /// <summary>The first page in [<paramref name="from"/>, <paramref name="to"/>) whose room bit is set, or -1.</summary>
+    /// <remarks>Page arithmetic in 64 bits: a block's end is past <see cref="int.MaxValue"/> for the last block of a segment at the page cap.</remarks>
+    private int NextPageWithRoom(RoomBlock[] blocks, int from, int to)
+    {
+        long page = from;
+        while (page < to)
+        {
+            var b = (int)(page >> RoomBlock.Shift);
+            var block = blocks[b];
+            var blockBase = (long)b << RoomBlock.Shift;
+            var w = (int)(page - blockBase) >> 6;
+            var summary = Volatile.Read(ref block.Summary) & (-1L << w);
+            if (summary == 0)
             {
-                return; // list looks valid, another thread fixed it
+                page = blockBase + RoomBlock.PageCount;
+                continue;
             }
 
-            var length = Length;
-            var nextPage = _nextPage;
-
-            // Phase 1: Reset all pages to NOT_IN_LIST and _freeHead to EMPTY_PAGE.
-            // Concurrent traversers will see NOT_IN_LIST and fall through to pass++/rebuild.
-            _freeHead = EMPTY_PAGE;
-            for (int i = 0; i < length; i++)
+            var summaryWord = BitOperations.TrailingZeroCount(summary);
+            if (summaryWord > w)
             {
-                nextPage[i] = NOT_IN_LIST;
+                w = summaryWord;
+                page = blockBase + (w << 6);
             }
 
-            // Phase 2: Scan bitmaps and build forward chain with plain writes.
-            // Under _growLock, no concurrent AddToFreeList can interfere because all pages start as NOT_IN_LIST — concurrent FreeChunk→AddToFreeList will
-            // CAS NOT_IN_LIST→EMPTY_PAGE and then try to link, which is compatible with our chain building.
-            int firstFree = EMPTY_PAGE;
-            int lastInList = EMPTY_PAGE;
-
-            for (int i = 0; i < length; i++)
+            var word = Volatile.Read(ref block.Words[w]);
+            if (word == 0)
             {
-                var maxChunks = i == 0 ? _rootChunkCount : _otherChunkCount;
-                var bitmapLongs = i == 0 ? _bitmapLongsRoot : _bitmapLongsOther;
-                // One page at a time (EP-02): an epoch-tagged read would hold every page for the allocating caller's scope — under update churn on a
-                // segment larger than the cache, the rebuild then waited for evictions its own tags forbid (#1144, found by MarketHardeningTests).
-                var page = AcquirePageForRead(i, out var memPageIndex);
-                int allocated;
+                // A summary bit over a zero word: clear it, then read the word again — a page marked in between sets it back (RoomBlock), as news to a
+                // search that skipped the word while it was clear.
+                Interlocked.Increment(ref _transientClears);
                 try
                 {
-                    allocated = CountAllocatedBits(page.MetadataReadOnly<long>(), bitmapLongs, maxChunks);
+                    Interlocked.And(ref block.Summary, ~(1L << w));
+                    if (Volatile.Read(ref block.Words[w]) != 0)
+                    {
+                        Interlocked.Or(ref block.Summary, 1L << w);
+                        Interlocked.Increment(ref _roomGeneration);
+                        continue;
+                    }
                 }
                 finally
                 {
-                    ReleasePageForRead(memPageIndex);
+                    Interlocked.Decrement(ref _transientClears);
                 }
 
-                if (allocated < maxChunks)
-                {
-                    nextPage[i] = EMPTY_PAGE; // mark as in-list, tail
-                    if (firstFree == EMPTY_PAGE)
-                    {
-                        firstFree = i;
-                    }
-                    else
-                    {
-                        nextPage[lastInList] = i;
-                    }
-                    lastInList = i;
-                }
+                page = blockBase + ((w + 1) << 6);
+                continue;
             }
 
-            RebuildFreeListProbe?.Invoke();
+            word &= -1L << (int)(page & 63);
+            if (word != 0)
+            {
+                var found = blockBase + (w << 6) + BitOperations.TrailingZeroCount(word);
+                return found < to ? (int)found : -1;
+            }
 
-            // Publish the chain head last — makes the entire chain visible atomically.
-            //
-            // _allocatedCount is NOT resynchronised from this scan. Allocate and free move it outside _growLock, each by exactly one and only for
-            // the bit transition it won (Or 0→1, And 1→0), so it is exact by construction. A popcount taken while they run is not: an allocation
-            // that has set its bit but not yet counted it, or a free on a page the scan has already passed, is lost when a snapshot is stored —
-            // and an overcount sticks, because a count at capacity grows the segment instead of rebuilding. FreeChunkCount went negative that way
-            // in ConcurrentAllocateAndFree_MaintainsConsistency under parallel load; entity counts and the AllocatedChunkCount == 0 early exits
-            // read the same field.
-            Interlocked.Exchange(ref _freeHead, firstFree);
+            page = blockBase + ((w + 1) << 6);
         }
+
+        return -1;
     }
+
+    /// <summary>Whether page <paramref name="pageIndex"/>'s room bit is set. Test seam.</summary>
+    internal bool HasRoomBitForTest(int pageIndex)
+    {
+        var block = Volatile.Read(ref _roomBlocks)[pageIndex >> RoomBlock.Shift];
+        return (Volatile.Read(ref block.Words[(pageIndex & (RoomBlock.PageCount - 1)) >> 6]) & (1L << (pageIndex & 63))) != 0;
+    }
+
+    /// <summary>Sets every page's room bit, as a summary recorded before pages filled would. Test seam.</summary>
+    internal void MarkEveryPageForTest() => MarkRoomRange(0, Length);
+
+    /// <summary>Starts the next search at the first page, so the next allocation takes the lowest free chunk. Test seam.</summary>
+    internal void RewindAllocationCursorForTest() => _allocationCursor = 0;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Helpers
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// The largest chunk count a segment may reach. A chunk id is an <c>int</c> and <c>-1</c> is the "none" sentinel everywhere, so ids stay in
+    /// <c>[0, int.MaxValue)</c>.
+    /// </summary>
+    internal const int MaxChunkCount = int.MaxValue - 1;
+
+    /// <summary>
+    /// Chunks <paramref name="pageCount"/> pages of a segment hold — <paramref name="rootChunks"/> on the root, <paramref name="chunksPerPage"/> on every
+    /// other — in <c>long</c>: the product overflows an <c>int</c> before the chunk-id space does.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int ComputeCapacity(int pageCount) => _rootChunkCount + (pageCount - 1) * _otherChunkCount;
+    internal static long CapacityOf(int rootChunks, int chunksPerPage, long pageCount) => rootChunks + (pageCount - 1) * chunksPerPage;
+
+    /// <summary>The largest page count whose chunks stay addressable by an <c>int</c> chunk id (<see cref="MaxChunkCount"/>).</summary>
+    internal static int MaxPageCountOf(int rootChunks, int chunksPerPage)
+        => (int)Math.Min(int.MaxValue, 1 + (MaxChunkCount - (long)rootChunks) / chunksPerPage);
+
+    /// <summary><see cref="CapacityOf"/> as an <c>int</c>, or <see cref="ResourceExhaustedException"/> past <see cref="MaxChunkCount"/>.</summary>
+    internal static int CheckedCapacityOf(int rootChunks, int chunksPerPage, int pageCount, int stride)
+    {
+        var capacity = CapacityOf(rootChunks, chunksPerPage, pageCount);
+        if (capacity > MaxChunkCount)
+        {
+            ThrowCapacityOverflow(pageCount, capacity, stride);
+        }
+
+        return (int)capacity;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private long ComputeCapacityLong(long pageCount) => CapacityOf(_rootChunkCount, _otherChunkCount, pageCount);
+
+    private int MaxPageCount => MaxPageCountOf(_rootChunkCount, _otherChunkCount);
+
+    /// <summary>The pages that hold the first <paramref name="capacity"/> chunks: the inverse of <see cref="ComputeCapacity"/>.</summary>
+    private int PagesCovering(int capacity)
+        => capacity <= 0 ? 0 : capacity <= _rootChunkCount ? 1 : (int)_pageDivider.Divide((uint)(capacity - _rootChunkCount)) + 1;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ComputeCapacity(int pageCount) => CheckedCapacityOf(_rootChunkCount, _otherChunkCount, pageCount, Stride);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowCapacityOverflow(int pageCount, long capacity, int stride)
+        => throw new ResourceExhaustedException(
+            $"A chunk-based segment of {pageCount:N0} pages at stride {stride} would hold {capacity:N0} chunks, past the {MaxChunkCount:N0} an int chunk id "
+            + "can address.",
+            "Storage/ChunkBasedSegment/Capacity", ResourceType.Memory, capacity, MaxChunkCount);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int PageOffsetToChunkIndex(int pageIndex, int chunkInPage)
@@ -1338,12 +1530,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         // Adjust index relative to non-root pages
         var adjusted = (uint)(index - _rootChunkCount);
 
-        // Fast division using magic multiplier: quotient = (n * magic) >> 32
-        // This replaces expensive idiv instruction with imul + shift
-        var pageIndex = (int)((adjusted * _divMagic) >> 32);
-
-        // Remainder: offset = adjusted - pageIndex * divisor
-        var offset = (int)(adjusted - (uint)(pageIndex * _otherChunkCount));
+        var pageIndex = (int)_pageDivider.Divide(adjusted);
+        var offset = (int)(adjusted - (uint)pageIndex * (uint)_otherChunkCount);
 
         var resultPageIndex = pageIndex + 1;
 
@@ -1391,7 +1579,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// <summary>Byte offset from start of raw data to first chunk on non-root pages (alignment padding only).</summary>
     internal int OtherChunkDataOffset => _otherAlignmentPadding;
 
-    public int ChunkCapacity => _capacity;
+    public int ChunkCapacity => Volatile.Read(ref _capacity);
 
     public int AllocatedChunkCount => _allocatedCount;
     public int FreeChunkCount => _capacity - _allocatedCount;
@@ -1411,4 +1599,41 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         return (data[wordIndex] & mask) != 0L;
     }
 
+}
+
+/// <summary>
+/// Divides a chunk index by a segment's chunks-per-page count exactly, for every 32-bit index, in one 64×64 multiply (#1204).
+/// </summary>
+/// <remarks>
+/// <para>
+/// The multiplier is <c>M = ⌈2⁶⁴ / d⌉</c> and the quotient the high 64 bits of <c>M · n</c> (Lemire, Kaser and Kurz, "Faster Remainder by Direct
+/// Computation", 2019): exact for every <c>n &lt; 2³²</c> and <c>d &lt; 2³²</c>, because the fraction has 64 bits for a 32-bit numerator and a 32-bit divisor.
+/// </para>
+/// <para>
+/// The 32-bit multiplier it replaces, <c>⌈2³² / d⌉</c> with <c>(n · m) &gt;&gt; 32</c>, is exact only while <c>n · (m · d − 2³²) &lt; 2³²</c>. Past that,
+/// ids with remainder <c>d − 1</c> resolved to the next page at offset −1 — one stride before that page's chunk area, inside its header — from chunk
+/// 6 100 999 at an 8-byte stride and 54 366 749 at the revision chains' 64.
+/// </para>
+/// </remarks>
+internal readonly struct ChunkPageDivider
+{
+    private readonly ulong _multiplier;
+    private readonly uint _divisor;
+
+    internal ChunkPageDivider(int divisor)
+    {
+        if (divisor <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(divisor), divisor, "A chunks-per-page count is positive.");
+        }
+
+        _divisor = (uint)divisor;
+
+        // ⌈2⁶⁴ / d⌉ = ⌊(2⁶⁴ − 1) / d⌋ + 1, which wraps to 0 for d = 1: that divisor is the identity and is handled in Divide.
+        _multiplier = divisor == 1 ? 0 : ulong.MaxValue / (uint)divisor + 1;
+    }
+
+    /// <summary><paramref name="n"/> / the divisor, exactly.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal uint Divide(uint n) => _divisor == 1 ? n : (uint)Math.BigMul(_multiplier, n, out _);
 }

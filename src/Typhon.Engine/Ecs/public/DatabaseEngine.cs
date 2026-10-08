@@ -3243,6 +3243,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // guard, so they were persisted only on a cycle where something ELSE changed. Benign while the index segment is allocated in the same open as the
             // cluster segment — the consolidation makes every archetype depend on it, and a pointer whose persistence is conditional on an unrelated field is
             // not a pointer you can build on.
+            // The EntityMap's entry count first, on every cycle: a despawn changes it and nothing compared below, so behind the skip a run of despawns
+            // never reached the meta chunk. FlushMeta writes only when the count moved, so a quiet cycle still writes nothing. The bucket count is not
+            // this call's — splits persist it, under the split lock (#1205).
+            anyUpdated |= state.EntityMap.FlushMeta(cs);
+
             if (arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.ClusterIndexSPI == newIndexSpi
                 && arch.ClusterString64IndexSPI == newString64IndexSpi && arch.NextEntityKey == newNextKey)
             {
@@ -3254,12 +3259,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             arch.ClusterIndexSPI = newIndexSpi;
             arch.ClusterString64IndexSPI = newString64IndexSpi;
             arch.NextEntityKey = newNextKey;
-
-            // EntityMap's meta chunk tracks the total entry count, but FlushMetaToChunk is otherwise only called during a bucket split. For append-only
-            // workloads that never split (e.g. a session with fewer entries than n0 × 0.75 × bucketCapacity), the persisted meta count stays at 0 from
-            // Create() even though the bucket data is correct. Flush it here so the next InitializeOpen reads an accurate total without having to walk
-            // the bucket chains.
-            state.EntityMap.FlushMeta(cs);
 
             // Issue #230 Phase 3 Option B: nothing about the per-cell cluster index is persisted. All cell-level state is transient per Phase 1 Q2/Q6 and
             // rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs.
@@ -4201,8 +4200,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             if (!hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0
                 && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, TolerateTornSegmentsAtOpen))
             {
-                // Reload existing EntityMap from persisted segment (O(1) reopen)
-                var em = RawValuePagedHashMap<long, PersistentStore>.Open(loadedSegment, 256, meta._entityRecordSize);
+                // Reload existing EntityMap from persisted segment (O(1) reopen). An unusable meta opens as an empty map exactly when this open is about
+                // to discard and re-derive the map — a crash reopen, or a repair's forced recovery open after a clean close — by the same predicate the
+                // rebuild gate uses, so the two cannot disagree. Anywhere else the map is the only record of where the entities are, and opening it
+                // empty would lose them silently: it throws instead.
+                var em = RawValuePagedHashMap<long, PersistentStore>.Open(loadedSegment, EntityMapInitialBuckets, meta._entityRecordSize,
+                    tolerateDamage: WillRebuildEntityMapOnCrash(meta, slotToTable));
                 _archetypeStates[meta.ArchetypeId] = new ArchetypeEngineState
                 {
                     SlotToComponentTable = slotToTable,
@@ -4231,7 +4234,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 _archetypeStates[meta.ArchetypeId] = new ArchetypeEngineState
                 {
                     SlotToComponentTable = slotToTable,
-                    EntityMap = RawValuePagedHashMap<long, PersistentStore>.Create(segment, 256, meta._entityRecordSize),
+                    EntityMap = RawValuePagedHashMap<long, PersistentStore>.Create(segment, EntityMapInitialBuckets, meta._entityRecordSize),
                     NextEntityKey = 0,
                 };
                 isFreshAllocation = true;
@@ -4605,7 +4608,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     {
                         // ORDERING (RB-01): RebuildVersionedHeadFromChain reads engineState.EntityMap to resolve each occupied entity's chain root. On the crash
                         // path the loaded EntityMap is NOT yet trusted — RebuildEntityMapsFromPersistedData discards and re-derives it further down — so running
-                        // the walk here would dereference a possibly-torn map's garbage hash-directory pointers and take the process down (a hard AV, before any
+                        // the walk here would dereference a possibly-torn map's garbage chunk-id pointers and take the process down (a hard AV, before any
                         // RB-04 loud-fail can fire). Defer it past that rebuild instead, so it always reads a freshly-derived map. Previously unreachable because
                         // only cluster archetypes take this branch and no cluster archetype was also EntityMap-rebuildable-on-crash; making the common archetype
                         // cluster-eligible (#629) exposed it.
@@ -5368,7 +5371,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         using var guard = EpochGuard.Enter(EpochManager);
-        var oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, 256, meta._entityRecordSize);
+        var oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, EntityMapInitialBuckets, meta._entityRecordSize, tolerateDamage: true);
         (_preMigrationEnabledBits ??= [])[meta.ArchetypeId] = SnapshotEnabledBits(oldMap);
     }
 
@@ -5990,30 +5993,40 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return false;
     }
 
+    /// <summary>The bucket count every archetype's EntityMap is created with and opened against (its N0), which the integrity check reads too.</summary>
+    internal const int EntityMapInitialBuckets = 256;
+
     /// <summary>
     /// True when this open will DISCARD the persisted EntityMap for <paramref name="meta"/> and re-derive it (the crash path of
     /// <see cref="RebuildEntityMapsFromPersistedData"/>). Until that rebuild has run, the loaded EntityMap is untrusted — it may be CRC-torn, and its
-    /// hash-directory pointers are garbage — so nothing may read it. Single predicate shared by the rebuild gate and the deferral it drives, so the two
+    /// chunk-id pointers are garbage — so nothing may read it. Single predicate shared by the rebuild gate and the deferral it drives, so the two
     /// can never disagree about which archetypes have an untrusted map.
     /// </summary>
-    private bool WillRebuildEntityMapOnCrash(ArchetypeMetadata meta) => CrashRecoveryAtOpen && IsEntityMapRebuildable(meta) && !DisableEntityMapRebuildForTest;
+    private bool WillRebuildEntityMapOnCrash(ArchetypeMetadata meta)
+        => WillRebuildEntityMapOnCrash(meta, _archetypeStates[meta.ArchetypeId]?.SlotToComponentTable);
 
-    internal bool IsEntityMapRebuildable(ArchetypeMetadata meta)
+    /// <summary><see cref="WillRebuildEntityMapOnCrash(ArchetypeMetadata)"/> for slot tables not yet installed on the archetype's state (the load).</summary>
+    private bool WillRebuildEntityMapOnCrash(ArchetypeMetadata meta, ComponentTable[] slotToComponentTable)
+        => CrashRecoveryAtOpen && IsEntityMapRebuildable(meta, slotToComponentTable) && !DisableEntityMapRebuildForTest;
+
+    internal bool IsEntityMapRebuildable(ArchetypeMetadata meta) => IsEntityMapRebuildable(meta, _archetypeStates[meta.ArchetypeId]?.SlotToComponentTable);
+
+    /// <summary><see cref="IsEntityMapRebuildable(ArchetypeMetadata)"/> for slot tables not yet installed on the archetype's state.</summary>
+    private static bool IsEntityMapRebuildable(ArchetypeMetadata meta, ComponentTable[] slotToComponentTable)
     {
         if (meta.IsClusterEligible)
         {
             return true;
         }
 
-        var state = _archetypeStates[meta.ArchetypeId];
-        if (state?.SlotToComponentTable == null)
+        if (slotToComponentTable == null)
         {
             return false;
         }
 
         for (var slot = 0; slot < meta.ComponentCount; slot++)
         {
-            var table = state.SlotToComponentTable[slot];
+            var table = slotToComponentTable[slot];
             if (table != null && table.StorageMode == StorageMode.SingleVersion)
             {
                 return false; // non-cluster SV slot — unrecoverable location
@@ -6027,7 +6040,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Crash-path EntityMap rebuild (03-recovery.md §7): discard the persisted (possibly CRC-torn, FPI-only-protected) EntityMap and re-derive it from the
     /// authoritative source — the cluster occupancy walk for cluster archetypes, the Versioned chain heads for flat archetypes. The EntityMap analogue of the
     /// Phase 2 index clear+rebuild, making the EntityMap a derived-on-crash structure. Runs from <see cref="RebuildEntityMapsFromPersistedData"/> (over every
-    /// archetype) before WAL apply, so the applier sees a clean map. Only called for rebuildable archetypes (<see cref="IsEntityMapRebuildable"/>).
+    /// archetype) before WAL apply, so the applier sees a clean map. Only called for rebuildable archetypes
+    /// (<see cref="IsEntityMapRebuildable(ArchetypeMetadata)"/>).
     /// </summary>
     private void RebuildEntityMapOnCrash(ArchetypeMetadata meta, ArchetypeEngineState state)
     {
@@ -6065,9 +6079,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// Collects per-entity <c>EnabledBits</c> from the persisted EntityMap (keyed by EntityKey) so the crash rebuild can preserve this non-derivable state.
-    /// Best-effort: a torn EntityMap page produces garbage keys that the rebuild's authoritative-key lookup will not match, so those entries fall back.
+    /// Best-effort: a chunk on a page that failed its CRC is not read (<see cref="PagedMMF.IsSuspectPage"/>), so its entities fall back to what the cluster
+    /// records.
     /// </summary>
-    private static Dictionary<long, ushort> SnapshotEntityMapEnabledBits(ArchetypeEngineState state)
+    private Dictionary<long, ushort> SnapshotEntityMapEnabledBits(ArchetypeEngineState state)
     {
         if (state?.EntityMap == null || state.EntityMap.EntryCount == 0)
         {
@@ -6083,12 +6098,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Collects <c>EnabledBits</c> per EntityKey from every entry of <paramref name="map"/> it can reach. The map is one an open is about to replace and may be
     /// torn, so the walk is the damage-tolerant one: the optimistic walk retried a torn bucket forever (#1143 exposed it).
     /// </summary>
-    private static Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
+    /// <remarks>
+    /// A torn page is skipped outright rather than read for whatever it still holds. A tear can leave a bucket's keys intact and its values garbage, and a real
+    /// key with garbage bits is the one case the fallback cannot catch: the rebuild prefers a snapshotted value to the cluster's own. Which bucket a tear lands
+    /// on is luck — a test that tore the highest allocated chunk's page passed while that page held overflow chunks and failed once it held buckets (#1205).
+    /// </remarks>
+    private Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
     {
         var snapshot = new Dictionary<long, ushort>();
         var accessor = map.Segment.CreateChunkAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
-        map.ForEachEntryQuiescent(ref accessor, ref action);
+        map.ForEachEntryQuiescent(ref accessor, ref action, MMF.IsSuspectPage);
         accessor.Dispose();
         return snapshot;
     }

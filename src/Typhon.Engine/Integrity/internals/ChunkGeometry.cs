@@ -139,8 +139,7 @@ internal readonly struct ChunkGeometry
 
     /// <summary>Chunks the segment can hold across <paramref name="pageCount"/> pages.</summary>
     /// <param name="pageCount">Number of pages in the segment, root included.</param>
-    public int Capacity(int pageCount)
-        => pageCount <= 0 ? 0 : ChunkCountRootPage + ((pageCount - 1) * ChunkCountPerPage);
+    public int Capacity(int pageCount) => pageCount <= 0 ? 0 : (int)Math.Min(int.MaxValue, ChunkCountRootPage + ((pageCount - 1L) * ChunkCountPerPage));
 
     /// <summary>
     /// Whether the page's own occupancy bitmap marks <paramref name="chunkInPage"/> allocated.

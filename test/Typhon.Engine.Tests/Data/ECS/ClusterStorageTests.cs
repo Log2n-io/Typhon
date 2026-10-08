@@ -396,7 +396,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
-    public void TryGetHashMapLayout_ReportsWidthsCapacityAndNonDataChunks()
+    public void TryGetHashMapLayout_ReportsWidthsCapacityAndBucketCount()
     {
         using var dbe = SetupClusterEngine();
         var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
@@ -426,15 +426,14 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         }
         Assert.That(stride, Is.GreaterThan(0));
 
-        var found = dbe.TryGetHashMapLayout(mapRoot, out var keyWidth, out var valueWidth, out var bucketCapacity, out var nonDataChunkIds);
+        var found = dbe.TryGetHashMapLayout(mapRoot, out var keyWidth, out var valueWidth, out var bucketCapacity, out var bucketCount);
 
         Assert.That(found, Is.True);
         Assert.That(keyWidth, Is.EqualTo(8), "EntityKey is a long");
         Assert.That(valueWidth, Is.GreaterThan(0));
         Assert.That(bucketCapacity, Is.EqualTo((stride - 12) / (keyWidth + valueWidth)), "capacity = (stride − header) / (key + value)");
-        // The structural set is meta (chunk 0) plus every directory chunk — at least 2 ids, and chunk 0 must be present.
-        Assert.That(nonDataChunkIds, Does.Contain(0), "the meta chunk is always chunk 0");
-        Assert.That(nonDataChunkIds.Length, Is.GreaterThanOrEqualTo(2), "meta + at least one directory chunk");
+        // Bucket b is chunk b + 1 (#1205): the count tells a bucket chunk from an overflow chunk, so it is what the renderer needs.
+        Assert.That(bucketCount, Is.EqualTo(dbe._archetypeStates[meta.ArchetypeId].EntityMap.BucketCount));
     }
 
     [Test]

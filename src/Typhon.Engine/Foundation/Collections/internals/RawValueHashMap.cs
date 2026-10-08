@@ -260,7 +260,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             byte* addr = accessor.GetChunkAddress(chunkId);
             ref readonly var header = ref GetHeader(addr);
             TKey* keys = KeysPtr(addr);
-            int count = header.EntryCount;
+            int count = Math.Min((int)header.EntryCount, _bucketCapacity);   // bounded: an optimistic reader may see a header mid-write
 
             for (int i = 0; i < count; i++)
             {
@@ -289,7 +289,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -318,7 +318,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 continue;
             }
 
-            if (!found && PackedMeta != packed)
+            if (!found && ReadPackedMeta() != packed)
             {
                 Interlocked.Increment(ref _olcRestarts);
                 continue;
@@ -334,7 +334,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
     /// <summary>
     /// Power-of-2 location-hint cache: low key bits → packed <c>((bucketChunkId &lt;&lt; 8) | indexInBucket) + 1</c> (0 = empty slot). Pure accelerator
-    /// for <see cref="TryGetWithHint"/>: a valid hint skips the hash + bucket-directory resolve + chain scan (one chunk-address translation + key compare
+    /// for <see cref="TryGetWithHint"/>: a valid hint skips the hash + bucket resolve + chain scan (one chunk-address translation + key compare
     /// instead). Hints are stored only for entries found in a bucket ROOT chunk — roots are never freed while the map lives (only empty overflow chunks
     /// are, see <see cref="RemoveFromChain"/>) — so a stale hint can never dereference a freed chunk. Staleness and slot collisions are caught by the
     /// EntryCount/key compare + OLC validate (whose pre-validation barrier makes the plain data reads safe on arm64 — see
@@ -342,6 +342,15 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// atomic on x64 and arm64); a torn/stale slot is validated like any other hint. No correctness dependency — the cache can be dropped at any time.
     /// </summary>
     private long[] _locationHints;
+
+    /// <inheritdoc />
+    protected override void OnClearedForRebuild() => _locationHints = null;
+
+    /// <summary>Whether the location-hint cache holds anything. Test seam.</summary>
+    internal bool HasLocationHintsForTest => _locationHints != null;
+
+    /// <summary>Runs one split now, whatever the load, on a quiescent map: what a test needs to stage a split's claim exactly. Test seam.</summary>
+    internal bool SplitOnceForTest(ref ChunkAccessor<TStore> accessor) => ExecuteSplit(ref accessor, null);
 
     /// <summary>Hint-cache slot count ceiling (2^20 slots = 8 MiB) — bounds per-map memory on huge maps; beyond it collisions just lower the hit rate.</summary>
     private const int MaxHintSlots = 1 << 20;
@@ -392,7 +401,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -421,7 +430,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 continue;
             }
 
-            if (!found && PackedMeta != packed)
+            if (!found && ReadPackedMeta() != packed)
             {
                 Interlocked.Increment(ref _olcRestarts);
                 continue;
@@ -466,7 +475,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -491,7 +500,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 continue;
             }
 
-            if (!found && PackedMeta != packed)
+            if (!found && ReadPackedMeta() != packed)
             {
                 Interlocked.Increment(ref _olcRestarts);
                 continue;
@@ -549,7 +558,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
-            ovHeader.OlcVersion = 0;
+            TagOverflowOwner(ref ovHeader, startChunkId - 1);   // startChunkId is the bucket's primary chunk, bucket + 1
             ovHeader.EntryCount = 1;
             ovHeader.Flags = 0;
             ovHeader.Reserved = 0;
@@ -560,7 +569,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             // Re-fetch the predecessor chunk last (the OOM/Grow during AllocateChunk above may have evicted it) and publish the link. Any concurrent snapshot
             // of the predecessor now sees a fully-formed new chunk, not a half-initialised zero state.
             addr = accessor.GetChunkAddress(chunkId, true);
-            GetHeader(addr).OverflowChunkId = overflowChunkId;
+            Volatile.Write(ref GetHeader(addr).OverflowChunkId, overflowChunkId);   // release: the chunk's content before the link to it
             return;
         }
     }
@@ -727,6 +736,11 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </remarks>
     private bool AppendUnderBucketLock(TKey key, byte* value, BucketWrite mode, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
+        // Splits first, before this write takes effect: a fault in one then fails a write that changed nothing, and a caller that retries it — InsertNew
+        // has no duplicate check — adds the key once. Outside the write's reservation scope, so each split's scope is its own and unpins its pages when
+        // it ends, instead of holding them until the write's (#1205).
+        TrySplitIfNeeded(ref accessor, changeSet);
+
         uint hash = ComputeHash(key);
         var reservation = ChunkReservation<TStore>.Current;
         reservation.Begin(Segment);
@@ -734,7 +748,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         {
             while (true)
             {
-                long packed = PackedMeta;
+                long packed = ReadPackedMeta();
                 var (level, next, _) = UnpackMeta(packed);
                 int bucket = ResolveBucket(hash, level, next, N0);
                 int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -754,7 +768,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     continue;
                 }
 
-                if (PackedMeta != packed)
+                if (ReadPackedMeta() != packed)
                 {
                     latch.AbortWriteLock();
                     continue;
@@ -813,7 +827,6 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     throw;
                 }
 
-                TrySplitIfNeeded(ref accessor, changeSet);
                 return true;
             }
         }
@@ -919,7 +932,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -935,7 +948,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -957,7 +970,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         while (true)
         {
-            long packed = PackedMeta;
+            long packed = ReadPackedMeta();
             var (level, next, _) = UnpackMeta(packed);
             int bucket = ResolveBucket(hash, level, next, N0);
             int chunkId = GetBucketChunkId(bucket, ref accessor);
@@ -970,7 +983,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 continue;
             }
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 latch.AbortWriteLock();
                 continue;
@@ -986,7 +999,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
             latch.AbortWriteLock();
 
-            if (PackedMeta != packed)
+            if (ReadPackedMeta() != packed)
             {
                 continue;
             }
@@ -1000,18 +1013,19 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <remarks>
-    /// IXW-07: the split takes every chunk it writes under the old bucket's lock from a reservation made with the lock released — the new bucket's chain,
-    /// both halves' overflow and the directory's growth — and pins every page it writes before its first write, so nothing under the lock allocates or
-    /// faults a page in once the bucket is being rewritten. A fault before that releases the lock without a version bump; one after it (none is expected)
-    /// releases it with one, rather than leaving the bucket locked for good.
+    /// IXW-07: the split takes every chunk it writes under the old bucket's lock from a reservation made with the lock released — the new bucket's
+    /// overflow and the old bucket's — and pins every page it writes before its first write, so nothing under the lock allocates or faults a page in once
+    /// the bucket is being rewritten. The new bucket's own chunk is claimed before any of that, at its address
+    /// (<see cref="PagedHashMapBase{TStore}.ClaimBucketChunk"/>). A fault before the rewrite releases the lock without a version bump; one after it (none
+    /// is expected) releases it with one, rather than leaving the bucket locked for good.
     /// </remarks>
-    protected override void ExecuteSplit(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    protected override bool ExecuteSplit(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
         var reservation = ChunkReservation<TStore>.Current;
         reservation.Begin(Segment);
         try
         {
-            ExecuteSplitReserved(ref accessor, changeSet, reservation);
+            return ExecuteSplitReserved(ref accessor, changeSet, reservation);
         }
         finally
         {
@@ -1023,7 +1037,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// The chunks splitting the bucket at <paramref name="oldChunkId"/> takes, estimated WITHOUT its lock — the count <see cref="ExecuteSplitReserved"/>
     /// makes exactly under the lock, as a hint for reserving before it. Range-checked and cut at the segment's capacity; anything inconsistent answers 0.
     /// </summary>
-    private int SplitChunksHint(int oldChunkId, int oldBucketId, int newMod, int newBucketId, ref ChunkAccessor<TStore> accessor)
+    private int SplitChunksHint(int oldChunkId, int oldBucketId, int newMod, ref ChunkAccessor<TStore> accessor)
     {
         var capacity = Segment.ChunkCapacity;
         int total = 0, move = 0;
@@ -1052,25 +1066,68 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         }
 
         var keep = total - move;
-        var newChain = Math.Max(1, (move + _bucketCapacity - 1) / _bucketCapacity);
+        var newOverflow = Math.Max(0, (move + _bucketCapacity - 1) / _bucketCapacity - 1);
         var keepOverflow = Math.Max(0, (keep + _bucketCapacity - 1) / _bucketCapacity - 1);
-        var missingDirChunks = Math.Max(0, (newBucketId >> PagedHashMapDirectory.Shift) + 1 - DirectoryChunkCount(ref accessor));
-        return Math.Min(newChain + keepOverflow + 2 * missingDirChunks, ChunkReservation<TStore>.InitialCapacity);
+        return Math.Min(newOverflow + keepOverflow, ChunkReservation<TStore>.InitialCapacity);
     }
 
-    private void ExecuteSplitReserved(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet, ChunkReservation<TStore> reservation)
+    private bool ExecuteSplitReserved(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet, ChunkReservation<TStore> reservation)
     {
         var (level, next, bucketCount) = ReadMeta();
+        if (bucketCount >= BucketCap)
+        {
+            return false;
+        }
+
         int mod = N0 << level;
         int newMod = mod << 1;
         int oldBucketId = next;
         int newBucketId = next + mod;
+        int oldChunkId = BucketChunkId(oldBucketId);
+        int newChunkId = BucketChunkId(newBucketId);
 
-        int oldChunkId = GetBucketChunkId(oldBucketId, ref accessor);
+        // The new bucket's chunk first, at its address, before the reservation fills and before any latch (#1205). Not claimable now: no split.
+        if (!ClaimBucketChunk(newBucketId, ref accessor, changeSet, reservation))
+        {
+            return false;
+        }
+
+        var published = false;
+        try
+        {
+            SplitClaimed(ref accessor, changeSet, reservation, oldBucketId, oldChunkId, newChunkId, newMod, bucketCount);
+            published = true;
+        }
+        finally
+        {
+            // Published is the count, not the flag: a fault after PublishBucketCount — in the meta flush, the unlock — leaves the flag false and the chunk a
+            // live bucket readers already resolve to. Only this thread advances the count (the split lock), so an unchanged count is an unpublished split.
+            if (!published && BucketCount == bucketCount)
+            {
+                // Unpublished, the new bucket's chunk is nothing's: free it, so the next split claims it rather than finding it held and unlinked.
+                try
+                {
+                    Segment.FreeChunk(newChunkId);
+                }
+                catch
+                {
+                    // The fault already propagating is the one the caller has to see.
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The split proper, once the new bucket's chunk <paramref name="newChunkId"/> is claimed.</summary>
+    private void SplitClaimed(ref ChunkAccessor<TStore> accessor, ChangeSet changeSet, ChunkReservation<TStore> reservation, int oldBucketId,
+        int oldChunkId, int newChunkId, int newMod, int bucketCount)
+    {
+        reservation.Pin(newChunkId, ref accessor);
 
         // Reserve before locking, from an unlatched estimate: the exact count under the lock then usually finds enough, instead of releasing the lock to
         // reserve and counting the chain again.
-        reservation.Fill(SplitChunksHint(oldChunkId, oldBucketId, newMod, newBucketId, ref accessor), changeSet, ref accessor);
+        reservation.Fill(SplitChunksHint(oldChunkId, oldBucketId, newMod, ref accessor), changeSet, ref accessor);
 
         int totalEntries;
         int overflowChainLength;
@@ -1113,13 +1170,11 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     countWalkId = countHeader.OverflowChunkId;
                 }
 
-                // Chunks the split takes under the lock, exactly: the new bucket's chain, the old bucket's overflow past its primary, and the directory's
-                // growth — a directory chunk per chunk it lacks, each possibly with an overflow directory index chunk.
+                // Chunks the split takes under the lock, exactly: each half's overflow past its primary. The new bucket's primary is already claimed.
                 var keepEntries = totalEntries - moveEntries;
-                var newChain = Math.Max(1, (moveEntries + _bucketCapacity - 1) / _bucketCapacity);
+                var newOverflow = Math.Max(0, (moveEntries + _bucketCapacity - 1) / _bucketCapacity - 1);
                 var keepOverflow = Math.Max(0, (keepEntries + _bucketCapacity - 1) / _bucketCapacity - 1);
-                var missingDirChunks = Math.Max(0, (newBucketId >> PagedHashMapDirectory.Shift) + 1 - DirectoryChunkCount(ref accessor));
-                need = newChain + keepOverflow + 2 * missingDirChunks;
+                need = newOverflow + keepOverflow;
             }
             catch
             {
@@ -1140,11 +1195,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         var locked = true;
         try
         {
-            // The directory grows before the bucket is rewritten, and every page the rewrite writes is pinned first: after the rewrite starts, nothing under
-            // the lock may fault. Growing the directory early is harmless — it only adds capacity no bucket points at yet.
-            EnsureDirectoryCapacity(newBucketId, ref accessor, changeSet, underLatch: true);
+            // Every page the rewrite writes is pinned first — the chain above, the new bucket's chunk, the meta: after the rewrite starts, nothing under the
+            // lock may fault.
             reservation.Pin(0, ref accessor);
-            reservation.Pin(GetDirectoryChunkId(newBucketId >> PagedHashMapDirectory.Shift, ref accessor), ref accessor);
 
             int entrySize = sizeof(TKey) + _valueSize;
             // StackEntryThreshold bounds the stackalloc fast path: at 72 entries × typical 12-16 B/entry × 2 buffers = ~2 KB. Safe
@@ -1244,33 +1297,25 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     written = true;
                     RewriteBucket(oldChunkId, keepKeys, keepValues, keepCount, ref accessor, changeSet);
 
-                    // Allocate and write new bucket — caller-accessor overload keeps ACW > 0 on the new chunk's content page from ClearChunk through
-                    // WriteBucket's header/keys/values writes (#301). IXW-07: reserved before the lock, its page pinned.
-                    int newChunkId = ChunkReservation<TStore>.AllocateUnderLatch(Segment, changeSet, ref accessor);
+                    // Write the new bucket at the chunk its position names, claimed before the lock and pinned (#1205).
                     WriteBucket(newChunkId, moveKeys, moveValues, moveCount, ref accessor, changeSet);
 
-                    SetBucketChunkId(newBucketId, newChunkId, ref accessor);
-
-                    // Free ALL overflow chunks — overflowIds is now sized to the real chain length from pass 1, so no excess leaks
-                    // into the free-list like before. Previously the array was capped at 8 and any overflow past that leaked chunks.
-                    for (int i = 0; i < overflowCount; i++)
-                    {
-                        Segment.FreeChunk(overflowIds[i]);
-                    }
-
-                    int newNext = next + 1;
-                    int newLevel = level;
-                    if (newNext >= mod)
-                    {
-                        newNext = 0;
-                        newLevel = level + 1;
-                    }
-                    PackedMeta = PackMeta(newLevel, newNext, bucketCount + 1);
-                    FlushMetaToChunk(ref accessor);
+                    // The new bucket exists once a reader can resolve to it: published after it is written, with release semantics. Before anything
+                    // else can fault: from the old bucket's rewrite on, the moved half is only in the new chunk, which an unpublished split frees.
+                    PublishBucketCount(bucketCount + 1);
+                    PersistBucketCount(ref accessor);
 
                     byte* unlockAddr = accessor.GetChunkAddress(oldChunkId, true);
                     new OlcLatch(ref GetHeader(unlockAddr).OlcVersion).WriteUnlock();
                     locked = false;
+
+                    // Free ALL the old chain's overflow chunks, unlinked by the rewrite — overflowIds is sized to the real chain length from pass 1 (it
+                    // used to be capped at 8, and any overflow chunk past that leaked). A fault here leaks what is left, which the offline check reports
+                    // (CHK-MAP-05) and a rebuild frees; it loses no entry.
+                    for (int i = 0; i < overflowCount; i++)
+                    {
+                        Segment.FreeChunk(overflowIds[i]);
+                    }
                 }
                 finally
                 {
@@ -1348,6 +1393,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         int prevChunkId = parentChunkId;
         int offset = 0;
+        var ownerBucket = parentChunkId - 1;   // the chain starts at the bucket's primary chunk, bucket + 1
 
         while (offset < entryCount)
         {
@@ -1360,7 +1406,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
             int writeCount = Math.Min(entryCount - offset, _bucketCapacity);
-            ovHeader.OlcVersion = 0;
+            TagOverflowOwner(ref ovHeader, ownerBucket);
             ovHeader.EntryCount = (byte)writeCount;
             ovHeader.Flags = 0;
             ovHeader.Reserved = 0;
@@ -1375,7 +1421,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
             // Link from prev LAST so any concurrent snapshot of prev sees a fully-formed new chunk.
             byte* prevAddr = accessor.GetChunkAddress(prevChunkId, true);
-            GetHeader(prevAddr).OverflowChunkId = overflowChunkId;
+            Volatile.Write(ref GetHeader(prevAddr).OverflowChunkId, overflowChunkId);   // release: the chunk's content before the link to it
 
             prevChunkId = overflowChunkId;
             offset += writeCount;
@@ -1391,21 +1437,21 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     internal void InsertDuringRebuild(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
+        TrySplitIfNeeded(ref accessor, changeSet);
         uint hash = ComputeHash(key);
-        var (level, next, _) = UnpackMeta(PackedMeta);
+        var (level, next, _) = UnpackMeta(ReadPackedMeta());
         int bucket = ResolveBucket(hash, level, next, N0);
         int chunkId = GetBucketChunkId(bucket, ref accessor);
 
         AppendEntry(chunkId, key, value, ref accessor, changeSet);
         _entryCount++;
-        TrySplitIfNeeded(ref accessor, changeSet);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Factory methods
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Create a new raw value hash map, allocating meta + directory + initial buckets.</summary>
+    /// <summary>Create a new raw value hash map: its meta and its initial buckets.</summary>
     public static RawValuePagedHashMap<TKey, TStore> Create(ChunkBasedSegment<TStore> segment, int n0, int valueSize, ChangeSet changeSet = null)
     {
         Debug.Assert(n0 > 0 && BitOperations.IsPow2(n0), "N0 must be a positive power of 2");
@@ -1418,12 +1464,17 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     }
 
     /// <summary>Open an existing raw value hash map by reading meta from chunk 0.</summary>
-    public static RawValuePagedHashMap<TKey, TStore> Open(ChunkBasedSegment<TStore> segment, int n0, int valueSize)
+    /// <param name="segment">The map's segment.</param>
+    /// <param name="n0">The initial bucket count it was created with.</param>
+    /// <param name="valueSize">Its value size.</param>
+    /// <param name="tolerateDamage">A crash reopen that rebuilds the map: an unusable meta opens it empty instead of throwing (see
+    /// <see cref="PagedHashMapBase{TStore}.InitializeOpen"/>).</param>
+    public static RawValuePagedHashMap<TKey, TStore> Open(ChunkBasedSegment<TStore> segment, int n0, int valueSize, bool tolerateDamage = false)
     {
         using var guard = EpochGuard.Enter(segment.Store.EpochManager);
 
         var map = new RawValuePagedHashMap<TKey, TStore>(segment, n0, valueSize);
-        map.InitializeOpen();
+        map.InitializeOpen(tolerateDamage);
         return map;
     }
 
@@ -1443,14 +1494,14 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// <summary>
     /// Iterate all live entries in the hash map, calling <paramref name="action"/> for each, under the OLC read protocol so the
     /// scan is safe against concurrent writers (insert / overflow append / bucket split). Each bucket is read optimistically into
-    /// a scratch buffer; if a concurrent writer bumps the bucket's head version — or the directory splits — mid-read, the bucket
+    /// a scratch buffer; if a concurrent writer bumps the bucket's head version — or a split moves the bucket count — mid-read, the bucket
     /// is re-read. Entries are handed to <paramref name="action"/> only once a consistent snapshot of the bucket has been
     /// captured: the callback may have side effects (it collects / invokes), so it must never observe a torn read.
     /// <para>
     /// Snapshot semantics: an entry present for the whole scan is visited exactly once; an entry concurrently inserted, removed,
     /// or relocated (by a split) during the scan may or may not be visited. Callers that need a fully consistent view must run
     /// against a quiescent map (the engine's broad-scan query path already does — it runs on the owning transaction thread).
-    /// Buckets are visited in directory order (cache-friendly).
+    /// Buckets are visited in order, chunk 1 onward (cache-friendly).
     /// </para>
     /// </summary>
     /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
@@ -1481,16 +1532,8 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     // Re-read fresh each attempt: a concurrent writer can grow the segment (raising the capacity) mid-scan, so a
                     // legitimately-valid head/overflow chunk id may exceed a stale snapshot — caching it would livelock the retry.
                     int chunkCapacity = Segment.ChunkCapacity;
-                    long packed = PackedMeta;
-                    int headId = GetBucketChunkId(b, ref accessor);
-                    if (headId < 0)
-                    {
-                        break;   // empty bucket
-                    }
-                    if ((uint)headId >= (uint)chunkCapacity)
-                    {
-                        continue;   // torn directory read — retry
-                    }
+                    long packed = ReadPackedMeta();
+                    int headId = GetBucketChunkId(b, ref accessor);   // b + 1: below the bucket count, inside the segment
 
                     byte* headAddr = accessor.GetChunkAddress(headId);
                     var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
@@ -1550,9 +1593,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                         continue;
                     }
 
-                    // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed
-                    // the directory. On failure, re-read the bucket from the head.
-                    if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || PackedMeta != packed)
+                    // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split moved
+                    // the bucket count. On failure, re-read the bucket from the head.
+                    if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || ReadPackedMeta() != packed)
                     {
                         continue;
                     }
@@ -1585,23 +1628,35 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// <remarks>
     /// <see cref="ForEachEntry{TAction}"/> retries any inconsistent read, because under its contract the cause is a concurrent writer that will finish. On a
     /// page torn on disk the inconsistency is permanent — a lock bit set in a bucket's version word, an out-of-range chunk id — and it retried forever: a crash
-    /// reopen hung in the EntityMap rebuild. Here nothing writes, so nothing is retried: every chunk id is range-checked before it is read, directory ones
-    /// included (<see cref="PagedHashMapBase{TStore}.GetBucketChunkIdChecked"/>), and a chain is cut at the segment's capacity (a cycle). What a damaged page
-    /// yields is garbage keys, which the callers' lookups by authoritative key do not match.
+    /// reopen hung in the EntityMap rebuild. Here nothing writes, so nothing is retried: every overflow chunk id is range-checked before it is read — a
+    /// bucket's own chunk is its position, inside the segment by the open's validation of the meta — and a chain is cut at the segment's capacity (a cycle).
+    /// What a damaged page yields is garbage keys, which the callers' lookups by authoritative key do not match.
     /// </remarks>
+    /// <param name="accessor">The caller's accessor over the map's segment.</param>
+    /// <param name="action">Receives each reachable entry.</param>
+    /// <param name="pageIsSuspect">
+    /// File page index → whether that page failed its CRC (<c>PagedMMF.IsSuspectPage</c>), or null. A chunk on such a page ends its chain unread: a tear can
+    /// leave a key intact and its value garbage, and a garbage value under a real key is worse than no entry — the crash rebuild's enabled-bits snapshot
+    /// prefers a snapshotted value to the cluster's own.
+    /// </param>
     /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
-    internal int ForEachEntryQuiescent<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action) where TAction : struct, IEntryAction<TKey>
+    internal int ForEachEntryQuiescent<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action, Func<int, bool> pageIsSuspect = null)
+        where TAction : struct, IEntryAction<TKey>
     {
         var visited = 0;
         var (_, _, bucketCount) = ReadMeta();
         var chunkCapacity = Segment.ChunkCapacity;
         for (var b = 0; b < bucketCount; b++)
         {
-            // -1 when the directory leading to the bucket is damaged: the bucket's entries are lost
-            var chunkId = GetBucketChunkIdChecked(b, ref accessor);
+            var chunkId = GetBucketChunkId(b, ref accessor);
             for (var walk = 0; (uint)chunkId < (uint)chunkCapacity && walk <= chunkCapacity; walk++)
             {
                 var addr = accessor.GetChunkAddress(chunkId);
+                if (pageIsSuspect != null && pageIsSuspect(Segment.Pages[Segment.GetChunkLocation(chunkId).segmentIndex]))
+                {
+                    break;   // read above, so a CRC failure on load is already recorded
+                }
+
                 ref readonly var header = ref GetHeader(addr);
                 var count = Math.Min((int)header.EntryCount, _bucketCapacity);
                 var nextId = header.OverflowChunkId;
@@ -1653,16 +1708,8 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             while (true)   // OLC retry for this bucket
             {
                 int chunkCapacity = Segment.ChunkCapacity;
-                long packed = PackedMeta;
-                int headId = GetBucketChunkId(b, ref accessor);
-                if (headId < 0)
-                {
-                    break;   // empty bucket
-                }
-                if ((uint)headId >= (uint)chunkCapacity)
-                {
-                    continue;   // torn directory read — retry
-                }
+                long packed = ReadPackedMeta();
+                int headId = GetBucketChunkId(b, ref accessor);   // b + 1: below the bucket count, inside the segment
 
                 byte* headAddr = accessor.GetChunkAddress(headId);
                 var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
@@ -1706,9 +1753,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                     continue;
                 }
 
-                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split changed the directory. On failure,
+                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split moved the bucket count. On failure,
                 // discard this attempt's tally and re-count the bucket from the head.
-                if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || PackedMeta != packed)
+                if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || ReadPackedMeta() != packed)
                 {
                     continue;
                 }
@@ -1735,16 +1782,8 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             while (true)   // OLC retry for this bucket
             {
                 int chunkCapacity = Segment.ChunkCapacity;
-                long packed = PackedMeta;
-                int headId = GetBucketChunkId(b, ref accessor);
-                if (headId < 0)
-                {
-                    break;   // empty bucket
-                }
-                if ((uint)headId >= (uint)chunkCapacity)
-                {
-                    continue;   // torn directory read — retry
-                }
+                long packed = ReadPackedMeta();
+                int headId = GetBucketChunkId(b, ref accessor);   // b + 1: below the bucket count, inside the segment
 
                 byte* headAddr = accessor.GetChunkAddress(headId);
                 var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
@@ -1790,7 +1829,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                 }
 
                 // Trust the candidate only once the bucket snapshot validates.
-                if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || PackedMeta != packed)
+                if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || ReadPackedMeta() != packed)
                 {
                     continue;
                 }

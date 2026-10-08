@@ -557,6 +557,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// loads may run on the background checkpoint/IO threads during recovery.</summary>
     private readonly ConcurrentDictionary<int, byte> _suspectPages = new();
 
+    /// <summary>
+    /// Whether <paramref name="filePageIndex"/> failed its CRC when it was loaded in <see cref="PageChecksumVerification.RecoverySuspect"/> mode: its bytes are
+    /// not to be trusted by anything that reads them before the suspects are resolved — the crash rebuild's snapshot of a structure it is about to discard
+    /// included. A page counts once loaded, so ask after reading it.
+    /// </summary>
+    internal bool IsSuspectPage(int filePageIndex) => _suspectPages.ContainsKey(filePageIndex);
+
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
     {

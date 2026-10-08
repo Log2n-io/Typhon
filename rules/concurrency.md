@@ -206,7 +206,9 @@ lock ordering and deadlock prevention are still to come.
 
 ### EP-02: A read whose length grows with the data holds a bounded set of pages `[fatal]`
   invariant a read that visits every page of a structure — a segment's chunk bitmaps, its forward chain, a grow's post-condition, a segment's
-            directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them
+            directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them.
+            One such walk writes: ChunkBasedSegment.FreeAllChunksFrom clears bitmap words through the read pin, with nothing allocating or freeing
+            concurrently, and records the page modified (CP-04) before it releases it
   invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
@@ -224,13 +226,15 @@ lock ordering and deadlock prevention are still to come.
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
-         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.RebuildFreeList, ChunkBasedSegment.ScanForAllocatorState,
+         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
+         ChunkBasedSegment.ScanForAllocatorState,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
-                storm stalled that way after about 96 000 transfers (RebuildFreeList under a Versioned copy-on-write); a load without
+                storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
+                copy-on-write); a load without
                 a chunk summary — every crash-path load — could not load a segment larger than the cache (#1144); and once the storm had
                 completed, counting its 300 000 audit entries stalled with 12 600 pages epoch-protected and none dirty: the count held every
                 cluster page it had read for its transaction
@@ -239,7 +243,8 @@ lock ordering and deadlock prevention are still to come.
         which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
         epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
         `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
-  verified: WholeSegmentScanTests — a segment four times the cache: the load scan, the free-list rebuild and the chain walk complete inside
+  verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
+            the chain walk complete inside
             one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
             [VerifiesRule]; the same fixture pins the pair's semantics (not evicted until released, no epoch tag, no clock bump, readers
             racing eviction always get their page)

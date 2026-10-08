@@ -252,58 +252,59 @@ internal static class L4Decoder
     }
 
     /// <summary>
-    /// Decodes one linear-hash (entity-map) chunk (Module 15, A6, design §10.1). The chunk's role is supplied by the caller — the meta chunk is always chunk 0;
-    /// directory / overflow-dir-index chunks come from the engine's non-data set (<see cref="DatabaseEngine.TryGetHashMapLayout"/>) — because a headerless
-    /// directory chunk can't be told from a bucket by its bytes alone:
+    /// Decodes one linear-hash (entity-map) chunk (Module 15, A6, design §10.1). The meta is chunk 0; bucket <c>b</c> is chunk <c>b + 1</c>, so a chunk whose
+    /// id is at most the bucket count is a bucket and anything above it an overflow chunk — the map keeps no directory (#1205):
     /// <list type="bullet">
-    /// <item><b>meta</b> — unpacks <c>PackedMeta</c> (@+8): the linear-hash <c>Level</c> / split pointer / bucket count, plus total entries (@+16) and the
-    /// directory-chunk count (@+24);</item>
-    /// <item><b>directory</b> — a flat table of 64 bucket-chunk pointers (no header);</item>
-    /// <item><b>bucket / overflow</b> — the bucket header (@+0): <c>EntryCount</c> (@+4) over capacity, the overflow chain link (@+8), and the
-    /// primary-vs-overflow role (a primary bucket carries a non-zero <c>OlcVersion</c>; an overflow chunk carries <c>OlcVersion == 0</c>).</item>
+    /// <item><b>meta</b> — <c>N0</c> (@+0), the format (@+4), the bucket count (@+8) with the linear-hash <c>Level</c> / split pointer derived from it, and
+    /// total entries (@+16);</item>
+    /// <item><b>bucket / overflow</b> — the bucket header (@+0): <c>EntryCount</c> (@+4) over capacity, the overflow chain link (@+8); an overflow chunk's
+    /// first word is the bucket that owns it, plus one.</item>
     /// </list>
     /// </summary>
-    public static StorageContentCellDto[] DecodeHashMap(ReadOnlySpan<byte> chunkBytes, bool isMeta, bool isDirectory, int bucketCapacity)
+    /// <param name="chunkBytes">The chunk's bytes.</param>
+    /// <param name="chunkId">The chunk's id within the map's segment.</param>
+    /// <param name="bucketCount">The map's bucket count (from its meta), or 0 when unknown: every non-meta chunk then decodes as a bucket.</param>
+    /// <param name="bucketCapacity">Entries per bucket chunk, or 0 when unknown.</param>
+    public static StorageContentCellDto[] DecodeHashMap(ReadOnlySpan<byte> chunkBytes, int chunkId, long bucketCount, int bucketCapacity)
     {
-        if (chunkBytes.Length < 12)
+        if (chunkBytes.Length < 24)
         {
             return [];
         }
 
-        if (isMeta)
+        if (chunkId == 0)
         {
-            // PackedMeta layout (PagedHashMapBase.UnpackMeta): Level(bits 56-63) | Next(bits 32-55) | BucketCount(bits 0-31).
-            var packed = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(8));
-            var level = (int)((packed >> 56) & 0xFF);
-            var next = (int)((packed >> 32) & 0x00FFFFFF);
-            var bucketCount = (int)(packed & 0xFFFFFFFF);
+            var n0 = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+            var buckets = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(8));
             var entryCount = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(chunkBytes.Slice(16));
-            var dirChunks = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(chunkBytes.Slice(24));
-            return
-            [
-                new StorageContentCellDto("Role", "Meta", "hashMeta", 0, 0, -1),
-                new StorageContentCellDto("Buckets", bucketCount.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
-                new StorageContentCellDto("Total entries", entryCount.ToString(CultureInfo.InvariantCulture), "hashMeta", 16, 8, -1),
-                new StorageContentCellDto("Level", level.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
-                new StorageContentCellDto("Split pointer", next.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
-                new StorageContentCellDto("Directory chunks", dirChunks.ToString(CultureInfo.InvariantCulture), "hashMeta", 24, 2, -1),
-            ];
+            var cells = new List<StorageContentCellDto>
+            {
+                new("Role", "Meta", "hashMeta", 0, 0, -1),
+                new("Buckets", buckets.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1),
+                new("Total entries", entryCount.ToString(CultureInfo.InvariantCulture), "hashMeta", 16, 8, -1),
+            };
+
+            // Level and split pointer are a function of the count: count = N0 · 2^level + next.
+            if (n0 > 0 && System.Numerics.BitOperations.IsPow2(n0) && buckets >= n0)
+            {
+                var level = System.Numerics.BitOperations.Log2((ulong)buckets / (ulong)n0);
+                var next = buckets - ((long)n0 << level);
+                cells.Add(new StorageContentCellDto("Level", level.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1));
+                cells.Add(new StorageContentCellDto("Split pointer", next.ToString(CultureInfo.InvariantCulture), "hashMeta", 8, 8, -1));
+            }
+
+            return [.. cells];
         }
 
-        if (isDirectory)
-        {
-            return
-            [
-                new StorageContentCellDto("Role", "Directory", "hashMeta", 0, 0, -1),
-                new StorageContentCellDto("Bucket pointers", "64 / chunk", "hashMeta", 0, 0, -1),
-            ];
-        }
-
-        // Bucket or overflow chunk — PagedHashMapBucketHeader { OlcVersion @0, EntryCount @4, _ @5-7, OverflowChunkId @8 }.
-        var olcVersion = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
+        // Bucket or overflow chunk — PagedHashMapBucketHeader { OlcVersion | owner+1 @0, EntryCount @4, _ @5-7, OverflowChunkId @8 }.
+        var firstWord = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes);
         var bucketEntries = chunkBytes[4];
         var overflowChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(chunkBytes.Slice(8));
-        var role = olcVersion == 0 ? "Overflow" : "Bucket";
+        var isOverflow = bucketCount > 0 && chunkId > bucketCount;
+        var role = !isOverflow ? $"Bucket {chunkId - 1}"
+            : firstWord > 0 && firstWord <= bucketCount ? $"Overflow of bucket {firstWord - 1}"
+            : firstWord > bucketCount ? $"Overflow naming bucket {firstWord - 1}, past the {bucketCount} buckets"
+            : "Overflow, linked to no bucket";
         var entriesLabel = bucketCapacity > 0 ? $"{bucketEntries} / {bucketCapacity}" : bucketEntries.ToString(CultureInfo.InvariantCulture);
         return
         [

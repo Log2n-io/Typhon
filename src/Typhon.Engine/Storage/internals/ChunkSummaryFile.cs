@@ -32,7 +32,7 @@ internal sealed class ChunkSegmentSummary
     /// <summary>Allocated chunks at the close.</summary>
     public int AllocatedCount { get; }
 
-    /// <summary>One bit per segment page, set when the page was in the allocator's free list: it has at least one free chunk.</summary>
+    /// <summary>One bit per segment page, the allocator's room bit: set when the page may have a free chunk (a superset).</summary>
     public ulong[] PagesWithRoom { get; }
 
     /// <summary>Number of 64-bit words <see cref="PagesWithRoom"/> needs for <paramref name="pageCount"/> pages.</summary>
@@ -136,7 +136,8 @@ internal static class ChunkSummaryFile
     internal const string FileName = "chunk-summary";
 
     private const uint Magic = 0x4D534354;   // "TCSM"
-    private const ushort Version = 2;
+    // 3 (#1205): the room bits are the allocator's own superset, trusted as they are; 2's were the lossy free list's, healed by a rebuild that is gone.
+    private const ushort Version = 3;
     private const int HeaderSize = 32;
     private const int EntryHeaderSize = 16;
     private const int SectionHeaderSize = 8;

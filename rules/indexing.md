@@ -557,13 +557,15 @@ written for the read path; these are the write-path obligations that went unwrit
 ### IXW-07: A writer never allocates storage while it holds a node or bucket latch `[fatal]`
   invariant every chunk a B+Tree split, or an entity-map append, bulk append or bucket split, writes under its latches is reserved before the first
             latch is taken (`ChunkReservation.Fill`, which grows to the exact need), its page pinned until the writer ends; under a latch
-            `ChunkReservation.AllocateUnderLatch` hands out reserved chunks — anything else is counted (`UnreservedAllocations`)
+            `ChunkReservation.AllocateUnderLatch` hands out reserved chunks — anything else is counted (`UnreservedAllocations`). A bucket split's
+            new bucket is its own address (EMAP-01): claimed before any latch, and an overflow chunk moved out of it lands in a chunk reserved
+            before its owner is latched
   invariant a writer that finds its reservation short under its latches releases every one and reserves before it latches again; a fault under an
             entity-map bucket lock releases the lock — with a version bump once anything may have been written (an upsert's in-place update, an
             append, a bulk run's entries, a split's rewrite), without one only when nothing was
   never `AllocateChunk`, a segment grow, or a page fault for a chunk being written, between a latch's acquisition and its release
   scope: ChunkReservation, BTree.AllocNode, BTree.InsertIterative, BTree.AddOrUpdateCorePessimistic, RawValuePagedHashMap.AppendUnderBucketLock,
-         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.EnsureDirectoryCapacity
+         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.ClaimBucketChunk
   on_violation: an allocation can grow the segment — up to 1 024 pages — and wait seconds on page-cache back-pressure, or throw. Waiting, it holds
                 every writer of the node or bucket: the B+Tree's waiters exhaust their bounded retries and report a liveness defect (IXW-01), two workers
                 in one MarketHardeningTests storm. Throwing, it leaves the latch held for good: an entity-map bucket nobody would unlock froze a storm at

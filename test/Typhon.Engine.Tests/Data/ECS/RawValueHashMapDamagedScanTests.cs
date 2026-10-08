@@ -116,8 +116,8 @@ unsafe class RawValueHashMapDamagedScanTests
     }
 
     /// <summary>
-    /// A chain that loops back on itself, an overflow id far outside the segment, and a directory chunk id that is negative: the walk ends, skips what it
-    /// cannot reach, and still visits every bucket the damage did not touch. A negative directory id read unchecked lands before the page's chunk area.
+    /// A chain that loops back on itself, an overflow id far outside the segment, and an overflow id that is negative: the walk ends, skips what it cannot
+    /// reach, and still visits every bucket the damage did not touch. A negative chunk id read unchecked lands before the page's chunk area.
     /// </summary>
     [Test]
     public void LoopsAndWildChunkIds_EndTheirBucket_AndLeaveTheRestReadable()
@@ -128,18 +128,22 @@ unsafe class RawValueHashMapDamagedScanTests
         var accessor = segment.CreateChunkAccessor();
         var map = Build(mpmmf, ref accessor, segment, 3000);
 
-        // What the damage below cuts off: every entry of buckets 0..63 (directory chunk 0), and whatever follows the head chunk of buckets 100 and 200.
-        var lost = 0;
-        for (long k = 1; k <= 3000; k++)
+        // What the damage below cuts off: whatever follows the head chunk of three buckets that have an overflow chain.
+        var heads = new System.Collections.Generic.List<int>();
+        for (var b = 0; b < map.BucketCount && heads.Count < 3; b++)
         {
-            lost += map.BucketIndexOf(k) < 64 ? 1 : 0;
+            var head = map.GetBucketChunkIdForTest(b, ref accessor);
+            if (RawValuePagedHashMap<long, PersistentStore>.BucketOverflowChunkIdForTest(head, ref accessor) >= 0)
+            {
+                heads.Add(head);
+            }
         }
 
-        var loopHead = map.GetBucketChunkIdForTest(100, ref accessor);
-        var wildHead = map.GetBucketChunkIdForTest(200, ref accessor);
-        lost += EntriesAfterHead(ref accessor, loopHead) + EntriesAfterHead(ref accessor, wildHead);
+        Assert.That(heads, Has.Count.EqualTo(3), "premise: the map has at least three buckets with an overflow chain to damage");
+        var (negativeHead, loopHead, wildHead) = (heads[0], heads[1], heads[2]);
+        var lost = EntriesAfterHead(ref accessor, negativeHead) + EntriesAfterHead(ref accessor, loopHead) + EntriesAfterHead(ref accessor, wildHead);
 
-        accessor.GetChunk<PagedHashMapMeta>(0, true).DirectoryChunkIds[0] = -7;
+        HeaderOf(ref accessor, negativeHead).OverflowChunkId = -7;
         HeaderOf(ref accessor, loopHead).OverflowChunkId = loopHead;
         HeaderOf(ref accessor, wildHead).OverflowChunkId = int.MaxValue - 3;
 

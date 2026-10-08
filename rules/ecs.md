@@ -833,3 +833,54 @@ both fast and exact inside the window; this rule fixes what it does promise.
             blind to which component was written, the gate case; with the gate blind to releases, the
             destroy-after-another-write case
 
+## Module: EMAP — Where an entity map keeps its buckets
+
+The per-archetype entity map is a linear hash map (`PagedHashMapBase`). Its layout used to hold a directory of bucket chunk ids, counted in 16 bits and
+reached through a linked list walked on every lookup: a map stopped at 4 194 240 buckets (6–14M entities, by the archetype's record size) and a lookup
+cost 12 µs at 20M entries (#1205).
+
+### EMAP-01: A bucket lives at the chunk its index names `[fatal]` `[silent]`
+  invariant ∀ b < BucketCount: bucket b is chunk b + 1 of the map's segment; chunk 0 is the meta; the map keeps no directory. The hash state is
+            BucketCount alone — level and split pointer derive from it (BucketCount = N0 · 2^level + next)
+  invariant every allocated chunk past BucketCount is an overflow chunk, and one linked into a chain names its owner (header OlcVersion = bucket + 1;
+            an overflow chunk is never latched). The segment's allocation floor sits a runway above the frontier (BucketCount + 1), so the allocator
+            hands out nothing a split will need soon
+  invariant a split claims chunk newBucket + 1 before it takes any latch: free → reserved; held by a linked overflow chunk → moved, under its owner's
+            latch, to a chunk reserved before that latch, the owner's version bumped; held and linked to nothing (a writer between reserving and
+            linking) → the split is skipped and retried by a later insert, never waited for
+  invariant the new bucket is written before the count that names it is published, with release semantics, and every reader resolves its bucket from an
+            acquire read of the count: a reader that reaches the new bucket sees what the split wrote, on x64 and on arm64
+  invariant past MaxBucketCount (2³⁰) a map stops splitting and inserts go on into longer chains; what refuses at last is the segment, whose allocator
+            throws ResourceExhausted when its chunk ids run out (PS-18). Under concurrent inserts the lock holder splits in batches, and an inserter that
+            finds the load a third past the threshold waits, bounded, for the lock — the load stays bounded, and with it a lookup's chunk count
+  invariant a split runs before the write that triggers it takes effect, in a reservation scope of its own: a fault in it fails a write that changed
+            nothing, which its caller can retry — InsertNew has no duplicate check. One that cannot get its chunk or its pages (ResourceExhausted,
+            page-cache back-pressure) is skipped and counted instead. A claimed chunk is freed only while the count that would name it is unpublished.
+            A frontier chunk held unlinked is remembered, and inserts skip the split until its holder links or frees it
+  invariant each count in the meta chunk has one writer: the bucket count the split that published it, under the split lock — or the checkpoint's
+            FlushMeta, under that lock, when a split's own persist faulted after it published; the entry count the checkpoint (FlushMeta), on every
+            cycle it changed. A writer reading the bucket count outside the lock could store an older one over a newer
+  invariant no allocated chunk stays linked to nothing: a reservation frees every chunk it did not hand out even if one free throws, a crash open
+            rebuilds every map it opens (ClearForRebuild frees all), and the offline check reports any allocated chunk past the buckets that no chain
+            reaches (CHK-MAP-05) — one at the frontier would defer every split for good
+  invariant an open tolerates an unusable meta — opening the map as N0 empty buckets — exactly when it is about to rebuild that map, by the same
+            predicate as the rebuild gate (WillRebuildEntityMapOnCrash): a crash reopen, or a repair's forced recovery open after a clean close
+  invariant a multi-value map (the generic PagedHashMap) keeps its value buffers in a segment of their own: one in the map's segment would sit where a
+            split must put a bucket, and could not be moved
+  scope: PagedHashMapBase.ClaimBucketChunk, PagedHashMapBase.PublishBucketCount, PagedHashMapBase.ReadMeta, PagedHashMapBase.GetBucketChunkId,
+         PagedHashMapBase.TagOverflowOwner, PagedHashMapBase.TrySplitIfNeeded, PagedHashMapBase.PersistBucketCount, PagedHashMapBase.FlushMeta,
+         PagedHashMapMeta.IsUsable, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.AppendUnderBucketLock, ChunkBasedSegment.TryReserveChunk,
+         ChunkBasedSegment.RaiseAllocationFloor, ChunkReservation.TryTakeReserved, ChunkReservation.End, EntityMapChecks
+  on_violation: a split that took the frontier chunk while an overflow chunk sat there would overwrite a live chain — entries lost, silently; one that
+                waited for a chunk held unlinked could wait on its own reservation; a count published before its bucket would let a reader resolve to
+                a chunk not yet written
+  verified: EntityMapAddressingTests [VerifiesRule] — every bucket at its position after 30 000 inserts; an overflow chunk on the frontier chunk is
+            moved by the next split whether its predecessor is the bucket or another overflow chunk, and when its owner is the bucket being split; a
+            frontier chunk held unlinked defers every split until it is freed, one with a stale owner defers until freed, one whose owner is latched
+            defers then moves, one in the splitter's own reservation is taken back; a fault in a split fails only a write that took no effect, and
+            frees the chunk it claimed — but not after the count that names it was published; each meta count has one writer; at a lowered cap
+            the map keeps inserting; the allocator stays above its floor;
+            inserters, readers and a remover at once over splits that move overflow chunks. EntityMapChecksTests — every structural fault reported
+            exactly, a recovery open rebuilds a map whose meta it cannot use, a despawn-only session persists the count. HashMapTests — a multi-value
+            map keeps splitting. EntityMapScaleTests (on demand): 500M entries (4-byte values), 200M (23-byte) and 50M over a 1 GiB cache — every
+            sampled entry found before and after a clean reopen

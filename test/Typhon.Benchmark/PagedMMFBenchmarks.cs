@@ -103,7 +103,7 @@ public class PagedMMFBenchmarks
 
     /// <summary>
     /// Allocate a new page via ManagedPagedMMF.
-    /// Measures the allocation path: free-list scan + page initialization.
+    /// Measures the allocation path: occupancy scan + page initialization.
     /// </summary>
     [Benchmark]
     public void PageAllocation()
