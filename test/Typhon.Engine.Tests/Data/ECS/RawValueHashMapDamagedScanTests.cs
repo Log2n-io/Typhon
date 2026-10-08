@@ -64,8 +64,11 @@ unsafe class RawValueHashMapDamagedScanTests
         var record = stackalloc byte[ValueSize];
         for (long k = 1; k <= count; k++)
         {
-            *(long*)record = k;
-            map.Insert(k, record, ref accessor, null);
+            // Keys a multiplier apart, so no two share a run of the hash and they collide as random keys do: consecutive keys fill their buckets
+            // evenly, which leaves a map this size without the overflow chains the damage tests need.
+            var key = k * 0x9E3779B1L;
+            *(long*)record = key;
+            map.Insert(key, record, ref accessor, null);
         }
 
         return map;

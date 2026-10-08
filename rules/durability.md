@@ -463,7 +463,7 @@ CK-08 (flush-only cycles) are later increments.
             (the post-flush `DurableLsn` taken before capture), never beyond
   requires: AP-01, WP-16
   scope: `CheckpointManager.RunCheckpointCycle` — step-1 barrier (`RequestFlush` + `WaitForDurable(LastPublishedLsn)` →
-         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each pass's `FlushToDisk`
+         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each batch's `FlushToDisk` (`SettleBatch`)
   note the target was `LastAppendedLsn` until #937. The published frontier is not a weakening: AP-01 orders a commit's
        page effects strictly after its append returns, so a page captured now can only reflect records already published.
        What it drops is the unreachable part of the old target — LSNs allocated to claims that produced no frame, which
@@ -714,6 +714,36 @@ CK-08 (flush-only cycles) are later increments.
                 twice); the storm died at 36 639 operations on main
   verified: CheckpointManagerTests.HookLoadingAPage_OnAFullyOwedCache_DoesNotWait [VerifiesRule] — every slot owes a write, the loop is not
             running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
+
+### CK-15: A checkpoint pass frees pages while it writes `[correctness]`
+  invariant a pass is written in batches — at most WriteBatchMaxPages pages, or WriteBatchMaxTicks (100 ms) of writing — and each batch is settled
+            before the next is written: WAL flushed through LastPublishedLsn (CK-02), data fsync, every written page's captured generation published
+            (CP-03). So the cache owes less after each batch's fsync, and a writer back-pressure holds waits for one batch, not for the whole pass
+  invariant the plain pages of a batch are written in waves of up to WriteWorkers disjoint ranges at once — the first by the checkpoint thread, the
+            others by its dedicated wave writers, never the thread pool, whose threads may be the very writers the cache holds back. A failure surfaces
+            unwrapped, a fatal one before any transient one, so CK-06 classifies the cycle by the worst fault and never by which writer threw first
+  invariant with a PageWriteInterceptor installed (crash simulation) the waves run one after the other on the checkpoint thread, so a simulated crash
+            at write k leaves nothing written after it
+  scope: CheckpointManager.WriteDirtyPages, CheckpointManager.SettleBatch, CheckpointManager.WriteWave
+  on_violation: settled only at its end, a pass under a write storm wrote the whole cache before freeing one page — 8 GiB at ~22k pages/s — and
+                every writer waiting for a slot timed out after 5 s with 1,046,917 of 1,048,576 pages owed (MarketHardeningTests, 75M items over an 8 GiB
+                cache). Batched, the same storm over a 1.3 GiB cache had the debt at 99.7 % of the cache and its longest wait at 77 ms
+  verified: CheckpointBatchSettleTests [VerifiesRule] — the cache's debt falls between successive fsyncs of one forced cycle written in parallel waves
+            ([RuleMutant]: one batch for the whole pass keeps it flat); an intercepted pass writes no parallel wave; pages written by parallel waves read
+            back, checksums verified, after a reopen
+
+### CK-16: A checkpoint wave writes one kind of page `[fatal]` `[silent]`
+  invariant a pass is ordered protected directory pages first, then by file page (PagedMMF.OrderForCheckpointWrite), and each wave writes one kind:
+            the protected pages that lead the pass, on the checkpoint thread alone, or plain pages, in parallel. A page whose kind changed after the order
+            was taken is left owed for the next pass, which orders it again (CheckpointWriteFilter)
+  invariant so a protected page's persist, whose fsync is file-wide, never runs beside or after a plain write its batch has not settled: it can only
+            make durable what an earlier batch already flushed the WAL for (CK-02)
+  scope: PagedMMF.OrderForCheckpointWrite, PagedMMF.WritePagesForCheckpoint, CheckpointManager.WriteDirtyPages
+  on_violation: a commit published after the cycle's barrier reaches the data file while its WAL record is still in the ring buffer — a partial write
+                of a transaction that may never become durable, which Typhon cannot undo (#585). Hoisting protected pages inside each write call stopped
+                being enough once a pass became many calls on several threads
+  verified: CheckpointProtectedPageOrderingTests [VerifiesRule] — a pass is ordered protected first and then by file page, and a plain wave given the
+            whole pass leaves every protected page owed and persists none ([RuleMutant]: a wave writing every kind is reported)
 
 ---
 
@@ -1814,6 +1844,24 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             taken rather than grown past; a bulk free from a mid-word start keeps every chunk below it; an allocation while a grow is held between
             publishing its pages and their capacity returns an id below the capacity it sees.
             EntityMapAddressingTests — every free chunk above the floor is used before the segment grows, stale bits on full pages included
+
+### PS-19: Every slot reference is released exactly once `[correctness]`
+  invariant a ChunkAccessor takes a slot reference on each page it loads into a slot (LoadIntoSlot) and releases it when the slot is
+            evicted or the accessor disposed, so an accessor is never copied to be used: a copy loads into slots of its own, takes their
+            references and is dropped with them — accessors travel by ref (EntityAccessor.ResolveSpawnAwarePayload)
+  invariant a transaction's dispose releases every accessor it holds — its component accessors (FlushAccessors), its cluster cache
+            (DisposeClusterCache) and its entity-map accessor — on the read-only path too, and whether the pool takes the transaction
+            back or drops it: a pool reset recycles component entries without disposing them, and a dropped transaction is never reset
+  invariant so with no transaction or accessor alive, no page is slot-referenced — apart from the per-thread warm accessors, which keep their
+            slots between operations by design (ChunkBasedSegment.ReturnWarmAccessor): a bounded number per thread, never one per operation
+  scope: EntityAccessor.ResolveSpawnAwarePayload, Transaction.Dispose, ChunkAccessor.LoadIntoSlot, ChunkAccessor.Dispose
+  on_violation: the page can never be evicted again (PS-01), silently — no epoch, checkpoint or back-pressure round releases a slot
+                reference. Every read of a Versioned or non-cluster component went through a copy of the component accessor and leaked one;
+                read-only transactions never disposed their component accessors. A database six times its cache then had 94 % of the cache
+                slot-referenced after a snapshot read in short read-only transactions, and its next writers timed out on back-pressure
+                with only 12 % of the cache dirty (MarketHardeningTests, 75M items over 8 GiB)
+  verified: ReadOnlyTransactionSlotPinTests [VerifiesRule] — read-only and writing transactions, read-only and writing transactions dropped by a
+            full pool, and parallel read-only batches each leave no page slot-referenced once disposed ([RuleMutant]: a copied accessor is reported)
 
 ---
 

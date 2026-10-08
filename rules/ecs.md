@@ -867,11 +867,17 @@ cost 12 µs at 20M entries (#1205).
             predicate as the rebuild gate (WillRebuildEntityMapOnCrash): a crash reopen, or a repair's forced recovery open after a clean close
   invariant a multi-value map (the generic PagedHashMap) keeps its value buffers in a segment of their own: one in the map's segment would sit where a
             split must put a bucket, and could not be moved
-  scope: PagedHashMapBase.ClaimBucketChunk, PagedHashMapBase.PublishBucketCount, PagedHashMapBase.ReadMeta, PagedHashMapBase.GetBucketChunkId,
+  invariant an 8-byte key's hash keeps an aligned run of 256 keys in 256 consecutive buckets (RunPreservingHash64: the run's mixed high part, the
+            key's low byte XOR the mix's): consecutive entity keys share pages, while runs, and keys issued unevenly within a run, spread like xxHash32.
+            The hash is part of the format: a map written under another (meta format other than "LHA3") is refused, never read
+  scope: RawValuePagedHashMap.RunPreservingHash64, PagedHashMapBase.ClaimBucketChunk, PagedHashMapBase.PublishBucketCount, PagedHashMapBase.ReadMeta, PagedHashMapBase.GetBucketChunkId,
          PagedHashMapBase.TagOverflowOwner, PagedHashMapBase.TrySplitIfNeeded, PagedHashMapBase.PersistBucketCount, PagedHashMapBase.FlushMeta,
          PagedHashMapMeta.IsUsable, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.AppendUnderBucketLock, ChunkBasedSegment.TryReserveChunk,
          ChunkBasedSegment.RaiseAllocationFloor, ChunkReservation.TryTakeReserved, ChunkReservation.End, EntityMapChecks
-  on_violation: a split that took the frontier chunk while an overflow chunk sat there would overwrite a live chain — entries lost, silently; one that
+  on_violation: a hash that scatters consecutive keys makes every batch of spawns dirty one map page per entity: a bulk load rewrote the whole map at
+                every checkpoint cycle, 85 % of its writes (MarketHardeningTests); one that keeps the key's low bits as they are overloads the buckets
+                partly-issued key blocks use. A split that took the frontier chunk while an overflow chunk sat there would overwrite a live chain —
+                entries lost, silently; one that
                 waited for a chunk held unlinked could wait on its own reservation; a count published before its bucket would let a reader resolve to
                 a chunk not yet written
   verified: EntityMapAddressingTests [VerifiesRule] — every bucket at its position after 30 000 inserts; an overflow chunk on the frontier chunk is
@@ -883,4 +889,6 @@ cost 12 µs at 20M entries (#1205).
             inserters, readers and a remover at once over splits that move overflow chunks. EntityMapChecksTests — every structural fault reported
             exactly, a recovery open rebuilds a map whose meta it cannot use, a despawn-only session persists the count. HashMapTests — a multi-value
             map keeps splitting. EntityMapScaleTests (on demand): 500M entries (4-byte values), 200M (23-byte) and 50M over a 1 GiB cache — every
-            sampled entry found before and after a clean reopen
+            sampled entry found before and after a clean reopen. EntityMapHashTests [VerifiesRule] — an aligned run of keys fills one aligned block of
+            buckets; sequential, partly-issued blocks, strided, churned and random keys all overflow and fill buckets within a margin of a random hash's
+            on the same keys at load 0.75 ([RuleMutant]: the key's own low bits, the naive locality hash, are reported)

@@ -16,8 +16,12 @@ namespace Typhon.Engine.Internals;
 [StructLayout(LayoutKind.Sequential, Pack = 4, Size = 256)]
 struct PagedHashMapMeta
 {
-    /// <summary>"LHA2": linear hashing with arithmetic bucket addressing. Any other value is a map written before #1205, or a damaged meta.</summary>
-    public const uint FormatMagic = 0x3241484C;
+    /// <summary>
+    /// "LHA3": linear hashing with arithmetic bucket addressing, 8-byte keys placed by <c>RawValuePagedHashMap</c>'s run-preserving hash — every map the
+    /// engine persists (the generic <c>PagedHashMap</c>, test-only, still places them by xxHash32). Any other value is a map written before it ("LHA2",
+    /// whose 8-byte keys were placed by plain xxHash32, so its entries would sit in the wrong buckets), before #1205, or a damaged meta.
+    /// </summary>
+    public const uint FormatMagic = 0x3341484C;
 
     /// <summary>The most buckets a map holds (see <see cref="PagedHashMapBase{TStore}.MaxBucketCount"/>).</summary>
     internal const int MaxBucketCount = 1 << 30;

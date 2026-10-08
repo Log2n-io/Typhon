@@ -7,6 +7,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -23,6 +24,19 @@ using System.Threading.Tasks;
 using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
+
+/// <summary>Which pages a <see cref="PagedMMF.WritePagesForCheckpoint"/> call may write (CK-16).</summary>
+internal enum CheckpointWriteFilter
+{
+    /// <summary>Every page: protected directory pages are hoisted to the front of the call.</summary>
+    All,
+
+    /// <summary>Protected directory pages only: the wave that leads a checkpoint pass, written by the checkpoint thread alone.</summary>
+    ProtectedOnly,
+
+    /// <summary>Plain pages only: the parallel waves, which must never run a protected page's file-wide fsync beside an unsettled plain write.</summary>
+    PlainOnly,
+}
 
 [PublicAPI]
 public partial class PagedMMF : ResourceNode, IMemoryResource
@@ -1869,6 +1883,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var cursor = -1;
         long lapVisits = 0;
         int lapDirty = 0, lapEpochHeld = 0, dirtyCount = 0, epochCount = 0;
+        long backpressureSince = 0;
 
         while (true)
         {
@@ -2003,6 +2018,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     // Backpressure span wraps the strategy wait. Suppressed by default alongside the other PageCache.* kinds, so zero cost unless
                     // the user explicitly opts in for cache-pressure analysis.
                     var bpScope = TyphonEvent.BeginPageCacheBackpressure();
+                    if (backpressureSince == 0)
+                    {
+                        backpressureSince = Stopwatch.GetTimestamp();
+                    }
+
                     try
                     {
                         bpScope.RetryCount = bpCtx.RetryCount;
@@ -2040,6 +2060,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     }
                     finally
                     {
+                        NoteBackpressureWait(Stopwatch.GetTimestamp() - backpressureSince);
                         bpScope.Dispose();
                     }
 
@@ -2856,6 +2877,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal int PeakBackpressureEpochHeld;
 
     /// <summary>
+    /// Longest time one allocation has waited under back-pressure so far, in <see cref="Stopwatch"/> ticks: from its first round that found no slot to the
+    /// end of its latest wait. Diagnostic: against <c>PageCacheBackpressureTimeout</c>, the margin a workload has before an allocation times out.
+    /// </summary>
+    internal long PeakBackpressureWaitTicks;
+
+    private void NoteBackpressureWait(long ticks)
+    {
+        var current = Volatile.Read(ref PeakBackpressureWaitTicks);
+        while (ticks > current)
+        {
+            var seen = Interlocked.CompareExchange(ref PeakBackpressureWaitTicks, ticks, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
+    }
+
+    /// <summary>
     /// The full unevictability breakdown, taken in ONE pass so the parts are mutually consistent.
     /// </summary>
     /// <remarks>
@@ -2899,6 +2941,72 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         return (debt, acw, slotRef, epochHeld, unevictable, total);
+    }
+
+    /// <summary>
+    /// Every reason a slot cannot be evicted, counted once per slot and per reason (a slot can have several), plus the slots none of them holds: what a
+    /// back-pressure timeout's two counts leave out. A diagnostic: one pass over the cache.
+    /// </summary>
+    internal string DescribeEvictionBlockers()
+    {
+        var slots = _slots;
+        if (slots == null)
+        {
+            return "no cache";
+        }
+
+        var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        int free = 0, allocating = 0, exclusive = 0, idle = 0, slotRef = 0, acw = 0, dirtyMarks = 0, debt = 0, epochHeld = 0, evictable = 0;
+        for (var i = 0; i < slots.Count; i++)
+        {
+            var pi = slots[i];
+            switch (pi.PageState)
+            {
+                case PageState.Free:
+                    free++;
+                    continue;
+                case PageState.Allocating:
+                    allocating++;
+                    continue;
+                case PageState.Exclusive:
+                    exclusive++;
+                    continue;
+            }
+
+            idle++;
+            var s = Volatile.Read(ref pi.SlotRefCount) > 0;
+            var a = Volatile.Read(ref pi.ActiveChunkWriters) > 0;
+            var m = Volatile.Read(ref pi.DirtyCounter) > 0;
+            var d = HasDebt(pi);
+            var e = Volatile.Read(ref pi.AccessEpoch) >= minActiveEpoch;
+            if (s) { slotRef++; }
+            if (a) { acw++; }
+            if (m) { dirtyMarks++; }
+            if (d) { debt++; }
+            if (e) { epochHeld++; }
+            if (!(s || a || m || d || e)) { evictable++; }
+        }
+
+        return $"slots {slots.Count:N0}: free {free:N0}, allocating {allocating:N0}, exclusive {exclusive:N0}, idle {idle:N0} — of the idle: slot-referenced "
+               + $"{slotRef:N0}, active writers {acw:N0}, dirty marks {dirtyMarks:N0}, writeback debt {debt:N0}, epoch-held {epochHeld:N0} (min active epoch "
+               + $"{minActiveEpoch}), evictable {evictable:N0}";
+    }
+
+    /// <summary>The file pages of the slots something holds a slot reference on. A diagnostic: one pass over the cache.</summary>
+    internal List<int> SlotReferencedFilePages()
+    {
+        var result = new List<int>();
+        var slots = _slots;
+        for (var i = 0; slots != null && i < slots.Count; i++)
+        {
+            var pi = slots[i];
+            if (pi.PageState != PageState.Free && Volatile.Read(ref pi.SlotRefCount) > 0)
+            {
+                result.Add(pi.FilePageIndex);
+            }
+        }
+
+        return result;
     }
 
     /// <summary>Pages holding outstanding mutator marks. At quiesce this must be zero — see the conservation rule.</summary>
@@ -3298,6 +3406,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Bitmap words <see cref="CollectDirtyMemPageIndices"/> has read. Test seam.</summary>
     internal long DebtScanWordVisits;
 
+    /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
+    internal long CheckpointSkipAcw;
+    internal long CheckpointSkipWriterHeld;
+    internal long CheckpointSkipStaleCounter;
+
+    /// <summary>
+    /// Pages a checkpoint wave left for the next pass because their kind — protected directory page or plain — was not the wave's: a page that
+    /// became a directory page after the pass was ordered (CK-16). Diagnostic.
+    /// </summary>
+    internal long CheckpointPagesDeferredForOrder;
+
     /// <summary>
     /// Copies a live page into a destination buffer using a seqlock read protocol.
     /// Spins while the page's <see cref="PageBaseHeader.ModificationCounter"/> is odd (writer in progress),
@@ -3306,21 +3425,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <returns>True if a consistent snapshot was obtained; false if the page was skipped — either because a real exclusive writer held the modification
     /// counter odd for longer than the checkpoint skip threshold (100ms), or because the counter was odd on a page no writer holds (a stale counter, skipped
     /// immediately). Skipping is safe: the page remains dirty and will be captured in the next checkpoint cycle.</returns>
-    /// <summary>
-    /// Why the last <see cref="CopyPageWithSeqlock"/> call declined: 0 = success, 2 = writer held &gt; 100 ms,
-    /// 3 = stale odd counter. Diagnostic only (#817) — written and read on the checkpoint thread alone, so no
-    /// synchronisation is required or implied.
-    /// </summary>
-    internal int LastSeqlockSkipReason;
-
-    /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
-    internal long CheckpointSkipAcw;
-    internal long CheckpointSkipWriterHeld;
-    internal long CheckpointSkipStaleCounter;
-
     private unsafe bool CopyPageWithSeqlock(byte* pageAddr, byte* destAddr, int memPageIndex)
     {
-        LastSeqlockSkipReason = 0;
         var sw = new SpinWait();
         long oddSpinStart = 0;
         while (true)
@@ -3342,8 +3448,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 if (Slot(memPageIndex).PageState != PageState.Exclusive)
                 {
                     LogStaleSeqlockCounterSkip(Logger, memPageIndex, counter);
-                    LastSeqlockSkipReason = 3;
-                    CheckpointSkipStaleCounter++;
+                    Interlocked.Increment(ref CheckpointSkipStaleCounter);
                     return false;
                 }
 
@@ -3361,8 +3466,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // backpressure to free cache pages). Skip this page to avoid deadlock:
                         // the writer may be waiting for this checkpoint to complete DecrementDirty.
                         LogSeqlockWriterHeldSkip(Logger, (int)elapsedMs, counter);
-                        LastSeqlockSkipReason = 2;
-                        CheckpointSkipWriterHeld++;
+                        Interlocked.Increment(ref CheckpointSkipWriterHeld);
                         return false;
                     }
                 }
@@ -3403,7 +3507,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>
     /// Writes dirty pages to the data file via staging buffers WITHOUT decrementing their DirtyCounter.
     /// Each page is snapshot-copied through the seqlock protocol, then CRC-stamped on the staging copy,
-    /// and written synchronously to the data file. Called on the checkpoint thread.
+    /// and written synchronously to the data file. Called by the checkpoint thread and its wave writers, each on its own range of pages (CK-15).
     /// </summary>
     /// <param name="memPageIndices">Memory page indices of dirty pages to write. On return, the first
     /// <paramref name="writtenCount"/> entries contain the indices of pages that were actually written.
@@ -3422,7 +3526,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// not cover, which is the lost-write shape of #385.
     /// </para>
     /// </param>
-    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount, long[] capturedGen = null)
+    /// <param name="filter">Which pages this call may write; the others are left at the back, as skipped, and counted in
+    /// <see cref="CheckpointPagesDeferredForOrder"/>. The checkpoint's waves write protected and plain pages apart (CK-16).</param>
+    unsafe internal void WritePagesForCheckpoint(
+        Span<int> memPageIndices,
+        StagingBufferPool stagingPool,
+        out int writtenCount,
+        Span<long> capturedGen = default,
+        CheckpointWriteFilter filter = CheckpointWriteFilter.All)
     {
         writtenCount = 0;
 
@@ -3430,8 +3541,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             return;
         }
-
-        Logger.LogInformation("Checkpoint: writing {PageCount} dirty pages", memPageIndices.Length);
 
         var memPageBaseAddr = _memPagesAddr;
 
@@ -3464,6 +3573,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var memPageIndex = memPageIndices[i];
             var pi = Slot(memPageIndex);
 
+            // A wave writes one kind of page (CK-16). A page of the other kind stays at the back, owed, for the next pass to order again.
+            if (filter != CheckpointWriteFilter.All)
+            {
+                var fp = pi.FilePageIndex;
+                if (fp > 0 && IsProtectedPage(fp) != (filter == CheckpointWriteFilter.ProtectedOnly))
+                {
+                    Interlocked.Increment(ref CheckpointPagesDeferredForOrder);
+                    continue;
+                }
+            }
+
             // Wait for any pending I/O read to complete
             WaitForPendingRead(memPageIndex, pi);
 
@@ -3476,7 +3596,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // detect because OLC writes don't update ModificationCounter.
             if (Interlocked.CompareExchange(ref pi.ActiveChunkWriters, -1, 0) != 0)
             {
-                CheckpointSkipAcw++;   // #817 diagnostic: cause A — a live chunk writer held the page
+                Interlocked.Increment(ref CheckpointSkipAcw);   // #817 diagnostic: cause A — a live chunk writer held the page
                 continue;
             }
 
@@ -3540,19 +3660,48 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
             memPageIndices[i] = memPageIndices[writtenCount];
             memPageIndices[writtenCount] = memPageIndex;
-            if (capturedGen != null && writtenCount < capturedGen.Length)
+            if (writtenCount < capturedGen.Length)
             {
                 capturedGen[writtenCount] = genAtCapture;
             }
             writtenCount++;
-
-            _metrics.PageWrittenToDiskCount++;
-            _metrics.WrittenOperationCount++;
         }
 
-        if (writtenCount < memPageIndices.Length)
+        // Atomic, and once per call: a checkpoint wave's sub-batches are written by several threads at once.
+        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, writtenCount);
+        Interlocked.Add(ref _metrics.WrittenOperationCount, writtenCount);
+    }
+
+    /// <summary>
+    /// Orders <paramref name="memPageIndices"/> for a checkpoint pass: protected segment-directory pages first, then every other page by file position.
+    /// </summary>
+    /// <remarks>
+    /// Protected first because their persist fsyncs the whole file (see <see cref="WritePagesForCheckpoint"/>): ahead of every plain write of the pass it
+    /// can only make durable what an earlier batch already flushed the WAL for (CK-02). File order for the rest makes the data file's writeback mostly
+    /// sequential, which is what an fsync then pays for.
+    /// </remarks>
+    /// <returns>How many protected pages lead the order.</returns>
+    internal int OrderForCheckpointWrite(int[] memPageIndices)
+    {
+        var n = memPageIndices.Length;
+        var keys = ArrayPool<long>.Shared.Rent(n);
+        try
         {
-            Logger.LogInformation("Checkpoint: skipped {SkippedCount} pages with active writers", memPageIndices.Length - writtenCount);
+            var protectedCount = 0;
+            for (var i = 0; i < n; i++)
+            {
+                long filePageIndex = Slot(memPageIndices[i]).FilePageIndex;
+                var isProtected = filePageIndex > 0 && IsProtectedPage((int)filePageIndex);
+                keys[i] = isProtected ? filePageIndex - (1L << 40) : filePageIndex;
+                protectedCount += isProtected ? 1 : 0;
+            }
+
+            Array.Sort(keys, memPageIndices, 0, n);
+            return protectedCount;
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(keys);
         }
     }
 
@@ -3779,8 +3928,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // _fileSize") authorize a disk read of a page whose WriteAsync hasn't extended the file yet, yielding a 0-byte read past EOF. _fileSize
         // must only ever reflect DURABLE bytes; SavePages advances it in its post-FlushToDisk continuation, before any page becomes evictable.
         PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the async structural write
-        _metrics.PageWrittenToDiskCount += length;
-        _metrics.WrittenOperationCount++;
+        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, length);
+        Interlocked.Increment(ref _metrics.WrittenOperationCount);
 
         // Synchronous span brackets only the WriteAsync kickoff. Manual scope + Dispose: `using var` marks the local readonly and blocks the
         // PageCount setter (CS1654). We capture SpanId + StartTimestamp before disposing so the optional async-completion wrap below can
@@ -3956,6 +4105,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int GetFilePageIndex(int memPageIndex) => Slot(memPageIndex).FilePageIndex;
+
+    /// <summary>Whether <paramref name="filePageIndex"/> is a protected segment-directory page (CK-05). Test seam.</summary>
+    internal bool IsProtectedFilePageForTests(int filePageIndex) => IsProtectedPage(filePageIndex);
 
     /// <summary>
     /// Increments the slot reference count for a memory page. While SlotRefCount &gt; 0,

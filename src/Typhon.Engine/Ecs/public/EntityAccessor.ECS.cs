@@ -677,7 +677,7 @@ public unsafe partial class EntityAccessor
     internal ref readonly T ReadEcsComponentData<T>(ComponentTable table, int location, long pk, bool isOwnSpawn) where T : unmanaged
     {
         var info = GetComponentInfo(typeof(T));
-        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, info.TransientCompContentAccessor, info.CompContentAccessor);
+        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, ref info.TransientCompContentAccessor, ref info.CompContentAccessor);
         // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
         // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
         // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
@@ -699,7 +699,7 @@ public unsafe partial class EntityAccessor
     internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int location, bool isOwnSpawn)
     {
         var info = GetComponentInfoByTypeId(componentTypeId, componentType);
-        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, info.TransientCompContentAccessor, info.CompContentAccessor);
+        byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, ref info.TransientCompContentAccessor, ref info.CompContentAccessor);
         return ptr + info.ComponentOverhead;
     }
 
@@ -711,10 +711,12 @@ public unsafe partial class EntityAccessor
     /// transaction's <see cref="SpawnStagingArena"/> and <paramref name="location"/> is a handle into it. A Versioned slot keeps a real content chunk even
     /// while unpublished, because that chunk IS the first revision's payload. Everything published resolves through the component accessors as before.
     /// The single choke point exists so the "is this an arena handle or a chunk id?" question is answered in one place rather than at every read site.
+    /// <para>The accessors come by reference. A copy loads the page into a slot of its own and takes the slot reference that keeps the page in the cache;
+    /// the copy is then dropped, so nothing ever releases it: one page pinned for good per read, which filled the cache of a database larger than it.</para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private byte* ResolveSpawnAwarePayload(ComponentTable table, int location, bool isOwnSpawn, ChunkAccessor<TransientStore> transientAccessor,
-        ChunkAccessor<PersistentStore> persistentAccessor)
+    private byte* ResolveSpawnAwarePayload(ComponentTable table, int location, bool isOwnSpawn, ref ChunkAccessor<TransientStore> transientAccessor,
+        ref ChunkAccessor<PersistentStore> persistentAccessor)
     {
         if (isOwnSpawn && table.StorageMode != StorageMode.Versioned)
         {

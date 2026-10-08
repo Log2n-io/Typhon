@@ -903,8 +903,8 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// </param>
     /// <exception cref="InvalidOperationException">
     /// The meta is not this format's (<see cref="PagedHashMapMeta.FormatMagic"/>), its N0 is not the caller's, or its bucket count cannot be: a map written
-    /// before #1205 — whose directory this code no longer reads — or a damaged meta. Refused here rather than resolved against: a wrong bucket count makes
-    /// every lookup read the wrong chunk.
+    /// by an earlier format — before #1205, whose directory this code no longer reads, or under an earlier hash, whose entries sit in other buckets — or a
+    /// damaged meta. Refused here rather than resolved against: a wrong bucket count or hash makes every lookup read the wrong chunk.
     /// </exception>
     protected void InitializeOpen(bool tolerateDamage = false)
     {
@@ -925,8 +925,9 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
                 }
 
                 throw new InvalidOperationException(
-                    $"PagedHashMap open refused: root={_segment.RootPageIndex} — {reason}. A map written before the directory was removed (#1205) is not "
-                    + "readable by this engine; a damaged meta is rebuilt by the crash path, or by a repair that forces it.");
+                    $"PagedHashMap open refused: root={_segment.RootPageIndex} — {reason}. A map written by an earlier format (before #1205's directory "
+                    + "removal, or under an earlier hash) is not readable by this engine; a damaged meta is rebuilt by the crash path, or by a repair that "
+                    + "forces it.");
             }
 
             Volatile.Write(ref _packedMeta, meta.BucketCount);

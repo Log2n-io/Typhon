@@ -191,7 +191,7 @@ public sealed class StorageDecoderTests
         // Meta chunk (#1205): N0 @+0 = 4, format @+4, BucketCount @+8 = 10, EntryCount @+16 = 50. 10 = 4 · 2^1 + 2 → level 1, split pointer 2.
         var chunk = new byte[64];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(0), 4);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(chunk.AsSpan(4), 0x3241484C);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(chunk.AsSpan(4), Typhon.Engine.Internals.PagedHashMapMeta.FormatMagic);
         System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(8), 10);
         System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(16), 50);
 
