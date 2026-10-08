@@ -118,8 +118,10 @@ public sealed partial class AttachSessionRuntime
     {
         get
         {
-            var remaining = Volatile.Read(ref _remainingTicks);
+            // The request first, the window second — the reverse of OpenTick, which publishes the window before it withdraws the request. Read the
+            // other way round, a tick consuming the request between the two reads left neither visible: Idle, right after the operator pressed Record.
             var pending = Volatile.Read(ref _pendingArmTicks);
+            var remaining = Volatile.Read(ref _remainingTicks);
             // A request that has not reached a tick boundary yet still reads as Recording — the operator pressed Record
             // and the window is committed; showing Idle for up to one tick would look like the click was lost.
             var effective = pending != NoPendingArm ? pending : remaining;
@@ -248,10 +250,13 @@ public sealed partial class AttachSessionRuntime
     /// </summary>
     private void OpenTick()
     {
-        var pending = Interlocked.Exchange(ref _pendingArmTicks, NoPendingArm);
+        // The window is published before the request is withdrawn, so a reader that finds no request pending finds its window (CaptureState). A request
+        // replacing this one in between fails the exchange and stays pending for the next tick.
+        var pending = Volatile.Read(ref _pendingArmTicks);
         if (pending != NoPendingArm)
         {
             Volatile.Write(ref _remainingTicks, pending);
+            Interlocked.CompareExchange(ref _pendingArmTicks, NoPendingArm, pending);
         }
 
         var remaining = Volatile.Read(ref _remainingTicks);
