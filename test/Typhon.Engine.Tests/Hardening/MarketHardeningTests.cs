@@ -141,9 +141,13 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// <c>TYPHON_MKT_OWNER_AUDIT</c> (1: audit the owner index during the storm, under each player's lock; 0 skips the auditor — a read concurrent
 /// with splits can miss a key's entries, #1235. The checks after the storm and the reopen always run), <c>TYPHON_MKT_LONG_READERS</c> (0: threads
 /// that each hold one snapshot for <c>TYPHON_MKT_LONG_READ_SECONDS</c>, 20, during the storm — off by default until #1146: an older writer's commit
-/// becomes visible inside a snapshot, so the sweeps fail), <c>TYPHON_MKT_CRASH</c> (0; 1 ends the process at a random point of the storm, 2 at a
-/// random page write after that point — see <i>Crashes</i>. The recovery of a database larger than its cache needs #1183, and the verification at
-/// high contention #1233), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none).</para>
+/// becomes visible inside a snapshot, so the sweeps fail; and #1253: the sweeping readers can starve a writer of a chain lock until it times out,
+/// whose rollback can then lose a committed update, #1252), <c>TYPHON_MKT_CRASH</c> (0; 1 ends the process at a random point of the storm, 2 at a
+/// random page write after that point — see <i>Crashes</i>. Off by default until #1251: the recovery loses durable transfers and zeroes spawned
+/// entities, even when the database fits the cache. The recovery of a database larger than its cache needs #1183, and the verification at high
+/// contention #1233), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none),
+/// <c>TYPHON_MKT_RECOVERY_MUTANT</c> (0; 1 replays the recovery verification without one of the last run's surviving transfers, so it must
+/// fail — the proof that it can).</para>
 /// <para><b>Long readers.</b> While the storm writes, each long reader holds one snapshot and sweeps every trader in it, again and again: each sweep
 /// finds the credits and the item counts conserved — a transfer is whole or absent — and reads every trader, and a growing sample of items, exactly as
 /// the first sweep did. The writers' revision chains grow behind the snapshot (the desks', written by most transfers, the most), and are cleaned up
