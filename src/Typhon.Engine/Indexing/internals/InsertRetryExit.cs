@@ -143,8 +143,14 @@ internal static class InsertRetryExit
     /// <summary>An ancestor's version changed between the descent and the path lock.</summary>
     public const int RemovePathVersionChanged = 26;
 
+    /// <summary>
+    /// The insert reached its split holding every latch it needs, but had not reserved the nodes the split allocates (IXW-07): the leaf filled after the
+    /// descent looked at it, or the tree grew a level. Released everything; the next pass reserves before it latches. An INSERT code, after Remove's.
+    /// </summary>
+    public const int SplitReservationShort = 27;
+
     /// <summary>One past the highest code — sizes the counter array without hard-coding the count at each call site.</summary>
-    public const int Count = 27;
+    public const int Count = 28;
 
     /// <summary>Short names, indexed by code, for diagnostic dumps.</summary>
     public static readonly string[] Names =
@@ -176,5 +182,6 @@ internal static class InsertRetryExit
         "RemoveLeafNextLockFailed",
         "RemovePathLockFailed",
         "RemovePathVersionChanged",
+        "SplitReservationShort",
     ];
 }

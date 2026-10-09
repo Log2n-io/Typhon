@@ -213,7 +213,7 @@ public sealed class UnknownPagesDiagnosticTest
         // ─── Integrity audit ─
         // The forensic gate: every issue here is a hard durability/structural bug. The popcount canary catches
         // orphan ranges (lost-write on segment Page Directory); the chain↔directory check identifies WHICH segment
-        // suffered the lost append; the chunk-segment capacity check guards against free-list desync.
+        // suffered the lost append; the chunk-segment capacity check guards against allocated-count desync.
         var integrity = engine.RunStorageIntegrityCheck();
         TestContext.Out.WriteLine($"=== Integrity report ===");
         TestContext.Out.WriteLine($"  OccupancyBitsSet     : {integrity.OccupancyBitsSet:N0}");

@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-08-17 |
+| Last Updated | 2026-10-07 |
 | Domain | UnitOfWorkContext, HoldoffScope, Deadline, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
 
 > Invariants governing cooperative cancellation and the structural-mutation regions it must not
@@ -144,9 +144,11 @@ That asymmetry is the trap. Write loops look expensive and are not; a read-only 
 
 And the scope is the caller's. `Transaction.Init` enters at `Transaction.cs:189` and exits only at `:388`; a nested
 `EpochGuard.Enter` inside a callee does **not** re-pin, because `EpochThreadRegistry.PinCurrentThread` stamps only at
-`depth == 0`. So every page any callee touches is pinned for the entire transaction, and a callee cannot buy itself
+`depth == 0`. So every page any callee touches is pinned until the transaction next refreshes its epoch (EP-03), and a callee cannot buy itself
 relief by opening a scope of its own. `EpochManager.RefreshScope` would, but it is not available to a callee holding
-live page pointers: it makes exactly the pages behind those pointers evictable (PS-01/PS-02 use-after-free).
+live page pointers: it makes exactly the pages behind those pointers evictable (PS-01/PS-02 use-after-free). That is
+why EP-03 forbids handing such pointers out: point access copies, and the one pointer a handle keeps is held by a slot,
+not the epoch — so the accessors themselves refresh at every 128th open, spawn or enumerated entity.
 
 This is the module `README.md`'s roadmap calls out as high priority because "the epoch/eviction interaction spans
 multiple subsystems". It starts with the one invariant #838 cost a P0 to establish; the AccessControl state machine,
@@ -171,32 +173,136 @@ lock ordering and deadlock prevention are still to come.
              index 0 is ALWAYS verified as well; it costs no extra fetch, because `VerifyDirectoryAgainst` faults the
              root immediately afterwards. Over the verified set the positional comparison that replaced the whole-chain
              count is strictly stronger: it also rejects "right count, wrong target".
-  note: the check is NOT free, and the earlier claim that it was ("the pages were already latched by this call") was
-        wrong in a way worth recording: the write loops UNLATCH, which resets `AccessEpoch` to 0, so the grow's own
-        writes leave nothing pinned and this post-condition is the ONLY thing a grow leaves pinned. The bound therefore
-        does not remove the cost, it makes the cost proportional to the grow instead of to the segment — a caller that
-        grows by N has already committed to touching N pages, so O(N) is the right ceiling and O(segment) is not.
+  note: the write loops UNLATCH, which resets `AccessEpoch` to 0, so the grow's own writes leave nothing pinned, and
+        while this post-condition epoch-tagged what it read it was the ONLY thing a grow left pinned: the whole segment
+        before the bound, then one page per page grown. Segments grow by doubling up to 1 024 pages, so the bounded
+        check still pinned as much as the segment held (a 128-page cluster segment growing in a 256-page cache
+        stalled its commit with 128 pages pinned). It now reads and releases each page (EP-02) and a grow pins
+        nothing; the bound is what keeps its reads proportional to the grow.
   enforce: no strict-mode escape hatch re-runs the exhaustive walk on this path. `CheckConfig.Enabled` is what a user
            turns on to diagnose a stall, and this walk is what produces the stall; the engine's own test suite runs
            strict mode on for every fixture, so "nobody will enable it in anger" is already false. Exhaustive structural
-           walks belong where no caller scope spans them — `LogicalSegment.Load` on reopen, `RunStorageIntegrityCheck`
-           on demand.
+           walks read and release each page instead (EP-02): `RunStorageIntegrityCheck` on demand, and the crash path's
+           allocator scan.
   note: what the bound gives up, accepted deliberately — prefix damage this method did NOT cause (a stale forward
         pointer below `growFrom-1` from a lost write, or a cycle in the prefix) is no longer noticed at the next grow.
-        Both are still caught, by `Load` on the next reopen and by `RunStorageIntegrityCheck` on demand; the detection
-        LATENCY grows from "next grow" to "next restart". Accepted because the old check mis-attributed that damage to
+        Both are still caught, by the crash path's allocator scan after an unclean close and by `RunStorageIntegrityCheck`
+        on demand (`Load` stopped walking chains in #1143); the detection LATENCY grows from "next grow" to "next crash or
+        next check". Accepted because the old check mis-attributed that damage to
         `CreateOrGrow` anyway — #840 is a live example, a loss that happened in memory and was reported as "not
         persistence".
-  verified: SegmentGrowEpochPinTests.Grow_InsideCallerEpochScope_PinsOnlyTheGrownRange [VerifiesRule] — counts pinned
+  verified: SegmentGrowEpochPinTests.Grow_InsideCallerEpochScope_PinsNothing [VerifiesRule] — counts pinned
             pages rather than waiting for the timeout, so it measures the invariant instead of a downstream symptom:
-            13 pins for a 10-page grow, against 2410 (the whole segment) before the fix. It asserts a LOWER bound too,
-            because zero pins would mean `RequestPageEpoch` had stopped stamping — a PS-01 use-after-free passing as a
-            success.
-  note: the walk sites #838 tabulates as latent copies are NOT covered by this rule and remain O(segment) today —
-        `RunStorageIntegrityCheck`, `LogicalSegment.Load`, `Clear`/`Fill`, `EnumerateVersionedChainHeads`,
+            0 pins for a 10-page grow, against 13 while the check epoch-tagged and 2410 (the whole segment) before the
+            bound. A control in the same scope reads one page through `RequestPageEpoch` and requires it counted,
+            because zero pins could otherwise mean `RequestPageEpoch` had stopped stamping — a PS-01 use-after-free
+            passing as a success.
+  note: the walk sites #838 tabulates as latent copies are NOT covered by this rule. `RunStorageIntegrityCheck`'s chain
+        walk now reads and releases (EP-02), and `LogicalSegment.Load` no longer walks (#1143); the rest remain O(segment) —
+        `Clear`/`Fill`, `EnumerateVersionedChainHeads`,
         `SchemaEvolutionEngine.MigrateEntities`, `RederiveOccupancyOnCrash`, `StatisticsRebuilder.RebuildClusterAll`,
         `GetSchemaHistory`, `LoadPersistedArchetypes`. None is a post-condition and none is on the commit path. Widening
         the rule to cover them would make it false on the day it was written, which is worse than not covering them.
+
+### EP-02: A read whose length grows with the data holds a bounded set of pages `[fatal]`
+  invariant a read that visits every page of a structure — a segment's chunk bitmaps, its forward chain, a grow's post-condition, a segment's
+            directory — takes each page with AcquirePageForRead and releases it (ReleasePageForRead) before it takes the next. It never epoch-tags them.
+            One such walk writes: ChunkBasedSegment.FreeAllChunksFrom clears bitmap words through the read pin, with nothing allocating or freeing
+            concurrently, and records the page modified (CP-04) before it releases it
+  invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
+            range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
+            (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
+            it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
+            page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
+            positioning faults: a window's pins are slot references, and nothing else releases them
+  invariant AcquirePageForRead pins by SlotRefCount, taken under the slot's StateSyncRoot after re-checking that the slot still holds the
+            page and is ready (PS-15). TryAcquire withdraws "ready", re-checks SlotRefCount and reclaims under the same lock, so a pin never
+            lands on a slot being reclaimed. It never tags AccessEpoch, and bumps the clock counter only for a query (warm): a structural scan
+            passes through the cache cold
+  invariant an address a scan accessor returns is valid only until its next window miss, not for the epoch scope: the clock hand may reclaim any slot
+            but the most recently used one. A hash-map bucket read therefore validates against its head's latch resolved again after the chain walk
+            (RawValuePagedHashMap.HeadLatch), never a reference taken before it
+  never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
+        transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
+  scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
+         LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
+         LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
+         ChunkBasedSegment.ScanForAllocatorState,
+         ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
+         EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
+         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
+  on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
+                `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
+                storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
+                copy-on-write); a load without
+                a chunk summary — every crash-path load — could not load a segment larger than the cache (#1144); and once the storm had
+                completed, counting its 300 000 audit entries stalled with 12 600 pages epoch-protected and none dirty: the count held every
+                cluster page it had read for its transaction
+  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) hold long scopes and dirty more pages than the
+        cache: #1183. A write cannot release its pages early either — its ChangeSet's marks keep them resident until its unit of work ends,
+        which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
+        epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
+        `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
+  verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
+            the chain walk complete inside
+            one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
+            [VerifiesRule]; the same fixture pins the pair's semantics (not evicted until released, no epoch tag, no clock bump, readers
+            racing eviction always get their page)
+  verified: QueryScanCacheBoundTests — the occupancy count, the entity-map count and existence check, the SoA scan, the index range scan and the
+            unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
+            epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page
+            is left held by a slot reference [VerifiesRule]
+
+### EP-03: No reference the engine hands out outlives the call that produced it, except a fast-path one within its step `[fatal]`
+  invariant the point-access handles hand out values, never references into a page: EntityRef.Read / TryRead / ReadRaw copy the
+            component out, EntityRefMut.Set copies it in and does the component's bookkeeping in the same call, and the generated
+            ReadAll / WriteAll copy every component. The zero-copy cores (EntityRef.ReadSlotRef, EntityRefMut.WriteRef) are internal and
+            used only within one call
+  invariant a handle may keep a pointer across calls only while something other than the epoch holds its page: an EntityRef's cluster
+            base is held by the slot of the accessor that resolved it (SlotRefCount). Every such accessor reports a page it lets go of —
+            a slot evicted to make room, the accessor disposed (its cluster-cache entry given to another archetype: four are kept, least
+            recently used replaced) — to its EntityAccessor's ClusterGeneration, and the handle re-resolves its base from the cluster id
+            it kept (EntityRef.ClusterBase) once the generation has moved. Transient pages never move: their accessors report nothing
+  invariant a fast-path reference — a ClusterRef and every span or ref it hands out, an index enumerator's CurrentComponent — is valid
+            until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for that long. Under
+            strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from every data member
+  invariant so the epoch may be refreshed at any call boundary: a transaction refreshes it every 128 entity opens
+            (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns and every 128 enumerated entities. Its
+            pinned set is then bounded by what it touched since the last refresh, not by everything it read. A PTA worker accessor is
+            refreshed once per system instead (PointInTimeAccessor.FlushWorker), which also releases its cluster cache: a refresh
+            increments the global epoch, which sends every other thread's warm B+Tree accessor down its cold path, so what a worker's
+            epoch and cluster cache hold is bounded by the system's run
+  invariant a stored component's collection is changed through EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy,
+            ref copy.Field), which creates a Versioned component's new revision before the accessor exists, so a buffer the committed
+            revision still points to is cloned, never edited in place; on dispose the accessor stores the buffer it ended on into the
+            stored component, so no Set is needed for the collection
+  never cache a pointer into a page across calls on the strength of the epoch alone, and never hand one to a caller: a refresh at the
+        next call boundary makes the page evictable while the pointer lives on
+  scope: EntityRef.Read, EntityRef.TryRead, EntityRef.ReadRaw, EntityRef.ReadSlotRef, EntityRef.ClusterBase, EntityRefMut.Set,
+         EntityRefMut.WriteRef, EntityRefMut.CreateComponentCollectionAccessor, EntityAccessor.ResolveClusterBases,
+         EntityAccessor.ReresolveClusterBase, EntityAccessor.EnsureClusterCache, EntityAccessor.NoteEntityOpen,
+         PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext
+  on_violation: the cache gives the slot to another page while the pointer lives on — reads return another entity's values, and a
+                write through the pointer lands in another entity while the intended write is lost (#1199: a handle opened, then an
+                archetype switch and 130 spawns or a 200-entity enumeration, then another thread's reads: wrong values in 2 to 4 runs of
+                4, the write case in 4 of 4). Bounded the other way — no refresh — a read-only transaction pinned every page it read
+                until disposed and timed out on back-pressure with 510 of 512 slots epoch-protected (#1189)
+  note: the 128 refresh was added (2026-03-06) when reads copied, so nothing handed out could be left over an evictable page. The
+        zero-copy EntityRef API that replaced them (2026-03-23) kept the refresh, and the deferred SlotRefCount release built for the
+        engine's own pointers covered neither handles nor read-only transactions
+  verified: EntityHandleLifetimeTests — a handle opened, its accessor's hold on the page dropped (its archetype pushed out of the cluster
+            cache, 100 other clusters, or the For<T>() accessor disposed), the epoch moved (enumeration, spawns, or a worker flush), then
+            the page evicted and its slot given to another page: the handle reads and Sets its own entity, as do a For<T>() handle and a
+            PTA worker's; a Transient Set captures the entity's own index key and a Commit-discipline partial write seeds from it. With
+            ClusterBase trusting the cached pointer, all nine fail [VerifiesRule]; one read-only transaction opens 45 000 entities over a
+            512-page cache and peaks at 45 epoch-protected pages (sampled every 1 024 opens), and without the open refresh times out with
+            510 [VerifiesRule]; a ClusterRef used after its enumerator's next MoveNext or Dispose throws under strict mode [VerifiesRule];
+            handles of two archetypes used in turn leave the generation unmoved, which a one-entry cluster cache fails
+  verified: ComponentCollectionTests.Collection_ChangedThroughAHandle_LeavesTheCommittedRevisionsBufferAlone — an older snapshot still sees
+            ten elements after a handle-made change commits eleven; without the copy-on-write first, it sees eleven [VerifiesRule];
+            Collection_ChangedThroughAHandle_WithoutASet_IsStored — the change is stored with no Set, and fails without the write-back
+  verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes — no public member of either handle returns a reference
+            [VerifiesRule]
 
 ## Module: SIGNAL — Wake signals versus resource counts
 

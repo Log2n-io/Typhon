@@ -73,8 +73,10 @@ class ShutdownDrainTests : TestBase<ShutdownDrainTests>
                     return;
                 }
 
-                ref var pos = ref ctx.Transaction.OpenMut(mover).Write(ShutdownDrainUnit.Pos);
+                var target = ctx.Transaction.OpenMut(mover);
+                var pos = target.Read(ShutdownDrainUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = 900f, MinY = 900f, MaxX = 901f, MaxY = 901f };
+                target.Set(ShutdownDrainUnit.Pos, pos);
                 moved.Set();
                 release.Wait(TimeSpan.FromSeconds(10));
             });

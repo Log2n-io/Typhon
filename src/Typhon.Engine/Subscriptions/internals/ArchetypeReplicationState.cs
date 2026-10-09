@@ -144,7 +144,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// charging: they are visible here, but nothing yet refuses to grow them.
     /// </para>
     /// </remarks>
-    public int EstimatedMemorySize
+    public long EstimatedMemorySize
     {
         get
         {

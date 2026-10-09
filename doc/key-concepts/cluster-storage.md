@@ -18,7 +18,7 @@ Per-entity storage pays a hash-map lookup plus a scattered page fetch for *every
 | `Versioned` | HEAD in the cluster chunk, revision chain kept separate | MVCC snapshot isolation; reading any version but the HEAD leaves the packed array |
 | `Transient` | a parallel segment with the same SoA layout | the same iteration pattern, with no page-cache backing and no persistence |
 
-Guarantees hold across all three — MVCC visibility, B+Tree and spatial indexes behave the same whichever way you iterate. One thing to know when you use the bulk path: direct span writes (`GetSpan`) **bypass dirty tracking**, so you must call `MarkCurrentDirty()` or the write never reaches the WAL/checkpoint.
+Reads behave the same whichever way you iterate — MVCC visibility, B+Tree and spatial indexes. Writes do not, yet: direct span writes (`GetSpan`) **bypass dirty tracking**, so you must call `MarkDirty(comp)` (or `MarkCurrentDirty()`) or the write never reaches the WAL/checkpoint, and they are **never seen by the component's secondary B+Tree indexes**, not even at the tick fence (#1187) — write indexed fields through `OpenMut(...).Set(...)`.
 
 ## How it relates
 

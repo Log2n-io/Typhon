@@ -141,8 +141,10 @@ public static class OpenMutLossProfile
                 using var tx = dbe.CreateQuickTransaction();
                 for (var i = 0; i < entities; i++)
                 {
-                    ref var p = ref tx.OpenMut(ids[i]).Write(comp);
+                    var opened = tx.OpenMut(ids[i]);
+                    var p = opened.Read(comp);
                     write(ref p, xs[i], ys[i], zs[i], half, i);
+                    opened.Set(comp, p);
                 }
                 tx.Commit();
             }

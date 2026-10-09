@@ -109,7 +109,7 @@ internal sealed unsafe class WideBodyArena : ResourceNode, IMemoryResource
 
     /// <inheritdoc />
     /// <remarks>Bookkeeping only: the slabs are children of this node and are accounted separately, per the interface contract.</remarks>
-    public int EstimatedMemorySize => 256 + (_slabs.Count * IntPtr.Size);
+    public long EstimatedMemorySize => 256 + (_slabs.Count * IntPtr.Size);
 
     /// <summary>The size class a body of <paramref name="length"/> bytes takes, or -1 when it exceeds <see cref="MaxClassBytes"/>.</summary>
     public static int ClassFor(int length)

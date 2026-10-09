@@ -54,8 +54,9 @@ public class MovementSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);     // PTA — no per-entity dictionary lookup
-            ref var pos = ref entity.Write<EcsPosition>();
+            var pos = entity.Read<EcsPosition>();
             pos.X += entity.Read<EcsVelocity>().X * ctx.DeltaTime;
+            entity.Set<EcsPosition>(pos);
         }
     }
 }
@@ -77,8 +78,9 @@ public class MovementSystem : QuerySystem
 - `ctx.Accessor` reads all storage modes (Versioned via MVCC chain walk, SingleVersion/Transient
   direct) and writes SingleVersion/Transient, but **throws on a Versioned write** — declare
   `WritesVersioned()` instead.
-- `ctx.Accessor` cannot Spawn, Destroy, Commit, or Rollback — structural changes need an upstream
-  non-parallel system.
+- `ctx.Accessor` cannot Spawn, Destroy, Commit, or Rollback. Use `ctx.Commands` to queue deferred
+  spawns and destroys from inside a parallel chunk; the engine applies the buffer at the fence phase
+  after all chunks complete. Commit and Rollback remain exclusive to `ctx.Transaction`.
 - A parallel system's `ctx.ChunkCount` can change from one tick to the next and reach twice
   `round(WorkerCount × ChunksPerWorker)`. Never size per-chunk state by it; index per worker (`ctx.WorkerId`).
 - A dispatch's chunks tile the cluster list as it stood when the dispatch began: clusters a spawn appends
@@ -90,8 +92,7 @@ public class MovementSystem : QuerySystem
 - Scaling is good up to one CCD's worth of cores; cross-CCD `EntityMap` access flattens the curve on
   multi-CCD hardware (measured: ~89% efficiency at 8 workers, ~42% at 16 on a 2-CCD part).
 - The DAG, not the runtime, guarantees chunks across different parallel systems don't race.
-- Out of scope: Spawn/Destroy inside a parallel chunk; cross-system pipelining (next system's chunk K
-  starting before this system fully completes).
+- Out of scope: cross-system pipelining (next system's chunk K starting before this system fully completes).
 
 ## 🧪 Tests
 

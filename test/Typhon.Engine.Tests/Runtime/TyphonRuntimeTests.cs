@@ -182,8 +182,10 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
                 var tick = Interlocked.Increment(ref ticksSeen);
                 if (tick == 1)
                 {
-                    ref var pos = ref ctx.Transaction.OpenMut(entityId).Write(EcsUnit.Position);
+                    var target = ctx.Transaction.OpenMut(entityId);
+                    var pos = target.Read(EcsUnit.Position);
                     pos.X = 42.0f;
+                    target.Set(EcsUnit.Position, pos);
                 }
                 else if (tick == 2)
                 {

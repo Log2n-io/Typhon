@@ -30,8 +30,10 @@ class EcsViewMultiFieldTests : TestBase<EcsViewMultiFieldTests>
     private static void UpdateD(DatabaseEngine dbe, EntityId id, float a, int b, double c = 2.0)
     {
         using var tx = dbe.CreateQuickTransaction();
-        ref var w = ref tx.OpenMut(id).Write(CompDArch.D);
+        var target = tx.OpenMut(id);
+        var w = target.Read(CompDArch.D);
         w = new CompD(a, b, c);
+        target.Set(CompDArch.D, w);
         tx.Commit();
     }
 

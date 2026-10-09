@@ -42,7 +42,9 @@ class StorageModeTickFenceTests : TestBase<StorageModeTickFenceTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        entity.Write(SvTestArchetype.SvComp).Value = 42;
+        var svComp = entity.Read(SvTestArchetype.SvComp);
+        svComp.Value = 42;
+        entity.Set(SvTestArchetype.SvComp, svComp);
 
         var table = dbe.GetComponentTable<CompSmSingleVersion>();
         var clusterState = dbe._archetypeStates[Archetype<SvTestArchetype>.Metadata.ArchetypeId]?.ClusterState;

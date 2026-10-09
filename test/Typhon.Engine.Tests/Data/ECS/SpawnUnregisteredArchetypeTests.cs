@@ -11,6 +11,8 @@ namespace Typhon.Engine.Tests;
 struct SpawnUnregMark
 {
     public int Value;
+
+    public SpawnUnregMark(int value) => Value = value;
 }
 
 [Archetype]

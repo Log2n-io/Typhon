@@ -39,8 +39,10 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         // Single writer, no concurrent update — handler should NOT be called
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var entity = t1.OpenMut(entityId);
+        var w = entity.Read(CompAArch.A);
         w = new CompA(42);
+        entity.Set(CompAArch.A, w);
 
         var handlerCalled = false;
 
@@ -79,14 +81,18 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         // T1 reads and updates
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var entity = t1.OpenMut(entityId);
+        var w1 = entity.Read(CompAArch.A);
         w1 = new CompA(20);
+        entity.Set(CompAArch.A, w1);
 
         // T2 updates and commits first
         {
             using var t2 = dbe.CreateQuickTransaction();
-            ref var w2 = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var target = t2.OpenMut(entityId);
+            var w2 = target.Read(CompAArch.A);
             w2 = new CompA(30);
+            target.Set(CompAArch.A, w2);
             t2.Commit();
         }
 
@@ -124,15 +130,19 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         // T1 reads (100), will set to 90
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var target = t1.OpenMut(entityId);
+        var w1 = target.Read(CompAArch.A);
         w1 = new CompA(90);
+        target.Set(CompAArch.A, w1);
 
         // T2 reads (100), sets to 130, commits first
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(entityId).Read(CompAArch.A);
-            ref var w2 = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var entity = t2.OpenMut(entityId);
+            var w2 = entity.Read(CompAArch.A);
             w2 = new CompA(130);
+            entity.Set(CompAArch.A, w2);
             t2.Commit();
         }
 
@@ -187,14 +197,18 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
 
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var target = t1.OpenMut(entityId);
+        var w1 = target.Read(CompAArch.A);
         w1 = new CompA(20);
+        target.Set(CompAArch.A, w1);
 
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(entityId).Read(CompAArch.A);
-            ref var w2 = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var entity = t2.OpenMut(entityId);
+            var w2 = entity.Read(CompAArch.A);
             w2 = new CompA(30);
+            entity.Set(CompAArch.A, w2);
             t2.Commit();
         }
 
@@ -232,14 +246,18 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
 
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var target = t1.OpenMut(entityId);
+        var w1 = target.Read(CompAArch.A);
         w1 = new CompA(20);
+        target.Set(CompAArch.A, w1);
 
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(entityId).Read(CompAArch.A);
-            ref var w2 = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var opened = t2.OpenMut(entityId);
+            var w2 = opened.Read(CompAArch.A);
             w2 = new CompA(30);
+            opened.Set(CompAArch.A, w2);
             t2.Commit();
         }
 
@@ -283,20 +301,28 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(id1).Read(CompAArch.A);
         t1.Open(id2).Read(CompAArch.A);
-        ref var w1a = ref t1.OpenMut(id1).Write(CompAArch.A);
-        w1a = new CompA(90);  // 100 - 10
-        ref var w1b = ref t1.OpenMut(id2).Write(CompAArch.A);
-        w1b = new CompA(210); // 200 + 10
+        var target = t1.OpenMut(id1);
+        var w1a = target.Read(CompAArch.A);
+        w1a = new CompA(90);
+        target.Set(CompAArch.A, w1a);  // 100 - 10
+        var entity3 = t1.OpenMut(id2);
+        var w1b = entity3.Read(CompAArch.A);
+        w1b = new CompA(210);
+        entity3.Set(CompAArch.A, w1b); // 200 + 10
 
         // T2 modifies both, commits first: pk1 = 150, pk2 = 250
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(id1).Read(CompAArch.A);
             t2.Open(id2).Read(CompAArch.A);
-            ref var w2a = ref t2.OpenMut(id1).Write(CompAArch.A);
+            var entity2 = t2.OpenMut(id1);
+            var w2a = entity2.Read(CompAArch.A);
             w2a = new CompA(150);
-            ref var w2b = ref t2.OpenMut(id2).Write(CompAArch.A);
+            entity2.Set(CompAArch.A, w2a);
+            var opened = t2.OpenMut(id2);
+            var w2b = opened.Read(CompAArch.A);
             w2b = new CompA(250);
+            opened.Set(CompAArch.A, w2b);
             t2.Commit();
         }
 
@@ -351,17 +377,23 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(id1).Read(CompAArch.A);
         t1.Open(id2).Read(CompAArch.A);
-        ref var w1a = ref t1.OpenMut(id1).Write(CompAArch.A);
-        w1a = new CompA(110); // +10
-        ref var w1b = ref t1.OpenMut(id2).Write(CompAArch.A);
-        w1b = new CompA(220); // +20
+        var target = t1.OpenMut(id1);
+        var w1a = target.Read(CompAArch.A);
+        w1a = new CompA(110);
+        target.Set(CompAArch.A, w1a); // +10
+        var entity2 = t1.OpenMut(id2);
+        var w1b = entity2.Read(CompAArch.A);
+        w1b = new CompA(220);
+        entity2.Set(CompAArch.A, w1b); // +20
 
         // T2 modifies ONLY pk1, commits first
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(id1).Read(CompAArch.A);
-            ref var w2 = ref t2.OpenMut(id1).Write(CompAArch.A);
+            var opened = t2.OpenMut(id1);
+            var w2 = opened.Read(CompAArch.A);
             w2 = new CompA(150);
+            opened.Set(CompAArch.A, w2);
             t2.Commit();
         }
 
@@ -421,8 +453,10 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var read = tx.Open(entityId).Read(CompAArch.A);
-            ref var w = ref tx.OpenMut(entityId).Write(CompAArch.A);
+            var entity = tx.OpenMut(entityId);
+            var w = entity.Read(CompAArch.A);
             w = new CompA(read.A + 10);
+            entity.Set(CompAArch.A, w);
             barrier.SignalAndWait();
 
             void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver)
@@ -440,8 +474,10 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var read = tx.Open(entityId).Read(CompAArch.A);
-            ref var w = ref tx.OpenMut(entityId).Write(CompAArch.A);
+            var target = tx.OpenMut(entityId);
+            var w = target.Read(CompAArch.A);
             w = new CompA(read.A + 20);
+            target.Set(CompAArch.A, w);
             barrier.SignalAndWait();
 
             void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver)
@@ -487,8 +523,10 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         // First commit with handler — creates ThreadLocalConflictSolver
         {
             using var t1 = dbe.CreateQuickTransaction();
-            ref var w = ref t1.OpenMut(entityId).Write(CompAArch.A);
+            var target = t1.OpenMut(entityId);
+            var w = target.Read(CompAArch.A);
             w = new CompA(2);
+            target.Set(CompAArch.A, w);
 
             void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver)
             {
@@ -500,8 +538,10 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         // Second commit with handler — reuses solver (Reset path)
         {
             using var t2 = dbe.CreateQuickTransaction();
-            ref var w = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var entity = t2.OpenMut(entityId);
+            var w = entity.Read(CompAArch.A);
             w = new CompA(3);
+            entity.Set(CompAArch.A, w);
 
             void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver)
             {
@@ -537,14 +577,18 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
 
         using var t1 = dbe.CreateQuickTransaction();
         t1.Open(entityId).Read(CompAArch.A);
-        ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
+        var entity = t1.OpenMut(entityId);
+        var w1 = entity.Read(CompAArch.A);
         w1 = new CompA(50);
+        entity.Set(CompAArch.A, w1);
 
         {
             using var t2 = dbe.CreateQuickTransaction();
             t2.Open(entityId).Read(CompAArch.A);
-            ref var w2 = ref t2.OpenMut(entityId).Write(CompAArch.A);
+            var opened = t2.OpenMut(entityId);
+            var w2 = opened.Read(CompAArch.A);
             w2 = new CompA(99);
+            opened.Set(CompAArch.A, w2);
             t2.Commit();
         }
 

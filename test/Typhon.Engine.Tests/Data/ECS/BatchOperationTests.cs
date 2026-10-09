@@ -43,11 +43,11 @@ class BatchOperationTests : TestBase<BatchOperationTests>
         {
             Assert.That(ids[i].IsNull, Is.False);
             var entity = t.Open(ids[i]);
-            ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+            var readPos = entity.Read(EcsUnit.Position);
             Assert.That(readPos.X, Is.EqualTo(10f));
             Assert.That(readPos.Y, Is.EqualTo(20f));
             Assert.That(readPos.Z, Is.EqualTo(30f));
-            ref readonly var readVel = ref entity.Read(EcsUnit.Velocity);
+            var readVel = entity.Read(EcsUnit.Velocity);
             Assert.That(readVel.Dx, Is.EqualTo(1f));
         }
     }
@@ -84,12 +84,12 @@ class BatchOperationTests : TestBase<BatchOperationTests>
             Assert.That(ids[i].ArchetypeId, Is.EqualTo(dbe.RoutingIdOf(Archetype<EcsUnit>.Metadata)));
 
             var entity = t.Open(ids[i]);
-            ref readonly var p = ref entity.Read(EcsUnit.Position);
+            var p = entity.Read(EcsUnit.Position);
             Assert.That(p.X, Is.EqualTo(positions[i].X));
             Assert.That(p.Y, Is.EqualTo(positions[i].Y));
             Assert.That(p.Z, Is.EqualTo(positions[i].Z));
 
-            ref readonly var v = ref entity.Read(EcsUnit.Velocity);
+            var v = entity.Read(EcsUnit.Velocity);
             Assert.That(v.Dx, Is.EqualTo(velocities[i].Dx));
             Assert.That(v.Dy, Is.EqualTo(velocities[i].Dy));
             Assert.That(v.Dz, Is.EqualTo(velocities[i].Dz));
@@ -116,14 +116,14 @@ class BatchOperationTests : TestBase<BatchOperationTests>
             var entity = t.Open(ids[i]);
 
             // Inherited components
-            ref readonly var p = ref entity.Read(EcsUnit.Position);
+            var p = entity.Read(EcsUnit.Position);
             Assert.That(p.X, Is.EqualTo(positions[i].X));
 
-            ref readonly var v = ref entity.Read(EcsUnit.Velocity);
+            var v = entity.Read(EcsUnit.Velocity);
             Assert.That(v.Dx, Is.EqualTo(velocities[i].Dx));
 
             // Own component
-            ref readonly var h = ref entity.Read(EcsSoldier.Health);
+            var h = entity.Read(EcsSoldier.Health);
             Assert.That(h.Current, Is.EqualTo(healths[i].Current));
             Assert.That(h.Max, Is.EqualTo(healths[i].Max));
         }

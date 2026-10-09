@@ -369,9 +369,10 @@ public class TransactionBenchmarks
         for (int i = 0; i < _entityIds.Length; i++)
         {
             var entity = t.OpenMut(_entityIds[i]);
-            ref var comp = ref entity.Write(BenchArch.Data);
+            var comp = entity.Read(BenchArch.Data);
             comp.Value = i + 1000;
             comp.Timestamp = DateTime.UtcNow.Ticks;
+            entity.Set(BenchArch.Data, comp);
         }
         t.Commit();
     }

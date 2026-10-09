@@ -76,8 +76,33 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     protected TStore _store;
 
     private readonly Lock _growLock = new();
-    private volatile int[] _pages;
+    private volatile PageList _pageList;
     private StorageSegmentKind _kind;
+
+    // The directory pages, root first, in chain order: what a grow reads instead of walking the directory chain on disk, and what it appends to. Written
+    // under _growLock (and by Create/Load before the segment is shared) (#1205).
+    private int[] _mapPages;
+    private int _mapPageCount;
+
+    /// <summary>The directory pages, root first, in chain order. Test seam.</summary>
+    internal ReadOnlySpan<int> DirectoryPagesForTest => _mapPages.AsSpan(0, _mapPageCount);
+
+    /// <summary>
+    /// The segment's page list as one immutable snapshot: <see cref="Items"/> may be longer than <see cref="Count"/>, holding room for later grows, which
+    /// append in place past <see cref="Count"/> — where no reader of this snapshot looks — and publish a new snapshot. A grow therefore copies the list only
+    /// when the room runs out, doubling, instead of on every grow: that copy, twice per grow, made a segment's growth quadratic in its size (#1205).
+    /// </summary>
+    private sealed class PageList
+    {
+        internal readonly int[] Items;
+        internal readonly int Count;
+
+        internal PageList(int[] items, int count)
+        {
+            Items = items;
+            Count = count;
+        }
+    }
 
     /// <summary>
     /// Test hook: runs before each step of a Create or Grow that can still fail, with the file page index it is about to fault in or latch: each
@@ -95,12 +120,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     {
         get
         {
-            var pages = _pages;
-            if (pages == null || pages.Length == 0)
+            var list = _pageList;
+            if (list == null || list.Count == 0)
             {
                 throw new InvalidOperationException("Logical segment has not been initialized.");
             }
-            return pages[0];
+            return list.Items[0];
         }
     }
 
@@ -109,8 +134,16 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// Null-safe deliberately. Callers guard with <c>Length == 0</c> to mean "nothing here, skip it" (see <c>DatabaseEngine.AddSegment</c>) — which threw a
     /// <see cref="NullReferenceException"/> out of the very check written to prevent it whenever the segment had never been created.
     /// </remarks>
-    public int Length => _pages?.Length ?? 0;
-    public ReadOnlySpan<int> Pages => _pages;
+    public int Length => _pageList?.Count ?? 0;
+
+    public ReadOnlySpan<int> Pages
+    {
+        get
+        {
+            var list = _pageList;
+            return list == null ? default : new ReadOnlySpan<int>(list.Items, 0, list.Count);
+        }
+    }
 
     /// <summary>The underlying page store.</summary>
     public ref TStore Store => ref _store;
@@ -149,6 +182,20 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         _store.RequestPageEpoch(Pages[segmentPageIndex], epoch, out memPageIndex);
         return _store.GetPage(memPageIndex);
     }
+
+    /// <summary>
+    /// A page of this segment for a whole-segment read (EP-02): pinned, not epoch-tagged, until <see cref="ReleasePageForRead"/>. Release it before
+    /// reading the next page, so the scan holds one page of the cache at a time however large the segment is.
+    /// </summary>
+    internal PageAccessor AcquirePageForRead(int segmentPageIndex, out int memPageIndex)
+    {
+        _store.AcquirePageForRead(Pages[segmentPageIndex], out memPageIndex);
+        return _store.GetPage(memPageIndex);
+    }
+
+    /// <summary>Releases a page taken by <see cref="AcquirePageForRead"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ReleasePageForRead(int memPageIndex) => _store.ReleasePageForRead(memPageIndex);
 
     /// <summary>
     /// Fault <paramref name="filePageIndex"/> into the page cache and acquire its exclusive latch with NO eviction window
@@ -237,16 +284,6 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             failure.Data[$"PS-11: {pageIds.Length} pages from {pageIds[0]} not released"] = releaseFailure.ToString();
         }
     }
-
-    /// <summary>
-    /// How many directory pages hold entries for a segment of <paramref name="pageCount"/> pages: the root, then one map-extension page per started
-    /// block of <see cref="NextHeadersIndexSectionCount"/>. Excludes the page a directory needs only for its terminator when its last page is
-    /// exactly full: <see cref="CreateOrGrow"/> writes that terminator but stamps no twin on the page.
-    /// </summary>
-    private static int FilledDirectoryPageCount(int pageCount)
-        => pageCount <= RootHeaderIndexSectionCount
-            ? 1
-            : 1 + ((pageCount - RootHeaderIndexSectionCount + NextHeadersIndexSectionCount - 1) / NextHeadersIndexSectionCount);
 
     /// <summary>
     /// Initializes data pages [<paramref name="from"/>, end) of <paramref name="filePageIndices"/>: a full clear (except the root), the header, and
@@ -356,9 +393,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     public void WalkIndicesMap(PageMapWalkPredicate predicate, long epoch)
     {
-        var pages = _pages;
-
-        var curPageIndex = pages[0];
+        var curPageIndex = RootPageIndex;
         var pageMapIndex = 0;
         while (true)
         {
@@ -380,9 +415,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     }
     public void WalkIndicesMap<T>(PageMapWalkPredicate<T> predicate, long epoch, T extra) where T : allows ref struct
     {
-        var pages = _pages;
-
-        var curPageIndex = pages[0];
+        var curPageIndex = RootPageIndex;
         var pageMapIndex = 0;
         while (true)
         {
@@ -409,35 +442,42 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// <param name="newLength">The new length (must be greater than current length).</param>
     /// <param name="changeSet">Optional change set for tracking modifications.</param>
     /// <remarks>
-    /// This method is thread-safe. Concurrent reads of existing pages remain valid during growth.
-    /// The <see cref="_pages"/> field is volatile, ensuring visibility of the new array after growth.
+    /// This method is thread-safe. Concurrent reads of existing pages remain valid during growth: the new pages are written past the published snapshot's
+    /// count, where no reader looks, and a new snapshot is published once the grow has succeeded. The cost is the new pages plus the directory pages they
+    /// land on, not the segment's size (#1205).
     /// </remarks>
     public void Grow(int newLength, ChangeSet changeSet = null)
     {
         lock (_growLock)
         {
-            var curPages = _pages;
-            if (curPages == null)
+            var current = _pageList;
+            if (current == null)
             {
                 throw new InvalidOperationException("Logical segment has not been initialized.");
             }
-            if (newLength <= curPages.Length)
+            if (newLength <= current.Count)
             {
                 // Already at or above requested size (may have been grown by another thread)
                 return;
             }
 
-            var oldLen = curPages.Length;
-            var newPages = new int[newLength];
-            var newPagesAsSpan = newPages.AsSpan();
-            curPages.CopyTo(newPagesAsSpan);
-            _store.AllocatePages(ref newPagesAsSpan, curPages.Length, changeSet);
+            var oldLen = current.Count;
+            var items = current.Items;
+            if (newLength > items.Length)
+            {
+                var grown = new int[(int)Math.Clamp(items.Length * 2L, newLength, int.MaxValue)];
+                Array.Copy(items, grown, oldLen);
+                items = grown;
+            }
+
+            var newPagesAsSpan = items.AsSpan(0, newLength);
+            _store.AllocatePages(ref newPagesAsSpan, oldLen, changeSet);
 
             int noNextMap = 0;
-            CreateOrGrow(PageBlockType.None, newPages, curPages.Length, ref noNextMap, changeSet, releaseNewPagesOnFailure: true);
+            CreateOrGrow(PageBlockType.None, newPagesAsSpan, oldLen, ref noNextMap, changeSet, releaseNewPagesOnFailure: true, publishBacking: items);
 
             // Phase 5: Storage:Segment:Grow event. Use the first page id as a stable segment identifier.
-            TyphonEvent.EmitStorageSegmentGrow(newPages[0], oldLen, newLength);
+            TyphonEvent.EmitStorageSegmentGrow(items[0], oldLen, newLength);
         }
     }
 
@@ -446,7 +486,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         _store = store;
     }
 
-    public void Dispose() => _pages = null;
+    public void Dispose() => _pageList = null;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public static int GetMaxItemCount<T>(bool firstPage) where T : unmanaged => GetMaxItemCount(firstPage, Marshal.SizeOf<T>());
@@ -497,14 +537,21 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     // releaseNewPagesOnFailure: true when this call owns filePageIndices[growFrom..] and must give them back if it fails before publishing (a Grow);
     // false when the caller manages them: a Create's pages, or the occupancy grow's reserved page.
+    // publishBacking: the array filePageIndices is a prefix of, published as the segment's page list without a copy (a Grow, whose array keeps room for
+    // later grows); null to publish a copy (a Create, whose pages the caller owns, or the occupancy grow).
     internal unsafe bool CreateOrGrow(PageBlockType type, Span<int> filePageIndices, int growFrom, ref int nextMap, ChangeSet changeSet,
-        bool releaseNewPagesOnFailure = false)
+        bool releaseNewPagesOnFailure = false, int[] publishBacking = null)
     {
         var epoch = _store.EpochManager.GlobalEpoch;
 
         // Compute the number of indices map pages needed to store the indices (root + subsequent).
         // The end of the indices list is marked by a 0 value, we need to save space for this entry too, so the next line is accurate, if you wonder.
         var mapPageCount = 1 + ((filePageIndices.Length - RootHeaderIndexSectionCount + NextHeadersIndexSectionCount) / NextHeadersIndexSectionCount);
+
+        // The first directory page a grow writes: the one holding entry growFrom, where the old terminator was. Every page before it keeps its entries and
+        // its link, so a grow reads, pins and latches only [firstWrittenMap, mapPageCount) — O(pages added), not O(directory) (#1205). A Create writes
+        // every one.
+        var firstWrittenMap = MapPageOfEntry(growFrom);
 
         // Store the indices, code is complex because we may need multiple pages to store them all.
         // Reminder of how data is structured:
@@ -517,8 +564,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // 2. The logical segment next raw data page ID(LogicalSegmentNextRawDataPBID), which is used to traverse the data pages.
         // Both of these linked lists are terminated by 0.
 
-        // Start by building and/or allocating the indices pages, considering the growFrom parameter.
-        Span<int> mapIndices = stackalloc int[mapPageCount];
+        // Start by building and/or allocating the indices pages, considering the growFrom parameter. On the heap past a small count: a directory has a page
+        // per 2 000 data pages, so a stack copy of it is a stack overflow on a segment of a few hundred GiB.
+        Span<int> mapIndices = mapPageCount <= 256 ? stackalloc int[mapPageCount] : new int[mapPageCount];
         mapIndices[0] = filePageIndices[0];                             // The first page is always the root page, so we set it here.
         var mapIndexAllocStartFrom = 0;
         var allocatedMapFrom = mapPageCount;                            // mapIndices[allocatedMapFrom..] are the directory pages this call allocated
@@ -529,7 +577,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // If one throws, the pages this grow allocated go back and the segment is exactly as it was. The publish then only re-enters latches it
         // already holds, on resident pages, so nothing in it waits or can fail. A Create has nothing published to protect: nothing references its
         // root until it returns.
-        Span<int> pinned = growFrom > 0 ? stackalloc int[mapPageCount + 1] : default;
+        var writtenMapPages = mapPageCount - firstWrittenMap;
+        Span<int> pinned = growFrom > 0 ? (writtenMapPages < 256 ? stackalloc int[writtenMapPages + 1] : new int[writtenMapPages + 1]) : default;
         var pinnedCount = 0;
         var latchedCount = 0;                                           // pinned[..latchedCount] are also latched
         var publishing = false;
@@ -537,15 +586,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         {
             if (mapPageCount > 1)
             {
-                // Need to rebuild the indices pages
+                // Need to rebuild the indices pages: a grow takes the existing ones from the in-memory list, rather than walking the chain on disk —
+                // a read of every directory page, on every grow (#1205).
                 if (growFrom > 0)
                 {
-                    WalkIndicesMap((i, _, memIdx, span) =>
-                    {
-                        span[i] = _store.GetFilePageIndex(memIdx);
-                        mapIndexAllocStartFrom = i + 1;                 // Update the start index for the first page to allocate
-                        return true;
-                    }, epoch, mapIndices);
+                    _mapPages.AsSpan(0, _mapPageCount).CopyTo(mapIndices);
+                    mapIndexAllocStartFrom = _mapPageCount;
                 }
 
                 // If a nextMap is provided, we need to use it as the first new map page
@@ -568,10 +614,10 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
             if (growFrom > 0)
             {
-                // The directory pass below stamps a twin on each new map-extension page it fills. Allocate them now, so the stamp only looks them up.
+                // The directory pass below stamps a twin on each new map-extension page — those it fills and the one that holds only the terminator
+                // when the entries end at a page's end (CK-05). Allocate them now, so the stamp only looks them up.
                 var firstNewMapPage = Math.Max(1, mapIndexAllocStartFrom);
-                var filledMapPages = FilledDirectoryPageCount(filePageIndices.Length);
-                for (var m = firstNewMapPage; m < filledMapPages; m++)
+                for (var m = firstNewMapPage; m < mapPageCount; m++)
                 {
                     _store.GetOrAllocateDirectoryTwin(mapIndices[m], changeSet);
                 }
@@ -579,8 +625,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 InitDataPages(type, filePageIndices, growFrom, changeSet, epoch);
 
                 // Count a pin only once it is taken: `pinned[pinnedCount++] = PinForPublish(…)` would count it before the call, and a throw would then
-                // release a slot this grow never pinned.
-                for (var m = 0; m < mapPageCount; m++)
+                // release a slot this grow never pinned. Only the directory pages the publish writes: those from the one holding entry growFrom on.
+                for (var m = firstWrittenMap; m < mapPageCount; m++)
                 {
                     var memPageIndex = PinForPublish(mapIndices[m], epoch, m < firstNewMapPage);
                     pinned[pinnedCount++] = memPageIndex;
@@ -591,7 +637,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 // Take the publish's latches before its first write, so that another thread holding one of these pages, or a lock timeout, fails the
                 // grow here, cleanly. Every page is resident and slot-pinned, so this waits for nothing the checkpoint has to do first (PS-09). The
                 // directory pass and the old-tail patch below re-enter these latches.
-                for (var m = 0; m <= mapPageCount; m++)
+                for (var m = firstWrittenMap; m <= mapPageCount; m++)
                 {
                     var filePageIndex = m < mapPageCount ? mapIndices[m] : filePageIndices[growFrom - 1];
                     GrowStepProbe?.Invoke(filePageIndex);
@@ -695,6 +741,10 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                             // WholePage (PS-14): this page receives a single int, so everything else on it must not carry a previous occupant's bytes.
                             InitHeader(endPage.Address, PageClearMode.WholePage, PageBlockFlags.IsLogicalSegment, type, 1, MetadataReservedBytes(false),
                                 ChunkStrideForGeometry);
+                            // A directory page like any other, so it has a twin (CK-05). It had none: the next grow fills it, and the reopen walk, which
+                            // stopped at a page without a twin, then read every later directory page from its primary slot — a stale one half the time.
+                            endPage.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).TwinPageIndex =
+                                _store.GetOrAllocateDirectoryTwin(mapIndices[curIndexMapIndex + 1], changeSet);
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
                             // Durability: AddByMemPageIndex already bumps DC to 1 via tracked IncrementDirty. Without a
@@ -809,22 +859,34 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             }
         }
 
-        _pages = filePageIndices.ToArray();
+        // The in-memory directory list follows the one on disk: the pages it already had, then the ones this call added. Before the page list is
+        // published: an allocation that throws here leaves both as they were, where a short directory list under a longer page list would make the next
+        // grow treat an existing directory page as new.
+        if (_mapPages == null || _mapPages.Length < mapPageCount)
+        {
+            var grownMap = new int[Math.Max(mapPageCount, (_mapPages?.Length ?? 0) * 2)];
+            _mapPages?.AsSpan(0, _mapPageCount).CopyTo(grownMap);
+            _mapPages = grownMap;
+        }
+
+        var firstNewMapIndex = growFrom > 0 ? _mapPageCount : 0;
+        mapIndices[firstNewMapIndex..mapPageCount].CopyTo(_mapPages.AsSpan(firstNewMapIndex));
+
+        var newCount = filePageIndices.Length;
+        var published = new PageList(publishBacking ?? filePageIndices.ToArray(), newCount);
+        _mapPageCount = mapPageCount;
+        _pageList = published;
 
         // Post-condition #1: verify the data-page forward chain over the pages this call actually wrote — the root, the old tail at growFrom-1, and every new
         // page. Mismatch here ⇒ bug in CreateOrGrow's pointer writes (not persistence).
         //
-        // The range is bounded on purpose (#838). This check is the ONLY thing a grow leaves epoch-pinned: RequestPageEpoch raises AccessEpoch by CAS-max and
-        // the sole thing that lowers it is UnlatchPageExclusive, which resets it to 0 (PS-03) — so the write loops above, which latch and unlatch every page
-        // they touch, end pinning nothing, while a page merely READ through RequestPageEpoch stays unevictable under PS-01 until the enclosing epoch scope
-        // exits. That scope is the CALLER's, not ours: Transaction.Init opens it and only the transaction's dispose closes it, and a nested EpochGuard.Enter
-        // does not re-pin (PinCurrentThread stamps at depth 0 only). Walking the whole chain therefore pinned O(segment) pages for a whole transaction, and
-        // once the segment outgrew the page cache a commit ended up waiting for eviction of pages its own pin protected — a self-deadlock surfaced as a 5 s
-        // PageCacheBackpressureTimeoutException. Bounding the walk does not make the check free; it makes its cost proportional to the grow (measured: 12
-        // pages for a 10-page grow, against 1210 — the whole segment — before), which is the property that matters, because a caller that grows by N has
-        // already committed to touching N pages.
-        var pageList = _pages;
-        var badLink = VerifyGrownChainLinks(epoch, pageList, growFrom, out var actualNext);
+        // The range is bounded on purpose (#838), and each page is read and released (EP-02), so a grow leaves nothing pinned. Read through
+        // RequestPageEpoch, a page stays unevictable until the CALLER's epoch scope exits — a transaction's, for its whole life — and the write loops above
+        // end pinning nothing (UnlatchPageExclusive resets AccessEpoch), so this check was the one thing a grow left pinned: the whole segment while it walked
+        // the chain (a commit waiting for eviction of pages its own pin protected, #838), then one page per page grown. Segments grow by doubling, so that was
+        // still the size of the segment, up to 1 024 pages: a 128-page cluster segment growing in a 256-page cache stalled its commit with 128 pages pinned.
+        var pageList = Pages;
+        var badLink = VerifyGrownChainLinks(pageList, growFrom, out var actualNext);
         if (badLink >= 0)
         {
             throw new InvalidOperationException(
@@ -842,20 +904,69 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // prefix damage to CreateOrGrow anyway ("not persistence"), and the bounded check is strictly more thorough than the count comparison over the range
         // this method can actually corrupt.
 
-        // Post-condition #2: walk the directory section in memory by reading the root + extension map pages RIGHT NOW and
-        // verify each entry matches the in-memory _pages array position-by-position. Mismatch here ⇒ bug in CreateOrGrow's
-        // directory writes (not persistence). Positional verification is store-agnostic — works for both PersistentStore
-        // (where page index 0 is reserved by the MMF bootstrap) and TransientStore (where page index 0 is a valid entry).
-        var memDirCount = VerifyDirectoryAgainst(epoch, _pages);
-        if (memDirCount != _pages.Length)
+        // Post-condition #2: read the directory pages this call wrote RIGHT NOW and verify each entry matches the in-memory page list position-by-position.
+        // Mismatch here ⇒ bug in CreateOrGrow's directory writes (not persistence). Positional verification is store-agnostic — works for both
+        // PersistentStore (where page index 0 is reserved by the MMF bootstrap) and TransientStore (where page index 0 is a valid entry). Bounded like
+        // post-condition #1, and for the same reason: the pages before the one holding entry growFrom were not written, and reading them all made every grow
+        // O(segment) (#1205). The full comparison stays available to the integrity check (VerifyDirectoryAgainst).
+        var memDirCount = VerifyDirectoryFrom(_mapPages.AsSpan(0, _mapPageCount), firstWrittenMap, pageList);
+        if (memDirCount != pageList.Length)
         {
             throw new InvalidOperationException(
-                $"CreateOrGrow IN-MEMORY directory mismatch: root={_pages[0]} kind={_kind} growFrom={growFrom} " +
-                $"expected={_pages.Length} directory={memDirCount} (diff={memDirCount - _pages.Length:+0;-#}) " +
+                $"CreateOrGrow IN-MEMORY directory mismatch: root={pageList[0]} kind={_kind} growFrom={growFrom} " +
+                $"expected={pageList.Length} directory={memDirCount} (diff={memDirCount - pageList.Length:+0;-#}) " +
                 $"— bug is in CreateOrGrow's directory writes, not persistence.");
         }
 
         return true;
+    }
+
+    /// <summary>The directory page (0 = the root) holding entry <paramref name="entry"/> of the page list — or, at the list's length, its terminator.</summary>
+    private static int MapPageOfEntry(int entry)
+        => entry < RootHeaderIndexSectionCount ? 0 : 1 + ((entry - RootHeaderIndexSectionCount) / NextHeadersIndexSectionCount);
+
+    /// <summary>The first entry directory page <paramref name="mapPage"/> holds.</summary>
+    private static int FirstEntryOfMapPage(int mapPage)
+        => mapPage == 0 ? 0 : RootHeaderIndexSectionCount + ((mapPage - 1) * NextHeadersIndexSectionCount);
+
+    /// <summary>
+    /// <see cref="VerifyDirectoryAgainst"/> over the directory pages from <paramref name="firstMapPage"/> on: reads each (EP-02), compares its entries with
+    /// <paramref name="expected"/> from the page's first entry, and checks each page links to the next while entries remain. Returns the entry index at
+    /// which the comparison stopped — <c>expected.Length</c> when every entry from the first page's matched.
+    /// </summary>
+    private int VerifyDirectoryFrom(ReadOnlySpan<int> mapPages, int firstMapPage, ReadOnlySpan<int> expected)
+    {
+        var entry = FirstEntryOfMapPage(firstMapPage);
+        for (var m = firstMapPage; m < mapPages.Length && entry < expected.Length; m++)
+        {
+            var count = m == 0 ? RootHeaderIndexSectionCount : NextHeadersIndexSectionCount;
+            _store.AcquirePageForRead(mapPages[m], out var memPageIndex);
+            try
+            {
+                var page = _store.GetPage(memPageIndex);
+                var rd = page.RawDataReadOnly<int>(0, count);
+                for (var i = 0; i < count && entry < expected.Length; i++, entry++)
+                {
+                    if (rd[i] != expected[entry])
+                    {
+                        return entry;
+                    }
+                }
+
+                if (entry < expected.Length
+                    && (m + 1 >= mapPages.Length
+                        || page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID != mapPages[m + 1]))
+                {
+                    return entry;
+                }
+            }
+            finally
+            {
+                _store.ReleasePageForRead(memPageIndex);
+            }
+        }
+
+        return entry;
     }
 
     /// <summary>
@@ -864,7 +975,6 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// positionally: page <c>i</c>'s forward pointer must be <c>_pages[i+1]</c>, and <c>0</c> at the last page. Returns <c>-1</c> when every link matches,
     /// else the index into <paramref name="pages"/> whose pointer is wrong, with <paramref name="actualNext"/> set to what that page actually held.
     /// </summary>
-    /// <param name="epoch">The caller's epoch, used to tag every page this reads.</param>
     /// <param name="pages">
     /// The segment's page directory. Passed in rather than re-read from <c>_pages</c> so the index this returns and the array the caller reports it against
     /// are provably the same object — two independent reads of a volatile field are two chances to disagree.
@@ -879,14 +989,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// walk, which turned a post-condition on a small grow into an O(segment) pin held for a whole transaction.
     /// </para>
     /// <para>
-    /// This check is consequently the ONLY thing a grow leaves pinned: the write loops in <see cref="CreateOrGrow"/> latch and unlatch every page they
-    /// touch, so they end pinning nothing. Bounding the walk does not make the check free — it costs one pin per page in range, held for the caller's scope —
-    /// it makes the cost proportional to the grow rather than to the segment, which is the property EP-01 (<c>rules/concurrency.md</c>) requires.
+    /// Each page is read and released (EP-02), so the check pins nothing past its own read. It used to tag each page with the caller's epoch, which made it
+    /// the one thing a grow left pinned — one page per page grown, for the caller's scope, and since segments grow by doubling, as many pages as the
+    /// segment held. Bounding the range is what EP-01 requires; reading and releasing is what makes the bound cost nothing.
     /// </para>
     /// <para>
     /// Coverage over the range is strictly stronger than the count comparison it replaces: positional comparison also catches "right count, wrong target",
     /// for the same reason <see cref="VerifyDirectoryAgainst"/> is positional. What it gives up is prefix damage <see cref="CreateOrGrow"/> did not cause,
-    /// which the exhaustive walk still catches on every reopen (<see cref="Load"/>) and on demand (<c>RunStorageIntegrityCheck</c>).
+    /// which the crash path's allocator scan still catches after an unclean close, and the exhaustive walk on demand (<c>RunStorageIntegrityCheck</c>).
     /// </para>
     /// <para>
     /// <b>Index 0 is always verified</b>, even when it falls outside <c>[growFrom-1, end]</c>. A grow that pushes the page directory past
@@ -896,11 +1006,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// post-condition exists to catch. It costs no extra fetch in practice: <see cref="VerifyDirectoryAgainst"/> faults the root immediately afterwards.
     /// </para>
     /// </remarks>
-    private int VerifyGrownChainLinks(long epoch, int[] pages, int growFrom, out int actualNext)
+    private int VerifyGrownChainLinks(ReadOnlySpan<int> pages, int growFrom, out int actualNext)
     {
         actualNext = 0;
 
-        if (pages == null || pages.Length == 0)
+        if (pages.Length == 0)
         {
             return -1;
         }
@@ -911,14 +1021,14 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             $"CreateOrGrow growFrom={growFrom} exceeds the {pages.Length}-page directory; the chain check would be vacuous.");
 
         var start = Math.Max(0, growFrom - 1);
-        if ((start > 0) && !ChainLinkMatches(epoch, pages, 0, out actualNext))
+        if ((start > 0) && !ChainLinkMatches(pages, 0, out actualNext))
         {
             return 0;
         }
 
         for (var i = start; i < pages.Length; i++)
         {
-            if (!ChainLinkMatches(epoch, pages, i, out actualNext))
+            if (!ChainLinkMatches(pages, i, out actualNext))
             {
                 return i;
             }
@@ -930,13 +1040,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     /// <summary>
     /// Reads page <paramref name="index"/>'s forward-chain pointer and reports whether it names the next page in <paramref name="pages"/> (or <c>0</c> at the
-    /// tail). <paramref name="actualNext"/> always receives what the page actually held, so the caller can put both values in its message.
+    /// tail). <paramref name="actualNext"/> always receives what the page actually held, so the caller can put both values in its message. Reads and
+    /// releases the page (EP-02).
     /// </summary>
-    private bool ChainLinkMatches(long epoch, int[] pages, int index, out int actualNext)
+    private bool ChainLinkMatches(ReadOnlySpan<int> pages, int index, out int actualNext)
     {
-        _store.RequestPageEpoch(pages[index], epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-        actualNext = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        actualNext = ReadNextRawDataPage(pages[index]);
         return actualNext == (((index + 1) < pages.Length) ? pages[index + 1] : 0);
     }
 
@@ -953,50 +1062,65 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// entry, an assumption that holds for <see cref="PersistentStore"/> (MMF reserve carves out page 0 for the bootstrap)
     /// but NOT for <see cref="TransientStore"/> (in-memory allocator can hand out page 0 as the first segment page).
     /// Positional comparison is store-agnostic AND strictly more thorough — it catches not just count mismatches but also
-    /// "right count, wrong content" bugs that the original walker silently passed.
+    /// "right count, wrong content" bugs that the original walker silently passed. Reads and releases each directory page (EP-02): the integrity
+    /// check runs it over every segment.
     /// </remarks>
-    internal int VerifyDirectoryAgainst(long epoch, ReadOnlySpan<int> expected)
+    internal int VerifyDirectoryAgainst(ReadOnlySpan<int> expected)
     {
         if (expected.Length == 0)
         {
             return 0;
         }
 
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-
-        var matched = 0;
-        var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
-        var maxIndicesForPage = RootHeaderIndexSectionCount;
-        var i = 0;
-        while (matched < expected.Length)
+        _store.AcquirePageForRead(RootPageIndex, out var memPageIndex);
+        try
         {
-            if (i == maxIndicesForPage)
+            var page = _store.GetPage(memPageIndex);
+            var matched = 0;
+            var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
+            var maxIndicesForPage = RootHeaderIndexSectionCount;
+            var i = 0;
+            while (matched < expected.Length)
             {
-                ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
-                if (lsh.LogicalSegmentNextMapPBID == 0)
+                if (i == maxIndicesForPage)
                 {
-                    // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                    var nextMap = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID;
+                    if (nextMap == 0)
+                    {
+                        // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                        return matched;
+                    }
+
+                    _store.ReleasePageForRead(memPageIndex);
+                    memPageIndex = -1;
+                    // Into a fresh local: AcquirePageForRead assigns its out parameter before it can throw, and a throw after that holds no pin — writing
+                    // memPageIndex directly would have the finally release a pin this method never took.
+                    _store.AcquirePageForRead(nextMap, out var nextMemPageIndex);
+                    memPageIndex = nextMemPageIndex;
+                    page = _store.GetPage(memPageIndex);
+                    rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
+                    i = 0;
+                    maxIndicesForPage = NextHeadersIndexSectionCount;
+                }
+
+                if (rd[i] != expected[matched])
+                {
+                    // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
+                    // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
                     return matched;
                 }
-                _store.RequestPageEpoch(lsh.LogicalSegmentNextMapPBID, epoch, out memPageIndex);
-                page = _store.GetPage(memPageIndex);
-                rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
-                i = 0;
-                maxIndicesForPage = NextHeadersIndexSectionCount;
+                matched++;
+                i++;
             }
-
-            if (rd[i] != expected[matched])
-            {
-                // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
-                // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
-                return matched;
-            }
-            matched++;
-            i++;
+            return matched;
         }
-        return matched;
+        finally
+        {
+            if (memPageIndex >= 0)
+            {
+                _store.ReleasePageForRead(memPageIndex);
+            }
+        }
     }
 
     /// <summary>
@@ -1062,6 +1186,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         _kind = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).Kind;
 
         var pages = new List<int>();
+        var mapPages = new List<int> { filePageIndex };
         var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
         var maxIndicesForPage = RootHeaderIndexSectionCount;
         var i = 0;
@@ -1081,6 +1206,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 break; // No more pages
             }
 
+            mapPages.Add(lsh.LogicalSegmentNextMapPBID);
             _store.RequestPageEpoch(lsh.LogicalSegmentNextMapPBID, epoch, out memPageIndex);
             page = _store.GetPage(memPageIndex);
             rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
@@ -1089,25 +1215,39 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             maxIndicesForPage = NextHeadersIndexSectionCount;
         }
 
-        _pages = pages.ToArray();
-
-        // Structural integrity invariant: the data-page forward chain (LogicalSegmentNextRawDataPBID) must reach exactly as many pages as the persisted Page
-        // Directory enumerates. The two are written by independent code paths in CreateOrGrow — the chain pointer is updated per-page in the data-page-init
-        // loop and on the old tail; the Directory entries are written into root/extension-map raw-data sections. A mismatch means one of the two writes lost
-        // durability across a crash / checkpoint race, leaving a structurally inconsistent segment that would silently lose addressing of some pages. We
-        // throw early at Load rather than let the corruption propagate. Zero storage cost — both fields already exist; cost is O(N) page-header reads per
-        // segment on Open, paid once.
-        var chainCount = WalkForwardChainPageCount(epoch);
-        if (chainCount != _pages.Length)
+        // Every directory lists at least the root itself, so an empty one is a root page that was never written — what a checkpoint interrupted before the
+        // root landed leaves behind its SPI. The chain walk that used to run below caught it by accident (its first step, RootPageIndex, threw); without a
+        // throw the segment would load as zero pages and fail far from the cause, and the crash path could not replace it (TryLoadChunkBasedSegment, RB-01).
+        if (pages.Count == 0)
         {
             throw new InvalidOperationException(
-                $"LogicalSegment integrity check failed at Load: root={filePageIndex} kind={_kind} directory={_pages.Length} chain={chainCount} " +
-                $"(diff={chainCount - _pages.Length:+0;-#}). Signature of a lost-write durability bug — either the directory append or the " +
-                $"forward-chain pointer didn't persist before the previous close.");
+                $"LogicalSegment load failed: root={filePageIndex} kind={_kind} — the root page lists no page, not even itself: it was never written.");
         }
 
+        _pageList = new PageList(pages.ToArray(), pages.Count);
+
+        // The directory pages a grow appends after: as many as CreateOrGrow sizes a directory of this length, read off the chain just walked. A page that
+        // holds only the terminator (the previous page exactly full) is one of them; the walk above reached it through the full page's link.
+        var expectedMapPages = MapPageOfEntry(pages.Count) + 1;
+        if (mapPages.Count != expectedMapPages)
+        {
+            throw new InvalidOperationException(
+                $"LogicalSegment load failed: root={filePageIndex} kind={_kind} — a directory of {pages.Count} pages spans {expectedMapPages} directory "
+                + $"pages, but its chain links {mapPages.Count}.");
+        }
+
+        _mapPages = mapPages.ToArray();
+        _mapPageCount = mapPages.Count;
+
+        // The directory only: a page per 2 000 entries. The cross-check of the directory against the data pages' forward chain (a lost-write detector, #382)
+        // is NOT made here. It reads every data page, and it used to, on every open, under the open's one epoch: O(database) reads, every page pinned until the
+        // open ended, so a database larger than its page cache could not be opened (#1143). On the crash path a chunk-based segment checks its links during
+        // the free-chunk scan it makes then (ChunkBasedSegment.ScanForAllocatorState). Otherwise the check is the offline scanner's, at Quick depth and deeper
+        // — not at the default Spine depth — and a mismatch found by open-time verification refuses the open unless recovery will rebuild the segment
+        // (DatabaseIntegrityException.RefusesOpen).
+
         // Phase 5: Storage:Segment:Load event.
-        TyphonEvent.EmitStorageSegmentLoad(filePageIndex, _pages.Length);
+        TyphonEvent.EmitStorageSegmentLoad(filePageIndex, pages.Count);
 
         return true;
     }
@@ -1117,31 +1257,42 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// pointer until it reaches <c>0</c>, counting pages along the way.
     /// </summary>
     /// <remarks>
-    /// Pure integrity-check helper — read-only, no allocations. Caller must be inside an <see cref="EpochGuard"/> scope (or pass an epoch known to be live).
-    /// Used by <see cref="Load"/> as the chain↔directory cross-check that catches lost-write durability bugs at the earliest moment.
+    /// Pure integrity-check helper — read-only, no allocations. No longer called by <see cref="Load"/> (#1143): tests and storage introspection use it
+    /// to cross-check the chain against the directory. Each page is read and released before the next (EP-02), so the walk holds one page of the cache
+    /// however long the chain is; it used to tag every page with the caller's epoch and pin the whole segment for the caller's scope (#1144).
     /// </remarks>
-    internal int WalkForwardChainPageCount(long epoch)
+    internal int WalkForwardChainPageCount()
     {
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-
         var count = 1;
+        var next = ReadNextRawDataPage(RootPageIndex);
         // Cycle guard: any healthy chain is bounded by the directory's page count. A runaway chain (cycle or wildly past the directory's length) is itself a
         // corruption signal — the caller's mismatch detection will flag it against the directory count.
-        var maxWalk = ((_pages?.Length ?? 0) * 2) + 16;
+        var maxWalk = (Length * 2) + 16;
         while (count < maxWalk)
         {
-            var next = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
             if (next == 0)
             {
                 return count;
             }
-            _store.RequestPageEpoch(next, epoch, out memPageIndex);
-            page = _store.GetPage(memPageIndex);
+
+            next = ReadNextRawDataPage(next);
             count++;
         }
         return count;
+    }
+
+    /// <summary>The forward-chain pointer of file page <paramref name="filePageIndex"/>, read and released (EP-02).</summary>
+    private int ReadNextRawDataPage(int filePageIndex)
+    {
+        _store.AcquirePageForRead(filePageIndex, out var memPageIndex);
+        try
+        {
+            return _store.GetPage(memPageIndex).StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        }
+        finally
+        {
+            _store.ReleasePageForRead(memPageIndex);
+        }
     }
 
     /// <summary>
@@ -1160,15 +1311,15 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         // page, and therefore owns no directory-map extension pages either. "None" is the correct answer to give, so give it instead of throwing out of a walk
         // over every segment. Reading RootPageIndex here used to throw, which took down the crash-path occupancy re-derive
         // (BuildOwnedPageBitmap ← RederiveOccupancyOnCrash) for ANY database holding an empty component — which is nearly every real schema.
-        var pages = _pages;
-        if (pages == null || pages.Length == 0)
+        var length = Length;
+        if (length == 0)
         {
             return;
         }
 
-        _store.RequestPageEpoch(pages[0], epoch, out var memPageIndex);
+        _store.RequestPageEpoch(RootPageIndex, epoch, out var memPageIndex);
         var page = _store.GetPage(memPageIndex);
-        var maxWalk = pages.Length / NextHeadersIndexSectionCount + 4; // cycle guard
+        var maxWalk = length / NextHeadersIndexSectionCount + 4; // cycle guard
         var step = 0;
         while (step < maxWalk)
         {

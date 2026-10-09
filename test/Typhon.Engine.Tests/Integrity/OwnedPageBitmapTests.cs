@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.IO;
 using System.Linq;
 
 namespace Typhon.Engine.Tests.Integrity;
@@ -127,9 +128,11 @@ internal sealed class OwnedPageBitmapTests : IntegrityFixtureBase
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.InitializeArchetypes();
 
-        Assert.That(dbe.WalFilesPresentAtOpen, Is.True,
+        Assert.That(Directory.GetFiles(dbe.WalDirectory, "*.wal"), Is.Not.Empty,
             "this test is only meaningful while WAL files survive a clean shutdown — if that changes, the gate it guards "
             + "against is gone and this test should be re-examined rather than deleted");
+        Assert.That(dbe.LastOpenRanCrashRecovery, Is.False,
+            "a clean close leaves no recovery window: WAL files on disk must not route the open into crash recovery (#1143)");
         Assert.That(dbe.LastOpenOccupancyRederiveWordsChanged, Is.Zero,
             "a cleanly-closed database consolidated its bitmap on the way out; re-deriving over it is not a no-op in "
             + "general, it is an overwrite with a reconstruction");

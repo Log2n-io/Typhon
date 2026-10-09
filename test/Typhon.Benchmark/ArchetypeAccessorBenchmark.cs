@@ -106,7 +106,9 @@ static class ArchetypeAccessorBenchmark
             {
                 if (tx.TryOpenMut(ids[i], out var entity))
                 {
-                    entity.Write(AaBenchAnt.Position).X += 0.016f;
+                    var positionCopy = entity.Read(AaBenchAnt.Position);
+                    positionCopy.X += 0.016f;
+                    entity.Set(AaBenchAnt.Position, positionCopy);
                 }
             }
             tx.Commit();
@@ -137,7 +139,10 @@ static class ArchetypeAccessorBenchmark
             {
                 if (tx.TryOpen(ids[i], out _))
                 {
-                    tx.OpenMut(ids[i]).Write(AaBenchAnt.Position).X += 0.016f;
+                    var entity = tx.OpenMut(ids[i]);
+                    var position = entity.Read(AaBenchAnt.Position);
+                    position.X += 0.016f;
+                    entity.Set(AaBenchAnt.Position, position);
                 }
             }
             tx.Commit();
@@ -240,14 +245,15 @@ static class ArchetypeAccessorBenchmark
                     foreach (var id in ctx.Entities)
                     {
                         var entity = ants.OpenMut(id);
-                        ref var pos = ref entity.Write(AaBenchAnt.Position);
-                        ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                        var pos = entity.Read(AaBenchAnt.Position);
+                        var mov = entity.Read(AaBenchAnt.Movement);
                         pos.X += mov.VX * ctx.DeltaTime;
                         pos.Y += mov.VY * ctx.DeltaTime;
                         if (pos.X < 0f) pos.X += WorldSize;
                         else if (pos.X >= WorldSize) pos.X -= WorldSize;
                         if (pos.Y < 0f) pos.Y += WorldSize;
                         else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                        entity.Set(AaBenchAnt.Position, pos);
                     }
                     ants.Dispose();
                 }
@@ -256,14 +262,15 @@ static class ArchetypeAccessorBenchmark
                     foreach (var id in ctx.Entities)
                     {
                         var entity = ctx.Accessor.OpenMut(id);
-                        ref var pos = ref entity.Write(AaBenchAnt.Position);
-                        ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                        var pos = entity.Read(AaBenchAnt.Position);
+                        var mov = entity.Read(AaBenchAnt.Movement);
                         pos.X += mov.VX * ctx.DeltaTime;
                         pos.Y += mov.VY * ctx.DeltaTime;
                         if (pos.X < 0f) pos.X += WorldSize;
                         else if (pos.X >= WorldSize) pos.X -= WorldSize;
                         if (pos.Y < 0f) pos.Y += WorldSize;
                         else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                        entity.Set(AaBenchAnt.Position, pos);
                     }
                 }
             }, input: () => view, parallel: true);
@@ -311,14 +318,15 @@ static class ArchetypeAccessorBenchmark
                 foreach (var id in ctx.Entities)
                 {
                     var entity = ctx.Accessor.OpenMut(id);
-                    ref var pos = ref entity.Write(AaBenchAnt.Position);
-                    ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                    var pos = entity.Read(AaBenchAnt.Position);
+                    var mov = entity.Read(AaBenchAnt.Movement);
                     pos.X += mov.VX * ctx.DeltaTime;
                     pos.Y += mov.VY * ctx.DeltaTime;
                     if (pos.X < 0f) pos.X += WorldSize;
                     else if (pos.X >= WorldSize) pos.X -= WorldSize;
                     if (pos.Y < 0f) pos.Y += WorldSize;
                     else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                    entity.Set(AaBenchAnt.Position, pos);
                 }
             }, input: () => view, parallel: true);
         }, new RuntimeOptions { BaseTickRate = 60, WorkerCount = 4 });
@@ -346,14 +354,15 @@ static class ArchetypeAccessorBenchmark
                 foreach (var id in ctx.Entities)
                 {
                     var entity = ants.OpenMut(id);
-                    ref var pos = ref entity.Write(AaBenchAnt.Position);
-                    ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                    var pos = entity.Read(AaBenchAnt.Position);
+                    var mov = entity.Read(AaBenchAnt.Movement);
                     pos.X += mov.VX * ctx.DeltaTime;
                     pos.Y += mov.VY * ctx.DeltaTime;
                     if (pos.X < 0f) pos.X += WorldSize;
                     else if (pos.X >= WorldSize) pos.X -= WorldSize;
                     if (pos.Y < 0f) pos.Y += WorldSize;
                     else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                    entity.Set(AaBenchAnt.Position, pos);
                 }
                 ants.Dispose();
             }, input: () => view, parallel: true);
@@ -374,14 +383,15 @@ static class ArchetypeAccessorBenchmark
             for (int i = 0; i < ids.Length; i++)
             {
                 var entity = tx.OpenMut(ids[i]);
-                ref var pos = ref entity.Write(AaBenchAnt.Position);
-                ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                var pos = entity.Read(AaBenchAnt.Position);
+                var mov = entity.Read(AaBenchAnt.Movement);
                 pos.X += mov.VX * 0.016f;
                 pos.Y += mov.VY * 0.016f;
                 if (pos.X < 0f) pos.X += WorldSize;
                 else if (pos.X >= WorldSize) pos.X -= WorldSize;
                 if (pos.Y < 0f) pos.Y += WorldSize;
                 else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                entity.Set(AaBenchAnt.Position, pos);
             }
             tx.Commit();
         }
@@ -396,14 +406,15 @@ static class ArchetypeAccessorBenchmark
             for (int i = 0; i < ids.Length; i++)
             {
                 var entity = ants.OpenMut(ids[i]);
-                ref var pos = ref entity.Write(AaBenchAnt.Position);
-                ref readonly var mov = ref entity.Read(AaBenchAnt.Movement);
+                var pos = entity.Read(AaBenchAnt.Position);
+                var mov = entity.Read(AaBenchAnt.Movement);
                 pos.X += mov.VX * 0.016f;
                 pos.Y += mov.VY * 0.016f;
                 if (pos.X < 0f) pos.X += WorldSize;
                 else if (pos.X >= WorldSize) pos.X -= WorldSize;
                 if (pos.Y < 0f) pos.Y += WorldSize;
                 else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
+                entity.Set(AaBenchAnt.Position, pos);
             }
             ants.Dispose();
             tx.Commit();
@@ -650,8 +661,10 @@ static class ArchetypeAccessorBenchmark
         using var tx = dbe.CreateQuickTransaction();
         for (int i = 0; i < ids.Length; i++)
         {
-            ref var pos = ref tx.OpenMut(ids[i]).Write(AaBenchAnt.Position);
+            var opened = tx.OpenMut(ids[i]);
+            var pos = opened.Read(AaBenchAnt.Position);
             pos.X += 0.1f;
+            opened.Set(AaBenchAnt.Position, pos);
         }
         tx.Commit();
     }
@@ -753,8 +766,10 @@ static class ArchetypeAccessorBenchmark
         using var tx = dbe.CreateQuickTransaction();
         for (int i = 0; i < ids.Length; i++)
         {
-            ref var data = ref tx.OpenMut(ids[i]).Write(AaBenchIdxUnit.Data);
-            data.Score = tick * 1000 + i; // Unique value to force B+Tree Move at tick fence
+            var entity = tx.OpenMut(ids[i]);
+            var data = entity.Read(AaBenchIdxUnit.Data);
+            data.Score = tick * 1000 + i;
+            entity.Set(AaBenchIdxUnit.Data, data); // Unique value to force B+Tree Move at tick fence
         }
         tx.Commit();
     }
@@ -866,9 +881,11 @@ static class ArchetypeAccessorBenchmark
         using var tx = dbe.CreateQuickTransaction();
         for (int i = 0; i < ids.Length; i++)
         {
-            ref var pos = ref tx.OpenMut(ids[i]).Write(AaBenchSpatialUnit.Pos);
+            var entity = tx.OpenMut(ids[i]);
+            var pos = entity.Read(AaBenchSpatialUnit.Pos);
             float x = i * 20.0f + tick * delta;
             pos.Bounds = new AABB3F { MinX = x - 1, MinY = -1, MinZ = -1, MaxX = x + 1, MaxY = 1, MaxZ = 1 };
+            entity.Set(AaBenchSpatialUnit.Pos, pos);
         }
         tx.Commit();
     }
@@ -1084,8 +1101,9 @@ static class ArchetypeAccessorBenchmark
             for (int i = 0; i < ids.Length; i++)
             {
                 var entity = accessor.OpenMut(ids[i]);
-                ref var h = ref entity.Write(AaBenchMixedCluster.Health);
+                var h = entity.Read(AaBenchMixedCluster.Health);
                 h.Current -= 1;
+                entity.Set(AaBenchMixedCluster.Health, h);
             }
             accessor.Dispose();
             tx.Commit();

@@ -451,7 +451,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoAddV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoAddV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(42));
             Assert.That(comp.B, Is.EqualTo(3.14f));
             Assert.That(comp.C, Is.EqualTo(0)); // New field should be zero
@@ -482,7 +482,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoRemoveV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoRemoveV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(10));
             Assert.That(comp.C, Is.EqualTo(1.5f));
         }
@@ -512,7 +512,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoReorderV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoReorderV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(2.718f));
             Assert.That(comp.B, Is.EqualTo(99));
         }
@@ -542,7 +542,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoWidenIntV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoWidenIntV2Arch.Comp);
             Assert.That(comp.Score, Is.EqualTo(1_000_000L));
         }
     }
@@ -571,7 +571,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoSignExtV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoSignExtV2Arch.Comp);
             Assert.That(comp.Value, Is.EqualTo(-42L));
         }
     }
@@ -600,7 +600,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoWidenFloatV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoWidenFloatV2Arch.Comp);
             // IEEE754: float→double promotion preserves exact float value
             Assert.That(comp.Speed, Is.EqualTo((double)3.14159f));
         }
@@ -630,7 +630,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoCombinedV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoCombinedV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(100L)); // int→long widened
             Assert.That(comp.B, Is.EqualTo((double)2.5f)); // float→double widened
             Assert.That(comp.C, Is.EqualTo(0)); // new field zero-filled
@@ -661,7 +661,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             dbe.InitializeArchetypes();
 
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoAddRemoveV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoAddRemoveV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(7));
             Assert.That(comp.C, Is.EqualTo(1.1f));
             Assert.That(comp.D, Is.EqualTo(0.0)); // new field zero-filled
@@ -698,7 +698,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
             using var t = dbe.CreateQuickTransaction();
             for (int i = 0; i < entityCount; i++)
             {
-                ref readonly var comp = ref t.Open(entityIds[i]).Read(EvoAddV2Arch.Comp);
+                var comp = t.Open(entityIds[i]).Read(EvoAddV2Arch.Comp);
                 Assert.That(comp.A, Is.EqualTo(i * 10), $"Entity {i}: A mismatch");
                 Assert.That(comp.B, Is.EqualTo(i * 0.5f), $"Entity {i}: B mismatch");
                 Assert.That(comp.C, Is.EqualTo(0), $"Entity {i}: new field C should be zero (got {comp.C})");
@@ -758,8 +758,10 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
                 using var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
                 for (var i = 0; i < ids.Count; i++)
                 {
-                    ref var c = ref t.OpenMut(ids[i]).Write(EvoIndexArch.Comp);
+                    var opened = t.OpenMut(ids[i]);
+                    var c = opened.Read(EvoIndexArch.Comp);
                     c = new EvoIndexV1(i, round == 3 ? (i < 3 ? 7 : 3) : round);
+                    opened.Set(EvoIndexArch.Comp, c);
                 }
                 t.Commit();
             }
@@ -949,7 +951,7 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
 
             // PK index should still work
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(EvoAddV2Arch.Comp);
+            var comp = t.Open(entityId).Read(EvoAddV2Arch.Comp);
             Assert.That(comp.A, Is.EqualTo(42));
 
             // Verify PK index lookups work (the index was not rebuilt)
@@ -1034,11 +1036,11 @@ class SchemaEvolutionTests : TestBase<SchemaEvolutionTests>
 
             // Read both entities
             using var t2 = dbe.CreateQuickTransaction();
-            ref readonly var old = ref t2.Open(entityId1).Read(EvoAddV2Arch.Comp);
+            var old = t2.Open(entityId1).Read(EvoAddV2Arch.Comp);
             Assert.That(old.A, Is.EqualTo(1));
             Assert.That(old.C, Is.EqualTo(0)); // migrated, new field zero
 
-            ref readonly var fresh = ref t2.Open(entityId2).Read(EvoAddV2Arch.Comp);
+            var fresh = t2.Open(entityId2).Read(EvoAddV2Arch.Comp);
             Assert.That(fresh.A, Is.EqualTo(100));
             Assert.That(fresh.C, Is.EqualTo(200));
             Assert.That(fresh.B, Is.EqualTo(3.0f));

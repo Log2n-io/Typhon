@@ -112,12 +112,12 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         var entity = t.Open(id);
         Assert.That(entity.IsValid, Is.True);
 
-        ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+        var readPos = entity.Read(EcsUnit.Position);
         Assert.That(readPos.X, Is.EqualTo(10f));
         Assert.That(readPos.Y, Is.EqualTo(20f));
         Assert.That(readPos.Z, Is.EqualTo(30f));
 
-        ref readonly var readVel = ref entity.Read(EcsUnit.Velocity);
+        var readVel = entity.Read(EcsUnit.Velocity);
         Assert.That(readVel.Dx, Is.EqualTo(1f));
     }
 
@@ -141,11 +141,11 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         var entity = t.Open(id);
 
         // Inherited components (from EcsUnit)
-        ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+        var readPos = entity.Read(EcsUnit.Position);
         Assert.That(readPos.X, Is.EqualTo(1f));
 
         // Own component
-        ref readonly var readHp = ref entity.Read(EcsSoldier.Health);
+        var readHp = entity.Read(EcsSoldier.Health);
         Assert.That(readHp.Current, Is.EqualTo(100));
         Assert.That(readHp.Max, Is.EqualTo(100));
     }
@@ -161,13 +161,14 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         var id = t.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
 
         var entity = t.OpenMut(id);
-        ref var writePos = ref entity.Write(EcsUnit.Position);
+        var writePos = entity.Read(EcsUnit.Position);
         writePos.X = 999;
         writePos.Y = 888;
+        entity.Set(EcsUnit.Position, writePos);
 
         // Re-open and verify write persisted
         var entity2 = t.Open(id);
-        ref readonly var readPos = ref entity2.Read(EcsUnit.Position);
+        var readPos = entity2.Read(EcsUnit.Position);
         Assert.That(readPos.X, Is.EqualTo(999f));
         Assert.That(readPos.Y, Is.EqualTo(888f));
     }
@@ -269,7 +270,7 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         for (int i = 0; i < 100; i++)
         {
             var entity = t.Open(ids[i]);
-            ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+            var readPos = entity.Read(EcsUnit.Position);
             Assert.That(readPos.X, Is.EqualTo(1f));
         }
 
@@ -324,7 +325,7 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
         for (int i = 0; i < 20; i++)
         {
             var entity = t2.Open(ids[i]);
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
+            var pos = entity.Read(EcsUnit.Position);
             Assert.That(pos.X, Is.EqualTo(10f));
         }
     }
@@ -430,10 +431,11 @@ class EntitySpawnTests : TestBase<EntitySpawnTests>
 
         using (var t = dbe.CreateQuickTransaction())
         {
-            var mut = EcsUnit.ReadWriteAll(t, id);
-            mut.Position.X = 999;
-            mut.Position.Y = 888;
-            mut.Velocity.Dx = 42;
+            var values = EcsUnit.ReadAll(t, id);
+            values.Position.X = 999;
+            values.Position.Y = 888;
+            values.Velocity.Dx = 42;
+            EcsUnit.WriteAll(t, id, values);
             t.Commit();
         }
 

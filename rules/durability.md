@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-08-02 |
+| Last Updated | 2026-10-07 |
 | Domain | WAL, Checkpoint, Crash Recovery, Page Safety, Versioned HEAD Reopen |
 
 > Type-location notes (post-#329 layout): WAL/Checkpoint/Recovery internals live in
@@ -196,14 +196,78 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   scope: `Transaction.PublishComponent` / `PublishClusterVersionedSlot` (component publish); `FlushEcsPendingOperations` /
          `FinalizeSpawns` (spawn publish)
   status: **PARTIAL.** Component publish is non-throwing — the revision handle is reconstructed in publish from coordinates
-          captured in PREPARE (no locking `GetRevisionElement` walk), and the publish acts are field writes + memcpy; the publish
-          drain releases each retained lock exactly once via a drain cursor. **RESIDUAL:** the spawn publish (`FinalizeSpawns`)
+          captured in PREPARE, re-checked under the chain lock taken with an UNBOUNDED wait (AP-05), and the publish acts are
+          field writes + memcpy; the publish drain releases each retained lock exactly once via a drain cursor. The wait cannot
+          deadlock, but it is not bounded either: readers walking a chain with a pending entry hold the lock shared, and
+          AccessControlSmall gives a waiting writer no preference. **RESIDUAL:** the spawn publish (`FinalizeSpawns`)
           can still throw on allocation (cluster `ClaimSlot` grow, EntityMap `InsertNew` grow, index B+Tree node alloc under
           page-cache backpressure). Full closure is P2-entangled — the clean sentinel-`BornTSN` flip is blocked for cluster by
           the SoA occupancy-based iteration (it would leak prepared, not-yet-published spawns to bulk SoA scans), so eliminating
           spawn-publish throws requires pre-growing all spawn segments before Append and/or unbounded-watchdog insert locks.
           Tracked: **#396** (to be done with the P2 cluster-durability rework)
   on_violation: partial publish with no compensation (TXW-8 class)
+
+### AP-04: Every byte a publish writes is owed to the disk `[fatal]` `[silent]`
+  invariant ∀ page p a commit writes through its cluster accessor — in PUBLISH the Versioned HEAD copy into the cluster slot and a
+            Commit-discipline staged value, in PREPARE an AllowMultiple element id: after the write, p owes a writeback
+            (WritebackGen ≠ CapturedGen) until a durable write discharges it
+  invariant the commit's cluster accessor carries the transaction's ChangeSet, like its index accessors
+  note a dirty write through an accessor WITHOUT a ChangeSet owes nothing, and that is by design for the in-place SingleVersion writes made
+       through the transaction's own cluster accessor: their durability is the tick fence's (cluster-page-durability.md). Making every such
+       write owe its page at write time was tried and rejected — the page is then collected while the writer still holds it, and checkpoint
+       cycles gate on it (CommittedDisciplineRecoveryTests turned red). The publish is different: it runs after the append, as the last act
+       of a commit nothing else will make durable
+  rationale: the cluster accessor had no ChangeSet, so marking a slot dirty only toggled ActiveChunkWriters. The page owed nothing: no
+             checkpoint and no close wrote it, the cache could evict it and reload the old bytes, and the fence does not help — it
+             stopped emitting Versioned slots in #559. A clean reopen then trusted the stale HEAD (CS-03): Path-B scans and bulk
+             iteration returned the old value while point reads, which walk the chain, returned the new one (#1159)
+  scope: Transaction.EnsureClusterCommitAccessors, Transaction.PublishClusterVersionedSlot, Transaction.PublishStagedEntry
+  on_violation: a committed update vanishes from the cluster slot across a clean reopen or an eviction — silently, while the revision
+                chain and the index keep the new value
+  verified: VersionedPublishDurabilityTests.AVersionedUpdate_OnACleanPage_IsWrittenAndSurvivesACleanReopen [VerifiesRule];
+            mutant VersionedPublishDurabilityTests.APublishThroughAnAccessorWithoutAChangeSet_LeavesThePageClean [RuleMutant]
+
+### AP-05: A publish stamps the entry it prepared, wherever it now is `[fatal]` `[silent]`
+  invariant the publication acts on a revision chain — TSN stamp + IsolationFlag clear, LastCommitRevisionIndex, CommitSequence —
+            run under the chain's exclusive lock: the one PREPARE retained (conflict-handler path), else one PUBLISH takes with an
+            unbounded wait (so AP-03 still holds — no bounded timeout, nothing to throw)
+  invariant under a lock retained from PREPARE no compaction can have run, and the recorded coordinates are exact. Otherwise they
+            are used only while they still name this transaction's pending entry (isolated, and its content chunk — or, for a
+            delete, no chunk and its TSN); else the entry is found again by that identity, under the same lock. A root-chunk slot
+            can be checked in place: a compaction rewrites the root chunk whole and zeroes what it vacates. An overflow chunk's
+            coordinates are never trusted: compaction may have freed and reissued the chunk with a stale copy of the entry in it
+  invariant an entry that cannot be found is not published at all — no stamp, no LCRI, no CommitSequence, no cluster copy —
+            and the loss is logged (DatabaseEngine.LogPublishEntryNotFound). Compaction keeps isolated entries, so only an unlocked
+            writer elsewhere can cause it (#1161); stamping the recorded slot anyway would publish another transaction's entry
+  rationale: without a handler PREPARE holds no chain lock, and a deferred cleanup on another thread could compact the chain
+             between PREPARE and PUBLISH — CleanUpUnusedEntriesCore rewrites every kept entry from index 0, the pending one
+             included. The publish stamped the recorded position: it committed whatever had moved there (often the previous
+             revision, re-stamped with the new TSN) and left its own entry isolated forever. The commit returned success and no
+             reader ever saw it; under last-writer-wins the next read-modify-write built on the old value. Measured before the fix:
+             ~1 read in 200 stale at 4 threads. A stamp landing in a reissued overflow chunk that had become another chain's root
+             overwrote that chain's header (its indexes and item count), seen as lock timeouts on that chain (#1158)
+  scope: Transaction.PublishComponent, Transaction.IsThisTransactionsPendingEntry, ComponentRevisionManager.CleanUpUnusedEntriesCore,
+         ComponentRevisionManager.FindRevisionIndexByChunkId
+  on_violation: a committed revision is invisible to every later reader, silently — lost updates, and corrupted neighbouring
+                chain state when the stale position belongs to a reissued chunk
+  verified: VersionedPublishCompactionRaceTests: ACompactionBetweenPrepareAndPublish_LeavesTheCommitVisible (overflow chunk),
+            ..._InTheRootChunk_LeavesTheCommitVisible, ..._OfADestroy_LeavesTheEntityGone (the race staged on one thread through
+            DatabaseEngine.PublishComponentProbe; each also checks no entry stays isolated, LCRI and CommitSequence) [VerifiesRule];
+            mutant APublishThatTrustsItsPrepareCoordinates_LosesTheCommit, root and overflow [RuleMutant];
+            SerializedReadModifyWrites_AcrossThreads_AlwaysSeeThePreviousCommit (the shape found)
+
+### AP-06: The cluster slot holds the newest committed revision `[fatal]` `[silent]`
+  invariant a publish copies its value into the entity's cluster slot only under the chain's exclusive lock (AP-05), and only when
+            its revision is the newest committed one: its index ≥ the chain's LastCommitRevisionIndex before its own stamp
+  invariant so two publishes of one entity never copy concurrently, and the slot never moves back to an older revision
+  rationale: two transactions may update one entity concurrently — without a handler each prepares its own revision — and their
+             appends need not finish in revision order. The copy ran after the lock was released, unconditionally: the older
+             revision publishing last overwrote the newer, so point reads, which walk the chain, saw the newer value while bulk
+             iteration and Path-B scans, which read the slot, saw the older; a clean close then persisted the slot (CS-03)
+  scope: Transaction.PublishComponent, Transaction.PublishClusterVersionedSlot
+  on_violation: the cluster slot silently disagrees with the chain's HEAD until the entity's next commit
+  verified: VersionedPublishOrderTests.TwoUpdatesPublishedOutOfOrder_LeaveTheNewerValueInTheClusterSlot (the older publish held
+            after its append while the newer one commits) [VerifiesRule]
 
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths
@@ -328,6 +392,8 @@ CK-08 (flush-only cycles) are later increments.
             overwritten
   post: at open, ∃ ≥1 CRC-valid slot per protected page; selection = highest valid `PairGeneration`; both-invalid → open
         fails loudly (never a silent fallback)
+  invariant every directory page of a segment has a twin — the map page a directory needs only for its terminator, when its
+            entries end at a page's end, included — and the open walk registers the current slot of every page in the chain
   scope: META PAIR (C1): `ManagedPagedMMF.PersistMetaNow` (write: alternate slot + gen + CRC + fsync + flip), `LoadMeta` (read:
          both slots, pick highest valid gen), `MapReadOffset` (page 0 → current slot), `IsExternallyPersisted` (meta pair excluded
          from the checkpoint dirty-write). DIRECTORY TWINS (C2): `PersistProtectedPage` (the atomic write protocol under `_pairLock`,
@@ -344,7 +410,8 @@ CK-08 (flush-only cycles) are later increments.
                 on delete → silent mis-route of a reallocated page (STO-4)
   verified: MetaPairTests (meta) + DirectoryPairTests (directory): AlternatesSlots_GenerationMonotonic,
             TornCurrentSlot_ReopenSelectsSibling, BothSlotsCorrupt_OpenFailsLoudly, MultiExtensionSegment_RoundTripsReopen,
-            RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10) + falsification.
+            RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10),
+            ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot (#1206) + falsification.
             MetaPairStructuralFlushTests — the SOLE-WRITER property: after a full engine lifecycle both slots verify,
             their generations are consecutive, and shutdown writes strictly alternate. That is the property the
             violation below broke, and no earlier test covered it: every one above checks the pair's READ selection or
@@ -362,6 +429,14 @@ CK-08 (flush-only cycles) are later increments.
         integrity scanner on its first run against a HEALTHY database — nothing inside the engine could observe it,
         which is the argument for the scanner made by the scanner. Fixed by extending `SavePages`'s existing CK-05
         partition to skip externally-persisted pages entirely. Regression: `MetaPairStructuralFlushTests`.
+  note 🔴 VIOLATION FOUND + FIXED 2026-10-07 (#1206, found by #1205): a directory whose entries ended exactly at a page's end got its
+        terminator on a fresh map page with no twin, and `ResolveDirectoryPairsForLoad` stopped at the first page without
+        one — every later directory page went unregistered and was read from its PRIMARY slot, whatever its current slot.
+        A page persisted an even number of times holds its latest bytes in its twin, so the segment reopened short, at an
+        earlier terminator. Latent while every grow rewrote every directory page (both slots stayed within one grow of each
+        other); exposed when grows started writing only the pages they change: a 200M-entry entity map reopened 800 000
+        pages short, caught by the chain↔directory cross-check at load. Fixed: the terminator-only page gets its twin, so
+        every page the walk meets is paired.
   note: the durability watermarks (CheckpointLSN + CleanShutdown) are packed in `BK_DurabilityWatermarks` and flip atomically
         with the meta generation — the generation bump is the cycle's atomic commit point (M12). `BK_LastTickFenceLSN`
         consolidation is deferred (fence-as-records, M5).
@@ -388,7 +463,7 @@ CK-08 (flush-only cycles) are later increments.
             (the post-flush `DurableLsn` taken before capture), never beyond
   requires: AP-01, WP-16
   scope: `CheckpointManager.RunCheckpointCycle` — step-1 barrier (`RequestFlush` + `WaitForDurable(LastPublishedLsn)` →
-         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each pass's `FlushToDisk`
+         `barrierLsn`); step-3 flush2 (`RequestFlush` + `WaitForDurable(LastPublishedLsn)`) before each batch's `FlushToDisk` (`SettleBatch`)
   note the target was `LastAppendedLsn` until #937. The published frontier is not a weakening: AP-01 orders a commit's
        page effects strictly after its append returns, so a page captured now can only reflect records already published.
        What it drops is the unreachable part of the old target — LSNs allocated to claims that produced no frame, which
@@ -437,8 +512,9 @@ CK-08 (flush-only cycles) are later increments.
             live pages. The persisted `ArchetypeR1` / `ComponentR1` segment pointers are now walked in addition, so `owned`
             is a function of the file alone. A reconstruction that cannot read a pointer it knows exists is PARTIAL and MUST
             NOT be adopted — `RederiveOccupancyOnCrash` refuses rather than freeing pages it merely failed to attribute.
-            The heal is also skipped entirely when the previous shutdown was clean: `WalFilesPresentAtOpen` means "WAL
-            segments exist on disk", which a clean shutdown does not preclude, so it alone does not establish a crash.
+            The heal runs only after an unclean close: it is gated on `CrashRecoveryAtOpen` (WAL segments on disk AND the clean
+            flag unset at open, CS-06). It used to be gated on "WAL segments exist on disk", which a clean close does not
+            preclude, and its own clean-shutdown guard read the on-disk flag after CS-02 had cleared it, so it never fired.
             The persisted L0 words are overwritten with `owned`
             (`BitmapL3.OverwriteFromDerived`) and the L1/L2 skip summaries recomputed — a full replacement, NOT a read-then-diff,
             so a CRC-torn occupancy page is healed by replacement (the FPI substitute) and any page a torn checkpoint leaked
@@ -449,7 +525,7 @@ CK-08 (flush-only cycles) are later increments.
           simply re-derives (idempotent — `owned` depends only on persisted segment directories)
   scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap`,
          `ManagedPagedMMF.RederiveOccupancy`, `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on
-         `WalFilesPresentAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
+         `CrashRecoveryAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
   on_violation: a torn / stale occupancy page survives recovery → a clear bit over a live page double-allocates it (data
                 corruption), or a stale set bit leaks the page forever
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
@@ -622,6 +698,52 @@ CK-08 (flush-only cycles) are later increments.
         and the frame's publish, and by -mutant-floorafterframe. No test reaches read-after-barrier-before-collect, because the verifiers hold the
         commit across the whole cycle; the S3 mutants cover it. Withdraw-after-the-last-page-effect is pinned by the hold just before the staged
         writes' publish; -mutant-withdrawearly pins only withdraw-after-publish, since S3's publish is one step
+
+### CK-14: A checkpoint never waits for a cache slot only its own writes can free `[fatal]`
+  invariant a step of a cycle that loads a page into the cache runs after the cycle has written the pages the cache owes, whenever the cache
+            owes enough that no other slot may be free: CheckpointManager.WriteAheadOfTheHook writes them before PersistDurableMetadataHook
+            once the writeback debt reaches the dirty-page trigger's threshold, capped at 50 % of the cache
+  invariant that early write keeps CK-02 (the WAL is durable through what the copies can reflect before the data fsync) and CP-03 (a page is
+            settled only after it), and does not move CheckpointLSN: the hook's records still precede the cycle's own barrier and advance
+  scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
+         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState
+  on_violation: the checkpoint is the only thing that turns owed slots into free ones. When a step of its own cycle waits for a free slot while every
+                slot is owed, it waits for itself until the back-pressure timeout: the cycle ends Degraded and every writer waiting behind it times out
+                too. Measured (#1184): MarketHardeningTests, a 0.76 GiB file over a 256 MiB cache, 16 threads. PersistArchetypeState, which writes
+                every cycle while entities are being created, waited in AllocateMemoryPageCore for the archetype table's evicted page (stack captured
+                twice); the storm died at 36 639 operations on main
+  verified: CheckpointManagerTests.HookLoadingAPage_OnAFullyOwedCache_DoesNotWait [VerifiesRule] — every slot owes a write, the loop is not
+            running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
+
+### CK-15: A checkpoint pass frees pages while it writes `[correctness]`
+  invariant a pass is written in batches — at most WriteBatchMaxPages pages, or WriteBatchMaxTicks (100 ms) of writing — and each batch is settled
+            before the next is written: WAL flushed through LastPublishedLsn (CK-02), data fsync, every written page's captured generation published
+            (CP-03). So the cache owes less after each batch's fsync, and a writer back-pressure holds waits for one batch, not for the whole pass
+  invariant the plain pages of a batch are written in waves of up to WriteWorkers disjoint ranges at once — the first by the checkpoint thread, the
+            others by its dedicated wave writers, never the thread pool, whose threads may be the very writers the cache holds back. A failure surfaces
+            unwrapped, a fatal one before any transient one, so CK-06 classifies the cycle by the worst fault and never by which writer threw first
+  invariant with a PageWriteInterceptor installed (crash simulation) the waves run one after the other on the checkpoint thread, so a simulated crash
+            at write k leaves nothing written after it
+  scope: CheckpointManager.WriteDirtyPages, CheckpointManager.SettleBatch, CheckpointManager.WriteWave
+  on_violation: settled only at its end, a pass under a write storm wrote the whole cache before freeing one page — 8 GiB at ~22k pages/s — and
+                every writer waiting for a slot timed out after 5 s with 1,046,917 of 1,048,576 pages owed (MarketHardeningTests, 75M items over an 8 GiB
+                cache). Batched, the same storm over a 1.3 GiB cache had the debt at 99.7 % of the cache and its longest wait at 77 ms
+  verified: CheckpointBatchSettleTests [VerifiesRule] — the cache's debt falls between successive fsyncs of one forced cycle written in parallel waves
+            ([RuleMutant]: one batch for the whole pass keeps it flat); an intercepted pass writes no parallel wave; pages written by parallel waves read
+            back, checksums verified, after a reopen
+
+### CK-16: A checkpoint wave writes one kind of page `[fatal]` `[silent]`
+  invariant a pass is ordered protected directory pages first, then by file page (PagedMMF.OrderForCheckpointWrite), and each wave writes one kind:
+            the protected pages that lead the pass, on the checkpoint thread alone, or plain pages, in parallel. A page whose kind changed after the order
+            was taken is left owed for the next pass, which orders it again (CheckpointWriteFilter)
+  invariant so a protected page's persist, whose fsync is file-wide, never runs beside or after a plain write its batch has not settled: it can only
+            make durable what an earlier batch already flushed the WAL for (CK-02)
+  scope: PagedMMF.OrderForCheckpointWrite, PagedMMF.WritePagesForCheckpoint, CheckpointManager.WriteDirtyPages
+  on_violation: a commit published after the cycle's barrier reaches the data file while its WAL record is still in the ring buffer — a partial write
+                of a transaction that may never become durable, which Typhon cannot undo (#585). Hoisting protected pages inside each write call stopped
+                being enough once a pass became many calls on several threads
+  verified: CheckpointProtectedPageOrderingTests [VerifiesRule] — a pass is ordered protected first and then by file page, and a plain wave given the
+            whole pass leaves every protected page owed and persists none ([RuleMutant]: a wave writing every kind is reported)
 
 ---
 
@@ -1379,11 +1501,27 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
          CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle,
          ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
-         ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange
+         ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
+         DatabaseEngine.DrainClusterShadowSlots, EntityRefMut.WriteRef, EntityAccessor.NoteSvInPlacePageWrite, PagedMMF.MemPageIndexOf,
+         DatabaseEngine.MarkClusterSlotDirty, ArchetypeClusterState.RebuildIndexesFromData
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
             page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed);
-            PageSlotRecordTests.ACaptureLandingAfterTheSlotWasReused_LeavesItsNextPageClean [VerifiesRule] (fails with the reset to 0 restored)
-  note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty) and WriteSpatial. They record the page at the
+            PageSlotRecordTests.ACaptureLandingAfterTheSlotWasReused_LeavesItsNextPageClean [VerifiesRule] (fails with the reset to 0 restored);
+            PrepSliceEquivalenceTests.AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage [VerifiesRule] (a checkpoint settles the writes' own
+            records, then every evictable page goes between Prep and Migrate; fails 5 of 5 with the drain's page record removed);
+            InPlaceClusterWriteSurvivalTests.CommittedPointWritesSurviveEviction [VerifiesRule] (both Set overloads; 400 of 400 committed point writes
+            revert with the write's page record removed, and the by-type case fails with only its own record removed)
+  note a SingleVersion point write (EntityRefMut.Set, through WriteRef) records its page at the call (#1172), by address with no page lookup
+       (MemPageIndexOf), since it runs once per written component. Before #1172 nothing recorded it: a committed value reverted whenever the cache evicted
+       the page before the next fence. Since #1199 the store happens in the same call, right after the record, through a base the handle re-resolves
+       (mapped dirty again) if its accessor had let go of the page — so a checkpoint can no longer copy the page between the record and the store. That
+       window was #1176: a store through a ref held across an archetype switch, or 31 other pages, landed after a checkpoint had settled the page
+  note the fence's shadow drain writes an AllowMultiple field's new element id into the cluster tail through the slice's accessor, which holds no
+       ChangeSet, and records the page at that write (#1171). The WAL emit's record comes later, at Finalize: in between, Migrate's own loads can evict a
+       page nothing marks, and the element id went with it — Migrate read the old id, its location update was dropped, and the index kept the entity at
+       the slot it had left
+  note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty, or by DatabaseEngine.MarkClusterSlotDirty),
+       WriteSpatial, and the index rebuild's element-id writes (RebuildIndexesFromData, once per cluster). They record the page at the
        write (MarkPageModified), and the fence's WAL emit records every cluster page it serialises besides — as writeback debt, not as a dirty mark in a
        ChangeSet, because the serial fence SAVES its own ChangeSet and would then write data pages outside the checkpoint's WAL barrier (CK-02). Before 2026-09-23 neither did: committed values reverted to the
        on-disk image whenever an unrelated allocation evicted the page (found by the push-replication oracle; seed 9160 reverted four creatures inside a
@@ -1463,7 +1601,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never write a page the published segment can reach (the root, an existing map page, the old tail) before every step that can throw has
         succeeded
   requires: PS-09 (the latch helper the pins go through), PS-05 (a grow's local ChangeSet is released on the throw too)
-  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
+  scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, ReleaseUnpublished,
          IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
          failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
          publishes), ChunkBasedSegment.GrowChunkCapacity
@@ -1480,8 +1618,53 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
         thrown; the pages then leak, which corrupts nothing since nothing references them.
   note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
-        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
-        (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity sets the new pages' room bits before `base.Grow`
+        and publishes only the capacity after it; nothing but a failed CreateOrGrow post-condition is known to throw there.
+
+### PS-12: A mem-page's address is computed in 64 bits, never in `int` `[fatal]` `[silent]`
+  invariant ∀ expression of the form `memPagesBaseAddr + (memPageIndex × PageSize)`: the product is
+            evaluated as `long` — `memPageIndex * (long)PageSize` — never as `int × int`
+  invariant an `int` product is exact only while `memPageIndex < 262 144` (2 GiB ÷ 8 KiB), so a narrow
+            product is a LATENT defect whose trigger is the configured cache size, not the code path
+  scope: PagedMMF.SavePages, PagedMMF.GetMemPageAddress, PagedMMF.WritePagesForCheckpoint,
+         ChunkAccessor.GetMemPageIndexFromSlot
+  rationale: the page cache is one contiguous native block addressed as `base + index × PageSize`.
+    `PageSize` is an `int` constant and `MemPageIndex` is an `int` field, so their product is an `int`
+    unless one side is widened — and the compiler gives no warning for it. Past 262 143 pages the product
+    wraps negative, and `byte* + int` sign-extends, so the pointer lands up to 2 GiB BELOW the cache base,
+    in memory the engine does not own.
+  on_violation: a wild-pointer WRITE, not a read. Both `SavePages` sites do `++headerAddr->ChangeRevision`
+    — a 4-byte read-modify-write at the foreign address — and then `StampPageForWrite` over 8 KiB of it.
+    An access violation if that page is unmapped; silent heap corruption if it is mapped. This is the
+    structural write path: bootstrap, schema write, segment grow, v1 replay.
+  verified: PageCacheAddressArithmeticTests.AMemPageOffsetPastTwoGibIsComputedIn64Bits [VerifiesRule] —
+            asserts the offset for `memPageIndex` 262 144 is 2 147 483 648, and that the narrow `int`
+            product it replaced wraps to −2 147 483 648, so the test fails if the widening is removed;
+            TheFirstPagePastTwoGib_IsAddressedAtItsSixtyFourBitOffset_ByTheIOWindows does the same for the disk
+            I/O path's window; LargePageCacheTests (nightly) writes and reads back pages past index 262 143 of a
+            real 3 GiB cache
+  note: the 2 GiB − 8 KiB cache-size ceiling is what kept this unreachable. It was fixed BEFORE the ceiling
+        went (#945: S1 here, the ceiling in S7), deliberately: until then the ceiling was the only thing
+        standing between this expression and live heap corruption.
+
+### PS-13: The page cache is one contiguous native block, and a page address maps back to its slot exactly `[fatal]` `[silent]`
+  invariant the cache is ONE allocation: slot i's page is at `MemPagesBaseAddress + i × PageSize`, for every i in [0, MemPagesCount)
+  invariant `MemPageIndexOfRawData(GetMemPageAddress(i) + PageHeaderSize, MemPagesBaseAddress) == i`, for every i: the reverse map is two
+            instructions of pointer arithmetic, with no search and no table
+  invariant the disk I/O path addresses the same bytes: each page's window slice (`PageCacheWindow.PageMemory`) starts at
+            `GetMemPageAddress(i)`, and a write run never leaves its window
+  scope: PagedMMF.MemPagesBaseAddress, PagedMMF.GetMemPageAddress, PagedMMF.MemPageIndexOfRawData, PagedMMF.AllocateCacheBlock,
+         ChunkAccessor.GetMemPageIndexFromSlot, PersistentStore.MemPagesBaseAddress, PageCacheWindow.PageMemory, PageCacheWindow.PageRunMemory
+  rationale: #945. The cache passed 2 GiB as one 64-bit block with 1 GiB windows for the two async I/O paths, rather than as several blocks,
+    because ChunkAccessor recovers a page's slot from its address on every first write, commit, latch and unlatch of a B+Tree page. Split
+    into blocks, that map needs a search (20-30× slower) or a per-accessor index table (+128 B on the hottest struct). This rule writes the
+    design's load-bearing assumption down, so that "just split it into blocks" fails a rule instead of corrupting accounting silently.
+  on_violation: a wrong slot index on the write path: the dirty counter, the active-writer count and the seqlock counter of ANOTHER page
+    move (PS-05, CP-13, SL-*), so a page is evicted while written, or written out half-modified, or its checkpoint skipped. Nothing fails at
+    the faulty line; the damage surfaces later as a torn page or a lost write.
+  verified: PageCacheContiguityTests.EveryPage_MapsBackToItsSlot_AndTheIOWindowsAgreeOnItsAddress [VerifiesRule] (every slot of a real cache;
+            eight windows under the small-window nightly); LargePageCacheTests.AThreeGibCache_WritesAndReadsBackPagesPastTheOldBoundary
+            checks the map at a slot past index 262 143 of a real 3 GiB cache (nightly)
 
 ### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
   invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is ready (PS-15)
@@ -1523,6 +1706,10 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             out of `Allocating`, under `StateSyncRoot`. The tag (a full-fence CAS, or an acquire read when no CAS is needed) pairs with
             `TryAcquire`, which withdraws `SlotReady` and fences BEFORE re-checking the epoch, and restores it when it backs off: of a reclaim and
             a tag that race, at least one sees the other, so the reclaim backs off or the requester retries — never a slot being reclaimed
+  invariant `TryAcquire` writes `SlotReady`, and drops a completed read task, only on a slot its lock finds `Free` or `Idle`. A slot
+            another thread claimed after the reclaim's unlocked first pass is `Allocating`, and its owner sets `SlotReady` without that lock:
+            the reclaim backs off without touching it, since a restore of the value it read before the owner's write would erase that write,
+            and the slot's read is for its requesters to complete (#1201)
   invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
             replacement
   invariant an owner that throws before the slot is prepared unpublishes it first — a waiter sees it no longer holds X and looks the page
@@ -1537,10 +1724,14 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
          PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, PagedMMF.CompletePendingRead, PagedMMF.WaitForPendingRead,
          PagedMMF.DropReadTask, SlotReady, ReadPending
+  requires: PS-17 — the directory publishes one slot per page, and its lookups are hints the requester validates
   rationale: a miss publishes its slot so that concurrent misses on the same page converge on one slot, and the slot is published before
     the read because the read's target must be decided by the thread that owns it. Between the two, the slot's bytes are its previous
     occupant's (or undefined), its CRC flag may be the previous occupant's `true`, and a new page has no read task to wait on.
-  on_violation: (1) a requester uses the page before its read lands — on `main` it silently got zeros (a stored CRC of 0 skips
+  on_violation: (3) a reclaim backing off a slot claimed since its first pass restores a stale `false` over its owner's `SlotReady`: the
+    page stays published and never ready, and every requester that comes after throws `PageCache/SlotReady` after the lock timeout — for
+    the rest of the process if the slot is still `Allocating`, which nothing reclaims (#1201: `EntityHandleLifetimeTests`, a 4 MiB cache
+    read by two threads, about 1 run in 4). (1) a requester uses the page before its read lands — on `main` it silently got zeros (a stored CRC of 0 skips
     verification): `PrepSliceEquivalenceTests` under 6 concurrent processes failed 22 of 60 with 2 001 index entries missing; with the test
     poison it is a CRC failure on 0xA5 bytes, or a lock word that looks held (a 10 s `SegmentAllocation/LockBuffer` timeout); (2) the loser's
     second read overwrites the winner's slot after a writer changed it — a lost write, a seqlock counter left odd, a false CRC failure
@@ -1548,7 +1739,10 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             between publishing and preparing; a second requester must still be waiting, then see the disk content),
             TheLoserOfAConcurrentMiss_LeavesTheWinnersSlotAlone (a loser held before publishing must not overwrite a write made after the
             winner's read, and the page is read once), AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck and
-            AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128). Contended:
+            AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128).
+            AReclaimThatBacksOffAClaimedSlot_LeavesItsOwnersReadyAlone holds a reclaim between its first pass and its lock while another
+            requester claims, publishes and prepares the slot; with the withdraw-and-restore on an Allocating slot, the reclaimer then waits
+            on a page never marked ready and times out, 3 runs of 3 (#1201). Contended:
             `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of 60 with this rule held. Two
             parts have no deterministic test and are argued above: the reclaim/tag pairing (covered by that stress run), and the owner waiting
             for its started read before freeing the slot (a real file read cannot be held in flight)
@@ -1585,6 +1779,89 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             Collecting_VisitsOnlyTheOwedSlots_AndFindsWhatAFullScanFinds counts 3 slot visits and 4 words on a 256-slot cache and matches a
             scan of every slot. Not staged: two discharges crossing (the source of stale bits) — its outcome, a bit with no debt, is staged
             directly instead
+
+### PS-17: The page directory publishes at most one slot per file page, and a lookup is only a hint `[fatal]` `[silent]`
+  invariant at most one slot is published for a file page: `GetOrAdd` links a slot under its bucket's lock only if no slot in the chain
+            holds the page, and otherwise returns that slot, which the caller takes untouched (PS-15)
+  invariant a slot's key — its own FilePageIndex — changes only while the slot is in no chain: its owner writes it just before `GetOrAdd`,
+            and it is reset only after `TryRemove`. So under a bucket's lock every key in its chain is stable
+  invariant `TryRemove(X, S)` unlinks S and nothing else, and leaves S's own link intact, so a reader paused on S finishes its walk down
+            the rest of the old chain
+  invariant `TryGet(X)` returns a slot only after reading that slot's key equal to X, and the caller validates the slot after tagging it
+            (PS-15): a lookup is a hint. "Absent" is exact: an empty bucket read with acquire, or a chain walked under the bucket's lock. A
+            walk that followed links without the lock never answers "absent" by itself
+  invariant no managed reference per entry: the buckets are one native block, and the chains run through the slot records
+            (`DirectoryNext`)
+  scope: PageDirectory.TryGet, PageDirectory.GetOrAdd, PageDirectory.TryRemove, PagedMMF.AllocateMemoryPageCore, PagedMMF.TryAcquire,
+         PagedMMF.AbandonUnpreparedSlot, DirectoryNext
+  rationale: #1136. The directory was a ConcurrentDictionary: one managed node per resident page, 67 M at #945's 512 GiB target for every
+    gen-2 collection to mark. Chaining through the slot records needs no node, no tombstone and no rehash, and a hit reads the bucket and
+    then the slot record it was about to read anyway. Its one subtlety is that a slot moves between chains when it is reused: a lock-free
+    reader paused on it would follow the slot into its new chain and miss the page it was looking for.
+  on_violation: (1) two slots published for one page: two copies of it diverge, and the one written last to disk wins — a lost write;
+    (2) another slot's mapping removed: a resident page becomes unreachable and a second copy is loaded beside it; (3) "absent" for a
+    resident page: its requester evicts a page for nothing and, with the cache exhausted, can time out on back-pressure for a page it
+    already has. None of them reports itself.
+  verified: PageDirectoryTests [VerifiesRule]: ConcurrentMissesOnOnePage_ConvergeOnOneSlot (8 threads × 300 pages, one winner each),
+            AReaderPausedOnANodeThatMovesToAnotherChain_StillFindsThePage (a probe reclaims the node and publishes it in another bucket
+            between the reader's key read and its link read; fails without the locked confirmation) and
+            AReaderChasingReusedNodes_Ends_AndFindsThePage (two nodes moved to the chain's head forever: the step bound ends the walk).
+            APublishedPage_IsAlwaysFound_WhileOtherSlotsChurnThroughItsChain (two threads churn slots through its bucket while two read;
+            fails, unstaged, without the locked confirmation). EveryPublishedPage_IsFound_AndRemovingOneSlot_UnpublishesOnlyIt fails
+            with a remove that ignores the slot (#1136)
+
+### PS-18: A chunk id names exactly one place in its segment `[fatal]` `[silent]`
+  invariant ∀ chunk id c < ChunkCapacity: GetChunkLocation(c) = (⌊(c − root) / d⌋ + 1, (c − root) mod d) with d the chunks per page and root the
+            root page's chunk count — exact division for every 32-bit id, so the offset lies in [0, d)
+  invariant ChunkCapacity = root + (pages − 1) · d ≤ MaxChunkCount (int.MaxValue − 1): a grow is clamped there, and an allocation that finds the
+            segment at the cap throws ResourceExhausted — the capacity never overflows an int
+  invariant growth costs the pages it adds: the page list keeps spare room (copied only when it runs out, doubling), the allocator's room bits live in
+            blocks that are added, never copied, and a grow pins, latches and re-verifies only the directory pages it writes (LogicalSegment: from the
+            one holding the old terminator on)
+  invariant the allocator's room bits are a superset of the truth: a page with a free chunk has its bit set. A free clears its chunk bit, then sets the
+            page's; an allocation that finds a page full clears the page's bit, then reads the page again and sets the bit back if a chunk was freed in
+            between — interlocked on both sides, so whichever runs second sees the other. An allocation that found no room grows the segment only if no
+            room or summary bit went from clear to set during its search (a set-back counts) and no clear is in flight; a free chunk above the
+            allocation floor is never grown past
+  invariant an allocation returns an id below the capacity published when its search began: it searches the pages that capacity covers, never the
+            page count — a grow publishes its pages, room bits set, before their capacity
+  scope: ChunkBasedSegment.GetChunkLocation, ChunkPageDivider, ChunkBasedSegment.ComputeCapacity, ChunkBasedSegment.GrowChunkCapacity,
+         ChunkBasedSegment.AllocateChunkInternal, ChunkBasedSegment.PagesCovering,
+         ChunkBasedSegment.TryAllocateOnPage, ChunkBasedSegment.MarkRoom, ChunkBasedSegment.NextPageWithRoom, ChunkBasedSegment.FreeChunk,
+         LogicalSegment.Grow, LogicalSegment.CreateOrGrow, LogicalSegment.VerifyDirectoryFrom
+  on_violation: the 32-bit magic multiplier it replaced (⌈2³²/d⌉, (c · m) ≫ 32) was exact only while c · (m · d − 2³²) < 2³²: past that, ids of
+                remainder d − 1 resolved to the next page at offset −1 — one stride before its chunk area, inside its header — and every read and
+                write of them landed there, silently: from chunk 6 100 999 at an 8-byte stride, 54 366 749 for revision chains (#1204). A grow that
+                copied the page list and re-read the whole directory each step was O(segment) per grow, quadratic over a segment's life (#1205). The
+                lock-free free list the room bits replaced lost pages to races by design, and under an allocation floor a lost page was grown past
+                for good; patching it took a loss counter, then a count for the rebuild's own race, and review still found two more (#1205)
+  verified: ChunkAddressingTests [VerifiesRule] — the divider against / for every chunks-per-page count from 1 to 4 000, at the ids the old multiplier
+            got wrong, at the top of the range and at random; a 6 200-page stride-8 segment locates chunk 6 100 999 on page 6 101 at offset 999, where
+            the old division read page 6 102 offset −1; the capacity stops at the chunk-id space at every geometry. SegmentGrowthTests [VerifiesRule]
+            — a segment grown to exact lengths across four directory pages, persisted at each, keeps its directory and its chain and reopens to the
+            same page list; a one-page grow of a three-page directory touches neither the root nor the first extension; a directory whose chain
+            ends early is refused at load. ChunkBasedSegmentBitmapL3Tests — a free between "page full" and the room bit's clear is not lost; a free behind the search is
+            taken rather than grown past; a bulk free from a mid-word start keeps every chunk below it; an allocation while a grow is held between
+            publishing its pages and their capacity returns an id below the capacity it sees.
+            EntityMapAddressingTests — every free chunk above the floor is used before the segment grows, stale bits on full pages included
+
+### PS-19: Every slot reference is released exactly once `[correctness]`
+  invariant a ChunkAccessor takes a slot reference on each page it loads into a slot (LoadIntoSlot) and releases it when the slot is
+            evicted or the accessor disposed, so an accessor is never copied to be used: a copy loads into slots of its own, takes their
+            references and is dropped with them — accessors travel by ref (EntityAccessor.ResolveSpawnAwarePayload)
+  invariant a transaction's dispose releases every accessor it holds — its component accessors (FlushAccessors), its cluster cache
+            (DisposeClusterCache) and its entity-map accessor — on the read-only path too, and whether the pool takes the transaction
+            back or drops it: a pool reset recycles component entries without disposing them, and a dropped transaction is never reset
+  invariant so with no transaction or accessor alive, no page is slot-referenced — apart from the per-thread warm accessors, which keep their
+            slots between operations by design (ChunkBasedSegment.ReturnWarmAccessor): a bounded number per thread, never one per operation
+  scope: EntityAccessor.ResolveSpawnAwarePayload, Transaction.Dispose, ChunkAccessor.LoadIntoSlot, ChunkAccessor.Dispose
+  on_violation: the page can never be evicted again (PS-01), silently — no epoch, checkpoint or back-pressure round releases a slot
+                reference. Every read of a Versioned or non-cluster component went through a copy of the component accessor and leaked one;
+                read-only transactions never disposed their component accessors. A database six times its cache then had 94 % of the cache
+                slot-referenced after a snapshot read in short read-only transactions, and its next writers timed out on back-pressure
+                with only 12 % of the cache dirty (MarketHardeningTests, 75M items over 8 GiB)
+  verified: ReadOnlyTransactionSlotPinTests [VerifiesRule] — read-only and writing transactions, read-only and writing transactions dropped by a
+            full pool, and parallel read-only batches each leave no page slot-referenced once disposed ([RuleMutant]: a copied accessor is reported)
 
 ---
 
@@ -1720,9 +1997,12 @@ of the LSN value).
 
 ### CS-01: Clean-shutdown flag written strictly after data fsync `[fatal][silent]`
   pre PersistEngineState data fsync complete (every dirty cluster page with current HEADs is durable)
-  post MarkCleanShutdown: BK_CleanShutdown = 1 + its OWN fsync (never bundled with the data flush)
-  invariant runs only on graceful Dispose, after final checkpoint → PersistArchetypeState → PersistEngineState (CPO-06)
-  scope: DatabaseEngine.Dispose, DurabilityWatermarks.SetCleanShutdown, ManagedPagedMMF.PersistMetaNow
+  pre the chunk summary written and fsynced (CS-05) — it describes the data file as that flush left it
+  post MarkCleanShutdown: BK_CleanShutdown = 1 and the summary's nonce, in ONE meta flip with its OWN fsync (never bundled with
+       the data flush)
+  invariant runs only on graceful Dispose, after final checkpoint → PersistArchetypeState → PersistEngineState (CPO-06), and only
+            for an engine whose open completed (CS-04)
+  scope: DatabaseEngine.Dispose, DurabilityWatermarks.MarkCleanShutdown, ManagedPagedMMF.PersistMetaNow
   requires: CK-05 — the flag rides the meta-pair generation flip, so its durability is atomic and torn-slot
             detected. That is STRONGER than this rule originally claimed.
   note the bootstrap key `BK_CleanShutdown` this module used to name is DEAD — the const is declared and never
@@ -1732,9 +2012,10 @@ of the LSN value).
 
 ### CS-02: Clean-shutdown flag cleared on open before any mutation `[fatal][silent]`
   pre bootstrap loaded; flag value captured for the trust decision (ctor loading path)
-  post InitializeArchetypes: SetInt(BK_CleanShutdown, 0) + fsync, before the engine accepts any write
+  post the ctor's loading path (InitializeUowRegistry): flag cleared + fsync, before the engine accepts any write and before
+       registration can migrate a schema (#583) — after the chunk summary has been adopted (CS-05)
   invariant the clear is the authoritative dirtying step — a session that mutates then crashes leaves the flag = 0
-  scope: DatabaseEngine.InitializeArchetypes
+  scope: DatabaseEngine.InitializeUowRegistry, DurabilityWatermarks.BeginOpenAfterCleanClose
   on_violation: flag survives an unclean session → next open trusts stale HEADs
 
 ### CS-03: HEAD rebuild skipped iff the clean flag was set `[fatal]`
@@ -1742,7 +2023,123 @@ of the LSN value).
   invariant trusted ⇒ skip RebuildVersionedHeadFromChain (persisted cluster-slot HEADs are current)
   invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved)
   scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain
+  requires AP-04 — "the flag says clean, therefore the HEADs are current" holds only if every published HEAD owes its page a write;
+    before #1159 a Versioned update on a page nothing else had dirtied was never written, and this rule trusted it
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
+
+### CS-04: An open that did not complete closes as a crash `[fatal][silent]`
+  invariant an engine whose InitializeArchetypes threw is disposed as a crash would leave it: no PersistArchetypeState, no
+            PersistEngineState, no chunk summary, no MarkCleanShutdown, and no final checkpoint cycle (the checkpoint manager is
+            crash-stopped). CS-02 cleared the flag at open, so the next open recovers
+  invariant an open that follows a clean close (or an open that never completed after one) sets the failed-open marker in the same
+            meta flip that clears the clean flag (DurabilityWatermarks.BeginOpenAfterCleanClose), and only a completed
+            InitializeArchetypes clears it (ClearFailedOpen). An open that dies anywhere in between — constructor, InitializeArchetypes,
+            or killed — leaves it set, and the next open loads its segments without tolerating a torn one: the WAL holds nothing past
+            the clean close, so a segment that fails to load is damage to refuse, not a crash to refill (RB-01)
+  invariant DatabaseEngine.TolerateTornSegmentsAtOpen = CrashRecoveryAtOpen ∧ ¬clean flag at open ∧ ¬marker: a repair's forced
+            recovery open (CS-06) after a clean close refuses a damaged segment too, for the same reason
+  invariant a repeat InitializeArchetypes disarms the checkpoint's segment-pointer persistence until it completes
+  rationale: hosts (DI, DatabaseEngine.Open) dispose an engine whose initialization threw, and the dispose ran the full close: it
+             persisted the archetype table as far as the open had built it — an archetype whose cluster state was never built was
+             written with ClusterSegmentSPI = 0, orphaning every entity it held — and set the clean flag over it, so the next open
+             trusted all of it (#1147). Any exception in InitializeArchetypes did it: back-pressure, a schema error, an I/O fault.
+             The final checkpoint cycle could do the same through its segment-pointer hook. And closing as a crash alone was not
+             enough: the retry of an open that failed on a damaged segment replaced the segment with an empty one and opened. The
+             marker was first cleared at the start of the open and written again only by the close of an open that failed in
+             InitializeArchetypes, so a kill or a constructor failure erased it; and a forced repair open after a clean close
+             tolerated a torn segment, emptying it while the repair reported success
+  scope: DatabaseEngine.InitializeArchetypes, DatabaseEngine.DisposeCore, DatabaseEngine.TolerateTornSegmentsAtOpen,
+         DurabilityWatermarks.BeginOpenAfterCleanClose, DurabilityWatermarks.ClearFailedOpen
+  on_violation: silent loss of every entity of the archetypes the failed open had not reached, behind a clean flag; or, on the
+                retry, of every entity of a damaged segment
+  verified: HealthyOpenTests.AnOpenThatFailsHalfway_ClosesAsACrash_AndLosesNothing (fails the open between two archetypes through
+            DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsReplacedOnlyAfterACrash (the retry
+            of a failed open refuses; after a real crash the segment is replaced, ChunkSegmentsReplacedAsTorn = 1),
+            HealthyOpenTests.AnOpenKilledBeforeItCompletes_LeavesTheMarker_AndTheNextOpenRefusesADamagedSegment,
+            HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule]
+
+### CS-05: The chunk summary is trusted only after the close that wrote it `[fatal][silent]`
+  invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and page room bits, every
+            archetype's active-cluster list and free-cluster head — after PersistEngineState's data fsync, with a fresh random
+            nonce; the nonce reaches the data file in the same meta flip as the clean flag (CS-01). A close that cannot write the
+            file, for any reason, records nonce 0, which nothing matches. Clearing the flag clears the nonce in the same flip
+  invariant an open adopts the file iff the clean flag was set at open ∧ the nonces agree ∧ the header and payload CRC32C hold ∧
+            every entry is one a close can write (cluster ids ascending from 1, the head among them, no root twice); otherwise every
+            load scans. Each segment entry is used only when it fits the segment just loaded (same page count, count within
+            capacity), and a cluster list only together with its segment's own entry and within its allocated count and capacity
+  invariant nothing checks a summary's content against the pages: a summary that passes every guard above but is wrong — a bug in
+            the capture — is trusted. Deliberate: the chunk bitmaps stay authoritative for allocation, so a wrong count never reuses a
+            chunk; a page recorded with room it lacks is cleared by the first allocation to look at it (the bits are a superset).
+            What a wrong count still misleads is AllocatedChunkCount's readers, and the exposure the pages cannot catch is the
+            active-cluster list, which ASummaryLoadedOpen_HoldsTheStateAScanWould pins
+  invariant the summary is consumed by the open only and released when InitializeArchetypes ends, completed or not; the pages stay
+            the truth. Repair deletes the file once, after its backup and before its first offline write; a regeneration step's own
+            clean close then writes a fresh one, which describes the file as that close left it
+  rationale: the count and the free list were rebuilt by reading every page of every chunk segment, and the active-cluster list by
+             reading every cluster's occupancy word — most of the file on every open, each page pinned by a bare epoch tag, so a
+             segment larger than the cache deadlocked the open (#1143). The summary replaces those reads; the nonce and the flag make
+             a stale, copied-in or damaged file cost a scan, never a wrong count
+  scope: DatabaseEngine.WriteChunkSummary, DatabaseEngine.AdoptChunkSummary, DatabaseEngine.TakeClusterSummaryFor,
+         DurabilityWatermarks.MarkCleanShutdown, DurabilityWatermarks.BeginOpenAfterCleanClose, ChunkSummaryFile.Parse,
+         ChunkBasedSegment.Load, ChunkBasedSegment.AllocateChunkInternal,
+         ChunkBasedSegment.CaptureSummary, ArchetypeClusterState.CreateFromExisting, ArchetypeClusterState.CaptureClusterSummary,
+         DatabaseRepair.Repair
+  on_violation: a summary from another state of the file is trusted — allocated counts wrong, so the segment grows instead of
+                reusing its free chunks; clusters holding entities missing from the active list and so from every iteration
+  verified: HealthyOpenTests.ASummaryLoadedOpen_HoldsTheStateAScanWould, HealthyOpenTests.ASummaryThatDoesNotDescribeTheFile_IsNotUsed
+            (unclean close, a stale file whose counts really differ, damage, missing file),
+            HealthyOpenTests.AnEntryThatDoesNotFitItsSegment_IsScanned_AndItsClusterListIgnored,
+            ChunkSegmentSummaryLoadTests.ASummaryWithAShortCount_GrowsAFullSegment_InsteadOfSpinning [VerifiesRule];
+            ChunkSummaryFileTests (the format)
+
+### CS-06: Crash recovery runs iff the last close was unclean `[fatal]`
+  invariant CrashRecoveryAtOpen = WAL segments on disk ∧ ¬clean flag at open, and every crash-path gate reads it: RB-01's index
+            clear + rebuild and EntityMap rebuild, RecoverySuspect checksum mode, WAL replay, CK-09's occupancy re-derive. The
+            tolerate-torn segment loads read TolerateTornSegmentsAtOpen, which is the same flag minus a failed open (CS-04)
+  invariant repair forces it (DatabaseEngineOptions.ForceCrashRecoveryAtOpen) and then ignores the chunk summary: the rebuild net
+            is what regenerates derived structures, and it runs on the crash path only. OPEN (#1179): the force takes effect only
+            when WAL segments are on disk; on a bundle without any, the forced open rebuilds nothing
+  invariant the ctor's WAL scan still runs whenever segments exist: it reads the log, not the data file, and gives LOG-08 its
+            LSN frontier
+  rationale: the flag used to mean "WAL segment files exist", which a clean close leaves true, so every reopen of a database with
+             a disk WAL ran the whole recovery pipeline — replay, scrub, rebuilds, seal, re-derive — over a file CS-01 had already
+             made current (#1143). Repair-by-reopen silently relied on that
+  scope: DatabaseEngine.InitializeUowRegistry, DatabaseEngine.RunWalV2Recovery, DatabaseEngine.RederiveOccupancyOnCrash,
+         DatabaseEngineOptions.ForceCrashRecoveryAtOpen
+  on_violation: (narrower) a crash is not recovered — torn derived structures trusted; (wider) every clean open reads the whole
+                file; (repair) a regeneration that rebuilds nothing and reports success
+  verified: HealthyOpenTests.WalFilesOnDisk_RunRecoveryOnlyAfterAnUncleanClose,
+            HealthyOpenTests.ARepairOpen_RunsRecoveryAfterACleanClose_AndIgnoresTheSummary [VerifiesRule]
+
+### CS-07: A clean open reads no data page `[perf]`
+  invariant after a clean close (CS-05 summary adopted), an open reads segment directories, the bootstrap and the schema — not the
+            pages of the chunk segments: every chunk segment loads its allocator from the summary, every cluster state its active
+            list, and no chain is walked (LogicalSegment.Load reads the directory only; the chain cross-check runs on the crash
+            path inside the scan, and offline at Quick depth)
+  exception the spatial cell layer of a cluster-spatial archetype is still rebuilt from every active cluster at every open
+            (RebuildSpatialStateFromData), O(entities) and under one epoch — its persistence is #1148
+  rationale: a 1.9 GB database read 251 053 pages (13 s) per open and could not open at all with a cache smaller than one segment
+  scope: ChunkBasedSegment.Load, LogicalSegment.Load, ArchetypeClusterState.CreateFromExisting
+  on_violation: open cost grows with the database instead of with its schema; a database larger than its cache cannot open
+  verified: HealthyOpenTests.ACleanReopen_ReadsNoDataPage (disk reads during the open under a tenth of the file),
+            HealthyOpenTests.ADatabaseLargerThanItsCache_ReopensCleanly (a cache smaller than one segment) [VerifiesRule]
+
+### CS-08: A segment whose directory and chain disagree is refused unless recovery rebuilds it `[fatal]`
+  invariant the open no longer cross-checks each segment's directory against its forward chain (CS-07). Open-time verification at
+            Quick depth and deeper does (CHK-SEG-05, counted from pointers its sweep records, compared position by position), and
+            refuses the open on a disagreement after a clean close, and after an unclean one for every kind but the three the
+            crash path replaces and refills from the WAL — cluster, entity map, index (DatabaseIntegrityException.RefusesOpen)
+  invariant the Spine tier, on by default, reads directories only and says so (CHK-SEG-05 skipped). On the crash path a chunk-based
+            segment checks its links during the free-chunk scan (ChunkBasedSegment.ScanForAllocatorState); plain logical segments
+            (occupancy map, UoW registry) are checked offline only
+  rationale: the check used to run in LogicalSegment.Load on every open, which read every data page (#1143). Moving it offline kept
+             its strength only if a finding still refuses what the open used to refuse; rating it a mere divergence would let a
+             clean database with a lost write open with pages its segment can no longer address
+  scope: DatabaseIntegrityException.RefusesOpen, SegmentChecks.Run, SegmentWalker.WalkSegment, IntegrityScanner.Scan,
+         ChunkBasedSegment.Load
+  on_violation: a lost write found offline is ignored by the open, which serves a segment that cannot address all its pages
+  verified: IntegrityScannerTests.AShortenedChain_IsFoundAtQuick_AndRefusesTheOpenUnlessRecoveryRebuildsIt [VerifiesRule];
+            IntegrityScannerTests.QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal
 
 ---
 
@@ -1882,7 +2279,8 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
   invariant ∀ derived structure (secondary B+Tree indexes + their multi-value HEAD/TAIL buffers, occupancy bitmap,
             spatial index, AND the EntityMap of a *rebuildable* archetype): integrity doubt post-crash ⟹ rebuilt from
             primary data; never page-repaired, never trusted. The EntityMap is derived-on-crash because a torn EntityMap
-            page holds a hash directory of chunk-id POINTERS — trusting it dereferences garbage into a hard process crash
+            page holds chunk-id POINTERS (overflow links; a bucket count that addresses buckets by position, EMAP-01) —
+            trusting it dereferences garbage into a hard process crash
             *before* any loud-fail can fire (unlike opaque-byte component pages, which RB-04 catches post-hoc). An archetype
             is "rebuildable" iff it is cluster-eligible (cluster slots persist EntityKeys[N] + EnabledBits[C] +
             OccupancyBits — fully self-describing) OR all its non-Transient slots are Versioned (chain heads carry every
@@ -1919,7 +2317,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     (ComponentTable.RebuildSecondaryIndexEntriesFromHeads, DatabaseEngine.RebuildSecondaryIndexes).
     🔴 BOTH index homes, since #656. A cluster-backed archetype keeps its field indexes on the ARCHETYPE, and that home did
     NOT implement this rule: the cluster-index init block read the persisted SPI, loaded the segment and skipped its rebuild,
-    so `WalFilesPresentAtOpen` — consulted in six places — reached none of it. Now the same shape as the flat home: the init
+    so the crash flag — consulted in six places, `CrashRecoveryAtOpen` since #1143 (CS-06) — reached none of it. Now the same shape as the flat home: the init
     block clears (ClearSharedSegment over both stride segments) and DatabaseEngine.RebuildClusterIndexes repopulates from the
     cluster SoA in Phase 5, via ArchetypeClusterState.RebuildIndexesFromData. Rebuilding from the SoA rather than from chain
     heads is what makes it storage-mode-agnostic: the cluster slot IS the head for SingleVersion and carries the published
@@ -1955,7 +2353,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     A THIRD ordering applies on a migrating open: RebuildClusterFromChains must place the entities BEFORE anything reads
     the cluster, and the cluster head rebuild (ArchetypeClusterState.RebuildVersionedHeadFromChain) must run AFTER the
     EntityMap it reads has been re-derived — DatabaseEngine.DrainDeferredVersionedHeadRebuilds exists precisely to defer
-    it past that point. Running it earlier dereferences a torn EntityMap's hash directory into a hard process crash,
+    it past that point. Running it earlier dereferences a torn EntityMap's chunk-id pointers into a hard process crash,
     which is RB-01's own rationale applied one level down.
   on_violation: an index built over pre-scrub MVCC history carries stale/duplicate keys; a suspect resolved before
     rebuild misclassifies a to-be-discarded derived page; a cluster index built at open covers only the checkpointed half of

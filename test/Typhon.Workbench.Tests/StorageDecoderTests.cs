@@ -186,53 +186,52 @@ public sealed class StorageDecoderTests
     }
 
     [Test]
-    public void HashMapDecoder_MetaChunk_UnpacksLevelNextBucketCountAndEntries()
+    public void HashMapDecoder_MetaChunk_DerivesLevelAndSplitPointerFromTheBucketCount()
     {
-        // Meta chunk: PackedMeta @+8 = Level(1)|Next(2)|BucketCount(8), EntryCount @+16 = 50, DirectoryChunkCount @+24 = 1.
+        // Meta chunk (#1205): N0 @+0 = 4, format @+4, BucketCount @+8 = 10, EntryCount @+16 = 50. 10 = 4 · 2^1 + 2 → level 1, split pointer 2.
         var chunk = new byte[64];
-        var packed = (1L << 56) | (2L << 32) | 8L;
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(8), packed);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(0), 4);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(chunk.AsSpan(4), Typhon.Engine.Internals.PagedHashMapMeta.FormatMagic);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(8), 10);
         System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(chunk.AsSpan(16), 50);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(chunk.AsSpan(24), 1);
 
-        var cells = L4Decoder.DecodeHashMap(chunk, isMeta: true, isDirectory: false, bucketCapacity: 9);
+        var cells = L4Decoder.DecodeHashMap(chunk, chunkId: 0, bucketCount: 10, bucketCapacity: 9);
 
         Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Meta"));
-        Assert.That(Array.Find(cells, c => c.Label == "Buckets")!.Value, Is.EqualTo("8"));
+        Assert.That(Array.Find(cells, c => c.Label == "Buckets")!.Value, Is.EqualTo("10"));
         Assert.That(Array.Find(cells, c => c.Label == "Total entries")!.Value, Is.EqualTo("50"));
         Assert.That(Array.Find(cells, c => c.Label == "Level")!.Value, Is.EqualTo("1"));
         Assert.That(Array.Find(cells, c => c.Label == "Split pointer")!.Value, Is.EqualTo("2"));
-        Assert.That(Array.Find(cells, c => c.Label == "Directory chunks")!.Value, Is.EqualTo("1"));
     }
 
     [Test]
     public void HashMapDecoder_PrimaryBucket_ReportsEntriesOverCapacityAndNoOverflow()
     {
-        // Bucket header: OlcVersion @+0 = 4 (primary), EntryCount @+4 = 5, OverflowChunkId @+8 = -1 (no chain).
+        // Bucket b is chunk b + 1: chunk 4 of a 10-bucket map is bucket 3. EntryCount @+4 = 5, OverflowChunkId @+8 = -1 (no chain).
         var chunk = new byte[64];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(0), 4);
         chunk[4] = 5;
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(8), -1);
 
-        var cells = L4Decoder.DecodeHashMap(chunk, isMeta: false, isDirectory: false, bucketCapacity: 9);
+        var cells = L4Decoder.DecodeHashMap(chunk, chunkId: 4, bucketCount: 10, bucketCapacity: 9);
 
-        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Bucket"));
+        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Bucket 3"));
         Assert.That(Array.Find(cells, c => c.Label == "Entries")!.Value, Is.EqualTo("5 / 9"));
         Assert.That(Array.Find(cells, c => c.Label == "Overflow")!.Value, Does.Contain("none"));
     }
 
     [Test]
-    public void HashMapDecoder_OverflowChunk_IdentifiedByZeroOlcVersion()
+    public void HashMapDecoder_OverflowChunk_IdentifiedByItsPositionAndNamesItsOwner()
     {
-        // An overflow chunk carries OlcVersion == 0 (not independently latched).
+        // Past the bucket count, a chunk is overflow; its first word is its owning bucket + 1.
         var chunk = new byte[64];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(0), 0);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(0), 7 + 1);
         chunk[4] = 3;
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(8), -1);
 
-        var cells = L4Decoder.DecodeHashMap(chunk, isMeta: false, isDirectory: false, bucketCapacity: 9);
+        var cells = L4Decoder.DecodeHashMap(chunk, chunkId: 120, bucketCount: 10, bucketCapacity: 9);
 
-        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Overflow"));
+        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Overflow of bucket 7"));
         Assert.That(Array.Find(cells, c => c.Label == "Entries")!.Value, Is.EqualTo("3 / 9"));
     }
 
@@ -244,23 +243,16 @@ public sealed class StorageDecoderTests
         chunk[4] = 9;
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk.AsSpan(8), 42); // chains to #42
 
-        var cells = L4Decoder.DecodeHashMap(chunk, isMeta: false, isDirectory: false, bucketCapacity: 9);
+        var cells = L4Decoder.DecodeHashMap(chunk, chunkId: 1, bucketCount: 10, bucketCapacity: 9);
 
-        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Bucket"));
+        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Bucket 0"));
         Assert.That(Array.Find(cells, c => c.Label == "Overflow")!.Value, Is.EqualTo("#42"));
-    }
-
-    [Test]
-    public void HashMapDecoder_DirectoryChunk_ReportsDirectoryRole()
-    {
-        var cells = L4Decoder.DecodeHashMap(new byte[64], isMeta: false, isDirectory: true, bucketCapacity: 9);
-        Assert.That(Array.Find(cells, c => c.Label == "Role")!.Value, Is.EqualTo("Directory"));
     }
 
     [Test]
     public void HashMapDecoder_ShortChunkProducesNoCells()
     {
-        Assert.That(L4Decoder.DecodeHashMap(new byte[4], isMeta: false, isDirectory: false, bucketCapacity: 9), Is.Empty);
+        Assert.That(L4Decoder.DecodeHashMap(new byte[4], chunkId: 1, bucketCount: 10, bucketCapacity: 9), Is.Empty);
     }
 
     [Test]

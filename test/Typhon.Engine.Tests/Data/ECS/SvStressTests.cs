@@ -81,7 +81,7 @@ class SvStressTests : TestBase<SvStressTests>
             {
                 barrier.SignalAndWait();
                 using var tx = dbe.CreateQuickTransaction();
-                tx.OpenMut(ids[threadIdx]).Write(comp) = new SvStressData(threadIdx + 1, threadIdx * 10);
+                tx.OpenMut(ids[threadIdx]).Set(comp, new SvStressData(threadIdx + 1, threadIdx * 10));
                 tx.Commit();
             });
             threads[t].Start();
@@ -126,7 +126,7 @@ class SvStressTests : TestBase<SvStressTests>
         for (int i = 0; i < mutations; i++)
         {
             using var tx = dbe.CreateQuickTransaction();
-            tx.OpenMut(id).Write(comp) = new SvStressData(i + 1, i);
+            tx.OpenMut(id).Set(comp, new SvStressData(i + 1, i));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -160,7 +160,7 @@ class SvStressTests : TestBase<SvStressTests>
         // Mutate + destroy in same tick
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new SvStressData(99, 200);
+            tx.OpenMut(id).Set(comp, new SvStressData(99, 200));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
@@ -217,7 +217,7 @@ class SvStressTests : TestBase<SvStressTests>
                 for (int i = 0; i < entityCount / 2; i++)
                 {
                     using var tx = dbe.CreateQuickTransaction();
-                    tx.OpenMut(ids[i]).Write(comp) = new SvStressData(target, i * 10);
+                    tx.OpenMut(ids[i]).Set(comp, new SvStressData(target, i * 10));
                     tx.Commit();
                 }
             }
@@ -280,7 +280,7 @@ class SvStressTests : TestBase<SvStressTests>
         // Tick 2: mutate 1→2
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new SvStressData(2, 200);
+            tx.OpenMut(id).Set(comp, new SvStressData(2, 200));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -294,7 +294,7 @@ class SvStressTests : TestBase<SvStressTests>
         // Tick 3: mutate 2→3
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new SvStressData(3, 300);
+            tx.OpenMut(id).Set(comp, new SvStressData(3, 300));
             tx.Commit();
         }
         dbe.WriteTickFence(3);
@@ -308,7 +308,7 @@ class SvStressTests : TestBase<SvStressTests>
         // Tick 4: mutate 3→4
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new SvStressData(4, 400);
+            tx.OpenMut(id).Set(comp, new SvStressData(4, 400));
             tx.Commit();
         }
         dbe.WriteTickFence(4);

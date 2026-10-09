@@ -36,6 +36,14 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private readonly int _chunkId;
     private readonly ArchetypeClusterState _state; // null only on synthetic test refs; carries spatial bookkeeping + grid
 
+    // ── Lifetime check (#1199): valid until its enumerator's next MoveNext ──────────────────────────────────────────
+    //
+    // A ClusterRef and every span or ref it hands out point into the cluster's page, which the enumerator holds only while the cluster is current.
+    // Under strict mode (CheckConfig.Enabled) the enumerator carries a step counter it bumps on every MoveNext and on Dispose; the ref records the
+    // step it was made at, and its data members throw once the two differ. Off, the source is null and the check folds away.
+    private readonly ClusterStep _stepSource;
+    private readonly int _step;
+
     // ── Cached cell frame (#872 step 9) ────────────────────────────────────
     //
     // The cluster's cell origin is a per-CLUSTER constant, and WriteSpatial is called per ENTITY. Resolving it inside the write meant two array loads, a
@@ -54,8 +62,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private double _cachedOriginY;
     private double _cachedOriginZ;
 
-    internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state)
+    internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state,
+        ClusterStep stepSource = null, int step = 0)
     {
+        _stepSource = stepSource;
+        _step = step;
         _base = basePtr;
         _transientBase = transientBasePtr;
         _layout = layout;
@@ -69,16 +80,36 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         _cachedOriginZ = 0f;
     }
 
+    /// <summary>
+    /// Strict mode (#1199): throw when this ref is used after its enumerator moved on — the page it points into is no longer held for it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private readonly void CheckStep()
+    {
+        if (CheckConfig.Enabled && _stepSource != null && _stepSource.Value != _step)
+        {
+            ThrowHelper.ThrowInvalidOp("A ClusterRef is valid until its enumerator's next MoveNext (or Dispose): the cluster's page is no longer held for it.");
+        }
+    }
+
     /// <summary>Bitmask of occupied slots. Bit i = 1 means slot i contains a live entity.</summary>
     public readonly ulong OccupancyBits
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => *(ulong*)_base;
+        get
+        {
+            CheckStep();
+            return *(ulong*)_base;
+        }
     }
 
     /// <summary>Bitmask of entities with component at <paramref name="slot"/> enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public readonly ulong EnabledBits(int slot) => *(ulong*)(_base + _layout.EnabledBitsOffset(slot));
+    public readonly ulong EnabledBits(int slot)
+    {
+        CheckStep();
+        return *(ulong*)(_base + _layout.EnabledBitsOffset(slot));
+    }
 
     /// <summary>Combined mask: alive AND component at slot enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -163,6 +194,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {
+        CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
         {
@@ -249,6 +281,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <param name="comp">Handle identifying the component column that was written.</param>
     public readonly void MarkDirty<T>(Comp<T> comp) where T : unmanaged
     {
+        CheckStep();
         var componentSlot = _meta.GetSlot(comp._componentTypeId);
         var bits = OccupancyBits;
         while (bits != 0)
@@ -266,6 +299,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
     {
+        CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         return new ReadOnlySpan<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
@@ -275,6 +309,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
+        CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
         {
@@ -288,6 +323,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref readonly T GetReadOnly<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
+        CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
@@ -297,13 +333,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly ReadOnlySpan<long> EntityIds
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => new(_base + _layout.EntityIdsOffset, _layout.ClusterSize);
+        get
+        {
+            CheckStep();
+            return new(_base + _layout.EntityIdsOffset, _layout.ClusterSize);
+        }
     }
 
     /// <summary>Read EntityId for the entity at the given slot (stored as full packed EntityId).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public readonly EntityId GetEntityId(int slotIndex) =>
-        EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
+    public readonly EntityId GetEntityId(int slotIndex)
+    {
+        CheckStep();
+        return EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
+    }
 
     /// <summary>
     /// The realm this cluster is in (Realms): every entity it holds is in that realm's frame, except one whose realm change awaits the next fence. A
@@ -416,6 +459,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteSpatial<T>(Comp<T> comp, int slotIndex, in T newValue) where T : unmanaged
     {
+        CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
         // Hottest path (AntHill per-entity-per-tick spatial write): inline-guard form so the gate JIT-folds to nothing when strict mode is off (#422 AC#6).
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
@@ -505,6 +549,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <exception cref="ArgumentException">A slot of <paramref name="slots"/> is beyond the cluster or beyond <paramref name="newValues"/>.</exception>
     public void WriteSpatial<T>(Comp<T> comp, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
     {
+        CheckStep();
         if (slots == 0)
         {
             return;
@@ -1298,12 +1343,13 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private int[] _clusterIds;
     private int _index;
     private int _endIndex;
+    private ClusterStep _stepCounter;   // strict mode only (#1199): bumped by MoveNext and Dispose; null otherwise
 
     [AllowCopy]
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null)
     {
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta };
+        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1332,7 +1378,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment,
         int startIndex, int endIndex)
     {
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta };
+        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1362,7 +1408,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         ChunkBasedSegment<TransientStore> transientSegment, int[] clusterIds, int startIndex, int endIndex)
     {
         ArgumentNullException.ThrowIfNull(clusterIds);
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta };
+        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1433,6 +1479,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {
+        if (CheckConfig.Enabled && _stepCounter != null)
+        {
+            _stepCounter.Value++;
+        }
+
         while (++_index < _endIndex)
         {
             var chunkId = _clusterIds[_index];
@@ -1456,13 +1507,18 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // TransientStore base for mixed archetypes (null for pure-SV/V and pure-Transient)
             var transientPtr = (_hasTransientAccessor && _hasPersistentAccessor) ? _transientAccessor.GetChunkAddress(chunkId) : null;
-            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state);
+            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _stepCounter, _stepCounter?.Value ?? 0);
         }
     }
 
     /// <summary>Release the ChunkAccessors.</summary>
     public void Dispose()
     {
+        if (CheckConfig.Enabled && _stepCounter != null)
+        {
+            _stepCounter.Value++;
+        }
+
         if (_hasPersistentAccessor)
         {
             _accessor.Dispose();
@@ -1475,4 +1531,13 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
 
     /// <summary>Enable foreach.</summary>
     public ClusterEnumerator<TArch> GetEnumerator() => this;
+}
+
+/// <summary>
+/// The step counter a <see cref="ClusterEnumerator{TArch}"/> shares with the <see cref="ClusterRef{TArch}"/> values it yields, under strict mode only
+/// (#1199). A class so every copy of the enumerator — <c>foreach</c> iterates a copy — bumps the same counter.
+/// </summary>
+internal sealed class ClusterStep
+{
+    public int Value;
 }

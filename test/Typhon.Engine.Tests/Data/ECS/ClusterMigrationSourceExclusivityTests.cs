@@ -197,7 +197,7 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
                 {
                     xs[i] = Math.Clamp(xs[i] + (float)((rng.NextDouble() - 0.5) * CellSize * 0.5f), 2f, WorldMax - 2f);
                     ys[i] = Math.Clamp(ys[i] + (float)((rng.NextDouble() - 0.5) * CellSize * 0.5f), 2f, WorldMax - 2f);
-                    tx.OpenMut(ids[i]).Write(ClMigUnit.Pos) = PointAt(xs[i], ys[i], i);
+                    tx.OpenMut(ids[i]).Set(ClMigUnit.Pos, PointAt(xs[i], ys[i], i));
                 }
 
                 tx.Commit();
@@ -215,7 +215,7 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < population; i++)
             {
-                tx.OpenMut(ids[i]).Write(ClMigUnit.Pos) = PointAt(xs[i], ys[i], i);
+                tx.OpenMut(ids[i]).Set(ClMigUnit.Pos, PointAt(xs[i], ys[i], i));
             }
 
             tx.Commit();

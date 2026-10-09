@@ -38,8 +38,10 @@ handler, which receives the resolved comparison views:
 ```csharp
 using var t1 = dbe.CreateQuickTransaction();
 t1.Open(entityId).Read(CompAArch.A);                       // baseline snapshot
-ref var w1 = ref t1.OpenMut(entityId).Write(CompAArch.A);
-w1 = new CompA(90);                                         // intended write, delta = -10
+var entity = t1.OpenMut(entityId);
+var w1 = entity.Read(CompAArch.A);
+w1 = new CompA(90);
+entity.Set(CompAArch.A, w1);                                         // intended write, delta = -10
 
 // Meanwhile another transaction read the same baseline, set A=130, and committed first.
 

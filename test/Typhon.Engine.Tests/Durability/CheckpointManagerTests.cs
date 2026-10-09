@@ -901,6 +901,96 @@ public class CheckpointManagerTests : AllocatorTestBase
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// A cycle whose metadata hook loads a page, while every slot of the cache owes a write, writes the owed pages first instead of waiting for a slot
+    /// only its own writes can free (CK-14, #1184).
+    /// </summary>
+    /// <remarks>
+    /// The engine's hook (<c>PersistArchetypeState</c>) loads the archetype table's page and each entity map's meta page, and runs before the cycle's
+    /// barrier and write. Under a write storm on a database larger than its cache, the churn evicted those pages and left every slot owing a write: the
+    /// hook waited the whole back-pressure timeout (5 s) for a slot, the cycle ended Degraded, and every writer behind it timed out. Captured twice with
+    /// <c>dotnet-stack</c> in MarketHardeningTests. Here the state is built directly: every slot owes a write, nothing else will write them (the loop is
+    /// not started), and the hook loads a page that is not in the cache.
+    /// </remarks>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("CK-14")]
+    public void HookLoadingAPage_OnAFullyOwedCache_DoesNotWait()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        _resourceOptions.CheckpointIntervalMs = int.MaxValue;   // the loop is not started either: nothing writes these pages but the cycle below
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+
+        var slots = (int)(PagedMMF.MinimumCacheSize / PagedMMF.PageSize);
+        OweAWriteOnEverySlot(slots);
+        _mmf.GetMetrics().GetMemPageExtraInfo(out var census);
+        Assert.That(census.FreeMemPageCount, Is.Zero, "premise: no free slot");
+        Assert.That(census.DirtyPageCount, Is.EqualTo(slots), "premise: every slot owes a write");
+
+        var coldPage = 8 + slots + 64;   // never loaded
+        ckpt.PersistDurableMetadataHook = () =>
+        {
+            using var guard = EpochGuard.Enter(_epochManager);
+            _mmf.RequestPageEpoch(coldPage, guard.Epoch, out _);
+        };
+
+        var sw = Stopwatch.StartNew();
+        ckpt.RunCheckpointCycle(_walManager.DurableLsn);
+        sw.Stop();
+
+        Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Ok),
+            "the cycle failed: its hook waited for a cache slot that only the cycle's own writes could free");
+        Assert.That(ckpt.TotalWritesAheadOfTheHook, Is.EqualTo(1));
+        Assert.That(ckpt.TotalCheckpoints, Is.EqualTo(1));
+        Assert.That(sw.Elapsed, Is.LessThan(TimeSpan.FromSeconds(3)), "the hook waited out a back-pressure timeout");
+    }
+
+    /// <summary>
+    /// Fills the cache: every slot holds a page that owes a write and is held by nothing else, so the only way to free one is to write it.
+    /// </summary>
+    private void OweAWriteOnEverySlot(int slots)
+    {
+        using (var guard = EpochGuard.Enter(_epochManager))
+        {
+            var cs = _mmf.CreateChangeSet();
+            for (var i = 0; i < slots - 32; i++)
+            {
+                _mmf.RequestPageEpoch(8 + i, guard.Epoch, out var memPageIdx);
+                _mmf.TryLatchPageExclusive(memPageIdx);
+                cs.AddByMemPageIndex(memPageIdx);
+                _mmf.UnlatchPageExclusive(memPageIdx);
+            }
+
+            cs.ReleaseDirtyMarks();
+        }
+
+        // The pages the fixture loaded itself (bootstrap, the UoW registry) owe a write too, and the last free slots are filled one page at a time.
+        for (var memPageIdx = 0; memPageIdx < slots; memPageIdx++)
+        {
+            if (_mmf.GetPageInfoForDiagnostic(memPageIdx).PageState == PagedMMF.PageState.Idle)
+            {
+                _mmf.MarkPageModified(memPageIdx);
+            }
+        }
+
+        var next = 8 + slots - 32;
+        while (true)
+        {
+            _mmf.GetMetrics().GetMemPageExtraInfo(out var census);
+            if (census.FreeMemPageCount == 0)
+            {
+                break;
+            }
+
+            using var guard = EpochGuard.Enter(_epochManager);
+            _mmf.RequestPageEpoch(next++, guard.Epoch, out var memPageIdx);
+            _mmf.MarkPageModified(memPageIdx);
+        }
+    }
+
+    /// <summary>
     /// Dirties <paramref name="pageCount"/> plain data pages and leaves them owing a writeback.
     /// </summary>
     /// <remarks>

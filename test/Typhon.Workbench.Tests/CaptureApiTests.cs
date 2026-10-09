@@ -93,6 +93,10 @@ public sealed class CaptureApiTests
     }
 
     /// <summary>AC-11 — arming through the endpoint moves the session into Recording with the requested budget.</summary>
+    /// <remarks>
+    /// The session keeps ticking, and a tick that starts between the arm and the response has already recorded into the window (#1225). So the budget
+    /// is asserted as what it must be whatever the timing: never above the request, and every tick missing from it recorded.
+    /// </remarks>
     [Test]
     public async Task PostCapture_ArmsAWindow_AndReportsRemaining()
     {
@@ -108,7 +112,9 @@ public sealed class CaptureApiTests
         Assert.Multiple(() =>
         {
             Assert.That(state.State, Is.EqualTo("Recording"), "the click must be acknowledged immediately, not one tick later");
-            Assert.That(state.Remaining, Is.EqualTo(25));
+            Assert.That(state.Remaining, Is.LessThanOrEqualTo(25), "the window is the requested 25 ticks");
+            Assert.That(state.Remaining + state.RecordedTicks, Is.GreaterThanOrEqualTo(25),
+                "a tick missing from the window must have been recorded: nothing was recorded before the arm");
         });
     }
 

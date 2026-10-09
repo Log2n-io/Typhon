@@ -20,7 +20,7 @@ internal class MemoryBlockArray : MemoryBlockBase
         DataAsArray = block;
     }
 
-    public override int EstimatedMemorySize => DataAsArray?.Length ?? 0;
+    public override long EstimatedMemorySize => DataAsArray?.Length ?? 0;
     public override int MemoryBlockSize => DataAsArray?.Length ?? 0;
     public override bool IsDisposed => DataAsArray == null;
     public override Span<byte> DataAsSpan => DataAsArray.AsSpan();

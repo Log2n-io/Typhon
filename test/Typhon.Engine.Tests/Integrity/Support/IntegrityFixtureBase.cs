@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Typhon.Schema.Definition;
 
@@ -114,8 +115,17 @@ internal abstract class IntegrityFixtureBase
     /// </remarks>
     protected ServiceProvider ReopenProviderWithMinimumCache() => BuildProvider(minimumCache: true);
 
+    /// <summary>
+    /// Reopens as a repair does (<see cref="DatabaseEngineOptions.ForceCrashRecoveryAtOpen"/>): the crash path after a clean close, so every derived
+    /// structure is rebuilt.
+    /// </summary>
+    protected ServiceProvider ReopenProviderForcingRecovery() => BuildProvider(forceCrashRecovery: true);
+
     /// <summary>Builds a small, fully-committed database and closes it cleanly.</summary>
-    protected void BuildHealthyDatabase(int entityCount = 64)
+    /// <param name="entityCount">How many entities to spawn.</param>
+    /// <param name="perTransaction">How many each transaction spawns: a large population builds in seconds only in batches.</param>
+    /// <param name="spawned">Receives the entity ids, when given.</param>
+    protected void BuildHealthyDatabase(int entityCount = 64, int perTransaction = 1, List<EntityId> spawned = null, bool uncleanClose = false)
     {
         using (var scope = _serviceProvider.CreateScope())
         {
@@ -125,11 +135,16 @@ internal abstract class IntegrityFixtureBase
 
             using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
             {
-                for (var i = 0; i < entityCount; i++)
+                for (var first = 0; first < entityCount; first += perTransaction)
                 {
                     using var tx = uow.CreateTransaction();
-                    var comp = new CompA(i + 1, i, i);
-                    tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                    for (var i = first; i < Math.Min(entityCount, first + perTransaction); i++)
+                    {
+                        var comp = new CompA(i + 1, i, i);
+                        var id = tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                        spawned?.Add(id);
+                    }
+
                     tx.Commit();
                 }
 
@@ -137,6 +152,7 @@ internal abstract class IntegrityFixtureBase
             }
 
             dbe.ForceCheckpoint();
+            dbe.SimulateUncleanShutdownForTest = uncleanClose;
         }
 
         CloseEngine();
@@ -277,7 +293,7 @@ internal abstract class IntegrityFixtureBase
         CloseEngine();
     }
 
-    private ServiceProvider BuildProvider(bool minimumCache = false)
+    private ServiceProvider BuildProvider(bool minimumCache = false, bool forceCrashRecovery = false)
     {
         var services = new ServiceCollection();
         services
@@ -297,6 +313,7 @@ internal abstract class IntegrityFixtureBase
             })
             .AddScopedDatabaseEngine(opts =>
             {
+                opts.ForceCrashRecoveryAtOpen = forceCrashRecovery;
                 opts.Wal = new WalWriterOptions
                 {
                     WalDirectory = WalDir,

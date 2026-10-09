@@ -56,7 +56,7 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
         BuildHealthyDatabase();
         var before = DamageKit.Baseline(BundlePath);
 
-        var damage = DamageKit.RedirectEntityMapDirectorySlot(BundlePath);
+        var damage = DamageKit.RedirectEntityMapOverflowPointer(BundlePath);
         DamageKit.AssertOnlyDeclaredBytesChanged(before, damage);
 
         var report = DamageKit.Scan(BundlePath, ScanDepth.Deep);
@@ -91,7 +91,7 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
         const int Entities = 64;
         BuildHealthyDatabase(Entities);
         DamageKit.Baseline(BundlePath);
-        DamageKit.RedirectEntityMapDirectorySlot(BundlePath);
+        DamageKit.RedirectEntityMapOverflowPointer(BundlePath);
 
         var plan = DatabaseRepair.Plan(DamageKit.Scan(BundlePath, ScanDepth.Deep));
         var outcome = DatabaseRepair.Apply(BundlePath, plan, allowLoss: false, backupFirst: false, dryRun: false,
@@ -153,7 +153,7 @@ internal sealed class DerivedRegenerationRoundTripTests : IntegrityFixtureBase
     {
         BuildHealthyDatabase();
         DamageKit.Baseline(BundlePath);
-        DamageKit.RedirectEntityMapDirectorySlot(BundlePath);
+        DamageKit.RedirectEntityMapOverflowPointer(BundlePath);
 
         var plan = DatabaseRepair.Plan(DamageKit.Scan(BundlePath, ScanDepth.Deep));
         var outcome = DatabaseRepair.Apply(BundlePath, plan, allowLoss: false, backupFirst: false, dryRun: false);

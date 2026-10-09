@@ -73,13 +73,13 @@ protected override void Configure(SystemBuilder b) => b
 - `Build()` validation has no suppress switch — a false positive is fixed by correcting the
   declaration, not disabling the check.
 - An opt-in runtime check (`Typhon:Checks:DeclaredAccess`, off by default in every build) asserts every
-  `EntityRefMut.Write<T>()` against the executing system's declared writes; off, it costs nothing.
+  `EntityRefMut.Set<T>()` against the executing system's declared writes; off, it costs nothing.
 
 ## 🧪 Tests
 
 - [AccessDagDerivationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
 - [SystemBuilderFluentTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
-- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — opt-in assert that `EntityRefMut.Write<T>()` matches the system's declared writes
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — opt-in assert that `EntityRefMut.Set<T>()` matches the system's declared writes
 
 ## 🔗 Related
 - Parent feature: [Runtime](./README.md)

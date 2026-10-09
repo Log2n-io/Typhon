@@ -67,7 +67,7 @@ var reopened = PagedHashMap<long, int, PersistentStore>.Open(segment);
 - One hash map owns its `ChunkBasedSegment` exclusively — chunk 0 is hardcoded as its meta chunk, so multiple maps cannot share a segment.
 
 ## 🧪 Tests
-- [PagedHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/HashMapTests.cs) — meta/directory struct layout, linear-hash bucket resolution across splits, `Create`/`Open` round-trip, insert/lookup/remove over a `ChunkAccessor`.
+- [PagedHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/HashMapTests.cs) — meta struct layout and bucket-at-chunk addressing, linear-hash bucket resolution across splits, `Create`/`Open` round-trip, insert/lookup/remove over a `ChunkAccessor`.
 
 ## 🔗 Related
 

@@ -139,8 +139,9 @@ class Write3DSpatialBarrierTests : TestBase<Write3DSpatialBarrierTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var eref = tx.OpenMut(id);
-        ref var pos = ref eref.Write(W3DUnit.Pos);
+        var pos = eref.Read(W3DUnit.Pos);
         pos.Bounds = PointAt(x, y, z).Bounds;
+        eref.Set(W3DUnit.Pos, pos);
         tx.Commit();
     }
 

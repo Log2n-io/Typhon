@@ -98,7 +98,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.Open(entityId);
         Assert.That(entity.IsValid, Is.True, "Entity should be visible after commit (IsolationFlag cleared)");
-        ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+        var readPos = entity.Read(EcsUnit.Position);
         Assert.That(readPos.X, Is.EqualTo(1), "Position data should be readable after IsolationFlag cleared");
     }
 
@@ -205,7 +205,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         // Read from a new transaction — should resolve via revision chain
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.Open(id);
-        ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+        var readPos = entity.Read(EcsUnit.Position);
 
         // Data should match what was spawned (resolved via revision chain, not spawn-time Location)
         Assert.That(readPos.X, Is.EqualTo(42f));
@@ -226,7 +226,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         // Read before commit — uses Location[slot] from pending record bytes directly
         var entity = tx.Open(id);
-        ref readonly var readPos = ref entity.Read(EcsUnit.Position);
+        var readPos = entity.Read(EcsUnit.Position);
         Assert.That(readPos.X, Is.EqualTo(10f));
         Assert.That(readPos.Y, Is.EqualTo(20f));
     }
@@ -243,7 +243,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.Open(id);
-        ref readonly var read = ref entity.Read(SvTestArchetype.SvComp);
+        var read = entity.Read(SvTestArchetype.SvComp);
         Assert.That(read.Value, Is.EqualTo(77), "SV uses direct Location, no revision chain");
     }
 
@@ -289,7 +289,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(id);
-        entity.Write(EcsUnit.Position).X = 999;
+        var position = entity.Read(EcsUnit.Position);
+        position.X = 999;
+        entity.Set(EcsUnit.Position, position);
 
         // Copy-on-write should have allocated a NEW chunk
         Assert.That(posTable.ComponentSegment.AllocatedChunkCount, Is.GreaterThan(chunksBefore),
@@ -309,10 +311,12 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(id);
-        entity.Write(EcsUnit.Position).X = 999;
+        var position = entity.Read(EcsUnit.Position);
+        position.X = 999;
+        entity.Set(EcsUnit.Position, position);
 
         // Read after Write in same tx should see new data
-        ref readonly var read = ref entity.Read(EcsUnit.Position);
+        var read = entity.Read(EcsUnit.Position);
         Assert.That(read.X, Is.EqualTo(999f));
     }
 
@@ -330,12 +334,14 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         // tx2 writes but doesn't commit yet
         using var tx2 = dbe.CreateQuickTransaction();
         var entity2 = tx2.OpenMut(id);
-        entity2.Write(EcsUnit.Position).X = 999;
+        var position = entity2.Read(EcsUnit.Position);
+        position.X = 999;
+        entity2.Set(EcsUnit.Position, position);
 
         // tx3 reads — should see OLD data (MVCC snapshot isolation)
         using var tx3 = dbe.CreateQuickTransaction();
         var entity3 = tx3.Open(id);
-        ref readonly var read = ref entity3.Read(EcsUnit.Position);
+        var read = entity3.Read(EcsUnit.Position);
         Assert.That(read.X, Is.EqualTo(10f), "Concurrent tx should see old data (MVCC isolation)");
     }
 
@@ -355,7 +361,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         // Write to entity spawned in SAME tx — should NOT allocate new chunk
         var entity = tx.OpenMut(id);
-        entity.Write(EcsUnit.Position).X = 777;
+        var position = entity.Read(EcsUnit.Position);
+        position.X = 777;
+        entity.Set(EcsUnit.Position, position);
 
         Assert.That(posTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(chunksAfterSpawn),
             "Write to entity created in same tx should reuse existing chunk (no copy-on-write)");
@@ -377,7 +385,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(id);
-        entity.Write(SvTestArchetype.SvComp).Value = 999;
+        var svComp = entity.Read(SvTestArchetype.SvComp);
+        svComp.Value = 999;
+        entity.Set(SvTestArchetype.SvComp, svComp);
 
         // SV writes in-place — no new chunk
         Assert.That(svTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(chunksBefore),
@@ -401,7 +411,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         using (var tx2 = dbe.CreateQuickTransaction())
         {
             var entity = tx2.OpenMut(id);
-            entity.Write(EcsUnit.Position).X = 999;
+            var position = entity.Read(EcsUnit.Position);
+            position.X = 999;
+            entity.Set(EcsUnit.Position, position);
             // Don't commit — triggers rollback
         }
 
@@ -424,7 +436,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         // Write and commit
         using var tx2 = dbe.CreateQuickTransaction();
         var entity2 = tx2.OpenMut(id);
-        entity2.Write(EcsUnit.Position).X = 888;
+        var position = entity2.Read(EcsUnit.Position);
+        position.X = 888;
+        entity2.Set(EcsUnit.Position, position);
         tx2.Commit();
 
         // New transaction reads committed data
@@ -453,12 +467,18 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
 
         // T1 reads and writes
         using var t1 = dbe.CreateQuickTransaction();
-        t1.OpenMut(id).Write(EcsUnit.Position).X = 20;
+        var opened = t1.OpenMut(id);
+        var positionCopy = opened.Read(EcsUnit.Position);
+        positionCopy.X = 20;
+        opened.Set(EcsUnit.Position, positionCopy);
 
         // T2 writes and commits first
         using (var t2 = dbe.CreateQuickTransaction())
         {
-            t2.OpenMut(id).Write(EcsUnit.Position).X = 30;
+            var target = t2.OpenMut(id);
+            var position = target.Read(EcsUnit.Position);
+            position.X = 30;
+            target.Set(EcsUnit.Position, position);
             t2.Commit();
         }
 
@@ -547,7 +567,9 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var entity = tx.OpenMut(id);
-            entity.Write(EcsUnit.Position).X = i;
+            var position = entity.Read(EcsUnit.Position);
+            position.X = i;
+            entity.Set(EcsUnit.Position, position);
             tx.Commit();
         }
 
@@ -654,7 +676,10 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         }
 
         using var tx2 = dbe.CreateQuickTransaction();
-        tx2.OpenMut(id).Write(EcsUnit.Position).X = 999;
+        var entity = tx2.OpenMut(id);
+        var positionCopy = entity.Read(EcsUnit.Position);
+        positionCopy.X = 999;
+        entity.Set(EcsUnit.Position, positionCopy);
         Assert.DoesNotThrow(() => tx2.Commit(), "Commit with write should not crash even without secondary indexes");
     }
 
@@ -706,7 +731,10 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         // Write but don't commit → rollback
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(EcsUnit.Position).X = 999;
+            var entity = tx2.OpenMut(id);
+            var position = entity.Read(EcsUnit.Position);
+            position.X = 999;
+            entity.Set(EcsUnit.Position, position);
             // No commit
         }
 
@@ -737,9 +765,15 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         using (var tx2 = dbe.CreateQuickTransaction())
         {
             var e = tx2.OpenMut(id);
-            e.Write(EcsUnit.Position).X = 999;
-            e.Write(EcsUnit.Velocity).Dx = 888;
-            e.Write(EcsSoldier.Health).Current = 1;
+            var position = e.Read(EcsUnit.Position);
+            position.X = 999;
+            e.Set(EcsUnit.Position, position);
+            var velocity = e.Read(EcsUnit.Velocity);
+            velocity.Dx = 888;
+            e.Set(EcsUnit.Velocity, velocity);
+            var health = e.Read(EcsSoldier.Health);
+            health.Current = 1;
+            e.Set(EcsSoldier.Health, health);
             // No commit
         }
 
@@ -875,11 +909,17 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         }
 
         using var t1 = dbe.CreateQuickTransaction();
-        t1.OpenMut(id).Write(EcsUnit.Position).X = 50;
+        var target = t1.OpenMut(id);
+        var position = target.Read(EcsUnit.Position);
+        position.X = 50;
+        target.Set(EcsUnit.Position, position);
 
         using (var t2 = dbe.CreateQuickTransaction())
         {
-            t2.OpenMut(id).Write(EcsUnit.Position).X = 200;
+            var entity = t2.OpenMut(id);
+            var positionCopy = entity.Read(EcsUnit.Position);
+            positionCopy.X = 200;
+            entity.Set(EcsUnit.Position, positionCopy);
             t2.Commit();
         }
 
@@ -939,8 +979,14 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
         var id2 = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos2), EcsUnit.Velocity.Set(in vel));
 
         // Write to both in same tx
-        tx.OpenMut(id1).Write(EcsUnit.Position).X = 111;
-        tx.OpenMut(id2).Write(EcsUnit.Position).X = 222;
+        var opened = tx.OpenMut(id1);
+        var positionCopy = opened.Read(EcsUnit.Position);
+        positionCopy.X = 111;
+        opened.Set(EcsUnit.Position, positionCopy);
+        var entity = tx.OpenMut(id2);
+        var position = entity.Read(EcsUnit.Position);
+        position.X = 222;
+        entity.Set(EcsUnit.Position, position);
         tx.Commit();
 
         using var tx2 = dbe.CreateQuickTransaction();

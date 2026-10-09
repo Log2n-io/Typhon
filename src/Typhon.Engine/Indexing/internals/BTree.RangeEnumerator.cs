@@ -33,6 +33,7 @@ internal abstract partial class BTree<TKey, TStore>
         private int _nodeItemCount;
         private int _leafVersion;
         private bool _disposed;
+        private readonly bool _countedLive;   // counted in EntityAccessor.LiveIndexCursors: holds a node across calls, so no per-operation epoch refresh (#1199)
         private readonly IComparer<TKey> _comparer;
         private readonly TKey _boundKey;
         private readonly bool _bounded;
@@ -56,7 +57,7 @@ internal abstract partial class BTree<TKey, TStore>
         internal RangeEnumerator(BTree<TKey, TStore> tree)
         {
             _tree = tree;
-            _accessor = tree._segment.CreateChunkAccessor();
+            _accessor = tree._segment.CreateScanAccessor();
             _comparer = tree.Comparer;
             _bounded = false;
             _reverse = false;
@@ -68,15 +69,26 @@ internal abstract partial class BTree<TKey, TStore>
             _currentNode = tree._linkList;
             _currentIndex = -1;
             _disposed = false;
+            _countedLive = false;
 
-            if (!_currentNode.IsValid || !TryReadLeafState())
+            try
             {
-                _nodeItemCount = 0;
-                _leafVersion = 0;
-                _finished = !_currentNode.IsValid;
+                if (!_currentNode.IsValid || !TryReadLeafState())
+                {
+                    _nodeItemCount = 0;
+                    _leafVersion = 0;
+                    _finished = !_currentNode.IsValid;
+                }
+            }
+            catch
+            {
+                _accessor.Dispose();   // never reaches the caller's Dispose (EP-02)
+                throw;
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
+            _countedLive = true;
+            EntityAccessor.LiveIndexCursors++;
         }
 
         /// <summary>
@@ -87,7 +99,7 @@ internal abstract partial class BTree<TKey, TStore>
         internal RangeEnumerator(BTree<TKey, TStore> tree, TKey minKey, TKey maxKey, bool reverse = false)
         {
             _tree = tree;
-            _accessor = tree._segment.CreateChunkAccessor();
+            _accessor = tree._segment.CreateScanAccessor();
             _comparer = tree.Comparer;
             _bounded = true;
             _reverse = reverse;
@@ -97,6 +109,7 @@ internal abstract partial class BTree<TKey, TStore>
             _hasLastKey = false;
             _finished = false;
             _disposed = false;
+            _countedLive = false;
             _currentIndex = -1;
             _nodeItemCount = 0;
             _leafVersion = 0;
@@ -109,38 +122,49 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
 
-            // Seek to the leaf containing the start key (pessimistic descent)
-            _currentNode = tree.FindLeaf(_seekKey, out int index, ref _accessor);
-            if (!_currentNode.IsValid)
+            // A fault while positioning never reaches the caller's Dispose: the window's pins are slot references, released here or never (EP-02).
+            try
             {
-                _finished = true;
-                return;
-            }
-
-            if (reverse)
-            {
-                InitReverse(index);
-            }
-            else
-            {
-                InitForward(index);
-            }
-
-            if (_currentNode.IsValid)
-            {
-                if (!TryReadLeafState())
+                // Seek to the leaf containing the start key (pessimistic descent)
+                _currentNode = tree.FindLeaf(_seekKey, out int index, ref _accessor);
+                if (!_currentNode.IsValid)
                 {
                     _finished = true;
+                    return;
                 }
 
-                // Fix sentinel: if reverse moved to previous leaf, start from its last item
-                if (_reverse && _currentIndex == -2)
+                if (reverse)
                 {
-                    _currentIndex = _nodeItemCount;
+                    InitReverse(index);
                 }
+                else
+                {
+                    InitForward(index);
+                }
+
+                if (_currentNode.IsValid)
+                {
+                    if (!TryReadLeafState())
+                    {
+                        _finished = true;
+                    }
+
+                    // Fix sentinel: if reverse moved to previous leaf, start from its last item
+                    if (_reverse && _currentIndex == -2)
+                    {
+                        _currentIndex = _nodeItemCount;
+                    }
+                }
+            }
+            catch
+            {
+                _accessor.Dispose();
+                throw;
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
+            _countedLive = true;
+            EntityAccessor.LiveIndexCursors++;
         }
 
         /// <summary>Positions the cursor for forward iteration starting at the leaf containing minKey.</summary>
@@ -412,6 +436,10 @@ internal abstract partial class BTree<TKey, TStore>
             if (!_disposed)
             {
                 _disposed = true;
+                if (_countedLive && EntityAccessor.LiveIndexCursors > 0)
+                {
+                    EntityAccessor.LiveIndexCursors--;
+                }
                 _span.Dispose();
                 _accessor.Dispose();
             }

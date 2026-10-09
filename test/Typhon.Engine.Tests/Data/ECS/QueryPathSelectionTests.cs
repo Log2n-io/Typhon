@@ -12,7 +12,7 @@ namespace Typhon.Engine.Tests;
 
 /// <summary>
 /// <c>Fan</c> is <c>AllowMultiple</c> so its fan-out — rows per distinct key — is whatever the test spawns; <c>Uniq</c> is a unique index, whose fan-out is 1
-/// by construction and which therefore must never be selected however the rows are shaped.
+/// by construction, so it is selected only for a range narrow against the archetype's cluster count.
 /// </summary>
 [Component("Typhon.Test.QSel.Data", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -168,10 +168,11 @@ class QueryPathSelectionTests : TestBase<QueryPathSelectionTests>
     }
 
     /// <summary>
-    /// A unique index is never selected however many rows there are: one entry per row is fan-out 1, Path A's worst case.
+    /// A wide range on a unique index takes the full scan: one entry per row is fan-out 1, Path A's worst case per key, and the range can hold more keys
+    /// than the archetype has clusters.
     /// </summary>
     [Test]
-    public void AUniqueIndexNeverSelectsTheSelectiveScan()
+    public void AWideRangeOnAUniqueIndexTakesTheFullScan()
     {
         var dbe = SetupEngine();
         const int keys = 4;
@@ -185,11 +186,71 @@ class QueryPathSelectionTests : TestBase<QueryPathSelectionTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(selective, Is.Zero, "a unique index stores one entry per row, so its fan-out is 1 regardless of the archetype's size");
+            Assert.That(selective, Is.Zero, "the range can hold up to int.MaxValue - rows keys: Path A would visit every cluster, one key at a time");
             Assert.That(full, Is.GreaterThan(0));
             Assert.That(planned, Is.EquivalentTo(Forced(Run, ClusterScanPath.FullScan)));
         });
     }
+
+    /// <summary>
+    /// A point lookup on a unique index takes the selective scan once the archetype has enough clusters: the full scan pays every cluster it cannot prune,
+    /// which on scattered keys is all of them, while the lookup can match one row. MarketHardeningTests' 2 000 point lookups on a 1 000 000-row archetype
+    /// each read the whole cluster segment from disk before this.
+    /// </summary>
+    [Test]
+    public void APointLookupOnAUniqueIndex_OverManyClusters_TakesTheSelectiveScan()
+    {
+        var dbe = SetupEngine();
+        var rows = UniqueBoundClusters * ClusterSizeOf(dbe);
+        Spawn(dbe, rows, 4);
+
+        using var tx = dbe.CreateQuickTransaction();
+        HashSet<EntityId> Run() => tx.Query<QSelUnit>().WhereField<QSelData>(d => d.Uniq == 100).Execute();
+
+        var planned = Planned(Run, out var selective, out var full);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(selective, Is.GreaterThan(0), $"one key against {UniqueBoundClusters} clusters must take Path A");
+            Assert.That(full, Is.Zero);
+            Assert.That(planned, Has.Count.EqualTo(1));
+            Assert.That(planned, Is.EquivalentTo(Forced(Run, ClusterScanPath.FullScan)));
+        });
+    }
+
+    /// <summary>
+    /// The bound is real on both sides: a unique range of <c>clusters / 8</c> keys takes the selective scan, one key more takes the full scan, and both answer
+    /// what the other path answers.
+    /// </summary>
+    [Test]
+    public void AUniqueRangeAtTheClusterBound_TakesTheSelectiveScan_AndOneKeyMoreTakesTheFullScan()
+    {
+        var dbe = SetupEngine();
+        var rows = UniqueBoundClusters * ClusterSizeOf(dbe);
+        Spawn(dbe, rows, 4);
+        const int atBound = UniqueBoundClusters / 8;
+
+        using var tx = dbe.CreateQuickTransaction();
+        HashSet<EntityId> AtBound() => tx.Query<QSelUnit>().WhereField<QSelData>(d => d.Uniq >= 100 && d.Uniq <= 100 + atBound - 1).Execute();
+        HashSet<EntityId> PastBound() => tx.Query<QSelUnit>().WhereField<QSelData>(d => d.Uniq >= 100 && d.Uniq <= 100 + atBound).Execute();
+
+        var at = Planned(AtBound, out var selectiveAt, out var fullAt);
+        var past = Planned(PastBound, out var selectivePast, out var fullPast);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(selectiveAt, Is.GreaterThan(0), $"{atBound} keys against {UniqueBoundClusters} clusters is at the bound: Path A");
+            Assert.That(fullAt, Is.Zero);
+            Assert.That(at, Has.Count.EqualTo(atBound));
+            Assert.That(at, Is.EquivalentTo(Forced(AtBound, ClusterScanPath.FullScan)));
+            Assert.That(selectivePast, Is.Zero, $"{atBound + 1} keys is past it: Path B");
+            Assert.That(fullPast, Is.GreaterThan(0));
+            Assert.That(past, Is.EquivalentTo(Forced(PastBound, ClusterScanPath.Selective)));
+        });
+    }
+
+    /// <summary>Clusters the unique-index cases spawn: the bound is one key per 8 clusters, so 32 puts it at four keys.</summary>
+    private const int UniqueBoundClusters = 32;
 
     /// <summary>
     /// Fan-out above the threshold is not sufficient: a range that does not exactly implement the predicate leaves Path A re-evaluating it per cluster, which

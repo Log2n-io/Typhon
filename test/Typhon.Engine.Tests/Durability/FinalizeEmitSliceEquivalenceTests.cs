@@ -241,11 +241,11 @@ internal sealed class FinalizeEmitSliceEquivalenceTests
                         var value = new FesUnit { Seq = -i, Stamp = 7_000_000L + i };
                         if (checkpoint)
                         {
-                            ctx.Transaction.OpenMut(ids[i]).Write(FesCkptArch.C) = value;
+                            ctx.Transaction.OpenMut(ids[i]).Set(FesCkptArch.C, value);
                         }
                         else
                         {
-                            ctx.Transaction.OpenMut(ids[i]).Write(FesUnitArch.C) = value;
+                            ctx.Transaction.OpenMut(ids[i]).Set(FesUnitArch.C, value);
                         }
                     }
                 }

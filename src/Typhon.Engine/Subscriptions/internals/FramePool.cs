@@ -229,7 +229,7 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
 
     /// <inheritdoc />
     /// <remarks>Bookkeeping only. The slabs are children of this node and are accounted separately, per the interface contract.</remarks>
-    public int EstimatedMemorySize
+    public long EstimatedMemorySize
     {
         get
         {

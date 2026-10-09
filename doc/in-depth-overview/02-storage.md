@@ -81,8 +81,8 @@ Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typho
 - `PageState` — current state machine value (see below)
 - `ClockSweepCounter` — eviction heuristic (range 0..5, see [§2](#two-pass-clock-sweep-eviction))
 - `DirtyCounter` (`DC`) — mutator marks a unit of work still holds on the page; > 0 prevents eviction
-- `WritebackGen` / `CapturedGen` — the page owes a write to the data file while they differ; prevents eviction until a checkpoint has made the bytes durable. A bitmap with one bit per slot lets the checkpoint find the owed pages without visiting every slot
-- `ActiveChunkWriters` (`ACW`) — > 0 means writers are mid-flight; prevents *checkpoint snapshot* (but not eviction)
+- `WritebackGen` / `CapturedGen` — the page owes a write to the data file while they differ; prevents eviction until a checkpoint has made the bytes durable (see [§5](#5-changeset--dirty-tracking)). A bitmap with one bit per slot lets the checkpoint find the owed pages without visiting every slot
+- `ActiveChunkWriters` (`ACW`) — > 0 means writers are mid-flight; prevents *checkpoint snapshot* and eviction
 - `SlotRefCount` — number of `ChunkAccessor` slots holding raw pointers into this page
 - `AccessEpoch` — epoch tag (see [01-foundation §4](01-foundation.md))
 - `CrcVerified` — CRC checked since this load? (reset on allocate)
@@ -108,11 +108,11 @@ State transitions are protected by `StateSyncRoot`. The Idle → Exclusive trans
 
 ### Default cache size — 256 MiB
 
-`DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to **256 MiB** (`DefaultDatabaseCacheSize`) — a production-sane size for the one primary engine a process normally runs. The hard minimum is **8 MiB** (`MinimumCacheSize` = `MinimumMemPageCount × 8 KiB`); a configured size below the **64 MiB** recommended floor (`RecommendedMinimumCacheSize`) logs a startup warning. Public byte constants — `PagedMMFOptions.DefaultCacheSizeBytes` / `MinimumCacheSizeBytes` / `MaximumCacheSizeBytes` / `PageSizeBytes` — expose these in-code.
+`DatabaseCacheSize` on [`PagedMMFOptions`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PagedMMFOptions.cs) defaults to **256 MiB** (`DefaultDatabaseCacheSize`) — a production-sane size for the one primary engine a process normally runs. The hard minimum is **8 MiB** (`MinimumCacheSize` = `MinimumMemPageCount × 8 KiB`); a configured size below the **64 MiB** recommended floor (`RecommendedMinimumCacheSize`) logs a startup warning. Public byte constants — `PagedMMFOptions.DefaultCacheSizeBytes` / `MinimumCacheSizeBytes` / `PageSizeBytes` — expose these in-code.
 
 **The 8 MiB minimum is deliberately small — but it's the hard floor; production-sane sizing starts far higher.** The internal `TestMode` flag suppresses the small-cache warning and the min-size floor so a fixture *can* run below 8 MiB; fixtures that deliberately exercise eviction opt in via `[Property("CacheSize", ...)]` to a sub-floor cache under `TestMode`, while the general test default is a representative 8 MiB (right at the floor). That puts the eviction, backpressure, and dirty-counter paths under real pressure exactly where a test wants it, while the rest of the suite runs representatively. Production leaves `TestMode` off and gets the 256 MiB default; size `DatabaseCacheSize` — or the fluent `TyphonOptions.PageCacheSize(...)` — for your workload's largest single-transaction working set (real servers go much higher).
 
-The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and at most 2 GiB minus one page (`MaximumCacheSize`). The **ceiling is not an architectural limit** — it exists because the cache is a *single* contiguous allocation whose size travels as an `int` (`IMemoryAllocator.AllocatePinned`, and the `Memory<byte>` slices the page I/O takes from it). Raising it means a 64-bit allocation with per-page I/O buffers, or several allocations; nothing else in the page-cache design depends on staying under it.
+The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and at most 2³¹ − 1 pages (about 16 TiB: a slot index is an `int`). **There is no other ceiling** (#945): the cache is one contiguous 64-bit allocation (`IMemoryAllocator.AllocateLargePinned`, 4 KiB-aligned, never zeroed), and the OS is the limit. A size the host cannot grant is refused at startup with a `StorageException` (`TyphonErrorCode.PageCacheAllocationFailed`) naming `DatabaseCacheSize`, the size and the limit that applied: the commit limit on Windows, the overcommit policy on Linux. The two async I/O paths, which need a `Memory<byte>` and so cannot address past 2 GiB from one base, go through fixed 1 GiB windows (`PageCacheWindow`); the page-access hot path is unchanged pointer arithmetic, and a page's address maps back to its slot exactly (rule PS-13).
 
 ### Two-pass clock-sweep eviction
 
@@ -126,7 +126,7 @@ Pass 2 (counter-ignoring):    scan up to N slots
    take the first slot TryAcquire succeeds on, regardless of counter
 ```
 
-The counter is incremented on every access via `PageInfo.IncrementClockSweepCounter`, capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page has DC > 0 or is epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, ACW, SlotRefCount, AccessEpoch).
+The counter is incremented on every access via `PageInfo.IncrementClockSweepCounter`, capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page is dirty or epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, writeback debt, ACW, SlotRefCount, AccessEpoch).
 
 When both passes fail, the **backpressure path** kicks in (see [§6](#6-backpressure)). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
 
@@ -226,30 +226,23 @@ Stores fixed-size chunks (minimum stride 8 B). Each page reserves part of its 12
 
 - `ChunkCountRootPage` — chunks per root page. With the directory-only root (v4) the directory fills the whole root, so this is **always 0** — chunk 0 lives on segment page 1, not the root.
 - `ChunkCountPerPage` — chunks per data (non-root) page
-- `_divMagic` — magic multiplier for `chunkIdx / ChunkCountPerPage` (multiply + shift, ~3 cycles, vs 20–80 for division)
+- `_pageDivider` (`ChunkPageDivider`) — exact 64-bit magic multiplier for `chunkIdx / ChunkCountPerPage` (one `Math.BigMul`, ~3 cycles, vs 20–80 for division); replaces the 32-bit multiplier that overflowed at large chunk ids (#1204)
 
 Alignment padding ensures chunks start at stride-aligned absolute page offsets — for `stride = 128`, each data page wastes 64 B (because `PageHeaderSize = 192` isn't a multiple of 128). For `stride = 64`, padding is zero. (The root carries no chunks, so its alignment is moot.)
 
-#### The lock-free forward singly-linked list
+#### Room-bits bitmap
 
-Free-page tracking is a lock-free **forward SLL** over the pages that have at least one free chunk:
+Free-page tracking is a **room-bits bitmap** (`RoomBlock[] _roomBlocks`): one bit per page, set when the page *may* have a free chunk (a conservative superset of the truth — a bit set on a full page is a false positive, corrected on the next allocation attempt). Three additional fields manage the invariant concurrently:
 
-- `_freeHead` — head index, or `EMPTY_PAGE = -1` when no page has free space
-- `_nextPage[i]` — successor index, `EMPTY_PAGE` for tail, `NOT_IN_LIST = -2` when removed
-- `HEAD_SENTINEL = -3` — used internally by allocators to indicate "predecessor is the head pointer itself"
+- `_roomGeneration` — bumped each time a room or summary bit goes from clear to set; an allocation that found no room grows the segment only when this counter is unchanged since its search, preventing a grow past a chunk freed behind the scan.
+- `_transientClears` — counts allocations that have cleared a room or summary bit but not yet re-read the page or word; a grow waits for zero before concluding that no chunk is available.
+- `_allocationCursor` — next-fit hint; avoids rescanning from page 0 on every allocation.
 
-`AllocateChunk` walks the chain, scans a page's bitmap (`Interlocked.Or` with a bit mask), and on success calls `_store.EnsureDirtyAtLeast(memPageIdx, 1)` + `Interlocked.Increment(_allocatedCount)`. When a page's bitmap is fully set, it's removed from the chain via **two-phase mark + unlink**:
-
-```
-Phase A (linearization point):  CAS _nextPage[cur] from capturedNext → NOT_IN_LIST
-Phase B (best-effort unlink):   CAS predecessor's pointer from cur → capturedNext
-```
-
-Phase A is the linearization point — once it succeeds, the page is "removed" as far as any concurrent traverser is concerned. Phase B failure is harmless: a later walk hits `NOT_IN_LIST` and restarts from `_freeHead` with a bounded restart counter (`restarts > length` triggers `RebuildFreeList` under `_growLock`). Freed pages are appended at the tail. The minimum chunk size is 8 bytes.
+`AllocateChunk` finds the first page with its room bit set (`NextPageWithRoom`), scans its per-chunk bitmap (`Interlocked.Or` with a bit mask), and on success registers the page with the caller's `ChangeSet` (`AddByMemPageIndex`, or `RegisterReDirty` if it already tracks it; `MarkPageModified` without one) + `Interlocked.Increment(_allocatedCount)`. When the page is found full, the allocation clears its room bit and re-reads the page — setting the bit back if a chunk was freed in the window. `FreeChunk` clears the chunk's bitmap bit, then sets the page's room bit. The minimum chunk size is 8 bytes.
 
 #### Growth — uses your `ChangeSet`
 
-`Grow(minNewPageCount, changeSet)` doubles the segment (or grows to the minimum requested), then for every newly allocated page calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)`. That `2`, not `1`, is the **growth-race fix**: see [§5](#5-changeset--dirty-tracking) below.
+`GrowChunkCapacity(minNewPageCount, changeSet)` doubles the segment up to 1 024 pages and grows it 1 024 pages at a time beyond that (or to the minimum requested). It sets the new pages' room bits, then calls `base.Grow`, which clears each new page in full — chunk bitmap included — and records the modification before unlatching it, so no page is written after it is published and each is owed a write from that moment: see [§5](#5-changeset--dirty-tracking) below.
 
 `EnsureCapacity(minChunkCount, changeSet)` is the pre-sizing entry point used by schema migration; `GrowIfNeeded` is the lazy variant used inside `AllocateChunk` when `_allocatedCount == _capacity`.
 
@@ -285,16 +278,16 @@ Dirty marking: `MarkSlotDirty(slot)` sets the dirty bit, calls `_store.Increment
 
 ## 5. ChangeSet & dirty tracking
 
-The page cache has two counters per page that work together:
+The page cache tracks three independent things per page:
 
-| Counter | Set by | Cleared by | Blocks |
+| Field | Set by | Cleared by | Blocks |
 |---|---|---|---|
-| `DirtyCounter` (`DC`) | `IncrementDirty` (on first `ChangeSet` registration; on re-dirty after commit) | `DecrementDirty` (only checkpoint Step 5) | **Eviction** while > 0 |
-| `ActiveChunkWriters` (`ACW`) | `IncrementActiveChunkWriters` (in `MarkSlotDirty`) | `DecrementActiveChunkWriters` (in `CommitChanges`, eviction queue) | **Checkpoint snapshot** while > 0 |
+| `DirtyCounter` (`DC`) — mutator marks | `IncrementDirty`, through a `ChangeSet` (`AddByMemPageIndex`, `RegisterReDirty`) | `DecrementDirty`, only by the `ChangeSet` that took the mark | **Eviction** while > 0 |
+| `WritebackGen` / `CapturedGen` — writeback debt | `WritebackGen`: every modification (`IncrementDirty`, `MarkPageModified`) | `CapturedGen`: `MarkCaptured`, after the checkpoint's fsync | **Eviction** while they differ |
+| `ActiveChunkWriters` (`ACW`) | `IncrementActiveChunkWriters` (in `MarkSlotDirty`) | `DecrementActiveChunkWriters` (in `CommitChanges`, eviction queue) | **Checkpoint snapshot** and eviction while > 0 |
 
-DC and ACW are independent dimensions:
-
-- **DC > 0** means *the page has pending writes that must reach disk*. Eviction is forbidden. Checkpoint *can* snapshot the page if ACW == 0.
+- **DC > 0** means *a mutation is in progress under someone's `ChangeSet`*. The page stays resident until the owner releases its marks, exactly as many as it took ([PS-05](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). The counter says nothing about the disk.
+- **Writeback debt** (`WritebackGen != CapturedGen`) means *the page holds bytes that are not on the data file yet*. Only a durable write clears it ([PS-10](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)): the checkpoint samples `WritebackGen` before its seqlock copy and publishes that sample with `MarkCaptured` after the fsync. Any number of modifications between two captures owe exactly one write, and a modification that lands after the sample leaves the page owed to the next cycle ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)).
 - **ACW > 0** means *a writer is mid-flight*. Snapshotting now would capture partially-written data (e.g. a B+Tree node with odd OLC version, or a struct mid-update). Checkpoint **skips** this page on the current cycle; it'll be picked up next time.
 
 ### `ChangeSet` — the per-UoW dirty page set
@@ -303,31 +296,28 @@ DC and ACW are independent dimensions:
 
 | Method | What it does |
 |---|---|
-| `AddByMemPageIndex(int)` | Register a dirty page. Idempotent — only the *first* call per page calls `IncrementDirty`. Returns `true` if this was the first registration. |
-| `SaveChangesAsync()` / `SaveChanges()` | (Non-WAL paths) write all tracked pages to disk. After write, `DecrementDirty` brings `DC` back down. |
-| `ReleaseExcessDirtyMarks()` | **WAL-path equivalent**: caps `DC` of every tracked page at 1 (via `DecrementDirtyToMin(memIdx, 1)`), then clears the set. Without this, hot pages would accumulate one `DC` increment per UoW and become permanently unevictable. |
-| `Reset()` | Rollback path — decrements `DC` once per tracked page. |
+| `AddByMemPageIndex(int)` | Register a dirty page. The *first* call per page takes a mark (`IncrementDirty`, which also records the modification); a later call takes no mark but still records the modification (`MarkPageModified`). Returns `true` if this was the first registration. |
+| `RegisterReDirty(int)` | Take one more mark on a page this set already tracks, counted per page. |
+| `SaveChangesAsync()` / `SaveChanges()` | Structural writes only (bootstrap, schema evolution, segment growth, recovery replay): release this set's marks, then write its pages; their fsync clears the debt. The user-data path never calls it — the checkpoint writes those pages. |
+| `ReleaseDirtyMarks()` | Release every mark this set took, exactly as many per page as it registered, then clear the set. The pages stay protected by their writeback debt until a checkpoint writes them. |
+| `Reset()` | Rollback — the same exact release. It does not clear the debt: the bytes were changed in place, so the page is still owed a write. |
 | `DeferEviction(entry)` / `FlushDeferredEvictions()` | Per-eviction `SlotRefCount` / `ACW` decrements that the persistent-store `ChunkAccessor` queues when a slot gets evicted mid-UoW, drained at commit. |
 
 `ChangeSet` is pooled via [`PagedMMF.RentChangeSet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs) + `ReturnChangeSet` — a `ConcurrentBag<ChangeSet>` keeps reusable instances. Pool rental is the normal pattern; the `new ChangeSet(this)` path is only the cold start.
 
-### `ReleaseExcessDirtyMarks` and the 128-op refresh
+### `ReleaseDirtyMarks` and the 128-op refresh
 
-Called by the ECS path every 128 entity operations (`EpochRefreshInterval = 128` — see [06-ecs §9](06-ecs.md)) inside `FlushAndRefreshEpoch`, and unconditionally at UoW dispose. This is what keeps hot pages evictable: without it, a 10 000-op transaction over `ComponentA`'s root page would leave `DC = 10 000`, and the only thing that could decrement it is 10 000 checkpoint cycles.
+Called by the ECS path every 128 entity operations (`EpochRefreshInterval = 128` — see [06-ecs §9](06-ecs.md)) inside `FlushAndRefreshEpoch`, and again when the accessor is disposed. Marks last only as long as the work that took them: without the refresh, a 10 000-op transaction would hold every page it touched resident until it ended. Releasing all of them is safe because the writeback debt, not the counter, keeps unwritten bytes in the cache.
 
-### `EnsureDirtyAtLeast(2)` — the Grow → first-access race
+### A new page is owed a write before it is published
 
-`ChunkBasedSegment.GrowChunkCapacity` calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)` for each newly allocated page (see `ChunkBasedSegment.cs:274`). Why 2 and not 1?
+`LogicalSegment.InitDataPages` clears and initializes each new page under its exclusive latch and records the modification before unlatching it: with a `ChangeSet`, `AddByMemPageIndex` + `RegisterReDirty` take two counted marks; without one, `MarkPageModified` records the debt alone. Directory map pages written by a grow are handled the same way. Either way `WritebackGen` has moved past `CapturedGen` by the time the page is reachable, so it cannot be evicted before a checkpoint has written it.
 
-The race: `base.Grow` registers the new page with a `ChangeSet`, which sets `DC = 1`. Between the moment `base.Grow` releases the page latch and the moment `ChunkBasedSegment.GrowChunkCapacity` re-latches it to clear the bitmap, a checkpoint cycle can run: it snapshots zeros, writes them, calls `DecrementDirty`, and brings `DC` to 0 — making the page evictable before the caller (`AllocateChunk` → `GetChunkAddress`) has had a chance to establish `ACW > 0` protection.
+A checkpoint that captures the new page before its first writer (`AllocateChunk` → `GetChunkAddress`) arrives is harmless: the writer's modification moves `WritebackGen` past the captured sample, and the page stays owed to the next cycle ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). `GrowChunkCapacity` called without a `ChangeSet` makes a local one and releases its marks before returning, on a throw too ([PS-05](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)), so a grow never strands a mark.
 
-`EnsureDirtyAtLeast(memPageIdx, 2)` raises `DC` to at least 2 atomically. One checkpoint cycle decrements to 1; the page survives. The next caller's `MarkSlotDirty` arrives, raises `ACW > 0`, and from then on the page is in the normal write protection regime.
+### `MarkSlotDirty` re-registration — the re-dirty guard
 
-**All `AllocateChunk` callers must pass a `ChangeSet`** to thread through `Grow`. Without that, `Grow` creates a local `ChangeSet` whose `DC` increments are "orphaned" (no UoW lifecycle to release them); a checkpoint cycle decrements them to 0 and the protection collapses.
-
-### `MarkSlotDirty` re-registration — the re-dirty guard (per design rule)
-
-`MarkSlotDirty` (in `ChunkAccessor`) has subtle behaviour for *re-dirty*. When `_changeSet.AddByMemPageIndex(memIdx)` returns `false` (page already tracked by this `ChangeSet`), it calls `_store.IncrementDirty(memIdx)` unconditionally — not `EnsureDirtyAtLeast(1)`. The reason: between two accessor rentals within the same UoW, a checkpoint can have snapshotted the page (with ACW=0 mid-rent), making the snapshot stale. `IncrementDirty` pushes `DC` to ≥ 2, so the pending `DecrementDirty` from that checkpoint leaves `DC ≥ 1` — the page stays dirty for the *next* checkpoint cycle which will capture the new modifications. `ReleaseExcessDirtyMarks` ultimately caps the inflation at 1 on UoW dispose.
+`MarkSlotDirty` (in `ChunkAccessor`) has subtle behaviour for *re-dirty*. When `_changeSet.AddByMemPageIndex(memIdx)` returns `false` (page already tracked by this `ChangeSet`, dirtied again in a later accessor rental), `AddByMemPageIndex` still records the modification, and `MarkSlotDirty` takes one more mark through `RegisterReDirty`. The modification record is what matters: a checkpoint can have captured the page between the two rentals (with ACW = 0 in between), and the bump moves `WritebackGen` past that capture, so the page stays owed to the next cycle, which captures the new bytes ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). The extra mark is released with the others by `ReleaseDirtyMarks`.
 
 ---
 
@@ -343,7 +333,7 @@ internal interface IPageCacheBackpressureStrategy : IDisposable
 }
 ```
 
-[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled by `PagedMMF.DecrementDirty` when a page's `DC` reaches 0. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
+[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled when a page is left with no marks and no writeback debt — by `PagedMMF.MarkCaptured` after a checkpoint write, or by `DecrementDirty` releasing a page's last mark. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
 
 The factory hook on `PagedMMFOptions`:
 
@@ -356,7 +346,7 @@ It's `internal` — meant to be set by the engine's test harness, not by applica
 
 ### `OnBackpressure → ForceCheckpoint`
 
-Independent of the strategy, the moment the allocator decides backpressure is needed, it invokes `OnBackpressure?.Invoke()` — set by `DatabaseEngine` to `CheckpointManager.ForceCheckpoint`. This wakes the checkpoint thread immediately instead of waiting for the timer (default `CheckpointIntervalMs = 30 000`). The pipeline writes dirty pages, calls `DecrementDirty`, which calls `SignalPageAvailable`, which wakes the strategy's `ManualResetEventSlim`. End-to-end the worst case is one checkpoint cycle (typically tens of ms) + the strategy's wait granularity.
+Independent of the strategy, the moment the allocator decides backpressure is needed, it invokes `OnBackpressure?.Invoke()` — set by `DatabaseEngine` to `CheckpointManager.ForceCheckpoint`. This wakes the checkpoint thread immediately instead of waiting for the timer (default `CheckpointIntervalMs = 30 000`). The pipeline writes the owed pages in batches and, after each batch's fsync, publishes their captures (`MarkCaptured`), which calls `SignalPageAvailable` for every page left with no marks and no debt, which wakes the strategy's `ManualResetEventSlim`. End-to-end the worst case is one write batch — up to 8 192 pages or 100 ms ([CK-15](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)) — + the strategy's wait granularity.
 
 ### `PageCacheGaugeSnapshot` — what the profiler sees
 
@@ -374,7 +364,7 @@ Every page header has a `ModificationCounter : int`. Convention: **even = quiesc
 
 `CopyPageWithSeqlock` (≈ `:1697`) is the consumer used by checkpoint: it spins while the counter is odd, copies the page into staging, and re-checks the counter — if it changed, retry. There are **two skip conditions**: an odd counter on a page whose `PageState` is *not* `Exclusive` is a **stale** counter — no writer to wait for — and is skipped **immediately** (logged via `LogStaleSeqlockCounterSkip`); an odd counter held by a *real* exclusive writer for longer than the **100 ms** threshold is also skipped (the writer is hung or in backpressure). A skipped page holds the checkpoint's coverage gate back (CK-03) but keeps its dirty bit / DC so the next cycle re-captures it.
 
-Critically — `InitHeader` in `LogicalSegment.cs` (≈ `:498`) **preserves `ModificationCounter` across header clears**. Zeroing it while a page is latched would leave the counter odd after unlatch — a quiescent page falsely advertising a write. The stale-counter guard above skips such a page immediately rather than spinning, but preserving the counter (and the slot-reuse reset in `TryAcquire`) is the correct invariant: a quiescent page must read even.
+Critically — `InitHeader` in `LogicalSegment.cs` **preserves `ModificationCounter` and `ChangeRevision` across the clear** (PS-14). Zeroing `ModificationCounter` while a page is latched would leave the seqlock counter odd after unlatch — a quiescent page falsely advertising a write. Zeroing `ChangeRevision` would let a reused page number's per-sector stamp go backwards, since `PageSectorFooter` embeds its low 16 bits in every sector. The stale-counter guard above skips such a page immediately rather than spinning, but the correct invariant is the counter (and the slot-reuse reset in `TryAcquire`): a quiescent page must read even.
 
 ### The CRC — `PageChecksum`
 
@@ -423,7 +413,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 | `DatabaseName` | `"TyphonDB"` | Logical name. Validated against `^[A-Za-z0-9_-]+$` and ≤ 63 UTF-8 bytes. |
 | `DatabaseDirectory` | `Environment.CurrentDirectory` | Filesystem directory. Must exist. `DatabaseAbsoluteDirectory` returns the absolutized form. |
 | `DatabaseFileName` | `DatabaseName` (if unset) | Validated with the same rules, but no longer names any file: a database is the bundle directory `{DatabaseDirectory}/{DatabaseName}.typhon/`, and the paged data file inside it is always named `data` (no extension). |
-| `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, between `MinimumCacheSize` (8 MiB) and `MaximumCacheSize` (2 GiB minus one page). |
+| `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, at least `MinimumCacheSize` (8 MiB), at most 2³¹ − 1 pages; otherwise only what the host grants (#945). |
 | `PagesDebugPattern` | `false` | Fill a page-cache slot with a debug pattern when it is assigned. No longer observable: a page not read from disk is cleared right after ([PS-14](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)), a page read from disk is overwritten. |
 | `BackpressureStrategyFactory` (internal) | `() => new WaitForIOStrategy()` | Test hook to substitute the backpressure strategy. |
 
@@ -439,6 +429,6 @@ The advisory lock file (`db.lock` inside the `{DatabaseName}.typhon/` bundle dir
 
 - [01-foundation](01-foundation.md) — `EpochManager` / `EpochGuard` (page protection), `AccessControlSmall` (page state locks), `CacheLinePaddedInt` (clock hand), memory allocators (page cache pinning)
 - [05-revision](05-revision.md) — MVCC revision storage uses `ChunkBasedSegment` + `ChunkAccessor` and threads its `ChangeSet` through writes
-- [06-ecs](06-ecs.md) — `ComponentTable` is the ECS-side consumer of segments; `EpochRefreshInterval = 128` drives `ReleaseExcessDirtyMarks`
+- [06-ecs](06-ecs.md) — `ComponentTable` is the ECS-side consumer of segments; `EpochRefreshInterval = 128` drives `ReleaseDirtyMarks`
 - [11-durability](11-durability.md) — the checkpoint v2 cycle; page CRC + seqlock snapshots; torn-page rebuild/loud-fail
 - [13-resources](13-resources.md) — `PagedMMF` registers itself as a `ResourceNode` (memory + I/O metrics on the `Storage` subtree)

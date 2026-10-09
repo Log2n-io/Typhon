@@ -42,6 +42,18 @@ public unsafe interface IPageStore
     bool RequestPageEpochUnchecked(int filePageIndex, long epoch, out int memPageIndex);
 
     /// <summary>
+    /// Read-only access to a page for a scan that visits a whole structure (EP-02): pinned until <see cref="ReleasePageForRead"/>, not epoch-tagged,
+    /// so a scan holds one page at a time.
+    /// <para>Persistent: pins the slot (<c>SlotRefCount</c>) and loads, waits for and verifies the page like <see cref="RequestPageEpoch"/>; marks it
+    /// recently used only when <paramref name="warm"/> is set.</para>
+    /// <para>Transient: identity mapping, nothing to pin.</para>
+    /// </summary>
+    bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false);
+
+    /// <summary>Releases a page taken by <see cref="AcquirePageForRead"/>. Transient: no-op.</summary>
+    void ReleasePageForRead(int memPageIndex);
+
+    /// <summary>
     /// Get a typed <see cref="PageAccessor"/> for a resolved memory page.
     /// The PageAccessor provides type-safe access to header, metadata, and raw data regions.
     /// </summary>

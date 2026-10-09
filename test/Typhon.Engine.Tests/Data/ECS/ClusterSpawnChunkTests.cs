@@ -239,9 +239,11 @@ class ClusterSpawnChunkTests : TestBase<ClusterSpawnChunkTests>
                 CmIdxEntity.Position.Set(new CmPosition(1, 2)),
                 CmIdxEntity.Team.Set(new CmTeam { TeamId = 7, Rank = 1 }));
 
-            ref var team = ref tx.OpenMut(id).Write(CmIdxEntity.Team);
+            var target = tx.OpenMut(id);
+            var team = target.Read(CmIdxEntity.Team);
             team.TeamId = 42;
             team.Rank = 9;
+            target.Set(CmIdxEntity.Team, team);
             tx.Commit();
         }
 
@@ -258,17 +260,17 @@ class ClusterSpawnChunkTests : TestBase<ClusterSpawnChunkTests>
     }
 
     /// <summary>
-    /// A <c>ref</c> handed out by a write must stay valid across arbitrarily many later spawns in the same transaction.
+    /// A handle on an entity spawned earlier in the transaction must keep reading and writing it across arbitrarily many later spawns.
     /// </summary>
     /// <remarks>
-    /// This is a PREVENTION test, not a regression test: it passes before #839's fix, because the staging chunk lives in
-    /// the page cache and is stable. It exists because the obvious implementation — the <c>_commitStagingBuffer</c>
-    /// pattern, a single <c>NativeMemory.Realloc</c>'d block — would move the buffer under exactly this sequence and
-    /// hand the caller a dangling ref. That buffer's own doc accepts the invalidation ("the common write-then-commit
-    /// idiom is always safe"); for spawns it is not safe, because spawn-spawn-write is what <c>SpawnBatch</c> does.
+    /// This is a PREVENTION test, not a regression test. The own-spawn handle resolves its value in the spawn staging store on every call, so a
+    /// staging store that grows by reallocating — the <c>_commitStagingBuffer</c> pattern, a single <c>NativeMemory.Realloc</c>'d block — must
+    /// still hand the handle the same entity's bytes after it moved. Before #1199 the test held a raw <c>ref</c> from <c>Write</c> across the spawns
+    /// (a use-after-free if the store moved); point access no longer hands one out, so what remains to prove is the handle and the value set
+    /// through it.
     /// </remarks>
     [Test]
-    public void WriteRefFromAnEarlierSpawn_SurvivesManyLaterSpawns()
+    public void HandleFromAnEarlierSpawn_SurvivesManyLaterSpawns()
     {
         const int LaterSpawns = 2048;
 
@@ -279,24 +281,23 @@ class ClusterSpawnChunkTests : TestBase<ClusterSpawnChunkTests>
         {
             first = tx.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(new CompSmSingleVersion(1)));
 
-            ref var staged = ref tx.OpenMut(first).Write(SvTestArchetype.SvComp);
-            staged.Value = 111;
+            var opened = tx.OpenMut(first);
+            opened.Set(SvTestArchetype.SvComp, new CompSmSingleVersion(111));
 
             for (var i = 0; i < LaterSpawns; i++)
             {
                 tx.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(new CompSmSingleVersion(i)));
             }
 
-            Assert.That(staged.Value, Is.EqualTo(111),
-                $"the ref from the first spawn must survive {LaterSpawns} later spawns in the same transaction — if the "
-                + "staging store grows by reallocating, this ref points at freed memory and the read is a use-after-free");
+            Assert.That(opened.Read(SvTestArchetype.SvComp).Value, Is.EqualTo(111),
+                $"the handle from the first spawn must still read its entity after {LaterSpawns} later spawns in the same transaction");
 
-            staged.Value = 222;
+            opened.Set(SvTestArchetype.SvComp, new CompSmSingleVersion(222));
             tx.Commit();
         }
 
         using var read = dbe.CreateQuickTransaction();
         Assert.That(read.Open(first).Read(SvTestArchetype.SvComp).Value, Is.EqualTo(222),
-            "and the write through that ref must be the value that reaches the cluster");
+            "and the value set through that handle must be the one that reaches the cluster");
     }
 }

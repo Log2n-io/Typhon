@@ -253,14 +253,17 @@ public class StorageModeProofBenchmarks : IDisposable
         return sink;
     }
 
-    /// <summary>L2 write, SingleVersion under the default TickFence discipline: resolve + in-place store + SetDirty.</summary>
+    /// <summary>L2 write (read-modify-set), SingleVersion under the default TickFence discipline: resolve + copy out + store + SetDirty.</summary>
     [Benchmark(OperationsPerInvoke = PointOps)]
     public void L2_Write_SingleVersion()
     {
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var entity = tx.OpenMut(_f.Sv[i]);
+            var position = entity.Read(AaBenchAnt.Position);
+            position.X = i;
+            entity.Set(AaBenchAnt.Position, position);
         }
         tx.Rollback();
     }
@@ -271,31 +274,40 @@ public class StorageModeProofBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Transient[i]).Write(AaBenchTransientUnit.Data).Value = i;
+            var entity = tx.OpenMut(_f.Transient[i]);
+            var data = entity.Read(AaBenchTransientUnit.Data);
+            data.Value = i;
+            entity.Set(AaBenchTransientUnit.Data, data);
         }
         tx.Rollback();
     }
 
-    /// <summary>L2 write, Versioned: resolve + copy-on-write into a new revision. The MVCC price, isolated from commit.</summary>
+    /// <summary>L2 write (read-modify-set), Versioned: resolve + copy out + copy-on-write into a new revision. The MVCC price, without commit.</summary>
     [Benchmark(OperationsPerInvoke = PointOps)]
     public void L2_Write_Versioned()
     {
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Mixed[i]).Write(AaBenchMixedCluster.Health).Current = i;
+            var entity = tx.OpenMut(_f.Mixed[i]);
+            var healthCopy = entity.Read(AaBenchMixedCluster.Health);
+            healthCopy.Current = i;
+            entity.Set(AaBenchMixedCluster.Health, healthCopy);
         }
         tx.Rollback();
     }
 
-    /// <summary>L2 write, SingleVersion under the Commit discipline: staged into the commit arena, HEAD untouched.</summary>
+    /// <summary>L2 write (read-modify-set), SingleVersion under the Commit discipline: staged into the commit arena, HEAD untouched.</summary>
     [Benchmark(OperationsPerInvoke = PointOps)]
     public void L2_Write_SingleVersion_Committed()
     {
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var entity = tx.OpenMut(_f.Sv[i]);
+            var positionCopy = entity.Read(AaBenchAnt.Position);
+            positionCopy.X = i;
+            entity.Set(AaBenchAnt.Position, positionCopy);
         }
         tx.Rollback();
     }
@@ -311,7 +323,10 @@ public class StorageModeProofBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var opened = tx.OpenMut(_f.Sv[i]);
+            var position = opened.Read(AaBenchAnt.Position);
+            position.X = i;
+            opened.Set(AaBenchAnt.Position, position);
         }
         tx.Commit();
     }
@@ -323,7 +338,10 @@ public class StorageModeProofBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var target = tx.OpenMut(_f.Sv[i]);
+            var position = target.Read(AaBenchAnt.Position);
+            position.X = i;
+            target.Set(AaBenchAnt.Position, position);
         }
         tx.Commit();
     }
@@ -335,7 +353,10 @@ public class StorageModeProofBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Mixed[i]).Write(AaBenchMixedCluster.Health).Current = i;
+            var entity = tx.OpenMut(_f.Mixed[i]);
+            var health = entity.Read(AaBenchMixedCluster.Health);
+            health.Current = i;
+            entity.Set(AaBenchMixedCluster.Health, health);
         }
         tx.Commit();
     }
@@ -347,7 +368,10 @@ public class StorageModeProofBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < PointOps; i++)
         {
-            tx.OpenMut(_f.Transient[i]).Write(AaBenchTransientUnit.Data).Value = i;
+            var entity = tx.OpenMut(_f.Transient[i]);
+            var dataCopy = entity.Read(AaBenchTransientUnit.Data);
+            dataCopy.Value = i;
+            entity.Set(AaBenchTransientUnit.Data, dataCopy);
         }
         tx.Commit();
     }

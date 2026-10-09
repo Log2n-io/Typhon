@@ -544,7 +544,7 @@ class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
         foreach (var id in entities)
         {
             // ClQStats is shared across ClQUnit, ClQUnit2, ClQUnit3 — use the appropriate Comp accessor
-            ref readonly var stats = ref tx.Open(id).Read(ClQUnit.Stats);
+            var stats = tx.Open(id).Read(ClQUnit.Stats);
             scores.Add(stats.Score);
         }
 
@@ -557,7 +557,7 @@ class SimdKwayMergeTests : TestBase<SimdKwayMergeTests>
         using var tx = dbe.CreateQuickTransaction();
         foreach (var id in entities)
         {
-            ref readonly var data = ref tx.Open(id).Read(ClQFloatUnit.Data);
+            var data = tx.Open(id).Read(ClQFloatUnit.Data);
             values.Add(data.Value);
         }
 

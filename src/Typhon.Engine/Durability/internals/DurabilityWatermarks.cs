@@ -18,6 +18,10 @@ internal static class DurabilityWatermarks
     // generation (CK-05). Replaces the v1 BK_CheckpointLSN / BK_LastTickFenceLSN / BK_CleanShutdown keys (04 §6).
     private const string Key = "DurabilityWatermarks";
 
+    // The nonce of the chunk summary file (#1143) a clean close wrote beside the data file, 0 when it wrote none. Set in the same meta flip as the clean
+    // flag that vouches for it, so the two are durable together or not at all.
+    internal const string ChunkSummaryNonceKey = "ChunkSummaryNonce";
+
     /// <summary>Reads the persisted watermark pair; a fresh database (key absent) reads as <c>(0, false)</c>.</summary>
     internal static (long CheckpointLsn, bool CleanShutdown) Read(ManagedPagedMMF mmf)
     {
@@ -43,9 +47,60 @@ internal static class DurabilityWatermarks
     internal static void UpdateCheckpointLsn(ManagedPagedMMF mmf, long checkpointLsn)
         => mmf.MutateBootstrapAndPersist(() => Write(mmf, checkpointLsn, Read(mmf).CleanShutdown));
 
-    /// <summary>Sets the clean-shutdown flag (preserving the checkpoint LSN) and persists the meta page atomically (CK-05).</summary>
+    // Set while an open that followed a clean close is in progress, and cleared when it completes (#1147, CS-04). Found set, it means that open never
+    // completed: the next one must recover, but the WAL holds nothing past the clean close to rebuild a damaged segment from, so it must not replace one
+    // with a fresh segment the way it would after a crash.
+    internal const string FailedOpenKey = "FailedOpenAfterCleanClose";
+
+    /// <summary>
+    /// Sets the clean-shutdown flag (preserving the checkpoint LSN) and persists the meta page atomically (CK-05). Clearing it also clears the chunk
+    /// summary's nonce, so a flag set again later without a new summary can never vouch for the old one (CS-05).
+    /// </summary>
     internal static void SetCleanShutdown(ManagedPagedMMF mmf, bool cleanShutdown)
-        => mmf.MutateBootstrapAndPersist(() => Write(mmf, Read(mmf).CheckpointLsn, cleanShutdown));
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            Write(mmf, Read(mmf).CheckpointLsn, cleanShutdown);
+            if (!cleanShutdown)
+            {
+                mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, 0);
+            }
+        });
+
+    /// <summary>
+    /// The dirtying step of an open that follows a clean close, or an open that never completed after one (CS-02, CS-04): clears the clean flag and the
+    /// chunk summary's nonce and sets the failed-open marker, in ONE meta flip, before the session mutates anything. The marker stays set until the open
+    /// completes (<see cref="ClearFailedOpen"/>), so an open that dies anywhere before that — in the constructor, in InitializeArchetypes, or killed —
+    /// leaves it for the next one.
+    /// </summary>
+    internal static void BeginOpenAfterCleanClose(ManagedPagedMMF mmf)
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            Write(mmf, Read(mmf).CheckpointLsn, false);
+            mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, 0);
+            mmf.Bootstrap.SetInt(FailedOpenKey, 1);
+        });
+
+    /// <summary>Clears the failed-open marker once the open that set it has completed (CS-04): from then on a crash is an ordinary one.</summary>
+    internal static void ClearFailedOpen(ManagedPagedMMF mmf) => mmf.MutateBootstrapAndPersist(() => mmf.Bootstrap.SetInt(FailedOpenKey, 0));
+
+    /// <summary>Whether the last session was an open after a clean close that never completed.</summary>
+    internal static bool ReadFailedOpen(ManagedPagedMMF mmf) => mmf.Bootstrap.GetInt(FailedOpenKey) != 0;
+
+    /// <summary>
+    /// Marks a clean close: sets the clean-shutdown flag and records the nonce of the chunk summary written just before, in ONE meta flip (CK-05). The
+    /// next open trusts the summary only when this flag is set and the file carries this nonce (CS-05).
+    /// </summary>
+    /// <param name="mmf">The data file.</param>
+    /// <param name="chunkSummaryNonce">The summary file's nonce, or 0 when the close wrote none.</param>
+    internal static void MarkCleanShutdown(ManagedPagedMMF mmf, ulong chunkSummaryNonce)
+        => mmf.MutateBootstrapAndPersist(() =>
+        {
+            Write(mmf, Read(mmf).CheckpointLsn, true);
+            mmf.Bootstrap.SetLong(ChunkSummaryNonceKey, (long)chunkSummaryNonce);
+        });
+
+    /// <summary>The nonce of the chunk summary the last clean close wrote (0 when none). Meaningful only while the clean flag is set.</summary>
+    internal static ulong ReadChunkSummaryNonce(ManagedPagedMMF mmf) => (ulong)mmf.Bootstrap.GetLong(ChunkSummaryNonceKey);
 
     // Must run inside MutateBootstrapAndPersist (under the meta lock) — the read-modify-write is atomic w.r.t. the flip.
     private static void Write(ManagedPagedMMF mmf, long checkpointLsn, bool cleanShutdown)

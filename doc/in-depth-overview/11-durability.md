@@ -237,7 +237,7 @@ The cycle never persists never-durable bytes (CK-02) and never advances past a p
 |---|---|---|
 | 1 | **Barrier** — flush the WAL and capture `barrierLsn = DurableLsn`, the durable frontier for this cycle. | CK-01 |
 | 2 | **Collect dirty pages** — `CollectDirtyMemPageIndices()` returns the cache slots with DirtyCounter > 0. | |
-| 3 | **Capture + write (coverage passes)** — for each page: seqlock-snapshot into a staging buffer (CRC stamped on the copy), **skip** a page with a writer in flight (ACW > 0); `flush2` the WAL through the just-captured high-water LSN *before* the data fsync; write captured copies → data file → fsync; decrement DirtyCounter for written pages. Skipped pages are retried for up to `MaxCoveragePasses`. | CK-02 |
+| 3 | **Capture + write (coverage passes, in batches)** — for each page: seqlock-snapshot into a staging buffer (CRC stamped on the copy), **skip** a page with a writer in flight (ACW > 0). Written pages are collected in batches of up to 8 192 pages or 100 ms of writing, whichever comes first. Before each batch's `fsync`, the WAL is flushed through `LastPublishedLsn` (`flush2`); after the fsync, DirtyCounters are decremented — writeback debt falls incrementally, one batch at a time, so writers blocked on backpressure wait for one batch, not the whole pass. Skipped pages are retried for up to `MaxCoveragePasses`. | CK-02, CK-15 |
 | 4 | **Coverage gate** — only if the skip list is empty: advance the checkpoint. A page still skipped after the passes holds `CheckpointLSN` back until a later cycle captures it. | CK-03 |
 | 5 | **Advance `CheckpointLSN`** — `DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn)` writes the watermark block to the meta-pair's **alternate** slot (gen+1, CRC, fsync); the generation flip is the cycle's atomic commit point. | CK-05 |
 | 6 | **Recycle** — `SegmentManager.MarkReclaimable(trimLsn)` deletes sealed segments below the persisted checkpoint, where `trimLsn = Min(checkpointLsn, lastTickFenceLsn)` so TickFence-only data isn't lost. | CK-04 |
@@ -297,7 +297,7 @@ This is the defining safety property: a torn primary page is never silently serv
 
 ## 7. Recovery
 
-Recovery runs at engine open, before any transaction is accepted, as **two cooperating passes**:
+Recovery runs only after an unclean close (the `CleanShutdown` flag was absent at open), before any transaction is accepted, as **two cooperating passes**:
 
 ### 7.1 Segment scan — `WalRecovery`
 

@@ -129,14 +129,15 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
-            ref var bag = ref entity.Write(ClCcUnit.Bag);
-            using (var cca = t.CreateComponentCollectionAccessor(ref bag.Items))
+            var bag = entity.Read(ClCcUnit.Bag);
+            using (var cca = entity.CreateComponentCollectionAccessor(ClCcUnit.Bag, ref bag, ref bag.Items))
             {
                 for (int i = 10; i < 20; i++)
                 {
                     cca.Add(i);
                 }
             }
+            entity.Set(ClCcUnit.Bag, bag);
             Assert.That(t.Commit(), Is.True, "update commit");
         }
 
@@ -162,8 +163,9 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(id);
-            ref var pos = ref entity.Write(ClCcUnit.Pos);
+            var pos = entity.Read(ClCcUnit.Pos);
             pos.Bounds = PointAt(350f, 350f);
+            entity.Set(ClCcUnit.Pos, pos);
             Assert.That(t.Commit(), Is.True, "move commit");
         }
         dbe.WriteTickFence(1);

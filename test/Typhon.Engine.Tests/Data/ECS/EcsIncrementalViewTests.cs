@@ -96,7 +96,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Update B to 60 (crosses threshold)
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompDArch.D).B = 60;
+            var target = tx2.OpenMut(id);
+            var dCopy = target.Read(CompDArch.D);
+            dCopy.B = 60;
+            target.Set(CompDArch.D, dCopy);
             tx2.Commit();
         }
 
@@ -131,7 +134,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Update B to 30 (crosses below threshold)
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompDArch.D).B = 30;
+            var target = tx2.OpenMut(id);
+            var dCopy = target.Read(CompDArch.D);
+            dCopy.B = 30;
+            target.Set(CompDArch.D, dCopy);
             tx2.Commit();
         }
 
@@ -163,7 +169,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Update B from 60 to 70 — still above threshold, no boundary crossing
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompDArch.D).B = 70;
+            var entity = tx2.OpenMut(id);
+            var dCopy = entity.Read(CompDArch.D);
+            dCopy.B = 70;
+            entity.Set(CompDArch.D, dCopy);
             tx2.Commit();
         }
 
@@ -456,7 +465,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Mutate to cross out of view
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(CompDArch.D).B = 10;
+            var entity = tx.OpenMut(id);
+            var dCopy = entity.Read(CompDArch.D);
+            dCopy.B = 10;
+            entity.Set(CompDArch.D, dCopy);
             tx.Commit();
         }
 
@@ -496,7 +508,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Mutate B from 80 to 90 — stays in view (no boundary crossing) → Modified
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(CompDArch.D).B = 90;
+            var opened = tx.OpenMut(id);
+            var dCopy = opened.Read(CompDArch.D);
+            dCopy.B = 90;
+            opened.Set(CompDArch.D, dCopy);
             tx.Commit();
         }
 
@@ -565,7 +580,10 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Now mutate B below threshold
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(CompDArch.D).B = 10;
+            var target = tx.OpenMut(id);
+            var dCopy = target.Read(CompDArch.D);
+            dCopy.B = 10;
+            target.Set(CompDArch.D, dCopy);
             tx.Commit();
         }
 
@@ -600,12 +618,18 @@ class EcsIncrementalViewTests : TestBase<EcsIncrementalViewTests>
         // Mutate B within view (80→90 → Modified), then out (90→10 → Removed)
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(CompDArch.D).B = 90;
+            var entity = tx.OpenMut(id);
+            var dCopy = entity.Read(CompDArch.D);
+            dCopy.B = 90;
+            entity.Set(CompDArch.D, dCopy);
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(CompDArch.D).B = 10;
+            var target = tx.OpenMut(id);
+            var d2 = target.Read(CompDArch.D);
+            d2.B = 10;
+            target.Set(CompDArch.D, d2);
             tx.Commit();
         }
 

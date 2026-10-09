@@ -296,7 +296,7 @@ public unsafe partial class Transaction
     /// and persisted as <c>ArchetypeR1.RoutingId</c>). No subtree / polymorphic expansion.</param>
     /// <returns>
     /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the routing id is unknown or has no engine state. Pair each
-    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw"/> to decode component values without a compile-time type.
+    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw(int, Span{byte})"/> to decode component values without a compile-time type.
     /// </returns>
     public List<EntityId> EnumerateArchetypeEntities(ushort routingId)
     {
@@ -1304,6 +1304,7 @@ public unsafe partial class Transaction
     private protected override EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
         AssertThreadAffinity();
+        NoteEntityOpen();   // #1189: every 128 opens the transaction moves its epoch forward, read-only included
 
 
         if (id.IsNull)
@@ -1431,48 +1432,7 @@ public unsafe partial class Transaction
                 int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
                 byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
-                // Reuse the cluster cache accessor — keyed by archetype
-                if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
-                {
-                    if (_hasClusterCache)
-                    {
-                        _clusterCacheAccessor.Dispose();
-                    }
-                    if (_hasTransientClusterCache)
-                    {
-                        _transientClusterCacheAccessor.Dispose();
-                        _hasTransientClusterCache = false;
-                    }
-
-                    if (es.ClusterState.ClusterSegment != null)
-                    {
-                        _clusterCacheAccessor = es.ClusterState.ClusterSegment.CreateChunkAccessor();
-                    }
-                    if (es.ClusterState.TransientSegment != null)
-                    {
-                        _transientClusterCacheAccessor = es.ClusterState.TransientSegment.CreateChunkAccessor();
-                        _hasTransientClusterCache = true;
-                    }
-                    _clusterCacheArchId = id.ArchetypeId;
-                    _hasClusterCache = true;
-                }
-
-                // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-                if (es.ClusterState.ClusterSegment != null)
-                {
-                    result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-                else
-                {
-                    result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
-                // Mixed archetype: also set TransientStore base for Transient component reads
-                if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
-                {
-                    result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
+                ResolveClusterBases(es, id.ArchetypeId, clusterChunkId, writable, ref result);
                 result._clusterSlotIndex = slotIndex;
                 result._clusterChunkId = clusterChunkId;
                 result._clusterLayout = es.ClusterState.Layout;
@@ -2131,7 +2091,7 @@ public unsafe partial class Transaction
                 var es = _dbe._stateByRouting[archId];
                 if (es?.EntityMap != null)
                 {
-                    es.EntityMap.EnsureCapacity((int)es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
+                    es.EntityMap.EnsureCapacity(es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
                 }
             }
         }
@@ -3515,10 +3475,27 @@ public unsafe partial class Transaction
                 return;
             }
 
-            // Free chunk allocated by Spawn/Write in same tx
-            if (cri.CurCompContentChunkId != 0)
+            // Free the chunk a Spawn or Write in this transaction allocated — and only that one. An entry that was only READ holds the COMMITTED
+            // revision's content chunk, which the chain owns: older snapshots still read it, and the revision GC frees it once the tombstone below makes
+            // it unreachable. Freeing it here as well freed it twice. The first free let a spawn reuse it at once, and the GC's free then took it from
+            // under that new entity, so the next spawn got the same chunk and two live entities shared one payload: a consume-and-craft market storm read
+            // another item's data within a few thousand operations, and 100 destroy-then-respawn rounds on 2,000 entities were enough to show it.
+            if (cri.CurCompContentChunkId != 0 && (cri.Operations & (ComponentInfo.OperationType.Created | ComponentInfo.OperationType.Updated)) != 0)
             {
-                info.CompContentSegment.FreeChunk(cri.CurCompContentChunkId);
+                // This transaction's revision — a write's, or a component enabled in it — becomes the tombstone, element first: freed while its element
+                // still named it, the chunk stayed listed by a committed revision, a dangling reference in a chain that could never reduce to its
+                // tombstone. Not found, the chunk is left allocated: a leak, never a free under an element that still names it.
+                if (ComponentRevisionManager.MakeOwnRevisionTombstone(info, ref cri, cri.CurCompContentChunkId))
+                {
+                    // CC-aware: a copy-on-write took a reference on every collection buffer it shares with the committed revision.
+                    DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
+                }
+                else
+                {
+                    System.Diagnostics.Debug.Fail(
+                        $"REAP-02: no uncommitted revision names chunk {cri.CurCompContentChunkId}; left allocated rather than freed under it");
+                }
+
                 cri.CurCompContentChunkId = 0;
             }
         }
@@ -3536,8 +3513,11 @@ public unsafe partial class Transaction
 
         cri.Operations |= ComponentInfo.OperationType.Deleted;
 
-        // Create tombstone revision only on first mutation (same guard as UpdateComponent)
-        if (!cached || (cri.Operations & ComponentInfo.OperationType.Read) != 0)
+        // Create the tombstone revision only on the first mutation — UpdateComponent's guard, which this used to paraphrase as "was read". An entry that
+        // was read and then WRITTEN carries both bits: it already has this transaction's revision, which the cleared chunk id above turns into the
+        // tombstone. Adding a second one left that first revision isolated for ever, its chunk freed above, so neither the GC nor the entity cleanup could
+        // reduce the chain to its tombstone: every write-then-destroy leaked the chain and the committed content it still listed.
+        if (!cached || (cri.Operations & (ComponentInfo.OperationType.Created | ComponentInfo.OperationType.Updated)) == 0)
         {
             ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, true);
         }
@@ -3900,7 +3880,15 @@ public unsafe partial class Transaction
 
                     if (table.StorageMode == StorageMode.Versioned)
                     {
-                        // Versioned: free componentChunkId from SpawnEntry + compRev chain from SingleCache
+                        // Versioned: the spawn's content chunk and chain — unless the rollback already freed them. RollbackComponent frees both for every
+                        // Created entry and then drops it from the cache, so an entry still cached is one it never processed. Freeing them here regardless
+                        // freed the content chunk twice (REAP-02).
+                        var compType = meta._slotToComponentType[slot];
+                        if (!_componentInfos.TryGetValue(compType, out var info) || !info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                        {
+                            continue;
+                        }
+
                         int chunkId = entry.VerLoc[slot];
                         if (chunkId > 0)
                         {
@@ -3908,13 +3896,9 @@ public unsafe partial class Transaction
                             DeferredCleanupManager.FreeContentChunk(table, chunkId);
                         }
 
-                        var compType = meta._slotToComponentType[slot];
-                        if (_componentInfos.TryGetValue(compType, out var info) && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                        if (cri.CompRevTableFirstChunkId > 0)
                         {
-                            if (cri.CompRevTableFirstChunkId > 0)
-                            {
-                                table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
-                            }
+                            table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
                         }
                     }
                     else

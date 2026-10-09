@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -11,7 +12,7 @@ namespace Typhon.Engine.Tests;
 /// <para>
 /// A protected segment-directory page (CK-05) is persisted as write → fsync → slot flip, and that fsync is <b>file-wide</b>, not page-scoped. Reached partway
 /// through a checkpoint batch it therefore makes every plain data page written earlier in the same pass durable — while the cycle's flush2 barrier
-/// (<c>RequestFlush</c> + <c>WaitForDurable</c>) has not run yet, because <c>CheckpointManager</c> issues it only after the whole write pass returns. Any commit
+/// (<c>RequestFlush</c> + <c>WaitForDurable</c>) has not run yet, because <c>CheckpointManager</c> issues it once the batch's writes return (CK-15). Any commit
 /// that appended and published between the step-1 barrier and that page's capture would then sit in the data file with its WAL record still in the ring buffer:
 /// "captured ⊆ durable" inverted, i.e. a phantom partial write of a never-durable transaction, which Typhon cannot undo.
 /// </para>
@@ -85,5 +86,96 @@ internal sealed class CheckpointProtectedPageOrderingTests : TestBase<Checkpoint
         Assert.That(mmf.CheckpointProtectedAfterPlainWriteCount, Is.Zero,
             "a protected page was persisted AFTER a plain data page in the same pass — its file-wide fsync then makes that page durable ahead of the "
             + "flush2 barrier (CK-02, #585)");
+    }
+
+    /// <summary>A pass of dirty pages holding at least one protected directory page and plain pages, ordered for the checkpoint.</summary>
+    private static (int[] Dirty, int ProtectedCount) OrderedPassWithProtectedPages(DatabaseEngine dbe)
+    {
+        var mmf = dbe.MMF;
+        int[] dirty = [];
+        var protectedCount = 0;
+        for (var round = 0; protectedCount == 0 && round < 40; round++)
+        {
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (var i = 0; i < 400; i++)
+                {
+                    var c = new CompA(round * 1000 + i, round, i);
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(in c));
+                }
+
+                tx.Commit();
+            }
+
+            dirty = mmf.CollectDirtyMemPageIndices();
+            protectedCount = mmf.OrderForCheckpointWrite(dirty);
+        }
+
+        Assert.That(protectedCount, Is.GreaterThan(0), "precondition: no pass held a protected directory page, so this test would prove nothing");
+        Assert.That(dirty.Length, Is.GreaterThan(protectedCount), "precondition: the pass also holds plain pages");
+        return (dirty, protectedCount);
+    }
+
+    /// <summary>The verifier: given the whole pass, a wave meant for plain pages leaves every protected page owed, at the back, and persists none.</summary>
+    private static void AssertAPlainWaveLeavesProtectedPages(DatabaseEngine dbe, int[] dirty, int protectedCount, CheckpointWriteFilter filter)
+    {
+        var mmf = dbe.MMF;
+        var persistedBefore = mmf.CheckpointProtectedPagePersistCount;
+        var deferredBefore = Interlocked.Read(ref mmf.CheckpointPagesDeferredForOrder);
+        mmf.WritePagesForCheckpoint(dirty, dbe.StagingBufferPool, out var written, filter: filter);
+
+        Assert.That(mmf.CheckpointProtectedPagePersistCount, Is.EqualTo(persistedBefore), "a plain wave persisted a protected page");
+        Assert.That(Interlocked.Read(ref mmf.CheckpointPagesDeferredForOrder) - deferredBefore, Is.EqualTo(protectedCount),
+            "a plain wave did not leave every protected page for the next pass");
+        for (var i = written; i < dirty.Length; i++)
+        {
+            Assert.That(mmf.IsProtectedFilePageForTests(mmf.GetFilePageIndex(dirty[i])), Is.True, "a plain page was left unwritten by the plain wave");
+        }
+    }
+
+    /// <summary>
+    /// The checkpoint's own pass (CK-16): ordered protected pages first, then by file position; and a parallel wave, which writes plain pages only, leaves a
+    /// protected page it meets for the next pass instead of running its file-wide fsync beside plain writes its batch has not settled.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("CK-16")]
+    public void APass_IsOrderedProtectedFirst_AndAPlainWaveLeavesProtectedPagesForTheNextPass()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CompA>();
+        dbe.InitializeArchetypes();
+        var (dirty, protectedCount) = OrderedPassWithProtectedPages(dbe);
+
+        var mmf = dbe.MMF;
+        var previous = -1;
+        for (var i = 0; i < dirty.Length; i++)
+        {
+            var filePage = mmf.GetFilePageIndex(dirty[i]);
+            var isProtected = filePage > 0 && mmf.IsProtectedFilePageForTests(filePage);
+            Assert.That(isProtected, Is.EqualTo(i < protectedCount), $"page {i} of the pass (file page {filePage}) is out of the protected-first order");
+            if (i >= protectedCount)
+            {
+                Assert.That(filePage, Is.GreaterThan(previous), $"plain page {i} of the pass is out of file order");
+                previous = filePage;
+            }
+        }
+
+        AssertAPlainWaveLeavesProtectedPages(dbe, dirty, protectedCount, CheckpointWriteFilter.PlainOnly);
+    }
+
+    /// <summary>The verifier can fail: a wave writing every kind of page — a single call over the pass, before CK-16 — persists the protected ones.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [RuleMutant("CK-16")]
+    public void Mutant_AWaveWritingEveryKind_IsReported()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CompA>();
+        dbe.InitializeArchetypes();
+        var (dirty, protectedCount) = OrderedPassWithProtectedPages(dbe);
+
+        RuleMutants.AssertDetects("CK-16", "a plain wave persisted a protected page",
+            () => AssertAPlainWaveLeavesProtectedPages(dbe, dirty, protectedCount, CheckpointWriteFilter.All));
     }
 }

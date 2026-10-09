@@ -1406,13 +1406,17 @@
     of a coordinate, or of something tracking one; for an index on an unrelated quantity a re-sort neither helps
     nor harms, and claiming otherwise would be claiming magic
   scope: ArchetypeClusterState.InvalidateClusterZoneMaps, ZoneMapArray.Invalidate, ZoneMapArray.TryGetBounds
+  requires IXS-08 — the conservative direction holds only for a cluster the map has seen. A widen that started the bounds of a
+    cluster loaded at open did narrow, to the one value it carried, and hid the cluster's other rows (#1151). Invalidate
+    returns a cluster to Unset, which is right only for an empty cluster such as a destination a repair allocates. The
+    migration then widens its occupants into the persistent index home only, not the Transient one (#1162)
   verified: ClusterRepairTests.ARepairNarrowsTheZoneMapsOfTheCellItRepacks measures total recorded width before
     and after over every cluster of the cell and every indexed field; measured 3 541 -> 796 (22 %) at 2 000
     entities in 41 clusters. It also asserts the total is non-zero afterwards, so "narrower" cannot be satisfied
     by "invalidated and never re-widened"
   on_violation:
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
-    invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
+    invalidate without a following widen → the map has no bounds (Unset), which is conservative but buys no pruning
 
 ### TH-04: The maintenance budget follows the queries' efficiency, and the configured budget is its ceiling `[perf][silent]`
   invariant every consumer of the re-clustering budget — the repair planner (DatabaseEngine.FinishArchetypeFencePrep), the throttle
@@ -2394,13 +2398,20 @@
   on_violation: an entity that left a realm answers that realm's queries with coordinates of another frame (SQ-08 broken for one tick)
 
 ### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
-  invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
-    GetSpan, or an in-place write into a pending spawn) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+  invariant validated paths (Spawn, WriteSpatial, Teleport, and EntityRefMut.Set when the value changes the key) throw at the call for an
+    unregistered, closing or incompatible realm, a Static archetype or a non-finite position, and store nothing; Set then flags the slot as
+    Teleport does, so a barrier-only archetype's fence sees the move. An unvalidated write (ClusterRef.GetSpan / Get, or a key valid when
+    written whose realm is gone since) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
     modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
     LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
-  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
-  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
-    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
+  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry, EntityRefMut.Set,
+    ArchetypeMetadata.RealmKeySlotMask
+  note: until #1199 Set handed out a `ref T`, so D-2 listed it among the unvalidated paths; since it takes the value it validates like Teleport
+  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown (a raw span write),
+    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing,
+    CrossRealmMigrationTests.Set_IntoAnUnregisteredRealm_Throws_AtTheCall_AndStoresNothing (by handle and by type),
+    CrossRealmMigrationTests.ASetIntoAPendingSpawn_WithAnInvalidKey_Throws_AndTheSpawnKeepsItsRealm,
+    CrossRealmMigrationTests.Set_RealmChange_MovesABarrierOnlyArchetype_WhoseFenceRunsNoDirtyScan; each fails with its part removed
   on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way
 
 ### RM-06: The rebuild checks every slot's realm, not only the first `[fatal][silent]`

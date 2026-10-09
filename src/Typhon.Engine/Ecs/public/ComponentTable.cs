@@ -643,7 +643,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         // Crash recovery (RB-01): persisted secondary indexes are never trusted post-crash. On the crash path (a WAL window exists at open), clear the shared
         // index segments torn-safely — FreeChunk by bitmap, never reading a (possibly torn) node page — and force EVERY indexed field into create-mode so the
         // trees are recreated EMPTY here. Phase-5 (DatabaseEngine.RebuildSecondaryIndexes, after apply+scrub) repopulates them from the final HEAD data.
-        if (load && DBE.WalFilesPresentAtOpen)
+        if (load && DBE.CrashRecoveryAtOpen)
         {
             newIndexFieldIds = CollectAllIndexedFieldIds(newIndexFieldIds);
         }

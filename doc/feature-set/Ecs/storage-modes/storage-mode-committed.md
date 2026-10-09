@@ -46,12 +46,17 @@ partial class Player : Archetype<Player>
 // Explicit escalation for one critical operation:
 using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
 var e = tx.OpenMut(playerId);
-e.Write(Player.Wallet).Gold -= price;
+var wallet = e.Read(Player.Wallet);
+wallet.Gold -= price;
+e.Set(Player.Wallet, wallet);
 tx.Commit();                  // staged value WAL-logged + published atomically — zero loss on crash
 
 // From inside a scheduled system, via the side-transaction idiom:
 using var side = ctx.CreateSideTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
-side.OpenMut(playerId).Write(Player.Wallet).Gold += reward;
+var entity = side.OpenMut(playerId);
+var walletCopy = entity.Read(Player.Wallet);
+walletCopy.Gold += reward;
+entity.Set(Player.Wallet, walletCopy);
 side.Commit();
 ```
 
@@ -67,7 +72,7 @@ side.Commit();
 - Discipline is fixed per transaction: once any write escalates a transaction to `Commit` — explicitly, or
   because a component declares `DefaultDiscipline = CommitDiscipline.Commit` — every `SingleVersion` write
   in that transaction is commit-staged.
-- Read-your-own-writes works for point reads (`EntityRef.Read` / `EntityRefMut.Write`) inside the writing transaction. Bulk
+- Read-your-own-writes works for point reads (`EntityRef.Read` / `EntityRefMut.Set`) inside the writing transaction. Bulk
   span reads (`ClusterRef.GetSpan<T>`) inside that same transaction do **not** see staged values — read HEAD
   through a side-transaction or after commit instead.
 - Isolation is read-committed, not snapshot — `ReadsSnapshot` on a `Commit`-discipline (or plain

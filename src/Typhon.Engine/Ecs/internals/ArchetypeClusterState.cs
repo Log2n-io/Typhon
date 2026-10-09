@@ -530,6 +530,35 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Prep-time snapshot of <see cref="WrittenSlotUnion"/> — the value Finalize reads when choosing which columns to emit.</summary>
     internal int FenceWrittenSlots;
 
+    /// <summary>
+    /// QFENCE-01: whether the indexes of component slot <paramref name="componentSlot"/> may hold keys their entities have left since the last fence.
+    /// Some entity must be marked in <see cref="ClusterShadowBitmap"/>, and one of three things true — the same three the fence's shadow drain gates on
+    /// (<c>DrainClusterShadowSlots</c>), for the same reasons:
+    /// <list type="bullet">
+    /// <item>the slot was written (<see cref="WrittenSlotUnion"/>, <see cref="AllSlotsWritten"/> included);</item>
+    /// <item>a slot was released this tick (<see cref="SlotReleasesThisTick"/>): a destroy after a write to ANY component leaves this one's index entries
+    /// for the fence, on a slot a spawn may already have reused;</item>
+    /// <item>the union is empty while entities are marked: a path that does not maintain the union (a pure-Transient archetype's writes) — a
+    /// contradiction, answered by doing the work.</item>
+    /// </list>
+    /// False lets a query trust this component's tree keys: a tick that only moves positions costs an index query on another component nothing.
+    /// </summary>
+    /// <remarks>
+    /// The union is reset at the fence's Prep, and the release count and the bitmap at its end, inside the fence window. Under the runtime no query runs
+    /// there — every system has completed (EW-01). A host driving <c>WriteTickFence</c> itself must not query concurrently with it: the fence's index
+    /// writers skip OLC validation in that window, which already makes a concurrent query unsafe.
+    /// </remarks>
+    internal bool MayHaveFenceStaleKeys(int componentSlot)
+    {
+        if (ClusterShadowBitmap is not { AnyTestAndSetSinceClear: true })
+        {
+            return false;
+        }
+
+        var written = Volatile.Read(ref WrittenSlotUnion);
+        return written == 0 || (written & (1 << componentSlot)) != 0 || Volatile.Read(ref SlotReleasesThisTick) != 0;
+    }
+
     /// <summary>Dirty cluster count (per-word non-zero count) at the end of Prep. Used for telemetry only.</summary>
     internal int FenceDirtyClusterCount;
 
@@ -1960,7 +1989,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// handed back out.
     /// </summary>
     /// <remarks>
-    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> keeps a free list — so without this a brand-new cluster inherits whatever the previous occupant of
+    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> reuses freed ids — so without this a brand-new cluster inherits whatever the previous occupant of
     /// that id left behind. That defeats <see cref="FreshClusterStaysUnknown"/> entirely: the fresh-cluster claim skips the fold precisely so the gate denies
     /// until the slot has contents, and it can only deny if the entry actually holds the sentinel. Concretely — cluster 7 drains with born=100, died=120 and
     /// is freed; a spawn at TSN 500 gets id 7 back and release-stores occupancy bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both
@@ -3280,7 +3309,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     private static void WriteRealmKeyOf<TKey>(ref EntityRefMut entity, ushort realm, int componentTypeId, int keyOffset) where TKey : unmanaged
     {
-        ref var value = ref entity.Write(new Comp<TKey>(componentTypeId));
+        ref var value = ref entity.WriteRef(new Comp<TKey>(componentTypeId));
         Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<TKey, byte>(ref value), keyOffset), realm);
     }
 
@@ -3665,7 +3694,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     ///   <item><see cref="RecomputeDirtyClusterAabbs"/> iterates <see cref="ClusterProcessBitmap"/>
     ///         (sparse) instead of <see cref="ActiveClusterIds"/> (full).</item>
     /// </list>
-    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Write</c> will cause those mutations to be invisible
+    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Set</c> will cause those mutations to be invisible
     /// to the engine's spatial maintenance — only set when you've migrated ALL spatial writers to <c>WriteSpatial</c>.
     /// Default <c>false</c>: legacy behaviour (full scan), safe for any caller.
     /// </summary>
@@ -3854,11 +3883,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen).
-    /// Scans cluster occupancy bitmaps to rebuild <see cref="ActiveClusterIds"/> and <see cref="FreeClusterHead"/>.
+    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen). Rebuilds <see cref="ActiveClusterIds"/> and
+    /// <see cref="FreeClusterHead"/> from <paramref name="summary"/> when one fits the segment, reading nothing; otherwise by scanning every cluster's
+    /// occupancy word.
     /// </summary>
+    /// <param name="layout">Precomputed cluster layout (shared by both segments).</param>
+    /// <param name="segment">The persisted PersistentStore cluster segment.</param>
+    /// <param name="transientSegment">Fresh TransientStore segment for Transient components. Default (null) if no Transient.</param>
+    /// <param name="transientStore">TransientStore instance to keep alive. Null if no Transient.</param>
+    /// <param name="summary">
+    /// What the last clean close recorded for this segment (<see cref="ManagedPagedMMF.TakeClusterSummary"/>), or <c>null</c>. The scan is what a healthy
+    /// open must not do (#1143): it reads one page per cluster page, most of a database's file.
+    /// </param>
     public static ArchetypeClusterState CreateFromExisting(ArchetypeClusterInfo layout, ChunkBasedSegment<PersistentStore> segment,
-        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null)
+        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null, ClusterListSummary summary = null)
     {
         Debug.Assert(segment != null || transientSegment != null, "At least one cluster segment must be provided");
         var capacity = segment?.ChunkCapacity ?? transientSegment.ChunkCapacity;
@@ -3879,8 +3917,79 @@ internal sealed unsafe partial class ArchetypeClusterState
             _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
 
-        state.RebuildActiveList();
+        if (!state.TryLoadActiveList(summary))
+        {
+            state.RebuildActiveList();
+        }
+
         return state;
+    }
+
+    /// <summary>Whether <see cref="CreateFromExisting"/> took the active-cluster list from the close's summary rather than by reading the clusters.</summary>
+    internal bool ActiveListLoadedFromSummary { get; private set; }
+
+    /// <summary>
+    /// Rebuilds the active list from <paramref name="summary"/> when it describes this state's cluster segment and every id fits the segment; reads no
+    /// page. Ids are taken through <see cref="AddToActiveList"/> in ascending order, so the state is the one <see cref="RebuildActiveList"/> would build.
+    /// </summary>
+    private bool TryLoadActiveList(ClusterListSummary summary)
+    {
+        var segment = ClusterSegment;
+        if (summary == null || segment == null || summary.RootPageIndex != segment.RootPageIndex)
+        {
+            return false;
+        }
+
+        // Parse guarantees ascending ids from 1 and a head among them; what it cannot know is the segment. A list longer than the allocated count or an id
+        // past the capacity describes some other segment, and is refused rather than trusted.
+        var ids = summary.ActiveClusterIds;
+        if (ids.Length > segment.AllocatedChunkCount || (ids.Length > 0 && ids[^1] >= segment.ChunkCapacity))
+        {
+            return false;
+        }
+
+        ActiveClusterCount = 0;
+        for (var i = 0; i < ids.Length; i++)
+        {
+            AddToActiveList(ids[i]);
+        }
+
+        FreeClusterHead = summary.FreeClusterHead;
+        ActiveListLoadedFromSummary = true;
+        return true;
+    }
+
+    /// <summary>
+    /// The active-cluster list a clean close records for the next open (<see cref="ClusterListSummary"/>), or <c>null</c> when there is none to record
+    /// faithfully: no persistent cluster segment, drained clusters the fence has not freed yet, or a list that is not a set. A <c>null</c> costs that
+    /// archetype a scan at the next open, never data.
+    /// </summary>
+    /// <remarks>Reads no page: the list is the running engine's own. The close calls it with nothing spawning, destroying or draining.</remarks>
+    internal ClusterListSummary CaptureClusterSummary()
+    {
+        var segment = ClusterSegment;
+        if (segment == null || _drainedCount != 0)
+        {
+            return null;
+        }
+
+        var ids = ActiveClusterIds.AsSpan(0, ActiveClusterCount).ToArray();
+        Array.Sort(ids);
+        for (var i = 0; i < ids.Length; i++)
+        {
+            if (ids[i] < 1 || (i > 0 && ids[i] == ids[i - 1]))
+            {
+                return null;
+            }
+        }
+
+        var head = FreeClusterHead;
+        if (head != -1 && Array.BinarySearch(ids, head) < 0)
+        {
+            head = -1;
+        }
+
+        return new ClusterListSummary(segment.RootPageIndex, head, ids);
     }
 
     /// <summary>
@@ -10361,6 +10470,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Marks every cluster that holds entities as holding values its zone maps never saw (#1151). Called once, at the end of an open, after every path that
+    /// fills a cluster without widening a zone map: the load itself, the schema-migration rebuild (<c>RebuildClusterFromChains</c>) and WAL replay
+    /// (<c>RecoveryApplier</c>).
+    /// </summary>
+    /// <remarks>
+    /// Zone maps are not persisted and the open does not scan the data to rebuild them, so a cluster holding entities after an open holds values its maps
+    /// never saw. Marked Unknown it is never pruned, and a later widen cannot narrow it to the one value it carries and hide the cluster's other rows from
+    /// scans. A recompute at the tick fence bounds it again. Transient slots too: the Transient columns of a reopened cluster hold defaults nothing widened
+    /// in. Marking where the maps are built (<c>InitializeIndexes</c>) was too early: recovery and the migration rebuild fill clusters after it.
+    /// </remarks>
+    internal void MarkActiveClustersZoneMapsUnknown()
+    {
+        var activeIds = ReadActiveClusterList(out var activeCount);
+        if (activeCount > 0)
+        {
+            MarkZoneMapsUnknown(IndexSlots, activeIds.AsSpan(0, activeCount));
+            MarkZoneMapsUnknown(TransientIndexSlots, activeIds.AsSpan(0, activeCount));
+        }
+    }
+
+    private static void MarkZoneMapsUnknown<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ReadOnlySpan<int> clusterChunkIds) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return;
+        }
+
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            var fields = ixSlots[s].Fields;
+            for (var f = 0; f < (fields?.Length ?? 0); f++)
+            {
+                fields[f].ZoneMap?.MarkUnknown(clusterChunkIds);
+            }
+        }
+    }
+
+    /// <summary>
     /// Builds one component slot's index metadata + B+Trees against <paramref name="defaultSegment"/> / <paramref name="string64Segment"/>.
     /// </summary>
     /// <remarks>
@@ -10461,6 +10608,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var chunkId = ActiveClusterIds[c];
                 var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
                 var occupancy = *(ulong*)clusterBase;
+                var wroteElementIds = false;
 
                 while (occupancy != 0)
                 {
@@ -10507,9 +10655,16 @@ internal sealed unsafe partial class ArchetypeClusterState
                             if (field.AllowMultiple)
                             {
                                 *(int*)(clusterBase + Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                                wroteElementIds = true;
                             }
                         }
                     }
+                }
+
+                // The element ids went in through a clean mapping: record the page, or an eviction reloads the stale ids (PS-10).
+                if (wroteElementIds)
+                {
+                    NoteClusterPageModified(chunkId);
                 }
             }
         }

@@ -90,7 +90,10 @@ class SpawnThenWriteFenceTests : TestBase<SpawnThenWriteFenceTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var id = tx.Spawn<SfEntity>(SfEntity.Position.Set(new SfPosition(1, 2)));
-        tx.OpenMut(id).Write(SfEntity.Position).X = newX;
+        var target = tx.OpenMut(id);
+        var position = target.Read(SfEntity.Position);
+        position.X = newX;
+        target.Set(SfEntity.Position, position);
         tx.Commit();
         return id;
     }
@@ -168,7 +171,7 @@ class SpawnThenWriteFenceTests : TestBase<SpawnThenWriteFenceTests>
             + "reach the fence's dirty set (#837)");
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var pos = ref read.Open(id).Read(SfEntity.Position);
+        var pos = read.Open(id).Read(SfEntity.Position);
         Assert.That(pos.X, Is.EqualTo(42f), "the same-transaction write must survive");
         Assert.That(pos.Y, Is.EqualTo(2f), "and must not have clobbered the untouched field");
     }
@@ -193,7 +196,10 @@ class SpawnThenWriteFenceTests : TestBase<SpawnThenWriteFenceTests>
             id = tx.Spawn<SfCommitEntity>(
                 SfCommitEntity.Position.Set(new SfPosition(1, 2)),
                 SfCommitEntity.Purse.Set(new SfPurse(7)));
-            tx.OpenMut(id).Write(SfCommitEntity.Position).X = 42;
+            var opened = tx.OpenMut(id);
+            var positionCopy = opened.Read(SfCommitEntity.Position);
+            positionCopy.X = 42;
+            opened.Set(SfCommitEntity.Position, positionCopy);
             tx.Commit();
         }
 
@@ -224,7 +230,10 @@ class SpawnThenWriteFenceTests : TestBase<SpawnThenWriteFenceTests>
             {
                 Interlocked.Increment(ref systemRuns);
                 var id = ctx.Transaction.Spawn<SfEntity>(SfEntity.Position.Set(new SfPosition(1, 2)));
-                ctx.Transaction.OpenMut(id).Write(SfEntity.Position).X = 42;
+                var entity = ctx.Transaction.OpenMut(id);
+                var position = entity.Read(SfEntity.Position);
+                position.X = 42;
+                entity.Set(SfEntity.Position, position);
             });
         }, new RuntimeOptions
         {

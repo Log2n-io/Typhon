@@ -53,6 +53,15 @@ internal sealed class SegmentView
     /// <summary>Whether the forward-chain walk terminated cleanly.</summary>
     public bool ChainComplete { get; init; }
 
+    /// <summary>Whether the forward chain was counted at all: never at Spine depth (#1143).</summary>
+    public bool ChainWalked { get; init; }
+
+    /// <summary>
+    /// Whether every link of the forward chain names the directory's next entry, the last one 0. Only established when the chain was counted from
+    /// recorded pointers; <c>true</c> otherwise, so a count comparison alone decides.
+    /// </summary>
+    public bool ChainMatchesDirectory { get; init; } = true;
+
     /// <summary>Problems encountered while walking this segment, for the check layer to turn into findings.</summary>
     public IReadOnlyList<string> WalkDiagnostics { get; init; } = [];
 }
@@ -142,11 +151,20 @@ internal sealed class SegmentWalker
     }
 
     /// <summary>
-    /// Walks one segment: resolves its directory pages through their A/B pairs, reads the page directory, and follows the
-    /// forward data-page chain for the cross-check.
+    /// Walks one segment: resolves its directory pages through their A/B pairs and reads the page directory. Counts the forward data-page chain for
+    /// the cross-check only from <paramref name="recordedNextPointers"/>; without them the chain is not looked at (<see cref="SegmentView.ChainWalked"/>).
     /// </summary>
+    /// <remarks>
+    /// Reading the chain from the file would read every data page of the segment, which is what made the Spine tier — on every open — O(database)
+    /// (#1143). The only pass that wants the chain is the Quick discovery sweep, which reads every page anyway and records each one's pointer.
+    /// </remarks>
     /// <param name="rootPageIndex">The segment's root page index.</param>
-    public SegmentView WalkSegment(int rootPageIndex)
+    /// <param name="recordedNextPointers">
+    /// Every page's forward pointer, recorded by a pass that already read every page: the chain is then counted in memory, reading nothing, and
+    /// compared with the directory position by position. <c>null</c> to read the directory only.
+    /// </param>
+    /// <param name="unreadPages">With <paramref name="recordedNextPointers"/>: the pages that pass could not read.</param>
+    public SegmentView WalkSegment(int rootPageIndex, int[] recordedNextPointers = null, bool[] unreadPages = null)
     {
         var diagnostics = new List<string>();
         var pages = new List<int>();
@@ -237,7 +255,14 @@ internal sealed class SegmentWalker
             currentDirectoryPage = nextMap;
         }
 
-        var chainCount = WalkForwardChain(rootPageIndex, pages.Count, out var chainComplete, diagnostics);
+        var chainCount = 0;
+        var chainComplete = false;
+        var chainMatches = true;
+        var walkChain = recordedNextPointers != null;
+        if (walkChain)
+        {
+            chainCount = CountRecordedChain(rootPageIndex, pages, recordedNextPointers, unreadPages, out chainComplete, out chainMatches, diagnostics);
+        }
 
         return new SegmentView
         {
@@ -249,59 +274,103 @@ internal sealed class SegmentWalker
             ForwardChainCount = chainCount,
             DirectoryComplete = complete,
             ChainComplete = chainComplete,
+            ChainWalked = walkChain,
+            ChainMatchesDirectory = chainMatches,
             WalkDiagnostics = diagnostics
         };
     }
 
     /// <summary>
-    /// Counts pages on the forward <c>NextRawDataPBID</c> chain. The directory and the chain are written by independent
-    /// code paths, so a mismatch localises a lost write precisely.
+    /// Counts the forward <c>NextRawDataPBID</c> chain over pointers already recorded for every page: no page is read. The directory and the chain
+    /// are written by independent code paths, so a mismatch localises a lost write precisely. Also compares the chain with the
+    /// directory position by position — page <c>i</c> must link to directory entry <c>i+1</c>, the last to 0 — the check the engine's crash-path
+    /// load makes (<c>ChunkBasedSegment.ScanForAllocatorState</c>), so a chain of the right length in the wrong order is caught too.
     /// </summary>
-    private int WalkForwardChain(int rootPageIndex, int directoryCount, out bool complete, List<string> diagnostics)
+    /// <remarks>
+    /// No visited set: a chain that outruns its bound is classified afterwards by a constant-memory cycle test, which keeps a segment of millions of
+    /// pages from costing a hash set of millions of entries.
+    /// </remarks>
+    private int CountRecordedChain(
+        int rootPageIndex,
+        List<int> directory,
+        int[] next,
+        bool[] unread,
+        out bool complete,
+        out bool matchesDirectory,
+        List<string> diagnostics)
     {
         complete = false;
-        Span<byte> buf = new byte[IntegrityConstants.PageSize];
-        if (!_source.TryReadPage(rootPageIndex, buf))
+        matchesDirectory = false;
+        if (unread != null && unread[rootPageIndex])
         {
+            diagnostics.Add($"Forward-chain root page {rootPageIndex} could not be read.");
             return 0;
         }
 
+        var matches = true;
         var count = 1;
-        var maxWalk = (directoryCount * 2) + 16;
-        var visited = new HashSet<int> { rootPageIndex };
+        var maxWalk = (directory.Count * 2) + 16;
+        var current = rootPageIndex;
 
         while (count < maxWalk)
         {
-            var next = PageImage.NextRawDataPage(buf);
-            if (next == 0)
+            var nextPage = next[current];
+            if (nextPage != (count < directory.Count ? directory[count] : 0))
+            {
+                matches = false;
+            }
+
+            if (nextPage == 0)
             {
                 complete = true;
+                matchesDirectory = matches;
                 return count;
             }
 
-            if (next < 0 || next >= _source.PageCount)
+            if (nextPage < 0 || nextPage >= _source.PageCount)
             {
-                diagnostics.Add($"Forward-chain pointer out of range ({next}) after {count} pages.");
+                diagnostics.Add($"Forward-chain pointer out of range ({nextPage}) after {count} pages.");
                 return count;
             }
 
-            if (!visited.Add(next))
+            if (unread != null && unread[nextPage])
             {
-                diagnostics.Add($"Forward data-page chain cycles back to page {next}.");
+                diagnostics.Add($"Forward-chain page {nextPage} could not be read.");
                 return count;
             }
 
-            if (!_source.TryReadPage(next, buf))
-            {
-                diagnostics.Add($"Forward-chain page {next} could not be read.");
-                return count;
-            }
-
+            current = nextPage;
             count++;
         }
 
-        diagnostics.Add($"Forward data-page chain exceeded its {maxWalk}-page bound; it is cyclic or wildly longer than the directory.");
+        diagnostics.Add(HasCycle(rootPageIndex, next, unread)
+            ? $"Forward data-page chain cycles: it never ends, and passed its {maxWalk}-page bound."
+            : $"Forward data-page chain exceeded its {maxWalk}-page bound; it is wildly longer than the directory.");
         return count;
+    }
+
+    /// <summary>Floyd's test over recorded pointers: whether the chain from <paramref name="root"/> loops. Constant memory.</summary>
+    private static bool HasCycle(int root, int[] next, bool[] unread)
+    {
+        static int Step(int page, int[] next, bool[] unread) =>
+            page <= 0 || page >= next.Length || (unread != null && unread[page]) ? 0 : next[page];
+
+        var slow = root;
+        var fast = root;
+        while (true)
+        {
+            fast = Step(Step(fast, next, unread), next, unread);
+            slow = Step(slow, next, unread);
+            if (fast <= 0 || slow <= 0)
+            {
+                return false;
+            }
+
+            if (slow == fast)
+            {
+                return true;
+            }
+        }
     }
 
     /// <summary>

@@ -738,7 +738,7 @@ public sealed partial class SimBridge
     /// <returns>Whether the blow landed; <see langword="false"/> when the creature was already dead this tick.</returns>
     private bool ApplyToCreature(Transaction tx, ref EntityRefMut target, in CombatEvent ev, int respawnTicks, ref long killed, ref long damageApplied)
     {
-        ref var v = ref target.Write(Creature.Vitals);
+        var v = target.Read(Creature.Vitals);
         if (v.Health <= 0)
         {
             return false;   // already dead this tick, from another shooter's event in the same drain
@@ -746,10 +746,11 @@ public sealed partial class SimBridge
 
         damageApplied++;
         var health = v.Health - ev.Amount;
-        ref var ai = ref target.Write(Creature.Ai);
+        var ai = target.Read(Creature.Ai);
         if (health > 0)
         {
             v.Health = health;
+            target.Set(Creature.Vitals, v);
 
             // Wounded and now angry: the creature turns on WHOEVER IS SHOOTING, which is what pulls a lair. Before SWG-02 it set Pursue with no destination
             // and no attacker, so it pursued nothing (gap G7).
@@ -757,12 +758,15 @@ public sealed partial class SimBridge
             {
                 ai.Mode = AiMode.Pursue;
                 ai.Target = ev.Attacker;
-                ref var timers = ref target.Write(Creature.Timers);
+                target.Set(Creature.Ai, ai);
+                var timers = target.Read(Creature.Timers);
                 timers.ThinkCooldown = 0;
+                target.Set(Creature.Timers, timers);
             }
             else if (ai.Target.IsNull)
             {
                 ai.Target = ev.Attacker;
+                target.Set(Creature.Ai, ai);
             }
 
             TatooineReplication.Replicate(in target);
@@ -770,11 +774,14 @@ public sealed partial class SimBridge
         }
 
         v.Health = 0;
+        target.Set(Creature.Vitals, v);
         ai.Mode = AiMode.Dead;
         ai.Target = EntityId.Null;
-        ref var t = ref target.Write(Creature.Timers);
+        target.Set(Creature.Ai, ai);
+        var t = target.Read(Creature.Timers);
         t.ThinkCooldown = respawnTicks;
         t.AttackCooldown = 0;
+        target.Set(Creature.Timers, t);
         TatooineReplication.Replicate(in target);
         killed++;
 
@@ -793,13 +800,14 @@ public sealed partial class SimBridge
             return false;   // the mission ended between the shot and here
         }
 
-        ref var v = ref target.Write(CreatureLair.Vitals);
+        var v = target.Read(CreatureLair.Vitals);
         if (v.Health <= 0)
         {
             return false;
         }
 
         v.Health = Math.Max(0, v.Health - ev.Amount);
+        target.Set(CreatureLair.Vitals, v);
         TatooineReplication.Replicate(in target);
         return true;
     }
@@ -814,7 +822,7 @@ public sealed partial class SimBridge
     private bool ApplyToPlayer(Transaction tx, ref EntityRefMut target, in CombatEvent ev, ref long incapacitated, out bool cloned)
     {
         cloned = false;
-        ref var v = ref target.Write(Player.Vitals);
+        var v = target.Read(Player.Vitals);
         if (v.Health <= 0)
         {
             return false;   // already down this tick
@@ -824,6 +832,7 @@ public sealed partial class SimBridge
         if (health > 0)
         {
             v.Health = health;
+            target.Set(Player.Vitals, v);
             TatooineReplication.Replicate(in target);
             return true;
         }
@@ -833,16 +842,20 @@ public sealed partial class SimBridge
         // the two steps are one here and the report says so.
         v.Health = v.MaxHealth;
         v.AttackCooldown = 0;
-        ref var state = ref target.Write(Player.State);
+        target.Set(Player.Vitals, v);
+        var state = target.Read(Player.State);
         state.Activity = PlayerActivity.Idle;
         state.ActivityTicks = CloneRecoverySeconds * _config.TickRateHz;
-        ref var move = ref target.Write(Player.Move);
+        target.Set(Player.State, state);
+        var move = target.Read(Player.Move);
         move.VelX = 0f;
         move.VelZ = 0f;
+        target.Set(Player.Move, move);
 
         // Its target dies with it, or a cloned player resumes shooting at a creature on the far side of the planet the moment its recovery ends.
-        ref var session = ref target.Write(Player.Session);
+        var session = target.Read(Player.Session);
         session.Target = EntityId.Null;
+        target.Set(Player.Session, session);
 
         var realm = target.Read(Player.Realm).Value;
         var place = target.Read(Player.Bounds);
@@ -886,17 +899,19 @@ public sealed partial class SimBridge
             return false;
         }
 
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
         state.Activity = PlayerActivity.Combat;
         state.ActivityTicks = MissionWalkSeconds * _config.TickRateHz;
         state.MissionX = ev.X;
         state.MissionZ = ev.Z;
-        ref var move = ref player.Write(Player.Move);
+        player.Set(Player.State, state);
+        var move = player.Read(Player.Move);
         move.DestX = ev.X;
         move.DestZ = ev.Z;
         move.SpeedMps = TatooineData.PlayerMountSpeedMps;
         var place = player.Read(Player.Bounds);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, place.X, place.Z, ev.X, ev.Z);
+        player.Set(Player.Move, move);
         TatooineReplication.Replicate(in player);
         return true;
     }
@@ -912,10 +927,12 @@ public sealed partial class SimBridge
             return false;
         }
 
-        ref var inv = ref player.Write(Player.Inventory);
+        var inv = player.Read(Player.Inventory);
         inv.Credits += ev.Amount;
-        ref var state = ref player.Write(Player.State);
+        player.Set(Player.Inventory, inv);
+        var state = player.Read(Player.State);
         state.MissionsCompleted++;
+        player.Set(Player.State, state);
         TatooineReplication.Replicate(in player);
         return true;
     }
@@ -933,10 +950,11 @@ public sealed partial class SimBridge
         }
 
         var credits = template < CreatureTemplates.LootCredits.Length ? CreatureTemplates.LootCredits[template] : 0;
-        ref var inv = ref player.Write(Player.Inventory);
+        var inv = player.Read(Player.Inventory);
         inv.Credits += credits;
         inv.ItemCount++;
         inv.ItemValue += credits;
+        player.Set(Player.Inventory, inv);
     }
 
     /// <summary>The nearest NPC city to a point — where a cloned player wakes up.</summary>

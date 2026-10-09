@@ -469,6 +469,9 @@ internal abstract partial class BTree<TKey, TStore>
     /// </summary>
     private void AddOrUpdateCorePessimistic(ref InsertArguments args)
     {
+        // IXW-07: the nodes a split allocates are reserved while nothing is latched, and what is left is freed in the finally, once nothing is again.
+        var reservation = ChunkReservation<TStore>.Current;
+        reservation.Begin(_segment);
         try
         {
             ref var accessor = ref args.Accessor;
@@ -700,6 +703,8 @@ internal abstract partial class BTree<TKey, TStore>
         }
         finally
         {
+            reservation.End();
+
             // Reclaim deferred nodes every 64 mutations to amortize MinActiveEpoch cost.
             if (++_deferredReclaimSkip >= 64)
             {
@@ -707,6 +712,43 @@ internal abstract partial class BTree<TKey, TStore>
                 DeferredReclaim();
             }
         }
+    }
+
+    /// <summary>
+    /// Nodes inserting into <paramref name="leaf"/> can allocate (IXW-07). None when the leaf has room or will spill (<see cref="NodeWrapper.LeafSpillOptions"/>);
+    /// otherwise its new right half, one for each consecutive full ancestor the promoted key climbs through, and a new root when the climb runs past the
+    /// top. <paramref name="split"/> skips the spill test: a contention split, or a pass whose reservation came up short, which must not be told "spill" by
+    /// an unlatched read again. An upper bound above the leaf: a full internal node may spill instead.
+    /// </summary>
+    private static int SplitNodesFor(NodeWrapper leaf, bool split, ref NodeRelatives relatives, ref MutationContext ctx, ref ChunkAccessor<TStore> accessor,
+        ref ChunkAccessor<TStore> sibAccessor)
+    {
+        if (!split)
+        {
+            if (!leaf.GetIsFull(ref accessor))
+            {
+                return 0;
+            }
+
+            leaf.LeafSpillOptions(ref relatives, ref accessor, ref sibAccessor, out var left, out var right);
+            if (left || right)
+            {
+                return 0;
+            }
+        }
+
+        var nodes = 1;
+        for (var d = ctx.Depth - 1; d >= 0; d--)
+        {
+            if (!ctx.PathNodes[d].GetIsFull(ref accessor))
+            {
+                return nodes;
+            }
+
+            nodes++;
+        }
+
+        return nodes + 1;
     }
 
     /// <summary>
@@ -739,6 +781,24 @@ internal abstract partial class BTree<TKey, TStore>
         // the window the defect needs: the tree can grow a level here, and the leaf version this writer reads afterwards is then already post-growth, so the
         // validation below passes on a node that is no longer the root. Parking after the lock instead would deadlock the very writer meant to grow the tree.
         OlcDescentTrace.OnDescentComplete?.Invoke(node.ChunkId, ctx.Depth);
+
+        // IXW-07: a split allocates a node for the leaf, one for each full ancestor its promoted key climbs through, and a new root when every level is
+        // full — all while holding the leaf, its neighbours and the whole path. Reserve them now, holding nothing, whenever this insert may split: a full
+        // leaf, a contended one, or a previous pass that came up short. The reads are unlatched, so they can be wrong both ways: a reservation not needed
+        // is freed when the insert ends, and a split that finds it short restarts below, where the same count is taken under the latches.
+        var reservation = ChunkReservation<TStore>.Current;
+        {
+            var leafFull = node.GetIsFull(ref accessor);
+            var assumeSplit = args.ReserveForSplit || (!leafFull && node.GetContentionHint(ref accessor) >= ContentionSplitThreshold);
+            if (leafFull || assumeSplit)
+            {
+                var predicted = SplitNodesFor(node, assumeSplit, ref relatives, ref ctx, ref accessor, ref sibAccessor);
+                if (reservation.Available < predicted)
+                {
+                    reservation.Fill(predicted, accessor.ChangeSet, ref accessor);
+                }
+            }
+        }
 
         // Phase 1.5A: Lock leaf with version validation.
         // Between Phase 1 descent and lock acquisition, a concurrent writer may have split/modified this leaf. Snapshot the version before locking,
@@ -897,10 +957,7 @@ internal abstract partial class BTree<TKey, TStore>
                 return;
             }
 
-            // Contention split: reset hint and fall through to split path
-            node.SetContentionHint(0, ref accessor);
-            Interlocked.Increment(ref _contentionSplitCount);
-            // Fall through to split path below
+            // Contention split: fall through to the split path, which resets the hint and counts the split once it holds the nodes to make it.
         }
 
         // Check if key already exists in full leaf (buffer append, no structural change)
@@ -1030,6 +1087,46 @@ internal abstract partial class BTree<TKey, TStore>
                 retryExit = InsertRetryExit.PathVersionChanged;
                 return;
             }
+        }
+
+        // IXW-07: nothing below may allocate with these latches held. Every node the split can touch is latched now, so this count is exact; short of it
+        // — the leaf or an ancestor filled after the descent looked — release everything and let the next pass reserve first. A contention split is
+        // optional: its item is in, so it just completes.
+        if (reservation.Available < SplitNodesFor(node, itemAlreadyInserted, ref relatives, ref ctx, ref accessor, ref sibAccessor))
+        {
+            for (var j = 0; j < ctx.Depth; j++)
+            {
+                ctx.PathNodes[j].GetLatch(ref accessor).AbortWriteLock();
+            }
+            if (leafNext.IsValid)
+            {
+                leafNext.GetLatch(ref sibAccessor).AbortWriteLock();
+            }
+            if (leafPrev.IsValid)
+            {
+                leafPrev.GetLatch(ref sibAccessor).AbortWriteLock();
+            }
+
+            args.ReserveForSplit = true;
+            if (itemAlreadyInserted)
+            {
+                node.GetLatch(ref accessor).WriteUnlock();
+                completed = true;
+                return;
+            }
+
+            node.GetLatch(ref accessor).AbortWriteLock();
+            retryExit = InsertRetryExit.SplitReservationShort;
+            return;
+        }
+
+        if (itemAlreadyInserted)
+        {
+            // A contention split, reset and counted only now it has its nodes. The hint crosses the threshold under this latch, after the descent read it
+            // to decide whether to reserve, so the pass that crosses it is usually short: resetting the hint before this check suppressed the split it
+            // counted, and the next pass never reserved. Left standing, it makes the next insert into this leaf reserve before it latches.
+            node.SetContentionHint(0, ref accessor);
+            Interlocked.Increment(ref _contentionSplitCount);
         }
 
         // insert/split at leaf

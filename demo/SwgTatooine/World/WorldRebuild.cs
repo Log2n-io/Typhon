@@ -356,10 +356,13 @@ public static class WorldRebuild
                 continue;
             }
 
-            player.Write(Player.Control).Kind = ControllerKind.InProcess;
-            ref var session = ref player.Write(Player.Session);
+            var control = player.Read(Player.Control);
+            control.Kind = ControllerKind.InProcess;
+            player.Set(Player.Control, control);
+            var session = player.Read(Player.Session);
             session.Controller = 0u;
             session.Target = EntityId.Null;
+            player.Set(Player.Session, session);
         }
 
         if (possessed.Count != 0)

@@ -426,18 +426,18 @@ class BulkEnumerateTests : TestBase<BulkEnumerateTests>
             var results = tx.Query<CompAArch>().Execute();
             Assert.That(results.Count, Is.EqualTo(5));
 
-            // Verify each entity is readable via Open().Read() — returns ref readonly (zero-copy)
+            // Verify each entity is readable via Open().Read() — a copy of its value
             foreach (var id in createdIds)
             {
                 Assert.That(results, Does.Contain(id));
-                ref readonly var comp = ref tx.Open(id).Read(CompAArch.A);
+                var comp = tx.Open(id).Read(CompAArch.A);
                 Assert.That(comp.A % 100, Is.EqualTo(0));
             }
 
             // Verify specific data integrity by reading each created entity in order
             for (int i = 0; i < createdIds.Count; i++)
             {
-                ref readonly var comp = ref tx.Open(createdIds[i]).Read(CompAArch.A);
+                var comp = tx.Open(createdIds[i]).Read(CompAArch.A);
                 Assert.That(comp.A, Is.EqualTo(i * 100));
                 Assert.That(comp.B, Is.EqualTo(i * 1.5f).Within(0.01f));
             }

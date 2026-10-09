@@ -46,7 +46,10 @@ class ClusterZoneMapNarrowingTests : TestBase<ClusterZoneMapNarrowingTests>
         {
             foreach (var id in ids)
             {
-                tx.OpenMut(id).Write(ClIdxUnit.Health).Current += 100_000;
+                var target = tx.OpenMut(id);
+                var healthCopy = target.Read(ClIdxUnit.Health);
+                healthCopy.Current += 100_000;
+                target.Set(ClIdxUnit.Health, healthCopy);
             }
 
             tx.Commit();
@@ -78,7 +81,10 @@ class ClusterZoneMapNarrowingTests : TestBase<ClusterZoneMapNarrowingTests>
             {
                 foreach (var id in ids)
                 {
-                    tx.OpenMut(id).Write(ClIdxUnit.Position).X += 1f;
+                    var opened = tx.OpenMut(id);
+                    var positionCopy = opened.Read(ClIdxUnit.Position);
+                    positionCopy.X += 1f;
+                    opened.Set(ClIdxUnit.Position, positionCopy);
                 }
 
                 tx.Commit();
@@ -107,7 +113,10 @@ class ClusterZoneMapNarrowingTests : TestBase<ClusterZoneMapNarrowingTests>
         {
             foreach (var id in ids)
             {
-                tx.OpenMut(id).Write(ClIdxUnit.Position).X += 1f;
+                var target = tx.OpenMut(id);
+                var position = target.Read(ClIdxUnit.Position);
+                position.X += 1f;
+                target.Set(ClIdxUnit.Position, position);
             }
 
             tx.Commit();
@@ -119,7 +128,10 @@ class ClusterZoneMapNarrowingTests : TestBase<ClusterZoneMapNarrowingTests>
         {
             foreach (var id in ids)
             {
-                tx.OpenMut(id).Write(ClIdxUnit.Health).Current += 50_000;
+                var entity = tx.OpenMut(id);
+                var health = entity.Read(ClIdxUnit.Health);
+                health.Current += 50_000;
+                entity.Set(ClIdxUnit.Health, health);
             }
 
             tx.Commit();

@@ -245,11 +245,13 @@ public sealed partial class StorageMapService
                         (chunkFill, chunkClass) = BuildStringChunkFill(body, chunkTotal, dataOffset, descriptor.Stride);
                     }
                     else if (descriptor.Kind == StorageSegmentKind.EntityMap
-                        && engine.TryGetHashMapLayout(descriptor.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmNonData) && hmBucketCapacity > 0)
+                        && engine.TryGetHashMapLayout(descriptor.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmBucketCount)
+                        && hmBucketCapacity > 0)
                     {
-                        // A linear-hash bucket chunk holds EntryCount entries (header @chunk+4); fill = used / capacity. Structural
-                        // chunks (meta / directory) are hatched, and an overflowing bucket is flagged (design §10.1).
-                        (chunkFill, chunkClass) = BuildHashMapChunkFill(body, chunkTotal, dataOffset, descriptor.Stride, firstChunkId, hmBucketCapacity, hmNonData);
+                        // A linear-hash bucket chunk holds EntryCount entries (header @chunk+4); fill = used / capacity. The meta chunk is hatched, and an
+                        // overflowing bucket is flagged (design §10.1).
+                        (chunkFill, chunkClass) = BuildHashMapChunkFill(body, chunkTotal, dataOffset, descriptor.Stride, firstChunkId, hmBucketCapacity,
+                            hmBucketCount);
                     }
                     else if (descriptor.Kind == StorageSegmentKind.Index
                         && engine.TryGetIndexLayout(descriptor.RootPageIndex, out var idxDirectoryChunks, out _))
@@ -467,13 +469,11 @@ public sealed partial class StorageMapService
             cells = L4Decoder.DecodeString(chunkBytes, seg.Stride);
         }
         else if (seg.Kind == StorageSegmentKind.EntityMap
-            && engine.TryGetHashMapLayout(seg.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmNonData))
+            && engine.TryGetHashMapLayout(seg.RootPageIndex, out _, out _, out var hmBucketCapacity, out var hmBucketCount))
         {
             decoder = "hash-bucket";
-            // The meta chunk is always chunk 0; directory / overflow-dir-index chunks come from the engine's non-data set. Everything else is a bucket / overflow.
-            var isMeta = chunkId == 0;
-            var isDirectory = !isMeta && Array.IndexOf(hmNonData, chunkId) >= 0;
-            cells = L4Decoder.DecodeHashMap(chunkBytes, isMeta, isDirectory, hmBucketCapacity);
+            // Chunk 0 is the meta, bucket b is chunk b + 1, every chunk past the bucket count an overflow chunk (#1205).
+            cells = L4Decoder.DecodeHashMap(chunkBytes, chunkId, hmBucketCount, hmBucketCapacity);
         }
         else if (seg.Kind == StorageSegmentKind.Index
             && engine.TryGetIndexLayout(seg.RootPageIndex, out var idxDirectoryChunks, out var idxTrees))
@@ -735,18 +735,16 @@ public sealed partial class StorageMapService
 
     /// <summary>
     /// Per-chunk fill (0..255) + class arrays for a linear-hash (entity-map) page (Module 15, A6, design §10.1). Every <i>data</i> chunk is a bucket or an
-    /// overflow chunk whose <c>EntryCount</c> (header @chunk+4) over <paramref name="bucketCapacity"/> is its fill; an overflow chunk (<c>OlcVersion == 0</c>
-    /// @chunk+0) or a primary bucket that chains (<c>OverflowChunkId != −1</c> @chunk+8) is flagged <see cref="StorageChunkClass.Overflow"/>, a lone primary
-    /// <see cref="StorageChunkClass.ContainerFill"/>. The structural chunks — the meta chunk and every directory / overflow-dir-index chunk, supplied as global
-    /// ids in <paramref name="nonDataChunkIds"/> — are headerless so their bytes can't be read as a bucket; they are marked <see cref="StorageChunkClass.NonData"/>
-    /// (no fill). Free chunks stay 0. base64 SoA, no extra I/O.
+    /// overflow chunk whose <c>EntryCount</c> (header @chunk+4) over <paramref name="bucketCapacity"/> is its fill; an overflow chunk (a chunk id past
+    /// <paramref name="bucketCount"/> — bucket <c>b</c> is chunk <c>b + 1</c>, #1205) or a primary bucket that chains (<c>OverflowChunkId != −1</c>
+    /// @chunk+8) is flagged <see cref="StorageChunkClass.Overflow"/>, a lone primary <see cref="StorageChunkClass.ContainerFill"/>. The meta chunk (0) is
+    /// <see cref="StorageChunkClass.NonData"/> (no fill). Free chunks stay 0. base64 SoA, no extra I/O.
     /// </summary>
     private static (string Fill, string Class) BuildHashMapChunkFill(ReadOnlySpan<byte> body, int chunkTotal, int dataOffset, int stride, int firstChunkId,
-        int bucketCapacity, int[] nonDataChunkIds)
+        int bucketCapacity, long bucketCount)
     {
         var fill = new byte[chunkTotal];
         var cls = new byte[chunkTotal];
-        var nonData = nonDataChunkIds is { Length: > 0 } ? new HashSet<int>(nonDataChunkIds) : null;
 
         for (var i = 0; i < chunkTotal; i++)
         {
@@ -754,9 +752,10 @@ public sealed partial class StorageMapService
             {
                 continue; // free chunk → fill 0, class Slot (0)
             }
-            if (nonData != null && nonData.Contains(firstChunkId + i))
+            var chunkId = firstChunkId + i;
+            if (chunkId == 0)
             {
-                cls[i] = (byte)StorageChunkClass.NonData; // meta / directory — structural, no fill
+                cls[i] = (byte)StorageChunkClass.NonData; // the meta — structural, no fill
                 continue;
             }
             var off = dataOffset + i * stride;
@@ -764,11 +763,10 @@ public sealed partial class StorageMapService
             {
                 continue;
             }
-            var olcVersion = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off));
             var entryCount = body[off + 4];
             var overflowChunkId = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Slice(off + 8));
             fill[i] = bucketCapacity > 0 ? (byte)Math.Clamp(entryCount * 255 / bucketCapacity, 0, 255) : (byte)0;
-            cls[i] = olcVersion == 0 || overflowChunkId != -1 ? (byte)StorageChunkClass.Overflow : (byte)StorageChunkClass.ContainerFill;
+            cls[i] = chunkId > bucketCount || overflowChunkId != -1 ? (byte)StorageChunkClass.Overflow : (byte)StorageChunkClass.ContainerFill;
         }
 
         return (Convert.ToBase64String(fill), Convert.ToBase64String(cls));

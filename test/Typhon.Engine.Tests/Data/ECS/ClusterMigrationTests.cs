@@ -153,8 +153,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 150f, MinY = 250f, MaxX = 150f, MaxY = 250f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -212,8 +213,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(firstInCell);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 850f, MinY = 150f, MaxX = 850f, MaxY = 150f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
         dbe.WriteTickFence(1);
@@ -260,8 +262,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(firstInCell);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 850f, MinY = 150f, MaxX = 850f, MaxY = 150f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
         dbe.WriteTickFence(1);
@@ -273,8 +276,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(migrant);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 50f, MinY = 50f, MaxX = 50f, MaxY = 50f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -313,8 +317,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 102f, MinY = 50f, MaxX = 102f, MaxY = 50f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -347,8 +352,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 110f, MinY = 50f, MaxX = 110f, MaxY = 50f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -401,12 +407,13 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             for (int i = 0; i < 3; i++)
             {
                 var eref = tx.OpenMut(ids[i]);
-                ref var pos = ref eref.Write(ClMigUnit.Pos);
+                var pos = eref.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F
                 {
                     MinX = destPositions[i].x, MinY = destPositions[i].y,
                     MaxX = destPositions[i].x, MaxY = destPositions[i].y
                 };
+                eref.Set(ClMigUnit.Pos, pos);
             }
             tx.Commit();
         }
@@ -450,8 +457,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 450f, MinY = 550f, MaxX = 450f, MaxY = 550f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -489,8 +497,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(migrant);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 450f, MinY = 50f, MaxX = 450f, MaxY = 50f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -526,8 +535,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 450f, MinY = 450f, MaxX = 450f, MaxY = 450f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Destroy(id);
             tx.Commit();
         }
@@ -563,8 +573,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = float.NaN, MinY = 50f, MaxX = float.NaN, MaxY = 50f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -596,8 +607,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 350f, MinY = 450f, MaxX = 350f, MaxY = 450f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -607,8 +619,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref readonly var pos = ref eref.Read(ClMigUnit.Pos);
-            ref readonly var scratch = ref eref.Read(ClMigUnit.Scratch);
+            var pos = eref.Read(ClMigUnit.Pos);
+            var scratch = eref.Read(ClMigUnit.Scratch);
             Assert.That(pos.Tag, Is.EqualTo(42), "persistent tag preserved");
             Assert.That(scratch.Counter, Is.EqualTo(12345), "transient counter preserved across migration (Q8)");
             Assert.That(scratch.Energy, Is.EqualTo(67.89f).Within(1e-4f), "transient energy preserved");
@@ -644,8 +656,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             using (var tx = dbe.CreateQuickTransaction())
             {
                 var eref = tx.OpenMut(id);
-                ref var pos = ref eref.Write(ClMigUnit.Pos);
+                var pos = eref.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
+                eref.Set(ClMigUnit.Pos, pos);
                 tx.Commit();
             }
             dstCellKey = dbe.Realm0Grid.WorldToCellKey(550f, 750f, 0f);
@@ -723,8 +736,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 850f, MinY = 850f, MaxX = 850f, MaxY = 850f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -796,8 +810,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(idA);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -805,8 +820,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         // Spawn B in the source cell — ClaimSlotInCell finds the source cell has zero clusters
         // (migration deallocated the empty cluster), so B lands in a fresh cluster. That cluster
-        // may reuse the same chunk id A originally occupied, since ChunkBasedSegment's free list
-        // returns recently-freed chunks first.
+        // may reuse the same chunk id A originally occupied, since ChunkBasedSegment hands
+        // freed chunks out again.
         EntityId idB;
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -820,8 +835,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var erefA = tx.OpenMut(idA);
-            ref readonly var posA = ref erefA.Read(ClMigUnit.Pos);
-            ref readonly var scratchA = ref erefA.Read(ClMigUnit.Scratch);
+            var posA = erefA.Read(ClMigUnit.Pos);
+            var scratchA = erefA.Read(ClMigUnit.Scratch);
             Assert.That(posA.Tag, Is.EqualTo(101), "A's tag must survive migration + subsequent B spawn");
             Assert.That(posA.Bounds.MinX, Is.EqualTo(550f), "A's position must reflect migration destination");
             Assert.That(posA.Bounds.MinY, Is.EqualTo(750f));
@@ -833,8 +848,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var erefB = tx.OpenMut(idB);
-            ref readonly var posB = ref erefB.Read(ClMigUnit.Pos);
-            ref readonly var scratchB = ref erefB.Read(ClMigUnit.Scratch);
+            var posB = erefB.Read(ClMigUnit.Pos);
+            var scratchB = erefB.Read(ClMigUnit.Scratch);
             Assert.That(posB.Tag, Is.EqualTo(202));
             Assert.That(posB.Bounds.MinX, Is.EqualTo(50f));
             Assert.That(scratchB.Counter, Is.EqualTo(222));
@@ -947,8 +962,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(ids[0]);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1040,8 +1056,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(ids[0]);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1086,8 +1103,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(ids[migrantIdx]);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1145,8 +1163,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(migrant);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 560f, MinY = 760f, MaxX = 560f, MaxY = 760f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1167,7 +1186,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var migrantRef = tx.OpenMut(migrant);
-            ref readonly var migrantPos = ref migrantRef.Read(ClMigUnit.Pos);
+            var migrantPos = migrantRef.Read(ClMigUnit.Pos);
             Assert.That(migrantPos.Tag, Is.EqualTo(1));
             Assert.That(migrantPos.Bounds.MinX, Is.EqualTo(560f));
         }
@@ -1200,8 +1219,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 450f, MinY = 550f, MaxX = 450f, MaxY = 550f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1211,7 +1231,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref readonly var pos = ref eref.Read(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             Assert.That(pos.Bounds.MinX, Is.EqualTo(450f));
             Assert.That(pos.Bounds.MinY, Is.EqualTo(550f));
             Assert.That(pos.Tag, Is.EqualTo(7), "non-spatial component fields survive migration");
@@ -1277,8 +1297,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(migrant);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 560f, MinY = 760f, MaxX = 560f, MaxY = 760f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -1710,8 +1731,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             for (var i = 0; i < ids.Length; i++)
             {
                 var eref = tx.OpenMut(ids[i]);
-                ref var pos = ref eref.Write(ClMigUnit.Pos);
+                var pos = eref.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = 650f, MinY = 650f, MaxX = 650f, MaxY = 650f };
+                eref.Set(ClMigUnit.Pos, pos);
             }
             tx.Commit();
         }
@@ -1845,8 +1867,10 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         {
             for (var i = 0; i < ids.Length; i += 2)
             {
-                ref var pos = ref tx.OpenMut(ids[i]).Write(ClMigUnit.Pos);
+                var target = tx.OpenMut(ids[i]);
+                var pos = target.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = 550f + i, MinY = 750f, MaxX = 550f + i, MaxY = 750f };
+                target.Set(ClMigUnit.Pos, pos);
             }
 
             tx.Commit();
@@ -1980,8 +2004,10 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         {
             for (var i = 0; i < ids.Length; i += 2)
             {
-                ref var pos = ref tx.OpenMut(ids[i]).Write(ClMigUnit.Pos);
+                var target = tx.OpenMut(ids[i]);
+                var pos = target.Read(ClMigUnit.Pos);
                 pos.Bounds = new AABB2F { MinX = 550f + i, MinY = 750f, MaxX = 550f + i, MaxY = 750f };
+                target.Set(ClMigUnit.Pos, pos);
             }
 
             tx.Commit();
@@ -2127,8 +2153,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var eref = tx.OpenMut(id);
-        ref var pos = ref eref.Write(ClMigUnit.Pos);
+        var pos = eref.Read(ClMigUnit.Pos);
         pos.Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y };
+        eref.Set(ClMigUnit.Pos, pos);
         tx.Commit();
     }
 

@@ -340,8 +340,10 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
         Assert.That(dbe.RealmTable.StateOf(1), Is.EqualTo(RealmRunState.Dormant));
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx.OpenMut(in1[0]).Write(RealmUnit.Pos);
+            var target = tx.OpenMut(in1[0]);
+            var pos = target.Read(RealmUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 85, MinY = 15, MaxX = 85, MaxY = 15 };
+            target.Set(RealmUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -459,8 +461,14 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
             // Writes one entity of realm 0 and one of realm 1 every tick, through the tick transaction: a callback is not realm-filtered.
             dag.CallbackSystem("Write", ctx =>
             {
-                ctx.Transaction.OpenMut(in0[0]).Write(RealmUnit.Pos).Tag++;
-                ctx.Transaction.OpenMut(in1[0]).Write(RealmUnit.Pos).Tag++;
+                var opened = ctx.Transaction.OpenMut(in0[0]);
+                var posCopy = opened.Read(RealmUnit.Pos);
+                posCopy.Tag++;
+                opened.Set(RealmUnit.Pos, posCopy);
+                var target = ctx.Transaction.OpenMut(in1[0]);
+                var pos = target.Read(RealmUnit.Pos);
+                pos.Tag++;
+                target.Set(RealmUnit.Pos, pos);
                 Interlocked.Increment(ref ticksSeen);
             });
             dag.QuerySystem("Reactive", ctx =>

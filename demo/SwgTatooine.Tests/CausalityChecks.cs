@@ -291,12 +291,14 @@ public sealed class DriveByCombatIsGoneTests
             var player = tx.OpenMut(id);
 
             // Roaming, parked, and with a timer long enough that the activity mix never re-rolls it into Combat during the window.
-            ref var state = ref player.Write(Player.State);
+            var state = player.Read(Player.State);
             state.Activity = PlayerActivity.Roaming;
             state.ActivityTicks = int.MaxValue / 2;
-            ref var move = ref player.Write(Player.Move);
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
             move.VelX = 0f;
             move.VelZ = 0f;
+            player.Set(Player.Move, move);
 
             // Standing on the creature's toes: two metres, well inside both the 75 m weapon and the 6 m melee reach.
             var at = default(PlayerPlacement);
@@ -377,15 +379,17 @@ public sealed class PlayerCloneTests
         using (var tx = _sim.Dbe.CreateQuickTransaction())
         {
             var player = tx.OpenMut(_player);
-            ref var vitals = ref player.Write(Player.Vitals);
+            var vitals = player.Read(Player.Vitals);
             _maxHealth = vitals.MaxHealth;
 
             // Five hit points: less than the weakest creature's 12, so one hit is fatal whichever creature was picked.
             vitals.Health = 5;
-            ref var state = ref player.Write(Player.State);
+            player.Set(Player.Vitals, vitals);
+            var state = player.Read(Player.State);
             state.Activity = PlayerActivity.Roaming;
             state.ActivityTicks = int.MaxValue / 2;
-            ref var move = ref player.Write(Player.Move);
+            player.Set(Player.State, state);
+            var move = player.Read(Player.Move);
             move.VelX = 0f;
             move.VelZ = 0f;
 
@@ -396,22 +400,26 @@ public sealed class PlayerCloneTests
 
             // The creature is already in the fight: Fighting, naming this player, weapon ready. ThinkCooldown is parked high so CreatureThink does not re-decide
             // inside the window and leash it home instead — the test is about the exchange, not about how a creature gets into one.
-            ref var ai = ref creature.Write(Creature.Ai);
+            var ai = creature.Read(Creature.Ai);
             ai.Mode = AiMode.Fighting;
             ai.Target = _player;
-            ref var timers = ref creature.Write(Creature.Timers);
+            creature.Set(Creature.Ai, ai);
+            var timers = creature.Read(Creature.Timers);
             timers.AttackCooldown = 0;
             timers.ThinkCooldown = int.MaxValue / 2;
+            creature.Set(Creature.Timers, timers);
 
             // A fighting creature stands still; without this it keeps the velocity its last wander leg left and the move system walks it away from the fight.
-            ref var cmove = ref creature.Write(Creature.Move);
+            var cmove = creature.Read(Creature.Move);
             cmove.VelX = 0f;
             cmove.VelZ = 0f;
+            creature.Set(Creature.Move, cmove);
 
             // Destination = where it is about to stand, so PlayerThink's arrival test succeeds and it never steers anywhere: a stale roam destination would
             // have it walking out of the creature's reach while the fight was still being set up.
             move.DestX = _diedAt.X;
             move.DestZ = _diedAt.Z;
+            player.Set(Player.Move, move);
 
             var here = default(PlayerPlacement);
             here.SetAt(_diedAt.X, _diedAt.Z, 0f, player.Read(Player.Bounds).HalfExtent);

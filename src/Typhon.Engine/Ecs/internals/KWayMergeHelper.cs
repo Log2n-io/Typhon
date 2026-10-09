@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -58,6 +59,13 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     private ArchetypeClusterInfo _layout;
     private bool _hasAccessors;
 
+    // QFENCE-01: the entities written since the last fence (null when there are none, or nothing to check them against), the query's evaluators, and
+    // where the evaluated component sits in a cluster.
+    private DirtyBitmap _fenceWritten;
+    private FieldEvaluator[] _evaluators;
+    private int _compOffset;
+    private int _compSize;
+
     public bool HasCurrent
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -86,8 +94,18 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     /// <see cref="long"/> — the same convention the typed dispatch used when it cast them back with
     /// <c>(int)</c> / <c>BitConverter.Int32BitsToSingle</c> — not the order-preserving encoding the merge compares on.
     /// </remarks>
+    /// <param name="tree">The ordered field's per-archetype tree.</param>
+    /// <param name="keyType">The tree's key type.</param>
+    /// <param name="scanMin">Lower bound, raw key bits (see the remarks).</param>
+    /// <param name="scanMax">Upper bound, raw key bits (see the remarks).</param>
+    /// <param name="descending">Stream from <paramref name="scanMax"/> down.</param>
+    /// <param name="clusterState">The archetype's cluster state.</param>
+    /// <param name="layout">The archetype's cluster layout.</param>
+    /// <param name="evaluators">The query's predicates, re-checked on the entities written since the last fence (QFENCE-01): the tree holds such an entity
+    /// under its key as of the fence, so a value that has left the range since must not ride it into the result. <c>null</c> streams the tree as is.</param>
+    /// <param name="componentSlot">The archetype slot of the component <paramref name="evaluators"/> read.</param>
     public static ArchetypeSortedStream Create(BTreeBase<PersistentStore> tree, KeyType keyType, long scanMin, long scanMax, bool descending,
-        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout)
+        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, FieldEvaluator[] evaluators = null, int componentSlot = -1)
     {
         // Bool and String64 have no typed B+Tree. Dispatch is virtual now, so such a tree would not fall out of a switch
         // — it would fill pages whose keys all encode to 0, comparing equal, and the merge would return this archetype's
@@ -104,6 +122,10 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         {
             _tree = tree,
             _layout = layout,
+            _fenceWritten = evaluators != null && componentSlot >= 0 && clusterState.MayHaveFenceStaleKeys(componentSlot) ? clusterState.ClusterShadowBitmap : null,
+            _evaluators = evaluators,
+            _compOffset = componentSlot >= 0 ? layout.ComponentOffset(componentSlot) : 0,
+            _compSize = componentSlot >= 0 ? layout.ComponentSize(componentSlot) : 0,
             _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
             _indexAccessor = tree.Segment.CreateChunkAccessor(),
             _hasAccessors = true,
@@ -155,6 +177,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
 
         // A fill can legitimately come back empty without the range being over — it walked leaves whose entries were all
         // behind the cursor, or hit its per-call leaf budget. Only Exhausted ends the stream.
+        var pageFull = false;
         while (_count == 0 && !_cursor.Exhausted)
         {
             var written = _tree.FillOrderedPage(ref _cursor, _orderedKeys.AsSpan(0, _pageCapacity), _locations.AsSpan(0, _pageCapacity), ref _indexAccessor);
@@ -166,16 +189,76 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
                 continue;
             }
 
-            _count = written;
+            pageFull = written == _pageCapacity;
+            _count = _fenceWritten != null ? DropFailedWrites(written) : written;
         }
 
         // A page that came back completely full is a stream the merge is actually draining, so widen its read-ahead for
         // next time. This is what keeps a deep Skip from paying a fresh leaf snapshot every 64 rows, without giving that
         // budget to the streams that lose every comparison and are read once.
-        if (_count == _pageCapacity && _pageCapacity < MaxPageCapacity)
+        if (pageFull && _pageCapacity < MaxPageCapacity)
         {
             GrowBuffers(_pageCapacity * 2, true);
         }
+    }
+
+    /// <summary>
+    /// QFENCE-01: compacts the first <paramref name="written"/> entries of the page, dropping each entity written since the last fence that is no longer
+    /// live or whose current value fails the query. Its tree key is the value as of the fence; a written entity that still matches keeps that position,
+    /// which is the order the query documents for it. Returns the entries kept.
+    /// </summary>
+    /// <remarks>
+    /// Liveness matters only here: a destroy leaves the index entries of an entity written earlier in the tick for the fence to remove, while it clears
+    /// the occupancy bit and the entity id at once — the merge would resolve that entry to entity 0. An entity destroyed without a write is removed from
+    /// the index by the destroy itself.
+    /// </remarks>
+    private int DropFailedWrites(int written)
+    {
+        var kept = 0;
+        var word = -1;
+        ulong dirty = 0;
+        for (var i = 0; i < written; i++)
+        {
+            var location = _locations[i];
+            var chunkId = location >> 6;
+            if (chunkId != word)
+            {
+                word = chunkId;
+                dirty = _fenceWritten.ReadWord(chunkId);
+            }
+
+            var bit = 1UL << (location & 0x3F);
+            if ((dirty & bit) != 0)
+            {
+                var clusterBase = _clusterAccessor.GetChunkAddress(chunkId);
+                if ((Volatile.Read(ref *(ulong*)clusterBase) & bit) == 0)
+                {
+                    continue;   // destroyed since its write
+                }
+
+                var entityComp = clusterBase + _compOffset + (location & 0x3F) * _compSize;
+                var matches = true;
+                for (var e = 0; e < _evaluators.Length; e++)
+                {
+                    if (!FieldEvaluator.Evaluate(ref _evaluators[e], entityComp + _evaluators[e].FieldOffset))
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if (!matches)
+                {
+                    continue;
+                }
+            }
+
+            _orderedKeys[kept] = _orderedKeys[i];
+            _locations[kept] = location;
+            kept++;
+        }
+
+        return kept;
     }
 
     /// <summary>Resolve a ClusterLocation (packed int) to an EntityPK by reading the cluster's EntityIds array.</summary>

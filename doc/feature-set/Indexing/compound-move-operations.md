@@ -52,8 +52,9 @@ partial class UnitArchetype : Archetype<UnitArchetype>
 
 using var tx = dbe.CreateQuickTransaction();
 EntityRefMut e = tx.OpenMut(id);
-ref Unit u = ref e.Write(UnitArchetype.U);
-u.Status = (int)UnitStatus.Engaged;   // indexed field change
+Unit u = e.Read(UnitArchetype.U);
+u.Status = (int)UnitStatus.Engaged;
+e.Set(UnitArchetype.U, u);   // indexed field change
 tx.Commit();                          // index relocation runs as a single compound Move/MoveValue — no app code involved
 ```
 

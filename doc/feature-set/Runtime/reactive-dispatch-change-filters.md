@@ -43,8 +43,10 @@ public class HealthRegen : QuerySystem
         // ctx.Entities == dirtySet ∪ Added — not the full View
         foreach (var id in ctx.Entities)
         {
-            ref var hp = ref ctx.Transaction.OpenMut(id).Write<EcsHealth>();
+            var entity = ctx.Transaction.OpenMut(id);
+            var hp = entity.Read<EcsHealth>();
             hp.Current = Math.Min(hp.Current + 1, hp.Max);
+            entity.Set<EcsHealth>(hp);
         }
     }
 }

@@ -157,7 +157,10 @@ internal sealed class FenceBlockBatchTests
             {
                 for (var c = 0; c < Clusters; c++)
                 {
-                    tx.OpenMut(ids[c * SlotsPerCluster]).Write(FbbSingleArch.C).Seq = -1;
+                    var target = tx.OpenMut(ids[c * SlotsPerCluster]);
+                    var cCopy = target.Read(FbbSingleArch.C);
+                    cCopy.Seq = -1;
+                    target.Set(FbbSingleArch.C, cCopy);
                 }
 
                 tx.Commit();

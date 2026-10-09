@@ -40,9 +40,11 @@ partial class Player : Archetype<Player>
 // Game tick — TickFence is the default, no argument needed
 using var uow = dbe.CreateUnitOfWork(DurabilityMode.Deferred);
 using var tx = uow.CreateTransaction();
-ref var pos = ref tx.OpenMut(playerId).Write(Player.Pos);
+var entity = tx.OpenMut(playerId);
+var pos = entity.Read(Player.Pos);
 pos.X += velocity.X * dt;
 pos.Y += velocity.Y * dt;
+entity.Set(Player.Pos, pos);
 tx.Commit();                  // ~40 ns write; value rides the next tick fence to the WAL
 
 // Equally explicit, if calling out the choice matters at the call site:

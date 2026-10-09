@@ -269,8 +269,9 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClCohUnit.Pos);
+            var pos = eref.Read(ClCohUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 550f, MinY = 550f, MaxX = 550f, MaxY = 550f };
+            eref.Set(ClCohUnit.Pos, pos);
             tx.Commit();
         }
 

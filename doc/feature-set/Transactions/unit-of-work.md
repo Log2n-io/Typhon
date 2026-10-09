@@ -22,7 +22,7 @@ write.
 
 `DatabaseEngine.CreateUnitOfWork(mode, timeout)` allocates a UoW: a `UowId` (stamped on every revision created
 within it, used for crash recovery), an absolute deadline, and — for `Deferred`/`GroupCommit` — a `ChangeSet` shared
-by every `Transaction` the UoW creates. `uow.CreateTransaction()` draws transactions from this scope; each commits
+by the transactions the UoW creates via `CreateTransaction()`. `uow.CreateTransaction()` draws transactions from this scope; each commits
 independently (its own atomicity/isolation), but none of them control *when* their WAL records become crash-safe —
 that is `Flush()`/`FlushAsync()`'s job, driven by the UoW's `DurabilityMode`. `Dispose()` always releases the
 `UowId` back to the registry; for `GroupCommit`/`Immediate` it also flushes for durability, while `Deferred` leaves
@@ -54,9 +54,11 @@ Console.WriteLine(uow.CommittedTransactionCount);
 
 - **Flat, not nestable** — there is no API to open a UoW "inside" another UoW's scope; doing so just creates a
   second, independent UoW with its own `UowId` and deadline.
-- **One shared `ChangeSet` per UoW** (`Deferred`/`GroupCommit`) — every transaction's dirty pages funnel through it,
-  so the checkpoint (not a per-UoW write) is what eventually persists data pages; `Immediate` gives each transaction
-  its own.
+- **One shared `ChangeSet` per UoW** (`Deferred`/`GroupCommit`) — dirty pages from transactions created via
+  `CreateTransaction()` funnel through it, so the checkpoint (not a per-UoW write) is what eventually persists data
+  pages; `Immediate` gives each transaction its own. The shared `ChangeSet` is single-thread-affine; transactions that
+  run concurrently with others of the same UoW — the per-chunk transactions a parallel `QuerySystem` declared
+  `WritesVersioned()` creates internally — rent a separate `ChangeSet` from the pool instead (rule PS-05a).
 - **`Deferred` dispose does not flush** — WAL records committed under a `Deferred` UoW stay volatile until an
   explicit `Flush()`/`FlushAsync()` (or the WAL buffer's own back-pressure forces an earlier write); `GroupCommit`
   and `Immediate` flush automatically on `Dispose()`.

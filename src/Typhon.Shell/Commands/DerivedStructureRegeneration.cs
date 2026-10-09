@@ -63,7 +63,13 @@ internal static class DerivedStructureRegeneration
                 opts.DatabaseName = name;
                 opts.DatabaseDirectory = directory;
             })
-            .AddScopedDatabaseEngine(opts => opts.Wal = new WalWriterOptions { UseFUA = false });
+            .AddScopedDatabaseEngine(opts =>
+            {
+                opts.Wal = new WalWriterOptions { UseFUA = false };
+
+                // The rebuild net runs on the crash path only, and since #1143 a cleanly closed database no longer takes it on its own (CS-06).
+                opts.ForceCrashRecoveryAtOpen = true;
+            });
 
         using var provider = services.BuildServiceProvider();
 

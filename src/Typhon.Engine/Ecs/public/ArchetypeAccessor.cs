@@ -76,6 +76,10 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         _clusterAccessor = _hasClusterStorage && _clusterState.ClusterSegment != null ? _clusterState.ClusterSegment.CreateChunkAccessor() : default;
         _hasTransientCluster = _hasClusterStorage && _clusterState.TransientSegment != null;
         _transientClusterAccessor = _hasTransientCluster ? _clusterState.TransientSegment.CreateChunkAccessor() : default;
+
+        // A handle resolved here caches a pointer this accessor's slot holds; what the accessor lets go of, the handle must learn (#1199). Not the
+        // Transient accessor: its pages are never evicted.
+        _clusterAccessor.TrackGeneration(accessor.ClusterGeneration);
     }
 
     /// <summary>Open an entity for reading. Throws if it is not an entity of this archetype visible at the accessor's TSN.</summary>
@@ -178,6 +182,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private EntityRef Resolve(EntityId id, bool writable, bool throwOnMiss)
     {
+        _transaction?.NoteEntityOpen();   // #1189: a transaction refreshes its epoch every 128 opens, however they reach it; a PTA worker per system
+
         // Also rejects EntityId.Null: routing id 0 is reserved, so no archetype has it.
         if (id.ArchetypeId != _routingId || IsPendingDestroy(id))
         {
@@ -216,6 +222,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
                 result._transientClusterBase = _transientClusterAccessor.GetChunkAddress(clusterChunkId, writable);
             }
 
+            result._resolveGen = _accessor.ClusterGeneration.Value;
+            result._resolvedWritable = writable;
             result._clusterSlotIndex = slotIndex;
             result._clusterChunkId = clusterChunkId;
             result._clusterLayout = _clusterState.Layout;

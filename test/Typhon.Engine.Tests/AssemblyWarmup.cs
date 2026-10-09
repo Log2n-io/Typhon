@@ -129,8 +129,10 @@ public class AssemblyWarmup
                     t.Spawn<CompDArch>(CompDArch.D.Set(in d));
 
                     t.Open(warmupId1).Read(CompAArch.A);
-                    ref var wa = ref t.OpenMut(warmupId1).Write(CompAArch.A);
+                    var entity = t.OpenMut(warmupId1);
+                    var wa = entity.Read(CompAArch.A);
                     wa.A = 999;
+                    entity.Set(CompAArch.A, wa);
                     t.Destroy(id2);
                     t.Commit();
                 }

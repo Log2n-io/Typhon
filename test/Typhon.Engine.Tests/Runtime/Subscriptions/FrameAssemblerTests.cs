@@ -497,7 +497,9 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             for (var i = 0; i < ids.Length; i++)
             {
                 var entity = tx.OpenMut(ids[i]);
-                entity.Write(ProjCreature.Ai).Level = 555;
+                var aiCopy = entity.Read(ProjCreature.Ai);
+                aiCopy.Level = 555;
+                entity.Set(ProjCreature.Ai, aiCopy);
 
                 // The third is written and not pushed: explicit replication sends nothing for it.
                 if (i < 2)

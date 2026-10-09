@@ -43,6 +43,12 @@ public enum TyphonErrorCode
     /// <summary>A file occupies the database bundle path, which must be a directory (raised as a <see cref="StorageException"/>).</summary>
     InvalidDatabaseBundle           = 2008,
 
+    /// <summary>
+    /// The page cache could not be allocated at startup: <c>DatabaseCacheSize</c> is more than the host grants (raised as a
+    /// <see cref="StorageException"/>).
+    /// </summary>
+    PageCacheAllocationFailed       = 2009,
+
     // 3xxx — Component
 
     /// <summary>

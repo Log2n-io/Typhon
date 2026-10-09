@@ -129,7 +129,10 @@ public class EcsLifecycleBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var target = tx.OpenMut(_f.Sv[i]);
+            var positionCopy = target.Read(AaBenchAnt.Position);
+            positionCopy.X = i;
+            target.Set(AaBenchAnt.Position, positionCopy);
         }
         tx.Commit();
     }
@@ -141,7 +144,10 @@ public class EcsLifecycleBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_f.Sv[i]).Write(AaBenchAnt.Position).X = i;
+            var opened = tx.OpenMut(_f.Sv[i]);
+            var position = opened.Read(AaBenchAnt.Position);
+            position.X = i;
+            opened.Set(AaBenchAnt.Position, position);
         }
         tx.Commit();
     }
@@ -153,7 +159,10 @@ public class EcsLifecycleBenchmarks : IDisposable
         using var tx = _dbe.CreateQuickTransaction(DurabilityMode.Deferred);
         for (int i = 0; i < N; i++)
         {
-            tx.OpenMut(_f.Mixed[i]).Write(AaBenchMixedCluster.Health).Current = i;
+            var entity = tx.OpenMut(_f.Mixed[i]);
+            var healthCopy = entity.Read(AaBenchMixedCluster.Health);
+            healthCopy.Current = i;
+            entity.Set(AaBenchMixedCluster.Health, healthCopy);
         }
         tx.Commit();
     }

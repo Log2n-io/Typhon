@@ -47,8 +47,10 @@ game.QuerySystem("IdleDrift", ctx =>
 {
     foreach (var id in ctx.Entities)
     {
-        ref var pos = ref ctx.Accessor.OpenMut(id).Write(Ant.Position);
-        pos.X += DriftSpeed * ctx.AmortizedDeltaTime;   // ~1s of drift, once every 60th tick
+        var entity = ctx.Accessor.OpenMut(id);
+        var pos = entity.Read(Ant.Position);
+        pos.X += DriftSpeed * ctx.AmortizedDeltaTime;
+        entity.Set(Ant.Position, pos);   // ~1s of drift, once every 60th tick
     }
 }, input: () => antsView, parallel: true, tier: SimTier.Tier2, cellAmortize: 60);
 

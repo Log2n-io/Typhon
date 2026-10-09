@@ -116,14 +116,15 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
-            ref var p = ref e.Write(CmEntity.Position);
+            var p = e.Read(CmEntity.Position);
             p.X = 99;
             p.Y = 88;
+            e.Set(CmEntity.Position, p);
             tx.Commit();
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        var rp = read.Open(id).Read(CmEntity.Position);
         Assert.That(rp.X, Is.EqualTo(99f));
         Assert.That(rp.Y, Is.EqualTo(88f));
     }
@@ -137,12 +138,14 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         using var writeTx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = writeTx.OpenMut(id);
-        e.Write(CmEntity.Position).X = 777;   // staged — HEAD must remain (1,2)
+        var position = e.Read(CmEntity.Position);
+        position.X = 777;
+        e.Set(CmEntity.Position, position);   // staged — HEAD must remain (1,2)
 
         // A separate transaction reads HEAD: read-committed ⇒ still sees the pre-write value.
         using (var peek = dbe.CreateQuickTransaction())
         {
-            ref readonly var pk = ref peek.Open(id).Read(CmEntity.Position);
+            var pk = peek.Open(id).Read(CmEntity.Position);
             Assert.That(pk.X, Is.EqualTo(1f), "staged value leaked to HEAD before commit (CM-01 violation)");
         }
 
@@ -161,8 +164,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
         var e = tx.OpenMut(id);
-        e.Write(CmEntity.Position).X = 42;
-        ref readonly var rp = ref e.Read(CmEntity.Position);
+        var position = e.Read(CmEntity.Position);
+        position.X = 42;
+        e.Set(CmEntity.Position, position);
+        var rp = e.Read(CmEntity.Position);
         Assert.That(rp.X, Is.EqualTo(42f), "writer did not see its own staged value (RYOW)");
         Assert.That(rp.Y, Is.EqualTo(6f), "partial write lost the unwritten field (seed missing)");
     }
@@ -176,7 +181,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
-            tx.OpenMut(id).Write(CmEntity.Position).X = 1234;
+            var entity = tx.OpenMut(id);
+            var position = entity.Read(CmEntity.Position);
+            position.X = 1234;
+            entity.Set(CmEntity.Position, position);
             tx.Rollback();
         }
 
@@ -194,8 +202,8 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
             var e = tx.OpenMut(id);
-            e.Write(CmEntity.Position) = new CmPosition(7, 8);
-            e.Write(CmEntity.Wallet) = new CmWallet(500);
+            e.Set(CmEntity.Position, new CmPosition(7, 8));
+            e.Set(CmEntity.Wallet, new CmWallet(500));
             tx.Commit();
         }
 
@@ -215,7 +223,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         // No explicit discipline → escalates to Commit on first touch of CmWallet (DefaultDiscipline=Commit).
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
         {
-            tx.OpenMut(id).Write(CmEntity.Wallet).Gold = 9999;
+            var entity = tx.OpenMut(id);
+            var walletCopy = entity.Read(CmEntity.Wallet);
+            walletCopy.Gold = 9999;
+            entity.Set(CmEntity.Wallet, walletCopy);
             Assert.That(tx.Discipline, Is.EqualTo(CommitDiscipline.Commit), "tx was not escalated by DefaultDiscipline=Commit");
             tx.Commit();
         }
@@ -243,7 +254,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         // the exact index must already reflect TeamId=7, the same as Versioned (CM-05/AC-11 — Move done at commit).
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
-            tx.OpenMut(id).Write(CmIdxEntity.Team).TeamId = 7;
+            var target = tx.OpenMut(id);
+            var team = target.Read(CmIdxEntity.Team);
+            team.TeamId = 7;
+            target.Set(CmIdxEntity.Team, team);
             tx.Commit();
         }
 
@@ -294,7 +308,9 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         {
             var e = tx.OpenMut(id);
             // Staged write — HEAD untouched until commit; a peek tx sees the old value.
-            e.Write(CmFlatEntity.Val).Tag = 55;
+            var val = e.Read(CmFlatEntity.Val);
+            val.Tag = 55;
+            e.Set(CmFlatEntity.Val, val);
             Assert.That(e.Read(CmFlatEntity.Val).Tag, Is.EqualTo(55), "flat read-your-own-writes failed");
             using (var peek = dbe.CreateQuickTransaction())
             {
@@ -315,7 +331,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
         {
-            tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 999;
+            var entity = tx.OpenMut(id);
+            var val = entity.Read(CmFlatEntity.Val);
+            val.Tag = 999;
+            entity.Set(CmFlatEntity.Val, val);
             tx.Rollback();
         }
 
@@ -341,7 +360,10 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
 
         using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit))
         {
-            tx.OpenMut(id).Write(CmFlatEntity.Val).Tag = 7;
+            var target = tx.OpenMut(id);
+            var valCopy = target.Read(CmFlatEntity.Val);
+            valCopy.Tag = 7;
+            target.Set(CmFlatEntity.Val, valCopy);
             tx.Commit();
         }
 
@@ -371,12 +393,15 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
             var pos = new CmPosition(1, 2);
             var wallet = new CmWallet(50);
             id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
-            tx.OpenMut(id).Write(CmEntity.Position).X = 42;   // same transaction as the Spawn
+            var target = tx.OpenMut(id);
+            var positionCopy = target.Read(CmEntity.Position);
+            positionCopy.X = 42;
+            target.Set(CmEntity.Position, positionCopy);   // same transaction as the Spawn
             tx.Commit();
         }
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        var rp = read.Open(id).Read(CmEntity.Position);
         Assert.That(rp.X, Is.EqualTo(42f), "the same-transaction write did not win over the spawn value");
         Assert.That(rp.Y, Is.EqualTo(2f), "the untouched field lost its spawn value");
     }
@@ -394,9 +419,12 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         var pos = new CmPosition(1, 2);
         var wallet = new CmWallet(0);
         var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
-        tx.OpenMut(id).Write(CmEntity.Position).X = 314;
+        var target = tx.OpenMut(id);
+        var position = target.Read(CmEntity.Position);
+        position.X = 314;
+        target.Set(CmEntity.Position, position);
 
-        ref readonly var staged = ref tx.Open(id).Read(CmEntity.Position);
+        var staged = tx.Open(id).Read(CmEntity.Position);
         Assert.That(staged.X, Is.EqualTo(314f), "read-your-own-writes broken for a same-transaction spawn+write");
         tx.Commit();
     }
@@ -417,8 +445,14 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
             var wallet = new CmWallet(0);
             a = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
             b = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
-            tx.OpenMut(a).Write(CmEntity.Position).X = 11;
-            tx.OpenMut(b).Write(CmEntity.Position).X = 22;
+            var opened = tx.OpenMut(a);
+            var positionCopy = opened.Read(CmEntity.Position);
+            positionCopy.X = 11;
+            opened.Set(CmEntity.Position, positionCopy);
+            var target = tx.OpenMut(b);
+            var position = target.Read(CmEntity.Position);
+            position.X = 22;
+            target.Set(CmEntity.Position, position);
             tx.Commit();
         }
 
@@ -447,14 +481,17 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
             var pos = new CmPosition(1, 2);
             var wallet = new CmWallet(0);
             id = tx.Spawn<CmEntity>(CmEntity.Position.Set(in pos), CmEntity.Wallet.Set(in wallet));
-            tx.OpenMut(id).Write(CmEntity.Position).X = 42;
+            var target = tx.OpenMut(id);
+            var position = target.Read(CmEntity.Position);
+            position.X = 42;
+            target.Set(CmEntity.Position, position);
             tx.Commit();
         }
 
         dbe.WriteTickFence(1);
 
         using var read = dbe.CreateQuickTransaction();
-        ref readonly var rp = ref read.Open(id).Read(CmEntity.Position);
+        var rp = read.Open(id).Read(CmEntity.Position);
         Assert.That(rp.X, Is.EqualTo(42f));
         Assert.That(rp.Y, Is.EqualTo(2f));
     }

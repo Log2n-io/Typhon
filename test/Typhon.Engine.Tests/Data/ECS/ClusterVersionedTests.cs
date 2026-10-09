@@ -136,10 +136,10 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
             using var accessor = tx.For<ClVMixed>();
             var entity = accessor.Open(id);
 
-            ref readonly var pos = ref entity.Read(ClVMixed.Pos);
+            var pos = entity.Read(ClVMixed.Pos);
             Assert.That(pos.X, Is.EqualTo(5));
 
-            ref readonly var hp = ref entity.Read(ClVMixed.Health);
+            var hp = entity.Read(ClVMixed.Health);
             Assert.That(hp.Current, Is.EqualTo(50));
             Assert.That(hp.Max, Is.EqualTo(100));
         }
@@ -168,21 +168,22 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var pos = ref entity.Write(ClVMixed.Pos);
+            var pos = entity.Read(ClVMixed.Pos);
             pos.X = 30;
             pos.Y = 40;
+            entity.Set(ClVMixed.Pos, pos);
             tx.Commit();
         }
 
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.Open(id);
-            ref readonly var pos = ref entity.Read(ClVMixed.Pos);
+            var pos = entity.Read(ClVMixed.Pos);
             Assert.That(pos.X, Is.EqualTo(30));
             Assert.That(pos.Y, Is.EqualTo(40));
 
             // Versioned component should be unchanged
-            ref readonly var hp = ref entity.Read(ClVMixed.Health);
+            var hp = entity.Read(ClVMixed.Health);
             Assert.That(hp.Current, Is.EqualTo(100));
         }
     }
@@ -258,8 +259,9 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var hp = ref entity.Write(ClVMixed.Health);
+            var hp = entity.Read(ClVMixed.Health);
             hp.Current = 42;
+            entity.Set(ClVMixed.Health, hp);
             tx.Commit();
         }
 
@@ -360,10 +362,12 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var pos = ref entity.Write(ClVTriple.Pos);
+            var pos = entity.Read(ClVTriple.Pos);
             pos.X = 30;
-            ref var hp = ref entity.Write(ClVTriple.Health);
+            entity.Set(ClVTriple.Pos, pos);
+            var hp = entity.Read(ClVTriple.Health);
             hp.Current = 50;
+            entity.Set(ClVTriple.Health, hp);
             tx.Commit();
         }
 
@@ -446,8 +450,9 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var hp = ref entity.Write(ClVMixed.Health);
+            var hp = entity.Read(ClVMixed.Health);
             hp.Current = 55;
+            entity.Set(ClVMixed.Health, hp);
             tx.Commit();
         }
 
@@ -479,10 +484,12 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var pos = ref entity.Write(ClVMixed.Pos);
+            var pos = entity.Read(ClVMixed.Pos);
             pos.X = 99;
-            ref var hp = ref entity.Write(ClVMixed.Health);
+            entity.Set(ClVMixed.Pos, pos);
+            var hp = entity.Read(ClVMixed.Health);
             hp.Current = 77;
+            entity.Set(ClVMixed.Health, hp);
             tx.Commit();
         }
 
@@ -514,8 +521,9 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var entity = tx.OpenMut(id);
-            ref var hp = ref entity.Write(ClVMixed.Health);
+            var hp = entity.Read(ClVMixed.Health);
             hp.Current = 999;
+            entity.Set(ClVMixed.Health, hp);
             tx.Rollback();
         }
 
@@ -569,8 +577,9 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
             for (int i = 0; i < count; i += 2)
             {
                 var entity = tx.OpenMut(ids[i]);
-                ref var hp = ref entity.Write(ClVMixed.Health);
+                var hp = entity.Read(ClVMixed.Health);
                 hp.Current = 999;
+                entity.Set(ClVMixed.Health, hp);
             }
             tx.Commit();
         }

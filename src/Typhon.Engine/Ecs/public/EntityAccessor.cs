@@ -74,12 +74,20 @@ public partial class EntityAccessor : IDisposable
     private protected ChunkAccessor<PersistentStore> _entityMapCacheAccessor;
     private protected bool _hasEntityMapCache;
 
-    /// <summary>Cached cluster accessor for same-archetype repeated lookups (cluster-eligible archetypes only).</summary>
-    private protected ushort _clusterCacheArchId;
-    private protected ChunkAccessor<PersistentStore> _clusterCacheAccessor;
-    private protected bool _hasClusterCache;
-    private protected ChunkAccessor<TransientStore> _transientClusterCacheAccessor;
-    private protected bool _hasTransientClusterCache;
+    /// <summary>
+    /// Bumped whenever an accessor that resolved an <see cref="EntityRef"/>'s cluster base lets go of a page — its cluster caches here and every
+    /// <see cref="ArchetypeAccessor{TArch}"/> built on this accessor (#1199). A handle resolved under an older value re-resolves its base.
+    /// </summary>
+    internal readonly ResolveGeneration ClusterGeneration = new();
+
+    /// <summary>
+    /// Cluster accessors for point lookups, one entry per archetype, least recently used replaced (cluster-eligible archetypes only). Several ways, not
+    /// one: two live handles of different archetypes (an attacker and its target) re-resolve through here in turn, and a single entry was disposed and
+    /// rebuilt on every alternation — each time invalidating every handle (#1199).
+    /// </summary>
+    private ClusterCache _clusterCache;
+    private long _clusterCacheClock;
+    private byte _clusterCacheMru;
 
     private protected int _entityOperationCount;
     private protected ChangeSet _changeSet;
@@ -332,7 +340,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void CheckEpochRefresh()
     {
-        if (++_entityOperationCount >= EpochRefreshInterval)
+        if (++_entityOperationCount >= EpochRefreshInterval && LiveIndexCursors == 0)
         {
             FlushAndRefreshEpoch();
             _entityOperationCount = 0;
@@ -340,12 +348,75 @@ public partial class EntityAccessor : IDisposable
     }
 
     /// <summary>
+    /// A mutable accessor over a <see cref="ComponentCollection{T}"/> field, bound to this accessor's <see cref="ChangeSet"/> so edits are tracked for
+    /// commit/rollback. Public callers reach it through <see cref="EntityRefMut.CreateComponentCollectionAccessor{T, TElem}"/>, which orders the
+    /// copy-on-write before it (#1199).
+    /// </summary>
+    internal ComponentCollectionAccessor<T> CreateComponentCollectionAccessorCore<T>(ref ComponentCollection<T> field) where T : unmanaged
+    {
+        AssertThreadAffinity();
+        return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
+    }
+
+    /// <summary>The same, writing its final buffer id back into the entity's stored component on dispose (#1199).</summary>
+    internal unsafe ComponentCollectionAccessor<T> CreateComponentCollectionAccessorCore<T>(
+        ref ComponentCollection<T> field,
+        EntityId entity,
+        int componentTypeId,
+        int fieldOffset,
+        delegate*<EntityAccessor, EntityId, int, int, int, void> writeBack) where T : unmanaged
+    {
+        AssertThreadAffinity();
+        return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field, this, entity, componentTypeId, fieldOffset,
+            writeBack);
+    }
+
+    /// <summary>
+    /// Count an entity open toward the epoch refresh, and refresh every <see cref="EpochRefreshInterval"/> of them, read-only transactions included (#1189).
+    /// Call only at the start of a <see cref="Transaction"/>'s open, from a thread inside its epoch scope.
+    /// </summary>
+    /// <remarks>
+    /// Safe since #1199: nothing an open hands out outlives the call that produced it — reads copy, writes are <c>Set</c>, and a handle's cluster base is
+    /// re-resolved once the accessor that resolved it lets go of the page — so a refresh can no longer leave a live reference over an evictable page.
+    /// Without it, a transaction that opens N entities kept every page they touched, and every page any other thread touched since it began, unevictable
+    /// until it ended.
+    /// <para>Not PTA workers: the runtime refreshes them once per system (<see cref="PointInTimeAccessor.FlushWorker"/>), on purpose. A refresh
+    /// increments the global epoch, and every other thread's warm B+Tree accessor, keyed on it, takes its cold path at its next operation; workers
+    /// refreshing every 128 opens each would do that to each other continuously. A worker's pinned set is bounded by its system's run instead.</para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteEntityOpen()
+    {
+        if (++_entityOperationCount >= EpochRefreshInterval && LiveIndexCursors == 0)
+        {
+            _entityOperationCount = 0;
+            EnumerateRefreshEpoch();
+        }
+    }
+
+    /// <summary>
+    /// B+Tree range cursors live on this thread (<c>BTree.RangeEnumerator</c>). While one is, no per-operation refresh moves the thread's epoch: the cursor
+    /// keeps its current node across calls, and retired nodes are reclaimed once the minimum active epoch has passed them (<c>BTree.DeferredReclaim</c>)
+    /// — a refresh under a live cursor could let its node be reused while it still reads it. An open made inside such a scan (an FK reverse lookup's
+    /// per-entity action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first operation after.
+    /// </summary>
+    /// <remarks>A cursor disposed twice (a <c>foreach</c> over a <c>using</c> copy) would decrement twice, so the decrement clamps at zero.</remarks>
+    [ThreadStatic]
+    internal static int LiveIndexCursors;
+
+    /// <summary>
     /// Unconditionally refresh the epoch scope for this accessor. Flushes all dirty ChunkAccessor state and advances the pinned epoch, allowing pages from
     /// older epochs to be evicted.
     /// Called by <see cref="PointInTimeAccessor.FlushWorker"/> at the end of each parallel chunk.
     /// </summary>
+    /// <remarks>
+    /// Also releases the cluster cache. A worker's handles do not outlive the system it ran, and the cache lives as long as the worker accessor —
+    /// across systems and ticks. Kept, its slots stay pinned, and a slot a writable open mapped dirty holds its page's <c>ActiveChunkWriters</c>
+    /// above zero, which keeps the checkpoint from capturing that page (#1199).
+    /// </remarks>
     internal void RefreshEpochScope()
     {
+        DisposeClusterCache();
         FlushAndRefreshEpoch();
         _entityOperationCount = 0;
     }
@@ -420,16 +491,7 @@ public partial class EntityAccessor : IDisposable
             _entityMapCacheAccessor.Dispose();
             _hasEntityMapCache = false;
         }
-        if (_hasClusterCache)
-        {
-            _clusterCacheAccessor.Dispose();
-            _hasClusterCache = false;
-        }
-        if (_hasTransientClusterCache)
-        {
-            _transientClusterCacheAccessor.Dispose();
-            _hasTransientClusterCache = false;
-        }
+        DisposeClusterCache();
         if (_componentInfos.Capacity <= ComponentInfosMaxCapacity)
         {
             _componentInfos.Clear();
@@ -472,16 +534,7 @@ public partial class EntityAccessor : IDisposable
                 _entityMapCacheAccessor.Dispose();
                 _hasEntityMapCache = false;
             }
-            if (_hasClusterCache)
-            {
-                _clusterCacheAccessor.Dispose();
-                _hasClusterCache = false;
-            }
-            if (_hasTransientClusterCache)
-            {
-                _transientClusterCacheAccessor.Dispose();
-                _hasTransientClusterCache = false;
-            }
+            DisposeClusterCache();
             return;
         }
 

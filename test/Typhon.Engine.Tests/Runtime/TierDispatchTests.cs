@@ -616,8 +616,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
                 foreach (var id in ctx.Entities)
                 {
                     var e = ctx.Accessor.OpenMut(id);
-                    ref var pos = ref e.Write(TierUnit.Pos);
+                    var pos = e.Read(TierUnit.Pos);
                     pos.Data += 1f;
+                    e.Set(TierUnit.Pos, pos);
                 }
             }, input: () => view, parallel: true, after: "Tick");
 
@@ -689,8 +690,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
                 foreach (var id in ctx.Entities)
                 {
                     var e = ctx.Accessor.OpenMut(id);
-                    ref var pos = ref e.Write(TierUnit.Pos);
+                    var pos = e.Read(TierUnit.Pos);
                     pos.Data += 1f;
+                    e.Set(TierUnit.Pos, pos);
                 }
             }, input: () => view, parallel: true, after: "Tick");
 

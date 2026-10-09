@@ -353,7 +353,10 @@ class EcsNavigationTests : TestBase<EcsNavigationTests>
         // path (NavigationView.ReverseLookupAndUpdate) — the second of the two sites that dereferenced CompRev.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(guild).Write(SvNavGuildArch.Guild).Level = 5;
+            var entity = tx.OpenMut(guild);
+            var guildCopy = entity.Read(SvNavGuildArch.Guild);
+            guildCopy.Level = 5;
+            entity.Set(SvNavGuildArch.Guild, guildCopy);
             tx.Commit();
         }
         // SingleVersion components are mutated IN PLACE, so the old key is parked in a shadow buffer and both the index update and the view delta are

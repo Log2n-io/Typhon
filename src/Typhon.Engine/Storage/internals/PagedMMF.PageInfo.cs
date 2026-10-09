@@ -64,6 +64,12 @@ public partial class PagedMMF
 
         /// <inheritdoc cref="PageInfo.ReadPending"/>
         [FieldOffset(58)] public bool ReadPending;
+
+        /// <summary>
+        /// The page directory's chain link (#1136): the next slot in this slot's bucket, plus one; 0 ends the chain. Owned by
+        /// <see cref="PageDirectory"/>, which alone reads and writes it.
+        /// </summary>
+        [FieldOffset(60)] public int DirectoryNext;
     }
 
     /// <summary>
@@ -259,8 +265,8 @@ public partial class PagedMMF
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Allocated zeroed: every slot starts free, with no initialisation loop over the records. Sized in an <c>int</c>, which holds under
-    /// today's 2 GiB cache ceiling (≤ 16 MiB of records); #945 moves it onto the 64-bit allocation, where large blocks come lazily zeroed.
+    /// Allocated zeroed, by contract and lazily (#945: 4 GiB of records at 512 GiB of cache, never written at open): every slot starts free,
+    /// with no initialisation loop over the records.
     /// </para>
     /// <para>
     /// Freed deterministically when <see cref="PagedMMF"/> is disposed. Nothing may touch it after that, and nothing does: the checkpoint
@@ -272,7 +278,7 @@ public partial class PagedMMF
     /// </remarks>
     internal sealed unsafe class PageSlotTable
     {
-        private readonly PinnedMemoryBlock _block;
+        private readonly LargePinnedMemoryBlock _block;
 
         /// <summary>First slot, 64-byte aligned.</summary>
         public readonly PageInfoData* Base;
@@ -283,12 +289,12 @@ public partial class PagedMMF
         public PageSlotTable(IMemoryAllocator allocator, IResource owner, int count)
         {
             Count = count;
-            _block = allocator.AllocatePinned("PageSlots", owner, count * sizeof(PageInfoData), zeroed: true, alignment: 64);
+            _block = allocator.AllocateLargePinned("PageSlots", owner, (long)count * sizeof(PageInfoData), 64, LargeBlockContents.Zeroed);
             Base = (PageInfoData*)_block.DataAsPointer;
         }
 
         /// <summary>Bytes held.</summary>
-        public long Bytes => _block.MemoryBlockSize;
+        public long Bytes => _block.Size;
 
         /// <summary>Whether the block has been freed. Test seam.</summary>
         internal bool IsFreed => _block.IsDisposed;
