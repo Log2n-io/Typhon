@@ -206,7 +206,7 @@ After this, the writing transaction can see its own change (it caches `CurCompCo
   <img src="assets/typhon-data-mvcc-write.svg" width="1200" alt="MVCC write path">
 </a>
 <br>
-<sub>The Versioned write path: <code>OpenMut(id).Write&lt;T&gt;(comp)</code> buffers in the ChangeSet; at commit the engine allocates a content chunk, appends a revision element via <code>AddCompRev</code> stamping <code>(TSN, UowId)</code> with IsolationFlag set, updates indexes, serializes to the WAL ring, and (Immediate mode) blocks on <code>WaitForDurable</code>.</sub>
+<sub>The Versioned write path: <code>OpenMut(id).Read&lt;T&gt;(comp)</code> returns a copy; <code>Set&lt;T&gt;(comp, value)</code> buffers the new value in the ChangeSet; at commit the engine allocates a content chunk, appends a revision element via <code>AddCompRev</code> stamping <code>(TSN, UowId)</code> with IsolationFlag set, updates indexes, serializes to the WAL ring, and (Immediate mode) blocks on <code>WaitForDurable</code>.</sub>
 
 ### Snapshot isolation, top-down
 

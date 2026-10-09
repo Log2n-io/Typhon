@@ -10,7 +10,7 @@ description: 'A component is a plain blittable struct of data — the atom of th
 
 A component is *just data*: public, blittable value-type fields, no base class, no interface. The `[Component("stable.name", revision)]` attribute makes it storable — the name is its schema identity, the revision its version (bumped when you [evolve](xref:concept-schema-evolution) it). Each component type also picks a [storage mode](xref:concept-storage-mode), which decides its ACID guarantees and write cost.
 
-You never touch a component through the engine directly — you refer to it by its typed handle, a `Comp<T>`, obtained when an [archetype](xref:concept-archetype) registers it (`Unit.Health`). That handle is how you set values on `Spawn`, and `Read`/`Write` on an opened [entity](xref:concept-entity).
+You never touch a component through the engine directly — you refer to it by its typed handle, a `Comp<T>`, obtained when an [archetype](xref:concept-archetype) registers it (`Unit.Health`). That handle is how you set values on `Spawn`, and `Read`/`Set` on an opened [entity](xref:concept-entity).
 
 ## How it relates
 
