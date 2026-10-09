@@ -103,9 +103,9 @@ public sealed class BulkLoadSession : IDisposable
     private const int TransactionRecycleThreshold = 5_000;
 
     /// <summary>
-    /// Operations between independent <c>ChangeSet.ReleaseDirtyMarks</c> calls — caps the per-page <c>DirtyCounter</c> at 1 and clears the tracking
-    /// HashSet, preventing DC inflation in long sessions. Critical for the destroy phase: at low destroy rates (random-access cache-bound workload) the
-    /// Transaction recycle is too infrequent to keep DC bounded, so this independent cleanup keeps the cache evictable. Matches the cadence used by
+    /// Operations between independent <c>ChangeSet.ReleaseDirtyMarks</c> calls — releases the set's mark on every page it touched and clears it, so a
+    /// long session does not hold its pages resident. Critical for the destroy phase: at low destroy rates (random-access cache-bound workload) the
+    /// Transaction recycle is too infrequent to release them, so this independent cleanup keeps the cache evictable. Matches the cadence used by
     /// <c>EntityAccessor.FlushAndRefreshEpoch</c> (128 ops).
     /// </summary>
     private const int DirtyMarkReleaseInterval = 128;
@@ -113,7 +113,7 @@ public sealed class BulkLoadSession : IDisposable
     /// <summary>
     /// Calls <c>ChangeSet.ReleaseDirtyMarks</c> on the bulk's UoW every <see cref="DirtyMarkReleaseInterval"/> operations. This is independent of
     /// transaction recycling — it runs frequently enough to keep the page cache healthy even when the bulk's operation rate is too low for recycles to fire
-    /// (e.g., the destroy phase's random-access cache-bound regime). Cheap: walks the ChangeSet's tracked-page set, capping each page's DC at 1.
+    /// (e.g., the destroy phase's random-access cache-bound regime). Cheap: walks the ChangeSet's tracked-page set, releasing one mark per page.
     /// </summary>
     private void ReleaseDirtyMarksIfNeeded()
     {

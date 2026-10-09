@@ -432,7 +432,7 @@ public partial class EntityAccessor : IDisposable
 
     /// <summary>
     /// Reset this accessor for a new MVCC snapshot without reallocating.
-    /// Flushes dirty ChunkAccessor state and caps DirtyCounter, then updates TSN.
+    /// Flushes dirty ChunkAccessor state and releases this accessor's DirtyCounter marks, then updates TSN.
     /// ComponentInfo cache and ChunkAccessors are preserved — page caches stay warm.
     /// Called by <see cref="PointInTimeAccessor"/> at the start of each tick to reuse
     /// per-thread accessors across ticks (zero allocation after warmup).

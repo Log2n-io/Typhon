@@ -527,10 +527,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
         if (changeSet != null)
         {
-            if (!changeSet.AddByMemPageIndex(memPageIdx))
-            {
-                changeSet.RegisterReDirty(memPageIdx);
-            }
+            changeSet.AddByMemPageIndex(memPageIdx);
         }
         else
         {
@@ -863,23 +860,15 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
                 // SUCCESS — chunk claimed.
                 //
-                // CRITICAL (#301): bitmap-write durability follows the same CP-04 pattern as MarkSlotDirty. EnsureDirtyAtLeast(1) is a no-op when DC was
-                // already ≥1 — and the running checkpoint may have ALREADY snapshotted this page's bitmap word BEFORE our Interlocked.Or above. That
-                // snapshot has bit=0 (pre-OR). After fsync, the snapshot's DC decrement takes DC to 0; the page becomes evictable; eviction + reload
-                // restores bit=0 from disk — silently REVERTING our allocation. A subsequent AllocateChunk sees bit=0 and hands the SAME chunkId out a
-                // second time (the DOUBLE-ALLOC we caught at scale with the ground-truth tracker). The fix: register the metadata page with the ChangeSet
-                // (its AddByMemPageIndex does IncrementDirty on first registration); on re-registration, do an explicit IncrementDirty per CP-04.
-                // ReleaseDirtyMarks caps inflation back to 1 on UoW dispose. Without a ChangeSet (callers that don't care about CP-04), fall back to
-                // the old EnsureDirtyAtLeast(1) — keeps the legacy behaviour for unit-test paths.
+                // CRITICAL (#301): the bitmap write must leave the page owed, every time. A running checkpoint may have ALREADY captured this page's
+                // bitmap word BEFORE our Interlocked.Or above, with bit=0. If nothing recorded our write, that capture's fsync would settle the page,
+                // eviction + reload would restore bit=0 from disk — silently REVERTING the allocation — and a later AllocateChunk would hand the SAME
+                // chunkId out twice (the DOUBLE-ALLOC caught at scale with the ground-truth tracker). Recording the modification moves WritebackGen past
+                // the capture, so the page stays owed to the next cycle (CP-04): AddByMemPageIndex records it on every call and takes a mark on the
+                // first; without a ChangeSet, MarkPageModified records it alone.
                 if (changeSet != null)
                 {
-                    if (!changeSet.AddByMemPageIndex(memPageIdx))
-                    {
-                        // Re-dirty path — routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
-                        // per-page mark count is tracked accurately and ReleaseDirtyMarks can drain the exact excess
-                        // via DecrementDirty (matching the checkpoint's own ack primitive). See #385.
-                        changeSet.RegisterReDirty(memPageIdx);
-                    }
+                    changeSet.AddByMemPageIndex(memPageIdx);
                 }
                 else
                 {

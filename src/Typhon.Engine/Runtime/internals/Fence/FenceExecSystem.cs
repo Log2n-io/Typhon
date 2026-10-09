@@ -20,9 +20,9 @@ namespace Typhon.Engine.Internals;
 /// (<c>claude/design/Transactions/transaction-overview.md §3.2</c>) — it cannot be threaded into parallel workers. Each chunk that needs page-dirty tracking
 /// creates a LOCAL ChangeSet via <see cref="CreateChunkChangeSet"/> (overridden by Prep / Migrate; returns null for Finalize, which records its pages
 /// as modified instead).
-/// The base <see cref="Execute"/> caps the local <c>DirtyCounter</c>s via <c>ReleaseDirtyMarks</c> at chunk end, then discards the ChangeSet.
-/// Capping (not <c>SaveChanges</c>) is the correct lifecycle because WAL + checkpoint are mandatory (ADR-054): the checkpoint thread always drains the capped
-/// pages.</para>
+/// The base <see cref="Execute"/> releases the local set's marks via <c>ReleaseDirtyMarks</c> at chunk end, then returns the ChangeSet to the pool.
+/// Releasing (not <c>SaveChanges</c>) is the correct lifecycle because WAL + checkpoint are mandatory (ADR-054): the checkpoint writes the pages, and their
+/// writeback debt keeps them resident until it has.</para>
 /// </summary>
 internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceContext>
 {
@@ -258,8 +258,8 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
         }
         finally
         {
-            // Cap DirtyCounter at 1 for every page touched by this chunk so the next checkpoint cycle can transition them to evictable (DC: 1 → 0). Matches
-            // UnitOfWork.Dispose's cleanup. WAL + checkpoint are mandatory (ADR-054), so the checkpoint thread always drains these — no per-worker SaveChanges.
+            // Return every mark this chunk's ChangeSet took, as UnitOfWork.Dispose does (PS-05). WAL + checkpoint are mandatory (ADR-054), so the checkpoint
+            // writes the pages and their writeback debt keeps them resident until it has — no per-worker SaveChanges.
             if (chunkCs != null)
             {
                 chunkCs.ReleaseDirtyMarks();

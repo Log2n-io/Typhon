@@ -93,9 +93,9 @@ internal sealed class ChangeSetDirtyMarkConservationTests : TestBase<ChangeSetDi
 
         var cs = new ChangeSet(dbe.MMF);
         cs.AddByMemPageIndex(page);
-        cs.RegisterReDirty(page);           // re-dirty inside the same unit of work
-        cs.RegisterReDirty(page);
-        Assert.That(dbe.MMF.DirtyCounterOf(page), Is.EqualTo(baseline + 3), "three marks taken");
+        cs.AddByMemPageIndex(page);         // re-dirty inside the same unit of work
+        cs.AddByMemPageIndex(page);
+        Assert.That(dbe.MMF.DirtyCounterOf(page), Is.EqualTo(baseline + 1), "one mark per page, however often it is re-dirtied");
 
         cs.ReleaseDirtyMarks();
 
@@ -127,7 +127,7 @@ internal sealed class ChangeSetDirtyMarkConservationTests : TestBase<ChangeSetDi
         {
             var cs = new ChangeSet(dbe.MMF);
             cs.AddByMemPageIndex(page);
-            cs.RegisterReDirty(page);
+            cs.AddByMemPageIndex(page);
             cs.ReleaseDirtyMarks();
         }
 
@@ -146,7 +146,7 @@ internal sealed class ChangeSetDirtyMarkConservationTests : TestBase<ChangeSetDi
 
         var cs = new ChangeSet(dbe.MMF);
         cs.AddByMemPageIndex(page);
-        cs.RegisterReDirty(page);
+        cs.AddByMemPageIndex(page);
         cs.Reset();
 
         Assert.That(dbe.MMF.DirtyCounterOf(page), Is.EqualTo(baseline));

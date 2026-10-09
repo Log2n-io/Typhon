@@ -255,10 +255,8 @@ public sealed class UnitOfWork : IDisposable
             _ = FlushAsync();
         }
 
-        // Balance DirtyCounter to prevent inflation. ChangeSet pages are never written via SaveChangesAsync — only the checkpoint writes them. Each UoW's
-        // ChangeSet incremented DirtyCounter for pages it touched, but the balancing DecrementDirty (from SavePages completion) never runs. Cap at 1 so that:
-        //   (a) Pages stay dirty for checkpoint (counter >= 1)
-        //   (b) One checkpoint cycle makes them evictable (1 → 0)
+        // Return every DirtyCounter mark this UoW's ChangeSet took (PS-05). Its pages are never written via SaveChangesAsync — only the checkpoint writes
+        // them — and they stay unevictable through their writeback debt until it has (PS-10), so releasing the marks loses nothing.
         ChangeSet?.ReleaseDirtyMarks();
 
         // Cancel any outstanding operations

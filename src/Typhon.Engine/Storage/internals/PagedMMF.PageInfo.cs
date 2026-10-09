@@ -101,8 +101,8 @@ public partial class PagedMMF
         public void WriteFilePageIndexVolatile(int filePageIndex) => Volatile.Write(ref _p->EncodedFilePageIndex, ~filePageIndex);
 
         /// <summary>
-        /// Number of live mutator marks on this page — one per <see cref="ChangeSet.AddByMemPageIndex"/> /
-        /// <see cref="ChangeSet.RegisterReDirty"/> that has not yet been released by the ChangeSet that took it.
+        /// Number of live mutator marks on this page — one per ChangeSet that registered it through <see cref="ChangeSet.AddByMemPageIndex"/>
+        /// and has not yet released it.
         /// </summary>
         /// <remarks>
         /// <para>

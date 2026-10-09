@@ -238,7 +238,7 @@ Free-page tracking is a **room-bits bitmap** (`RoomBlock[] _roomBlocks`): one bi
 - `_transientClears` — counts allocations that have cleared a room or summary bit but not yet re-read the page or word; a grow waits for zero before concluding that no chunk is available.
 - `_allocationCursor` — next-fit hint; avoids rescanning from page 0 on every allocation.
 
-`AllocateChunk` finds the first page with its room bit set (`NextPageWithRoom`), scans its per-chunk bitmap (`Interlocked.Or` with a bit mask), and on success registers the page with the caller's `ChangeSet` (`AddByMemPageIndex`, or `RegisterReDirty` if it already tracks it; `MarkPageModified` without one) + `Interlocked.Increment(_allocatedCount)`. When the page is found full, the allocation clears its room bit and re-reads the page — setting the bit back if a chunk was freed in the window. `FreeChunk` clears the chunk's bitmap bit, then sets the page's room bit. The minimum chunk size is 8 bytes.
+`AllocateChunk` finds the first page with its room bit set (`NextPageWithRoom`), scans its per-chunk bitmap (`Interlocked.Or` with a bit mask), and on success registers the page with the caller's `ChangeSet` (`AddByMemPageIndex`, which records the bitmap write even when the set already tracks the page; `MarkPageModified` without one) + `Interlocked.Increment(_allocatedCount)`. When the page is found full, the allocation clears its room bit and re-reads the page — setting the bit back if a chunk was freed in the window. `FreeChunk` clears the chunk's bitmap bit, then sets the page's room bit. The minimum chunk size is 8 bytes.
 
 #### Growth — uses your `ChangeSet`
 
@@ -282,7 +282,7 @@ The page cache tracks three independent things per page:
 
 | Field | Set by | Cleared by | Blocks |
 |---|---|---|---|
-| `DirtyCounter` (`DC`) — mutator marks | `IncrementDirty`, through a `ChangeSet` (`AddByMemPageIndex`, `RegisterReDirty`) | `DecrementDirty`, only by the `ChangeSet` that took the mark | **Eviction** while > 0 |
+| `DirtyCounter` (`DC`) — mutator marks | `IncrementDirty`, through a `ChangeSet` (`AddByMemPageIndex`, one mark per page per set) | `DecrementDirty`, only by the `ChangeSet` that took the mark | **Eviction** while > 0 |
 | `WritebackGen` / `CapturedGen` — writeback debt | `WritebackGen`: every modification (`IncrementDirty`, `MarkPageModified`) | `CapturedGen`: `MarkCaptured`, after the checkpoint's fsync | **Eviction** while they differ |
 | `ActiveChunkWriters` (`ACW`) | `IncrementActiveChunkWriters` (in `MarkSlotDirty`) | `DecrementActiveChunkWriters` (in `CommitChanges`, eviction queue) | **Checkpoint snapshot** and eviction while > 0 |
 
@@ -296,10 +296,9 @@ The page cache tracks three independent things per page:
 
 | Method | What it does |
 |---|---|
-| `AddByMemPageIndex(int)` | Register a dirty page. The *first* call per page takes a mark (`IncrementDirty`, which also records the modification); a later call takes no mark but still records the modification (`MarkPageModified`). Returns `true` if this was the first registration. |
-| `RegisterReDirty(int)` | Take one more mark on a page this set already tracks, counted per page. |
+| `AddByMemPageIndex(int)` | Register a dirty page. The *first* call per page takes the set's one mark on it (`IncrementDirty`, which also records the modification); a later call — a re-dirty — takes no mark but still records the modification (`MarkPageModified`). Returns `true` if this was the first registration. |
 | `SaveChangesAsync()` / `SaveChanges()` | Structural writes only (bootstrap, schema evolution, segment growth, recovery replay): release this set's marks, then write its pages; their fsync clears the debt. The user-data path never calls it — the checkpoint writes those pages. |
-| `ReleaseDirtyMarks()` | Release every mark this set took, exactly as many per page as it registered, then clear the set. The pages stay protected by their writeback debt until a checkpoint writes them. |
+| `ReleaseDirtyMarks()` | Release every mark this set took — one per page it registered — then clear the set. The pages stay protected by their writeback debt until a checkpoint writes them. |
 | `Reset()` | Rollback — the same exact release. It does not clear the debt: the bytes were changed in place, so the page is still owed a write. |
 | `DeferEviction(entry)` / `FlushDeferredEvictions()` | Per-eviction `SlotRefCount` / `ACW` decrements that the persistent-store `ChunkAccessor` queues when a slot gets evicted mid-UoW, drained at commit. |
 
@@ -311,13 +310,13 @@ Called by the ECS path every 128 entity operations (`EpochRefreshInterval = 128`
 
 ### A new page is owed a write before it is published
 
-`LogicalSegment.InitDataPages` clears and initializes each new page under its exclusive latch and records the modification before unlatching it: with a `ChangeSet`, `AddByMemPageIndex` + `RegisterReDirty` take two counted marks; without one, `MarkPageModified` records the debt alone. Directory map pages written by a grow are handled the same way. Either way `WritebackGen` has moved past `CapturedGen` by the time the page is reachable, so it cannot be evicted before a checkpoint has written it.
+`LogicalSegment.InitDataPages` clears and initializes each new page under its exclusive latch and records the modification before unlatching it: with a `ChangeSet`, `AddByMemPageIndex` takes the set's mark on it; without one, `MarkPageModified` records the debt alone. Directory map pages written by a grow are handled the same way. Either way `WritebackGen` has moved past `CapturedGen` by the time the page is reachable, so it cannot be evicted before a checkpoint has written it.
 
 A checkpoint that captures the new page before its first writer (`AllocateChunk` → `GetChunkAddress`) arrives is harmless: the writer's modification moves `WritebackGen` past the captured sample, and the page stays owed to the next cycle ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). `GrowChunkCapacity` called without a `ChangeSet` makes a local one and releases its marks before returning, on a throw too ([PS-05](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)), so a grow never strands a mark.
 
 ### `MarkSlotDirty` re-registration — the re-dirty guard
 
-`MarkSlotDirty` (in `ChunkAccessor`) has subtle behaviour for *re-dirty*. When `_changeSet.AddByMemPageIndex(memIdx)` returns `false` (page already tracked by this `ChangeSet`, dirtied again in a later accessor rental), `AddByMemPageIndex` still records the modification, and `MarkSlotDirty` takes one more mark through `RegisterReDirty`. The modification record is what matters: a checkpoint can have captured the page between the two rentals (with ACW = 0 in between), and the bump moves `WritebackGen` past that capture, so the page stays owed to the next cycle, which captures the new bytes ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). The extra mark is released with the others by `ReleaseDirtyMarks`.
+`MarkSlotDirty` (in `ChunkAccessor`) has subtle behaviour for *re-dirty*. When `_changeSet.AddByMemPageIndex(memIdx)` returns `false` (page already tracked by this `ChangeSet`, dirtied again in a later accessor rental), `AddByMemPageIndex` takes no second mark but still records the modification. That record is what matters: a checkpoint can have captured the page between the two rentals (with ACW = 0 in between), and the bump moves `WritebackGen` past that capture, so the page stays owed to the next cycle, which captures the new bytes ([CP-04](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). The page keeps the set's first mark until `ReleaseDirtyMarks`, so a second one would protect nothing.
 
 ---
 

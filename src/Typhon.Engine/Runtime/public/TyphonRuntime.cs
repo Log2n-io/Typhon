@@ -3264,7 +3264,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private void RunParallelFence(DagScheduler scheduler)
     {
         // WAL + checkpoint are mandatory (ADR-054), so the per-worker ChangeSet cleanup via ReleaseDirtyMarks is always correct here: the checkpoint
-        // thread drains the capped pages. The serial WriteTickFence path is reached only via the EnableParallelFence=false opt-out (call site in
+        // writes the pages the workers touched. The serial WriteTickFence path is reached only via the EnableParallelFence=false opt-out (call site in
         // OnTickEndInternal).
         var ctx = Engine.FenceContext;
 

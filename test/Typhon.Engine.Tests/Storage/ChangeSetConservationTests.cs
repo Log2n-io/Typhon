@@ -109,14 +109,14 @@ class ChangeSetConservationTests
     }
 
     [Test]
-    public void Add_PlusFiveReDirty_LeavesDC_6()
+    public void Add_PlusFiveReDirty_HoldsOneMark()
     {
         using var _ep = EpochGuard.Enter(_em);
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(4);
         cs.AddByMemPageIndex(m);
-        for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
-        Assert.That(Dc(m), Is.EqualTo(6), "Add (1) + 5 × RegisterReDirty (+5) = 6 marks held");
+        for (var i = 0; i < 5; i++) cs.AddByMemPageIndex(m);
+        Assert.That(Dc(m), Is.EqualTo(1), "a change set holds one mark per page, however often it re-dirties it");
     }
 
     [Test]
@@ -126,9 +126,9 @@ class ChangeSetConservationTests
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(5);
         cs.AddByMemPageIndex(m);
-        for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
+        for (var i = 0; i < 5; i++) cs.AddByMemPageIndex(m);
         cs.ReleaseDirtyMarks();
-        Assert.That(Dc(m), Is.Zero, "release drains exactly the 6 marks this change set took, not 5 of them");
+        Assert.That(Dc(m), Is.Zero, "release returns the one mark this change set took, re-dirties included");
     }
 
     /// <summary>
@@ -142,7 +142,7 @@ class ChangeSetConservationTests
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(6);
         cs.AddByMemPageIndex(m);
-        for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
+        for (var i = 0; i < 5; i++) cs.AddByMemPageIndex(m);
         cs.ReleaseDirtyMarks();
 
         Assert.That(Dc(m), Is.Zero);
@@ -161,7 +161,7 @@ class ChangeSetConservationTests
         var cs = _pmmf.CreateChangeSet();
         var m = Fetch(7);
         cs.AddByMemPageIndex(m);
-        for (var i = 0; i < 5; i++) cs.RegisterReDirty(m);
+        for (var i = 0; i < 5; i++) cs.AddByMemPageIndex(m);
         cs.Reset();
         Assert.That(Dc(m), Is.Zero, "rollback reverses every mark regardless of depth");
     }
@@ -176,6 +176,8 @@ class ChangeSetConservationTests
     /// calls, and the second modification would then never reach disk.
     /// </remarks>
     [Test]
+    [VerifiesRule("CP-04")]
+    [VerifiesRule("PS-10")]
     public void Add_TwiceForSamePage_TakesOneMark_ButRecordsBothModifications()
     {
         using var _ep = EpochGuard.Enter(_em);
@@ -207,8 +209,7 @@ class ChangeSetConservationTests
     {
         using var _ep = EpochGuard.Enter(_em);
         const int pageCount = 32;
-        const int marksPerPage = 6;
-        const int ownersPerPage = 2;
+        const int ownersPerPage = 6;
         var memIndices = new int[pageCount];
         var sets = new ChangeSet[pageCount, ownersPerPage];
 
@@ -219,7 +220,7 @@ class ChangeSetConservationTests
             {
                 var cs = _pmmf.CreateChangeSet();
                 cs.AddByMemPageIndex(memIndices[i]);
-                for (var j = 0; j < marksPerPage - 1; j++) cs.RegisterReDirty(memIndices[i]);
+                cs.AddByMemPageIndex(memIndices[i]);   // a re-dirty: no second mark
                 sets[i, o] = cs;
             }
         }
