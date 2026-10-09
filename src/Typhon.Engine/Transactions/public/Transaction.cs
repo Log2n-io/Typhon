@@ -129,6 +129,12 @@ public unsafe partial class Transaction : EntityAccessor
         // Cluster Phase-B coordinates resolved by PrepareClusterVersionedSlot (so publish needs no second EntityMap lookup).
         // ClusterCopyPending == true ⇒ a committed HEAD value must be copied into (ArchId, ClusterChunkId, SlotIndex)'s CompSlot.
         public bool ClusterCopyPending;
+
+        // Phase A (#1262): IndexPending == true ⇒ the publish reconciles the archetype's indexes and views for CompSlot, moving the entity (Pk) from the
+        // value of the revision it read (ReadCompChunkId, 0 for none) to the committing one's.
+        public bool IndexPending;
+        public long Pk;
+        public int ReadCompChunkId;
         public ushort ArchId;
         public int ClusterChunkId;
         public byte SlotIndex;
@@ -278,7 +284,18 @@ public unsafe partial class Transaction : EntityAccessor
         _deletedComponentCount = 0;
         _deferredEnqueueBatch?.Clear();
         _inFlightLsnFloor = 0;
+        _prepareConsumed = false;
+        _pendingUniqueMoves = 0;
     }
+
+    /// <summary>
+    /// Set once a commit's PREPARE has begun on its entries (#1262): from then on the transaction cannot commit again, whether its failed commit's rollback
+    /// succeeded or not — PREPARE consumed each entry's read revision.
+    /// </summary>
+    private bool _prepareConsumed;
+
+    /// <summary>How many of this commit's prepared Versioned writes move a key a unique index covers: <c>ValidatePublishBeforeAppend</c> checks them.</summary>
+    private int _pendingUniqueMoves;
 
     /// <summary>
     /// <see cref="PrepareOpenMut"/> inside a profiling span — the first writable open of an <see cref="ArchetypeAccessor{TArch}"/>. Its later opens run
@@ -1893,7 +1910,22 @@ public unsafe partial class Transaction : EntityAccessor
             // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
             bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
-                out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
+                out clusterCopyPending, out var indexPending, out clusterChunkId, out slotIndex, out compSlot);
+            if (indexPending && (_dbe._stateByRouting[archId].ClusterState.UniqueIndexedSlots & (1 << compSlot)) != 0)
+            {
+                _pendingUniqueMoves++;
+            }
+
+            if (indexPending && _dbe.PrepareReconcilesIndexesForTest)
+            {
+                // AP-07's mutant: the pre-#1262 order, Phase A in PREPARE.
+                PublishClusterIndexes(new PublishEntry
+                {
+                    Info = info, CurCompContentChunkId = compRevInfo.CurCompContentChunkId, ArchId = archId, ClusterChunkId = clusterChunkId,
+                    SlotIndex = slotIndex, CompSlot = compSlot, Pk = pk, ReadCompChunkId = readCompChunkId,
+                });
+                indexPending = false;
+            }
 
             // Periodic flush: bound dirty counter inflation for large transactions
             if (_batchIndexActive && (++_batchEntityCount & 0x3FF) == 0)
@@ -1927,6 +1959,9 @@ public unsafe partial class Transaction : EntityAccessor
                 ElementIsFirst = elementHandle.IsFirst,
                 ElementIndexInChunk = elementHandle.ElementIndex,
                 ClusterCopyPending = clusterCopyPending,
+                IndexPending = indexPending,
+                Pk = pk,
+                ReadCompChunkId = readCompChunkId,
                 ArchId = archId,
                 ClusterChunkId = clusterChunkId,
                 SlotIndex = slotIndex,
@@ -1972,6 +2007,13 @@ public unsafe partial class Transaction : EntityAccessor
 
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
 
+        // Phase A (#1262): the indexes and views, before the stamp — and before taking the chain lock, which readers of this entity then do not wait out
+        // through an index update (a page-cache back-pressure wait included). PREPARE did it unlocked too; a conflict-handler commit still holds the lock.
+        if (e.IndexPending)
+        {
+            PublishClusterIndexes(in e);
+        }
+
         // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here
         // a cleanup on another thread can compact this chain: CleanUpUnusedEntries rewrites every kept entry from index 0, the still-isolated one included.
         // Stamping the coordinates PREPARE recorded then cleared IsolationFlag on whatever had moved there — often the previous committed entry, re-stamped
@@ -2006,8 +2048,9 @@ public unsafe partial class Transaction : EntityAccessor
                 if (found < 0)
                 {
                     // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
-                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing is published: no stamp, no LCRI, no
-                    // cluster copy. The commit is lost either way; this keeps it from taking a neighbour down with it, and says so.
+                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing more is published: no stamp, no LCRI,
+                    // no cluster copy. (Phase A, run above, has moved the index for it, as it did from PREPARE before #1262.) The commit is lost either way;
+                    // this keeps it from taking a neighbour down with it, and says so.
                     Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
                     _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
                     return;
@@ -2069,10 +2112,27 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Advance the cursor only after each entry is FULLY published (PublishComponent releases its retained lock last), so a mid-drain throw leaves
         // [_publishDrainIndex, Count) for the abort path to release — never double-releasing an already-published entry's lock.
-        while (_publishDrainIndex < _publishEntries.Count)
+        //
+        // Batch mode, as PREPARE's pass: the index moves made here since #1262 (Phase A) return their B+Tree warm accessors without a CommitChanges each,
+        // and one flush per 1 024 entries, and at the end, registers their dirty pages. The end is before CK-13's floor is withdrawn, so a checkpoint
+        // that passes these records collects those pages. Unlike PREPARE's flush, this one does not release the ChangeSet's dirty marks mid-publish.
+        ChunkBasedSegment<PersistentStore>.EnterBatchMode();
+        try
         {
-            PublishComponent(_publishEntries[_publishDrainIndex]);
-            _publishDrainIndex++;
+            while (_publishDrainIndex < _publishEntries.Count)
+            {
+                PublishComponent(_publishEntries[_publishDrainIndex]);
+                _publishDrainIndex++;
+                if ((_publishDrainIndex & 0x3FF) == 0)
+                {
+                    ChunkBasedSegment<PersistentStore>.ExitBatchMode();
+                    ChunkBasedSegment<PersistentStore>.EnterBatchMode();
+                }
+            }
+        }
+        finally
+        {
+            ChunkBasedSegment<PersistentStore>.ExitBatchMode();
         }
 
         // Cluster Phase-B may have created lazy-cached accessors during this drain — release them.
@@ -2109,16 +2169,18 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// PREPARE half of the cluster commit (AP-01): updates per-archetype B+Tree indexes (Phase A) and notifies views, and resolves the cluster-slot
-    /// coordinates for the deferred Phase-B copy. Phase B (the HEAD→cluster-slot memcpy — the visibility act) is performed by
-    /// <see cref="PublishClusterVersionedSlot"/> after the WAL Append. Single EntityMap lookup; the resolved coordinates are returned so publish does
-    /// not repeat it. <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles cluster copy for those).
+    /// PREPARE half of the cluster commit (AP-01): resolves the cluster-slot coordinates for the publish, and says what it owes. Both the index and view
+    /// reconcile (Phase A, <see cref="PublishClusterIndexes"/>) and the HEAD→cluster-slot copy (Phase B, <see cref="PublishClusterVersionedSlot"/>) run
+    /// after the WAL Append: Phase A here would survive an abort before the append, which reverts revisions only (#1262). Single EntityMap lookup; the
+    /// resolved coordinates are returned so publish does not repeat it. <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles
+    /// cluster copy for those).
     /// </summary>
-    private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId,
-        ComponentTable table, int componentTypeId, bool copyToCluster,
-        out bool clusterCopyPending, out int outClusterChunkId, out byte outSlotIndex, out byte outCompSlot)
+    private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId, ComponentTable table,
+        int componentTypeId, bool copyToCluster, out bool clusterCopyPending, out bool indexPending, out int outClusterChunkId, out byte outSlotIndex,
+        out byte outCompSlot)
     {
         clusterCopyPending = false;
+        indexPending = false;
         outClusterChunkId = 0;
         outSlotIndex = 0;
         outCompSlot = 0;
@@ -2157,29 +2219,84 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
-        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
-        int clusterLocation = clusterChunkId * 64 + slotIndex;
-        outClusterChunkId = clusterChunkId;
-        outSlotIndex = slotIndex;
+        outClusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
+        outSlotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
 
         // Phase B (HEAD→cluster slot copy) is required iff a committed value exists and this is not a spawn — deferred to PublishClusterVersionedSlot.
         clusterCopyPending = copyToCluster && compRevInfo.CurCompContentChunkId != 0;
 
-        // Phase A: Update per-archetype B+Tree indexes for this component's indexed fields
-        if (hasIndexes)
+        // Phase A — the archetype's B+Tree indexes and the views over them — is owed when an index covers this component and the write moves one of its
+        // keys: an insert, a delete, or a changed field. The publish does it. The unchanged-field guard (#665) runs here, where it always ran, so a write
+        // that leaves every indexed field alone costs the publish nothing.
+        if (hasIndexes && (clusterState.IndexedSlots & (1 << compSlot)) != 0)
         {
-            // Read new and old field values from CONTENT CHUNKS (not cluster slot — cluster hasn't been updated yet).
-            byte* newComp = compRevInfo.CurCompContentChunkId != 0 ?
-                _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + table.ComponentOverhead : null;
-            byte* oldComp = readCompChunkId != 0 ?
-                _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + table.ComponentOverhead : null;
-
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, oldComp, newComp);
+            if (compRevInfo.CurCompContentChunkId == 0 || readCompChunkId == 0)
+            {
+                indexPending = true;
+            }
+            else
+            {
+                var overhead = table.ComponentOverhead;
+                indexPending = AnyIndexedFieldChanged(clusterState, compSlot,
+                    _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + overhead,
+                    _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead);
+            }
         }
 
         // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
         // DetectClusterMigrations at tick fence (spatial per-cell index — same deferred-update pattern as SV cluster spatial, Issue #230 Phase 3).
+    }
+
+    /// <summary>Whether a write from <paramref name="oldComp"/> to <paramref name="newComp"/> changes a field an index of the slot covers — the guard
+    /// <see cref="ReconcileClusterIndexAndViews"/> applies field by field, so a write it would skip entirely owes the publish nothing.</summary>
+    private static bool AnyIndexedFieldChanged(ArchetypeClusterState clusterState, int compSlot, byte* oldComp, byte* newComp)
+    {
+        var ixSlots = clusterState.IndexSlots;
+        for (var ixs = 0; ixs < ixSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref ixSlots[ixs];
+            if (ixSlot.Slot != compSlot)
+            {
+                continue;
+            }
+
+            var fields = ixSlot.Fields;
+            for (var fi = 0; fi < fields.Length; fi++)
+            {
+                ref var field = ref fields[fi];
+                if (!FieldBytesEqual(oldComp + field.FieldOffset, newComp + field.FieldOffset, field.FieldSize))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Phase A of the cluster commit, in its publish (#1262): moves the entity's entries in the archetype's B+Tree indexes from the value of the revision
+    /// the transaction read to the committing one's, and appends the matching view deltas. Values come from the content chunks — the cluster slot is
+    /// Phase B's, and not copied yet. Runs before the revision is stamped, as it did in PREPARE, so the index never lags a visible revision.
+    /// </summary>
+    /// <remarks>
+    /// In PREPARE this survived an abort before the append — the rollback reverts revisions only — leaving the index on a key no commit made and the
+    /// views with a delta no commit made. A unique key it would collide on is rejected before the append (<c>ValidatePublishBeforeAppend</c>);
+    /// <see cref="RejectUniqueIndexCollision"/> here is the backstop for a concurrent commit that took the key in between (#1258).
+    /// </remarks>
+    private void PublishClusterIndexes(in PublishEntry e)
+    {
+        var es = _dbe._stateByRouting[e.ArchId];
+        var clusterState = es.ClusterState;
+        var table = e.Info.ComponentTable;
+        EnsureClusterCommitAccessors(e.ArchId, es, table.ComponentSegment, clusterState);
+
+        byte* newComp = e.CurCompContentChunkId != 0
+            ? _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId) + table.ComponentOverhead
+            : null;
+        byte* oldComp = e.ReadCompChunkId != 0 ? _clusterCommitContentAccessor.GetChunkAddress(e.ReadCompChunkId) + table.ComponentOverhead : null;
+        ReconcileClusterIndexAndViews(es, clusterState, e.CompSlot, e.ClusterChunkId, e.ClusterChunkId * 64 + e.SlotIndex, EntityId.FromRaw(e.Pk), oldComp,
+            newComp);
     }
 
     /// <summary>
@@ -2970,6 +3087,26 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
+    /// Rolls back a commit that failed before its append, once PREPARE had begun on its entries (#1262), without the unit of work's deadline: the failure
+    /// may be that deadline (the transaction chain's lock keeps its own timeout). Reported as
+    /// <see cref="Typhon.Profiler.TransactionRollbackReason.AutoOnDispose"/>, the rollback such a commit used to get from <see cref="Dispose"/>. A rollback
+    /// that throws is logged, and the commit's own failure is the one that propagates; the transaction still cannot commit again
+    /// (<see cref="_prepareConsumed"/>).
+    /// </summary>
+    private void RollbackAfterFailedCommit()
+    {
+        try
+        {
+            var unbounded = UnitOfWorkContext.None;
+            RollbackCore(ref unbounded, Typhon.Profiler.TransactionRollbackReason.AutoOnDispose);
+        }
+        catch (Exception rollbackFailure)
+        {
+            _dbe.LogRollbackAfterFailedCommitFailed(TSN, rollbackFailure);
+        }
+    }
+
+    /// <summary>
     /// The commit failed after its append (AP-02/AP-03): it reports Committed and is never rolled back. When its publish had completed, only the durability
     /// wait or the finalization failed: <see cref="CommitDurabilityUncertainException"/>. Otherwise memory holds part of it: the engine stops committing and
     /// pins its records below the checkpoint (<see cref="DatabaseEngine.LatchCommitPipelineFailure"/>), its records are made durable when they can be, and
@@ -3104,8 +3241,8 @@ public unsafe partial class Transaction : EntityAccessor
             return true;
         }
 
-        // Can't commit a transaction already processed
-        if (State is TransactionState.Rollbacked or TransactionState.Committed)
+        // Can't commit a transaction already processed — nor one a failed commit's PREPARE consumed (#1262), should its rollback have failed
+        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
         {
             return false;
         }
@@ -3125,10 +3262,12 @@ public unsafe partial class Transaction : EntityAccessor
 
         var scope = TyphonEvent.BeginTransactionCommit(TSN);
         // Cumulative commit counter — monotonic. Incrementing BEFORE the commit body means a commit that throws mid-way still gets
-        // counted; the rollback counter will NOT fire for that case (Commit and Rollback are mutually exclusive paths). For gauge
-        // purposes "attempted commit" vs "successful commit" is close enough; a more precise variant would move this to a success
-        // path but currently Transaction.Commit has no single success-return point.
+        // counted. A commit that fails before its append, once PREPARE has begun on its entries, also counts a rollback (#1262: it rolls back
+        // itself); one that fails earlier counts its rollback when Dispose rolls it back. For gauge purposes "attempted commit" vs "successful
+        // commit" is close enough; a more precise variant would move this to a success path but currently Transaction.Commit has no single
+        // success-return point.
         _dbe.TransactionChain.IncrementCommitTotal();
+        var preparedEntries = false;
         try
         {
             // Must sit inside the try so the finally still runs if this property access ever gains side effects that can throw.
@@ -3161,10 +3300,16 @@ public unsafe partial class Transaction : EntityAccessor
 
             _appendPhaseEnteredThisCommit = false; // AP-01 guard reset (pooled Transaction reuse).
             _publishDrainIndex = 0;
+            _pendingUniqueMoves = 0;
 
             // Prepare ECS destroy operations: create component-level tombstone revisions in the PREPARE pass so it can handle index removal, WAL, and
             // cleanup. The entity-level destroy visibility (DiedTSN) is applied later, in the PUBLISH pass (FlushEcsPendingOperations).
             PrepareEcsDestroys();
+
+            // From here PREPARE changes per-entry state a second attempt could not reuse (each entry's read revision is consumed, a conflict's orphan
+            // freed), so a failure before the append ends the transaction: see the catch below (#1262). A failure above stays retryable.
+            preparedEntries = true;
+            _prepareConsumed = true;
 
             _dbe.LogCommitPhase(TSN, "CommitComponentCore");
 
@@ -3314,10 +3459,23 @@ public unsafe partial class Transaction : EntityAccessor
             return true;
 
         }
+        catch (Exception) when (preparedEntries && State == TransactionState.InProgress)
+        {
+            // #1262: a commit that fails after PREPARE began on its entries, and before its append, rolls the transaction back here — the rollback Dispose
+            // would give it — so it is over: Commit again returns false. Retried, PREPARE would run on entries the first attempt consumed. Past the append
+            // the transaction is Committed (AP-03) and this does not apply.
+            //
+            // Its retained chain locks go first, as they did when the finally released them before Dispose's rollback: the rollback frees a spawn's chain
+            // (its lock word with it) and voids, with no deadline, on chains another aborting commit may hold — rolled back holding them, two conflict-
+            // handler commits that took their chains in crossed order wait for each other for good.
+            ReleaseRetainedPublishLocks();
+            RollbackAfterFailedCommit();
+            throw;
+        }
         finally
         {
-            // First, so nothing below can leave it set: a commit that threw part-way stops holding the checkpoint back (CK-13; its partial publish is
-            // AP-03's residual, #396).
+            // First, so nothing below can leave it set: a commit that threw part-way stops holding the checkpoint back (CK-13). One whose publish failed
+            // past its append has pinned its floor on the engine (AP-03).
             Volatile.Write(ref _inFlightLsnFloor, 0);
 
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success

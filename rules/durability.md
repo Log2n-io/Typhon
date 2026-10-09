@@ -193,9 +193,11 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
 
 ### AP-03: A commit past its append completes its publish, or the engine stops `[fatal]`
   invariant what the publish could reject is rejected before the append, after PREPARE (`ValidatePublishBeforeAppend`), and
-            the commit then rolls back clean — no record, nothing visible:
+            the commit then rolls back clean — no record, nothing visible (AP-07):
             - a key a unique index holds when the write publishes (`UniqueConstraintViolationException`), followed in the
-              publish's order: spawns first, then destroys, then the staged Commit-discipline writes in their visiting order.
+              publish's order: the Versioned writes' index moves first (`CheckVersionedUniqueKeys`, #1262), then spawns,
+              then destroys, then the staged Commit-discipline writes in their visiting order. A Versioned write or a spawn
+              may take a key a Versioned write before it moves away.
               A staged write may take a key its transaction's destroy removes in the publish (the destroy path's own
               shadow mask decides which slots it removes; under the Commit discipline, the only one with staged writes,
               it removes every persistent slot), one a staged write visited earlier moves away, or one its own entity
@@ -243,8 +245,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           unique key both pass, and the later publish stops the engine (#1258). A commit that passed `DurabilityLog`'s own
           check just before another commit latched still appends and publishes (a window of a few instructions). A staged
           write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
-          fence) is not modelled; the publish's own reconcile shares the assumption. A unique key a Versioned write changes is checked in PREPARE by
-          `RejectUniqueIndexCollision`, which throws `InvalidOperationException`, not the documented type (#1260)
+          fence) is not modelled; the publish's own reconcile shares the assumption. The publish's backstop for a unique
+          collision on a Versioned write, `RejectUniqueIndexCollision`, throws `InvalidOperationException` (#1260); the check
+          before the append throws the documented type
   rationale: #396's recommendation was to reserve, before the append, every page the publish would consume. The reservation
              would have to size cluster growth, EntityMap splits and index node splits per transaction, and still would not cover
              a lock timeout or an I/O failure; the fail-stop covers every case, and the wait-out keeps the one transient case,
@@ -335,6 +338,59 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   on_violation: the cluster slot silently disagrees with the chain's HEAD until the entity's next commit
   verified: VersionedPublishOrderTests.TwoUpdatesPublishedOutOfOrder_LeaveTheNewerValueInTheClusterSlot (the older publish held
             after its append while the newer one commits) [VerifiesRule]
+
+### AP-07: An abort before the append leaves no trace `[fatal]` `[silent]`
+  invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending revisions: a
+            Versioned commit's index and view reconcile (Phase A) runs in its publish (`PublishClusterIndexes`), not in PREPARE.
+            PREPARE only decides it is owed (`IndexPending`: an index covers the slot and the write inserts, deletes or changes
+            an indexed field). It runs first in `PublishComponent`, before the chain lock and the stamp, so the index never
+            lags a visible revision and readers of the entity never wait out an index update. It runs before AP-05's
+            vanished-entry check too, which therefore leaves the index moved for an unstamped revision, as PREPARE did. A
+            destroy's index removal and deletion deltas are in the publish already (`FlushPendingDestroys`)
+  invariant a commit that fails before its append, once PREPARE has begun on its entries (after `PrepareEcsDestroys`), ends the
+            transaction: it releases its retained chain locks, then rolls back without the unit of work's deadline
+            (`RollbackAfterFailedCommit`), and `Commit` again returns false — even if that rollback failed
+            (`_prepareConsumed`). A failure before that point — the chain's tail check, a destroy's tombstone — leaves the
+            transaction open, and a retried `Commit` is safe
+  never move an index entry or append a view delta before the append: the rollback reverts revisions only, so the index keeps a
+        key no commit made and loses the committed one, and a view refreshed after the abort applies a delta no commit made.
+        Undone after the fact, another transaction could take the freed key in between, and the inverse move would collide or
+        overwrite it
+  never retry PREPARE on entries a failed attempt consumed: it resets each entry's read revision (`PrevCompContentChunkId = -1`),
+        so a second pass reads chunk -1 as the old value
+  never roll back while holding the retained chain locks: the rollback frees a spawn's chain, lock word included, and voids
+        with no deadline on chains another aborting conflict-handler commit may hold. Two that took their chains in crossed
+        order then wait for each other for good, and every later publish of those entities waits behind them
+  scope: Transaction.PrepareClusterVersionedSlot, Transaction.AnyIndexedFieldChanged, Transaction.PublishClusterIndexes,
+         Transaction.PublishComponent, Transaction.PublishPreparedComponents, Transaction.Commit,
+         Transaction.RollbackAfterFailedCommit, Transaction.CheckVersionedUniqueKeys, ArchetypeClusterState.IndexedSlots
+  rationale: #1262. A Versioned commit maintained its indexes in PREPARE, so that a unique collision there could throw before
+             the append (AP-03). That made an abort before the append — a lock timeout, back-pressure on the claim, AP-03's own
+             pre-append rejections — leave the index moved and the views notified. Since #396 the pre-append check rejects such
+             commits routinely, so it was no longer an edge case. The unique check now moves with Phase A into
+             `ValidatePublishBeforeAppend`, in publish order: the Versioned writes first, then spawns, destroys and staged writes.
+             The publish drain runs in batch mode, as PREPARE's pass did, and the unchanged-field guard stays in PREPARE, so
+             a write that moves no key costs the publish nothing
+  status: **RESIDUAL:**
+          - a Versioned unique key taken by two concurrent commits now passes the check in both, and the later publish stops the
+            engine (#1258, which this widens: in PREPARE the loser failed clean);
+          - two last-writer-wins updates of one entity leave its index on the first writer's key: Phase A's old key is the
+            read value, and the ignored `Move` result hides it (#1263, pre-existing);
+          - a changed Versioned unique key costs two descents, the check and the publish's backstop
+  on_violation: the index loses an entity's committed key and maps a key no commit made — it is unreachable by its value — and
+                incremental views report removals and moves that never happened; or two aborting commits deadlock
+  verified: AbortBeforeAppendTests — AnAbortedKeyMove_LeavesTheIndexAndTheView (a unique key moved, the commit rejected after
+            PREPARE: the index keeps the committed key, a refreshed view keeps the entity, the same change then commits),
+            AnAbortedWrite_LeavesNoPhantomInAView (an AllowMultiple field: no phantom, then the same write committed and the
+            entity destroyed), AVersionedWriteOntoAHeldKey_IsRejectedBeforeTheAppend,
+            AnAbortedHandlerCommit_ReleasesItsChainLocksBeforeRollingBack, TwoHandlerCommitsAbortingInCrossedOrder_DoNotDeadlock
+            (each conflict handler holds its first chain at a barrier while the other's second wait times out),
+            AnAbortedDestroy_LeavesTheIndexAndTheView (a guard: the destroy's index work was already in the publish); each
+            also checks the failed commit ended the transaction [VerifiesRule]; mutants
+            APrepareThatReconcilesIndexes_LeavesTheAbortedKey and APrepareThatAppendsViewDeltas_LeavesAPhantom
+            (`PrepareReconcilesIndexesForTest`) [RuleMutant]. Real mutations: the terminal rollback removed fails the abort
+            tests; the locks released after the rollback hangs the crossed-order test (both rollbacks wait on each other).
+            Not covered by a test: a rollback that throws (`_prepareConsumed` then refuses the retry)
 
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths

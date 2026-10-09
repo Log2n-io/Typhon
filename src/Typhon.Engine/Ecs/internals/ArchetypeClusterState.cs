@@ -2376,20 +2376,41 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         get
         {
-            if (Volatile.Read(ref _uniqueIndexedSlotsComputed) == 0)
-            {
-                _uniqueIndexedSlots = UniqueSlotsOf(IndexSlots) | (UniqueSlotsOf(TransientIndexSlots) << 16);
-                Volatile.Write(ref _uniqueIndexedSlotsComputed, 1);
-            }
-
+            ComputeIndexedSlotMasks();
             return _uniqueIndexedSlots;
         }
     }
 
-    private int _uniqueIndexedSlots;
-    private int _uniqueIndexedSlotsComputed;
+    /// <summary>
+    /// The component slots any index of the persistent home covers, one bit per slot: the Versioned slots whose commit reconciles an index in its publish
+    /// (#1262). Computed on first use, as <see cref="UniqueIndexedSlots"/>.
+    /// </summary>
+    internal int IndexedSlots
+    {
+        get
+        {
+            ComputeIndexedSlotMasks();
+            return _indexedSlots;
+        }
+    }
 
-    private static int UniqueSlotsOf<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    private int _uniqueIndexedSlots;
+    private int _indexedSlots;
+    private int _indexedSlotMasksComputed;
+
+    private void ComputeIndexedSlotMasks()
+    {
+        if (Volatile.Read(ref _indexedSlotMasksComputed) != 0)
+        {
+            return;
+        }
+
+        _uniqueIndexedSlots = SlotsOf(IndexSlots, uniqueOnly: true) | (SlotsOf(TransientIndexSlots, uniqueOnly: true) << 16);
+        _indexedSlots = SlotsOf(IndexSlots, uniqueOnly: false);
+        Volatile.Write(ref _indexedSlotMasksComputed, 1);
+    }
+
+    private static int SlotsOf<TStore>(ClusterIndexSlot<TStore>[] ixSlots, bool uniqueOnly) where TStore : struct, IPageStore
     {
         var mask = 0;
         if (ixSlots != null)
@@ -2403,7 +2424,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                 foreach (var field in ixSlot.Fields)
                 {
-                    if (!field.AllowMultiple)
+                    if (!uniqueOnly || !field.AllowMultiple)
                     {
                         mask |= 1 << ixSlot.Slot;
                     }
@@ -10514,6 +10535,11 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         IndexUpdates = new IndexUpdateStaging(fieldRefs);
+
+        // The masks decide whether a Versioned commit maintains its indexes at all (#1262): computed here, from the slots just built, so nothing read
+        // before this point can leave them cached at 0.
+        Volatile.Write(ref _indexedSlotMasksComputed, 0);
+        ComputeIndexedSlotMasks();
     }
 
     /// <summary>

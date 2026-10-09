@@ -2106,9 +2106,10 @@ public unsafe partial class Transaction
     {
         // The common commit checks nothing: no spawn of an archetype with a unique index or a spatial cell, no staged write to a unique-indexed component.
         // It returns here, before the epoch scope and the accessors.
+        var checkVersioned = AnyVersionedWriteNeedsCheck();
         var checkSpawns = _spawnedEntities is { Count: > 0 } && AnySpawnNeedsCheck();
         var checkStaged = _commitStagingBuffer != null && AnyStagedWriteNeedsCheck();
-        if (!checkSpawns && !checkStaged)
+        if (!checkVersioned && !checkSpawns && !checkStaged)
         {
             return;
         }
@@ -2117,6 +2118,12 @@ public unsafe partial class Transaction
         var check = new PublishCheck();
         try
         {
+            // The publish's order: the Versioned writes' index moves (PublishPreparedComponents), then the spawns, the destroys and the staged writes.
+            if (checkVersioned)
+            {
+                CheckVersionedUniqueKeys(ref check);
+            }
+
             if (checkSpawns)
             {
                 t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
@@ -2160,6 +2167,86 @@ public unsafe partial class Transaction
         else
         {
             set.Clear();
+        }
+    }
+
+    /// <summary>Whether a Versioned write of this commit owes a unique index a move (<see cref="CheckVersionedUniqueKeys"/>): counted by PREPARE.</summary>
+    private bool AnyVersionedWriteNeedsCheck() => _pendingUniqueMoves > 0;
+
+    /// <summary>
+    /// The unique keys the Versioned writes move in the publish (#1262), in its order — <c>PublishClusterIndexes</c>, one entry after another, before the
+    /// spawns. The key a write takes must be free then, or freed by a write before it, or its own entity's; the key it leaves is free for the writes after
+    /// it and for the spawns. A write to an entity this commit destroys moves nothing (the destroy removes its key, after the spawns).
+    /// </summary>
+    private void CheckVersionedUniqueKeys(ref PublishCheck check)
+    {
+        foreach (ref readonly var e in CollectionsMarshal.AsSpan(_publishEntries))
+        {
+            if (!e.IndexPending)
+            {
+                continue;
+            }
+
+            var cs = _dbe._stateByRouting[e.ArchId].ClusterState;
+            if ((cs.UniqueIndexedSlots & (1 << e.CompSlot)) == 0 || (_pendingDestroys != null && _pendingDestroys.Contains(EntityId.FromRaw(e.Pk))))
+            {
+                continue;
+            }
+
+            var table = e.Info.ComponentTable;
+            var overhead = table.ComponentOverhead;
+            byte* newComp = e.CurCompContentChunkId != 0
+                ? check.Contents.For(table.ComponentSegment).GetChunkAddress(e.CurCompContentChunkId) + overhead
+                : null;
+            byte* oldComp = e.ReadCompChunkId != 0 ? check.Contents.For(table.ComponentSegment).GetChunkAddress(e.ReadCompChunkId) + overhead : null;
+            var location = e.ClusterChunkId * 64 + e.SlotIndex;
+            for (var ixs = 0; ixs < cs.IndexSlots.Length; ixs++)
+            {
+                ref var ixSlot = ref cs.IndexSlots[ixs];
+                if (ixSlot.Slot != e.CompSlot)
+                {
+                    continue;
+                }
+
+                var fields = ixSlot.Fields;
+                for (var fi = 0; fi < fields.Length; fi++)
+                {
+                    ref var field = ref fields[fi];
+                    if (field.AllowMultiple)
+                    {
+                        continue;
+                    }
+
+                    // Unchanged: the publish moves nothing (ReconcileClusterIndexAndViews compares the same bytes).
+                    if (newComp != null && oldComp != null
+                        && new ReadOnlySpan<byte>(oldComp + field.FieldOffset, field.FieldSize).SequenceEqual(
+                            new ReadOnlySpan<byte>(newComp + field.FieldOffset, field.FieldSize)))
+                    {
+                        continue;
+                    }
+
+                    if (newComp != null)
+                    {
+                        var key = newComp + field.FieldOffset;
+                        ref var accessor = ref ReferenceEquals(field.Index.Segment, cs.IndexSegmentString64)
+                            ? ref check.PersistentIndexesS64.For(cs.IndexSegmentString64)
+                            : ref check.PersistentIndexes.For(field.Index.Segment);
+                        var holder = field.Index.TryGet(key, ref accessor);
+                        if (holder.IsSuccess && holder.Value != location && !IsFreedBeforeThisWrite(field.Index, key))
+                        {
+                            ThrowHelper.ThrowUniqueConstraintViolation();
+                        }
+
+                        ClaimOwnKey(field.Index, key);
+                    }
+
+                    if (oldComp != null)
+                    {
+                        t_validationFreedKeys ??= new HashSet<UniqueKeyRef>();
+                        t_validationFreedKeys.Add(new UniqueKeyRef(field.Index, oldComp + field.FieldOffset));
+                    }
+                }
+            }
         }
     }
 
@@ -2409,7 +2496,8 @@ public unsafe partial class Transaction
 
                 var key = source + field.FieldOffset;
                 ref var accessor = ref ReferenceEquals(field.Index.Segment, s64Segment) ? ref indexesS64.For(s64Segment) : ref indexes.For(field.Index.Segment);
-                if (field.Index.TryGet(key, ref accessor).IsSuccess)
+                // A key a Versioned write of this commit moves away is free by then: their index moves publish before the spawns.
+                if (field.Index.TryGet(key, ref accessor).IsSuccess && !IsFreedBeforeThisWrite(field.Index, key))
                 {
                     ThrowHelper.ThrowUniqueConstraintViolation();
                 }

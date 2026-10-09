@@ -6071,6 +6071,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         + "checkpoint below those records and will close as a crash. Reopen the database to recover the transaction from the log.")]
     internal partial void LogCommitPipelineStopped(long tsn, long firstLsn, Exception failure);
 
+    [LoggerMessage(LogLevel.Error, "Transaction TSN {tsn}: the rollback of a commit that failed before its append threw; Dispose retries it.")]
+    internal partial void LogRollbackAfterFailedCommitFailed(long tsn, Exception failure);
+
     [LoggerMessage(LogLevel.Critical, "Tick fence {tick}: nothing logged, nor in any fence after it — the engine stopped committing after an incomplete "
         + "publish. Reopen the database.")]
     private partial void LogTickFenceSkippedOnStoppedEngine(long tick);
@@ -6123,6 +6126,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// production.
     /// </summary>
     internal bool PublishGivesUpOnBackpressureForTest { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-07): when set, a Versioned commit reconciles its indexes and views in PREPARE, as it did before #1262, instead of in its
+    /// publish — what AP-07 forbids — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool PrepareReconcilesIndexesForTest { get; set; }
 
     /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
