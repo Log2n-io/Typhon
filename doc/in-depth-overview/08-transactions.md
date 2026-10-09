@@ -100,9 +100,9 @@ The UoW pre-allocates the shared `ChangeSet` before allocating the `UowId`. That
 3. `uow.Flush()` or `uow.FlushAsync()` (or `Dispose` for non-`Deferred`) advances state to `WalDurable` and calls `UowRegistry.RecordCommit(uowId, 0, ChangeSet)` to mark the slot as committed-in-the-registry.
 4. The checkpoint later transitions `WalDurable → Committed` once data pages are fsynced ([11-durability §5](11-durability.md#5-checkpoint-v2)).
 
-### 2.4 `ReleaseExcessDirtyMarks` on Dispose (WAL mode)
+### 2.4 `ReleaseDirtyMarks` on Dispose
 
-In WAL mode the `ChangeSet` accumulates dirty-page marks that *never* get balanced by `SaveChangesAsync` — only the checkpoint thread writes those pages. Left alone, `DirtyCounter` would inflate across many UoWs. `Dispose` calls `ChangeSet.ReleaseExcessDirtyMarks()` which caps the counter at 1 (so the page stays dirty for the next checkpoint, but one checkpoint cycle is enough to make it evictable). This is the lifecycle hook that bounds DC inflation across long-running workloads.
+The `ChangeSet` accumulates dirty-page marks that `SaveChangesAsync` never balances on the user-data path — only the checkpoint thread writes those pages. `Dispose` calls `ChangeSet.ReleaseDirtyMarks()`, which releases every mark the set took, exactly as many per page as it registered ([PS-05](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). Releasing them all loses nothing: a page holding bytes not yet on disk stays non-evictable through its writeback debt until a checkpoint has written it ([PS-10](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md), [02-storage §5](02-storage.md#5-changeset--dirty-tracking)). This is the lifecycle hook that keeps `DirtyCounter` from inflating across long-running workloads.
 
 ---
 
