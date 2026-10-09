@@ -24,8 +24,10 @@ Each entity carries one `EnabledBits` bitmask on its `EntityRecord` — one bit 
 `Enable<T>(Comp<T>)`/`Disable<T>(Comp<T>)` on an `EntityRefMut` (from `OpenMut`) flip that bit locally and stage the change via
 `StageEnableDisable` for commit; a read-only `EntityAccessor`/`PointInTimeAccessor` worker throws, since only a full
 `Transaction` supports staging structural changes. If the entity lives in cluster (batched SoA) storage, the
-cluster's own enabled-bit vector is updated immediately too, so bulk cluster iteration sees the change without
-waiting for commit. Because `EnabledBits` is entity-level metadata independent of each component's own
+cluster's own enabled-bit vector is updated at commit by `FlushPendingEnableDisable`, not at staging, so bulk
+cluster iteration reflects committed enabled state only: the cluster bits are shared and unversioned, and a
+rolled-back toggle must never reach them (rule ENABLE-01). Because `EnabledBits` is entity-level metadata
+independent of each component's own
 `StorageMode`, it carries its own MVCC snapshot isolation through an engine-wide exception dictionary
 (`EnabledBitsOverrides`): a fast path (`_overrideCount == 0`, a single volatile-int read) skips it entirely when no
 concurrent transaction is mid-toggle; when one is, older transactions still resolve the pre-change bits via a
