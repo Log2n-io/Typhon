@@ -1549,8 +1549,15 @@ public unsafe partial class Transaction : EntityAccessor
         // If we roll back a created component, we must delete the revision table chunk. No other transaction can reach a chain this one created.
         if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
-            FreeOwnContentChunk(info, ref compRevInfo);
-            revTableSegment.FreeChunk(firstChunkId);
+            // A root of 0: an earlier pass of this rollback freed the chain, then threw on a later entry, and this is the retry (Dispose). The entry
+            // leaves the cache only once the whole pass is done, so the retry meets it again; freeing the root twice took the chain of whoever had been
+            // given the chunk in between (REAP-02).
+            if (firstChunkId != 0)
+            {
+                FreeOwnContentChunk(info, ref compRevInfo);
+                revTableSegment.FreeChunk(firstChunkId);
+                compRevInfo.CompRevTableFirstChunkId = 0;
+            }
 
             // Early exit: the RevTable chunk is gone — continuing would access freed memory.
             return true;
@@ -1702,8 +1709,8 @@ public unsafe partial class Transaction : EntityAccessor
         if (orphanChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
         {
             ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
+            ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);   // before anything that can throw (CHAIN-01)
             elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-            ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);
             return;
         }
 
@@ -2033,6 +2040,7 @@ public unsafe partial class Transaction : EntityAccessor
             lockTaken = true;
         }
 
+        var completed = false;
         try
         {
             // Reconstruct the revision handle from the coordinates resolved in PREPARE. Held since PREPARE (handler path), the lock kept every compaction
@@ -2054,6 +2062,7 @@ public unsafe partial class Transaction : EntityAccessor
                     // this keeps it from taking a neighbour down with it, and says so.
                     Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
                     _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
+                    completed = true;
                     return;
                 }
 
@@ -2062,6 +2071,7 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             elementHandle.Commit(TSN);   // THE publication act: TSN stamp + IsolationFlag clear
+            _dbe.PublishUnderLockProbe?.Invoke();
 
             // LCRI / CommitSequence bookkeeping, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it. Read from
             // the live header: a compaction since PREPARE renumbered the entries, and under a lock held since PREPARE it is the recorded value anyway.
@@ -2079,11 +2089,15 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 PublishClusterVersionedSlot(e);
             }
+
+            completed = true;
         }
         finally
         {
-            // Both forms released here: the one taken above, and the one PrepareComponent retained (handler path), which nothing else releases.
-            if (lockTaken || e.LockHeld)
+            // The lock taken above, always. The one PrepareComponent retained (handler path) only on a normal exit: on a throw the drain's cursor has not
+            // passed this entry, and ReleaseRetainedPublishLocks — the abort path — releases it. Released here too, it was released twice, and the second
+            // release's InvalidOperationException replaced the CommitPublishIncompleteException (AP-03).
+            if (lockTaken || (e.LockHeld && completed))
             {
                 header.Control.ExitExclusiveAccess();
             }
@@ -3219,26 +3233,10 @@ public unsafe partial class Transaction : EntityAccessor
             return true;
         }
 
-        // Nothing to commit if the transaction is empty, but still process deferred cleanups
-        // in case this transaction (as the tail) is blocking cleanup of entities modified by others.
+        // Nothing to commit if the transaction is empty. Its deferred cleanups wait for its Dispose: an empty commit leaves the transaction usable (still
+        // Created), and the cutoff a tail computes leaves its own snapshot out — trimming to it here took revisions this transaction can still read (TXC-01).
         if (State is TransactionState.Created)
         {
-            if (_dbe.DeferredCleanupManager.QueueSize > 0)
-            {
-                var wcDeferred = ComposeWaitContext(ref ctx, TimeoutOptions.Current.TransactionChainLockTimeout);
-                if (_dbe.TransactionChain.Control.EnterSharedAccess(ref wcDeferred))
-                {
-                    var isTailForDeferred = _dbe.TransactionChain.Tail == this;
-                    var nextMinTSNDeferred = isTailForDeferred ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
-                    _dbe.TransactionChain.Control.ExitSharedAccess();
-
-                    if (isTailForDeferred)
-                    {
-                        _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSNDeferred, _dbe, _changeSet);
-                    }
-                }
-            }
-
             return true;
         }
 

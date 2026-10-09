@@ -18,7 +18,7 @@
   "src/Typhon.Engine/Spatial/internals/CellClusterTree.cs": 1,
   "src/Typhon.Engine/Spatial/internals/SpatialGrid.cs": 1,
   "src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs": 1,
-  "src/Typhon.Engine/Storage/internals/PagedMMF.cs": 2,
+  "src/Typhon.Engine/Storage/internals/PagedMMF.cs": 1,
   "src/Typhon.Engine/Transactions/internals/SpawnStagingArena.cs": 1,
   "src/Typhon.Engine/Transactions/public/Transaction.ECS.cs": 1,
   "src/Typhon.Engine/Transactions/public/Transaction.cs": 2,

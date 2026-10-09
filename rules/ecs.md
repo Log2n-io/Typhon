@@ -773,7 +773,8 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
         a leak, no live entity affected); its test is quarantined against that issue
   verified: DestroyRespawnSlotReuseTests [VerifiesRule] — destroy-and-respawn in one transaction, after a read, after a write, in two transactions
             and on 8 threads keeps every live id on its own data; after a full cleanup no chunk was freed twice and the revision and content segments
-            hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a destroy
+            hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a rollback that
+            threw part-way and was retried by the dispose (no spawn's root freed twice; a real mutation, the root not cleared once freed, fails), a destroy
             committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
             overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
             a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
@@ -833,11 +834,16 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
   invariant whether an entity WAS in the view is the view's own state — its set (`_entityIds`), or for an OR view the branch's bit, which a
             creation does not reset — never the delta's BeforeKey. Whether it is in now is decided by the delta's AfterKey against EVERY evaluator
             of the field (a range on one field is two), or, for an enable, whose entry carries no key, by reading the entity
-            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out). An entry applied twice is then harmless
-  invariant a full refresh never discards the ring: it clears the overflow flag (`BeginRefreshFull`), re-scans, diffs, then FOLDS the entries at
-            or below its transaction's TSN through the same processing as an incremental refresh, keeps the newer ones, and when the ring dropped
-            entries before or during it, owes one more full refresh (`EndRefreshFull`, `_refreshFullPending`) — as a membership resync stays in
-            resync (MEMB). A builder leaves a new view's first refresh a full one (`OweRefreshFull`)
+            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out) — an entity the refresh's snapshot does not see
+            (spawned and destroyed since) is not in the view, never a throw (`TryOpen`). An entry applied twice is then harmless
+  invariant a full refresh never discards the ring: it clears the overflow flag and owes itself (`BeginRefreshFull`), re-scans, diffs, then FOLDS
+            the entries at or below its transaction's TSN through the same processing as an incremental refresh, keeps the newer ones, and owes one
+            more full refresh when the ring dropped entries before or during it, or still holds entries from before a drop (`EndRefreshFull`,
+            `_refreshFullPending`) — as a membership resync stays in resync (MEMB). An entry appended before the latest drop
+            (`ViewDeltaRingBuffer.HeadPrecedesDrop`) is consumed unapplied (`ViewBase.FoldsHead`): the ring drops the NEWEST entry, so it can hold
+            an entity's older entry and not the one after it, and the re-scan, which ran after the drop, stands for that entity. A builder leaves a
+            new view's first refresh a full one (`OweRefreshFull`). A membership resync drains its entries unapplied
+            (`DrainBufferAfterRefreshFull`)
   invariant a navigation view's full refresh re-populates its set from the entity maps (`PopulateFromEntityMaps`)
   invariant the ring's consumer publishes its advanced head with a release store, after clearing the slot's written flag (`Advance`)
   never take "was in view" from the BeforeKey: it is the writer's read value, and two last-writer-wins writers of one entity both read the same
@@ -847,22 +853,29 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
         re-anchored its base TSN under live producers; it is gone)
   scope: EcsView.ProcessEntry, EcsView.ProcessEntryOr, EcsView.RefreshFull, EcsView.RefreshFullOr, EcsView.FoldEntriesAfterRefreshFull,
          NavigationView.ProcessEntry, NavigationView.RefreshFull, ViewBase.BeginRefreshFull, ViewBase.EndRefreshFull, ViewBase.OweRefreshFull,
-         ViewBase.ApplyMembership, ViewDeltaRingBuffer.Advance
+         ViewBase.ApplyMembership, ViewBase.FoldsHead, ViewDeltaRingBuffer.Advance, ViewDeltaRingBuffer.HeadPrecedesDrop
   status: **RESIDUAL:**
           - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
             view read the other fields' old values (#1266);
           - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
           - two last-writer-wins writers publishing out of revision order (AP-06) leave the view on the older value, as the index (#1263);
           - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
-            single-field drain measures at parity)
+            single-field drain measures at parity);
+          - the owed re-scan covers a dropped commit, or one whose entry came before a drop, only once its value is published: one still between
+            its delta and its value at that re-scan too is lost (the chain-lock wait between them is unbounded under readers). The builders' owed
+            first refresh has the same limit for a commit straddling the view's registration;
+          - a membership resync drains, so a spawn between its delta and its publication at that re-query is not covered
   on_violation: a view silently misses entities whose committed value passes, or keeps ones that fail; an overflowed navigation view empties
   verified: ViewDeltaRingDefectTests — TwoConcurrentWritersOfOneEntity_LeaveTheViewOnTheNewestValue (single-field, multi-field, OR),
             AFullRefreshBetweenACommitsDeltaAndItsValue_IsFollowedByAnother and TheOwedFullRefresh_FoldsACommitBetweenItsDeltaAndItsValue (the
             commit held between its delta and its value by `DatabaseEngine.PublishAfterIndexesProbe` while the view re-scans),
             ARangeOnOneField_IsDecidedByBothBounds, DisableThenEnable_BringsTheEntityBack (with and without a value),
-            AnOrViewOverTwoFields_KeepsEveryBranchOfASpawn (either branch left holding), AnOverflowedNavigationView_RebuildsItsSet [VerifiesRule].
+            AnOrViewOverTwoFields_KeepsEveryBranchOfASpawn (either branch left holding), AnOverflowedNavigationView_RebuildsItsSet,
+            ASpawnDestroyedBeforeTheRefresh_IsSkipped (single-field, multi-field, OR), AnEntryOlderThanADroppedOne_IsNotFoldedOverTheRescan
+            [VerifiesRule].
             Real mutations, each failing its test: the BeforeKey membership restored (single-field, OR), the owed refresh dropped, the fold replaced
-            by the drain, the navigation re-population removed, one evaluator per field, the enable not re-read, the OR creation reset. Not
+            by the drain, the navigation re-population removed, one evaluator per field, the enable not re-read, the OR creation reset, an entry from
+            before a drop folded, the refresh not owed while such entries are left, the entity read with `Open`. Not
             covered by a test: `Advance`'s release store (an arm64 reordering), the overflow telemetry no longer emitted for an owed refresh
 
 ## Module: QFENCE — What an indexed query answers between a write and its tick fence

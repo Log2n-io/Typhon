@@ -805,14 +805,18 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     {
         while (DeltaBuffer.TryPeek(tx.TSN, out var entry, out var flags, out var tsn, out _))
         {
+            var fold = FoldsHead;   // an entry appended before a drop that may have superseded it: the re-scan stands for its entity
             DeltaBuffer.Advance();
-            if (IsOrMode)
+            if (fold)
             {
-                ProcessEntryOr(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
-            }
-            else
-            {
-                ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
+                if (IsOrMode)
+                {
+                    ProcessEntryOr(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
+                }
+                else
+                {
+                    ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
+                }
             }
 
             SetLastRefreshTSN(tsn);
@@ -1210,8 +1214,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
     public override bool CheckOtherFields(long pk, FieldEvaluator[] evaluators, int skipFieldIndex, Transaction tx)
     {
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }
@@ -1241,8 +1246,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
         }
 
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }
@@ -1267,8 +1273,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
     public override bool EvaluateAllFields(long pk, FieldEvaluator[] evaluators, Transaction tx)
     {
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }

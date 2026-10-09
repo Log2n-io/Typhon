@@ -232,9 +232,11 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop
-  status: the component publish cannot throw: its handle is rebuilt from PREPARE's coordinates, re-checked under the chain lock
-          taken with an unbounded wait (AP-05), and its acts are field writes and copies; the drain releases each retained lock
-          exactly once. The spawn and pending-operation publishes allocate (cluster claim and growth, EntityMap insert, index
+  status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
+          re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
+          (indexes and views, AP-07), before the lock, allocates and can throw: B+Tree nodes past the publish limit, segment
+          growth, a unique collision (#1258). Any throw is the failed publish above; a retained lock (handler path) is released
+          once — by the publish on a normal exit, by the abort path (`ReleaseRetainedPublishLocks`) after a throw. The spawn and pending-operation publishes allocate (cluster claim and growth, EntityMap insert, index
           nodes): their back-pressure is waited out, and a failure that is not back-pressure — a page-cache or segment lock
           timeout (5-10 s, a stall rather than pressure), the data file failing to grow — stops the engine as above. A
           lock is rarely held across an allocation (the page-occupancy map's, whose pages stay resident), so a publisher
@@ -243,7 +245,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           which recovery handles from the pinned floor.
           **RESIDUAL:** a concurrent change between the check and the publish is not seen: two transactions that put one
           unique key both pass, and the later publish stops the engine (#1258). A commit that passed `DurabilityLog`'s own
-          check just before another commit latched still appends and publishes (a window of a few instructions). A staged
+          check just before another commit latched still appends and publishes: the check precedes the claim of its slot, so the
+          window spans the claim — a commit waiting in WAL back-pressure, up to its timeout, appends after a stop. A staged
           write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
           fence) is not modelled; the publish's own reconcile shares the assumption. The publish's backstop for a unique
           collision on a Versioned write, `RejectUniqueIndexCollision`, throws `InvalidOperationException` (#1260); the check
@@ -267,15 +270,18 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns (the partial spawn publish comes
             back whole), AnEngineThatStopsDuringACommitsPrepare_RefusesItsAppend, AStoppedEnginesTickFence_AppendsNothing,
             AStoppedEnginesParallelFence_AppendsNothing (the runtime's default fence; without the stop it logs the pending
-            write), AStagedWrite_OntoTheKeyItsEntityHolds_Commits (-0f to +0f), and a String64 key among the comparison shapes
+            write), AStagedWrite_OntoTheKeyItsEntityHolds_Commits (-0f to +0f), AThrowUnderAHandlerCommitsChainLock_ReleasesItOnce_AndSurfacesAsIncomplete
+            (a throw under a retained chain lock, after the append), and a String64 key among the comparison shapes
             [VerifiesRule]; mutant APublishThatGivesUpOnBackpressure_StopsTheEngine (`PublishGivesUpOnBackpressureForTest`)
             [RuleMutant]. Real mutations, each failing its test: no catch after the append, the floor not pinned, a stopped
             engine closing clean, the unique pre-check removed, an unset unique component let through, the spatial pre-check
             removed, keys freed earlier in the publish or by the commit's destroy not accepted, byte equality instead of the
-            index's, the re-check before the append removed, the serial or the parallel fence not gated (the parallel one
-            then meets `DurabilityLog`'s refusal and the runtime stalls), the own-entity holder not accepted, the publish not
-            waiting out, the wait-out ignoring its limit. Not covered by a test: the latch-then-Committed-then-log order (a
-            throwing logger), the locks released before the durability wait, the publish bound starting at the append
+            index's, the parallel fence not gated (it then meets `DurabilityLog`'s refusal and the runtime stalls), the
+            own-entity holder not accepted, the publish not waiting out, the wait-out ignoring its limit, a retained lock
+            released by the publish on a throw too. Not covered by a test: the latch-then-Committed-then-log order (a throwing
+            logger), the locks released before the durability wait, the publish bound starting at the append, the commit's
+            re-check before the append and the serial fence's own gate (each redundant with `DurabilityLog`'s refusal, which
+            throws the same), the serial fence's maintenance after a stop
 
 ### AP-04: Every byte a publish writes is owed to the disk `[fatal]` `[silent]`
   invariant ∀ page p a commit writes through its cluster accessor — in PUBLISH the Versioned HEAD copy into the cluster slot and a

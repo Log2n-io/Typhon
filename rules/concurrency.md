@@ -125,7 +125,7 @@ the chain's side of that contract: a transaction's snapshot is visible to every 
 ### TXC-01: A cutoff never passes a snapshot that exists or is being created `[fatal]` `[silent]`
   invariant ∀ cutoff C = `TransactionChain.ComputeNextMinTSN()`, computed by the tail L, ∀ transaction T ≠ L alive when C is
             computed or created concurrently with it: C ≤ T.TSN. (L's own snapshot is not retained past its cutoff: L computes
-            C to clean up after itself.)
+            C to clean up after itself, at its dispose. An empty commit leaves L usable, so it computes nothing.)
   enforce (1) a transaction is in the chain before its TSN exists: `Register` pushes it with its TSN pending (0), then draws
           the TSN and publishes it (`Volatile.Write`);
           (2) the cutoff is the minimum over every node but the leaving tail, and over `issued + 1`, the counter read BEFORE
@@ -148,6 +148,8 @@ the chain's side of that contract: a transaction's snapshot is visible to every 
             (writer first); or after its release, the writer before or after a younger reader. Every snapshot reads its own
             value [VerifiesRule]; a cutoff above every TSN issued is caught [RuleMutant]. Real mutations: the draw moved before
             the push fails `HeldAcrossTheCleanup`; the second-to-last cutoff fails `ReleasedBeforeTheCleanup_ReaderFirst`.
+            TransactionCutoffTests.AnEmptyCommitByTheTail_KeepsItsOwnSnapshot — the tail still reads its value after an empty
+            commit [VerifiesRule]; the empty commit's cleanup restored fails it.
             TransactionChainTests.Stress_ConcurrentCreation_NoCutoffPassesALiveSnapshot — 8 readers and a writer for 300 ms,
             each reader finding the retention floor at or below its TSN [VerifiesRule]; it catches each real mutation 3/3.
 

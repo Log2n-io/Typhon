@@ -627,6 +627,53 @@ internal sealed class PostAppendFailureTests
         }
     }
 
+    /// <summary>
+    /// A conflict-handler commit holds each entity's chain lock from its PREPARE. A throw under that lock, after the append, must release it once and
+    /// surface as <see cref="CommitPublishIncompleteException"/>: released by the publish and again by the abort path, the second release's
+    /// InvalidOperationException took its place, and with it the "do not run it again".
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    [CancelAfter(30_000)]
+    public void AThrowUnderAHandlerCommitsChainLock_ReleasesItOnce_AndSurfacesAsIncomplete()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = Open(scope);
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+        {
+            id = tx.Spawn<PaWalletArch>(PaWalletArch.Wallet.Set(new PaWallet { Credits = 1 }));
+            tx.Commit();
+        }
+
+        Exception thrown = null;
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+        {
+            tx.OpenMut(id).Set(PaWalletArch.Wallet, new PaWallet { Credits = 2 });
+            dbe.PublishUnderLockProbe = () =>
+            {
+                dbe.PublishUnderLockProbe = null;
+                throw new TimeoutException("injected under the chain lock");
+            };
+            try
+            {
+                tx.Commit((ref ConcurrencyConflictSolver _) => { });
+            }
+            catch (Exception e)
+            {
+                thrown = e;
+            }
+            finally
+            {
+                dbe.PublishUnderLockProbe = null;
+            }
+        }
+
+        Assert.That(thrown, Is.InstanceOf<CommitPublishIncompleteException>(),
+            $"{Marker}: a throw under a retained chain lock surfaced as {thrown?.GetType().Name ?? "nothing"}: {thrown?.Message}");
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "the engine stopped");
+    }
+
     /// <summary>A stopped engine's tick fence appends nothing over the partial publish (AP-03): it returns without logging the tick's writes.</summary>
     [Test]
     [VerifiesRule("AP-03")]

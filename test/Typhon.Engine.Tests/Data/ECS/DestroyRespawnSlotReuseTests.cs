@@ -355,6 +355,49 @@ class DestroyRespawnSlotReuseTests : TestBase<DestroyRespawnSlotReuseTests>
     }
 
     /// <summary>
+    /// A rollback that throws part-way is retried by the transaction's dispose. The spawns it had already rolled back are still in the cache — an entry
+    /// leaves it only once the whole pass is done — so the retry met them again and freed their chain roots a second time.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [CancelAfter(10_000)]
+    public void ARollbackRetriedAfterAThrow_FreesEachSpawnsChainOnce()
+    {
+        using var dbe = SetupEngine(out _);
+        var segment = dbe.GetComponentTable<CompA>().CompRevTableSegment;
+        var revisionsBefore = segment.AllocatedChunkCount;
+        var doubleFreesBefore = Interlocked.Read(ref segment.DoubleFreeCount);
+
+        var tx = dbe.CreateQuickTransaction();
+        for (var k = 0; k < 2; k++)
+        {
+            var a = new CompA(k, 0, 0);
+            tx.Spawn<CompAArch>(CompAArch.A.Set(in a));
+        }
+
+        var visits = 0;
+        dbe.ChainVoidProbe = (_, _) =>
+        {
+            if (++visits == 2)
+            {
+                throw new TimeoutException("injected into the rollback's second entry");
+            }
+        };
+        try
+        {
+            Assert.Throws<TimeoutException>(() => tx.Rollback(), "premise: the rollback threw after rolling back one spawn");
+        }
+        finally
+        {
+            dbe.ChainVoidProbe = null;
+        }
+
+        tx.Dispose();
+        Assert.That(Interlocked.Read(ref segment.DoubleFreeCount) - doubleFreesBefore, Is.Zero, "a spawn's chain root was freed twice");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(revisionsBefore), "the rolled-back spawns' chains");
+    }
+
+    /// <summary>
     /// The last entities of an archetype, destroyed just before a clean close, stay dead after the reopen. Their chains are freed deferred, past the
     /// transactions alive at the release; with none to follow, the close runs those frees — a chain root left allocated reads back as a live entity
     /// when the archetype's map reopens empty and is rebuilt from the chain heads.

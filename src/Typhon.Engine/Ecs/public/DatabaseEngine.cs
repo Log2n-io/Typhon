@@ -6156,6 +6156,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal Action PublishAfterIndexesProbe { get; set; }
 
+    /// <summary>Test seam (AP-03): invoked inside a component's publish, under its chain lock, after the stamp and before Phase B. Null in production.</summary>
+    internal Action PublishUnderLockProbe { get; set; }
+
     /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
     /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.

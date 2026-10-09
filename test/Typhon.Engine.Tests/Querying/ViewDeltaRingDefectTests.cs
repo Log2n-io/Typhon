@@ -227,6 +227,112 @@ class ViewDeltaRingDefectTests : TestBase<ViewDeltaRingDefectTests>
         Or,
     }
 
+    private static EcsView<CompDArch> ViewOf(Transaction tx, ViewShape shape) => shape switch
+    {
+        ViewShape.Or => tx.Query<CompDArch>().WhereField<CompD>(d => d.B <= -20 || d.B >= 50).ToView(),
+        ViewShape.MultiField => tx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50 && d.A >= 0.5f).ToView(),
+        _ => tx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50).ToView(),
+    };
+
+    /// <summary>
+    /// A spawn whose fields are 0 carries no key, so the refresh reads the entity. Destroyed before the refresh, the entity is not in the refresh's
+    /// snapshot, and the read threw: the refresh failed with its drain half done. It must skip the entity and go on.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VDELTA-01")]
+    [CancelAfter(10_000)]
+    public void ASpawnDestroyedBeforeTheRefresh_IsSkipped([Values] ViewShape shape)
+    {
+        using var dbe = SetupEngine();
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = ViewOf(txView, shape);
+        using (var settle = dbe.CreateQuickTransaction())
+        {
+            view.Refresh(settle);
+        }
+
+        EntityId gone, kept;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            gone = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(0f, 0, 0.0)));
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(gone);
+            kept = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 60, 1.0)));
+            tx.Commit();
+        }
+
+        using var r = dbe.CreateQuickTransaction();
+        Assert.DoesNotThrow(() => view.Refresh(r), "a refresh met an entity its snapshot does not see");
+        Assert.That(view.Contains(gone), Is.False);
+        Assert.That(view.Contains(kept), Is.True, $"{Marker}: the drain stopped before the entry after the destroyed spawn's");
+    }
+
+    /// <summary>
+    /// A full ring drops the NEWEST entry, so it can keep an entity's older entry and lose the one after it. A full refresh folds the entries at or
+    /// below its TSN after its re-scan: folding that older entry over a re-scan that read the newer value put the entity back on the old one, and no
+    /// later refresh corrected it. X moves 60 → 30 → 70: it must end in the view.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VDELTA-01")]
+    [CancelAfter(10_000)]
+    public void AnEntryOlderThanADroppedOne_IsNotFoldedOverTheRescan()
+    {
+        using var dbe = SetupEngine();
+        EntityId x;
+        var fillers = new EntityId[3];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            x = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 60, 1.0)));
+            for (var i = 0; i < fillers.Length; i++)
+            {
+                fillers[i] = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 1_000 + i, 1.0)));
+            }
+
+            tx.Commit();
+        }
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50).ToView(bufferCapacity: 4);
+        using (var settle = dbe.CreateQuickTransaction())
+        {
+            view.Refresh(settle);
+        }
+
+        Assert.That(view.Contains(x), Is.True, "premise: X starts in the view");
+        using (var early = dbe.CreateQuickTransaction())
+        using (var lessEarly = dbe.CreateQuickTransaction())
+        {
+            Commit(dbe, x, 30);                     // X's entry, kept
+            for (var i = 0; i < fillers.Length; i++)
+            {
+                Commit(dbe, fillers[i], 2_000 + i); // the ring is full
+            }
+
+            Commit(dbe, x, 70);                     // X's next entry, dropped
+            view.Refresh(early);                    // a full refresh below X's kept entry: it stays in the ring
+            view.Refresh(lessEarly);                // owed, and still below it: the next refresh must re-scan again, not drain it
+        }
+
+        for (var round = 0; round < 3; round++)
+        {
+            using var r = dbe.CreateQuickTransaction();
+            Assert.That(r.Open(x).Read(CompDArch.D).B, Is.EqualTo(70), "premise: X's newest committed value");
+            view.Refresh(r);
+            Assert.That(view.Contains(x), Is.True, $"{Marker}: refresh {round}: X's older entry, folded over the re-scan, took it out");
+        }
+
+        static void Commit(DatabaseEngine dbe, EntityId id, int b)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            SetB(tx, id, b);
+            Assert.That(tx.Commit(), Is.True);
+        }
+    }
+
     /// <summary>
     /// A range on one field (<c>B &gt;= 10 &amp;&amp; B &lt;= 20</c>) is two evaluators of one field: a value passes only if it passes both. An entity below
     /// the range stays out when it moves within the area below, enters when it crosses into the range, and leaves above it.

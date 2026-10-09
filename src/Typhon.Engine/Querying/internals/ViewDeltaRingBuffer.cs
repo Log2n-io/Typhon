@@ -43,6 +43,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     // field layout, preventing false sharing between concurrent producers and the single consumer.
     private PaddedLong _tail;          // 64B (producer writes via CAS)
     private int _overflow;             // Sticky flag — only written when buffer is full (exceptional path)
+    private long _dropMark;            // The tail at the latest drop (exceptional path): an entry below it may be superseded by a dropped one
 
     // Consumer hot path — plain increment on _head. Isolated from producer by PaddedLong padding.
     private PaddedLong _head;          // 64B (consumer writes)
@@ -114,6 +115,9 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
 
             if (tail - head >= _capacity)
             {
+                // The mark first: a consumer that sees the flag sees the mark (the CAS is a full fence).
+                RaiseDropMark(tail);
+
                 // Release, so a consumer that acquire-reads HasOverflow cannot see the flag set without also seeing the state that preceded it.
                 Volatile.Write(ref _overflow, 1);
                 return false;
@@ -189,6 +193,27 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
         flags = _flags[index];
         componentTag = _componentTags[index];
         return true;
+    }
+
+    /// <summary>
+    /// Whether the entry at the head was appended before the latest drop. A full ring drops the NEWEST entry, so it can keep an entity's older entry and
+    /// lose the one after it: such an entry is stale, and only a re-scan that ran after the drop stands for its entity (VDELTA-01). Single consumer.
+    /// </summary>
+    public bool HeadPrecedesDrop => _head.Value < Volatile.Read(ref _dropMark);
+
+    private void RaiseDropMark(long tail)
+    {
+        var seen = Volatile.Read(ref _dropMark);
+        while (tail > seen)
+        {
+            var prior = Interlocked.CompareExchange(ref _dropMark, tail, seen);
+            if (prior == seen)
+            {
+                return;
+            }
+
+            seen = prior;
+        }
     }
 
     /// <summary>

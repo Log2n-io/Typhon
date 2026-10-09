@@ -514,8 +514,13 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
         // The entries the re-scan may have missed (a commit between its delta and its value) are folded, not discarded: see EndRefreshFull.
         while (DeltaBuffer.TryPeek(tx.TSN, out var entry, out var flags, out var tsn, out var componentTag))
         {
+            var fold = FoldsHead;   // an entry appended before a drop that may have superseded it: the re-scan stands for its entity
             DeltaBuffer.Advance();
-            ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
+            if (fold)
+            {
+                ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
+            }
+
             SetLastRefreshTSN(tsn);
         }
 

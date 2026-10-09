@@ -470,7 +470,8 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     private void WarnTsnHeadroomOnce(long next)
     {
-        if (Interlocked.Exchange(ref _tsnWarned, 1) == 0)
+        // Read first: past 2^46 every draw comes here, for years — an unconditional exchange would be a locked write on the chain's line per draw.
+        if (Volatile.Read(ref _tsnWarned) == 0 && Interlocked.Exchange(ref _tsnWarned, 1) == 0)
         {
             _dbe?.WarnTsnHeadroomLow(next, TsnRefusalThreshold);
         }

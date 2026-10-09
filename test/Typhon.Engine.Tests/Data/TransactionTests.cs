@@ -1168,7 +1168,7 @@ class TransactionTests : TestBase<TransactionTests>
                 "Deferred cleanup should be pending while blocking transaction holds the tail");
 
             // Step 5: Commit the blocker (zero entity operations, State == Created).
-            // The empty-commit path processes deferred cleanup when this transaction is the tail.
+            // The empty commit leaves the cleanup to the dispose: the transaction stays usable, and the cutoff leaves its own snapshot out (TXC-01).
             var commitResult = tBlocker.Commit();
             Assert.That(commitResult, Is.True, "Empty transaction commit should return true");
         }

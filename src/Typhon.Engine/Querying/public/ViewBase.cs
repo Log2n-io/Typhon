@@ -380,8 +380,9 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 
     /// <summary>
     /// Set while a full refresh is still owed: the last one began after an overflow, or met one, and the entries the ring dropped may belong to a commit
-    /// that had appended its deltas but not yet published the value the re-scan reads. The next refresh re-scans again, as a membership resync stays in
-    /// resync (<c>EcsView.RefreshMembershipResync</c>) — one more O(N) at a later snapshot, which covers them.
+    /// that had appended its deltas but not yet published the value the re-scan reads; or the ring still holds entries from before a drop. The next
+    /// refresh re-scans again, as a membership resync stays in resync (<c>EcsView.RefreshMembershipResync</c>) — one more O(N) at a later snapshot,
+    /// which covers a dropped commit once its value is published. One still between its delta and its value at that re-scan too is not covered.
     /// </summary>
     private protected bool _refreshFullPending;
 
@@ -393,7 +394,13 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// refreshes used before (and which is gone), also threw away the entries of commits above the refreshing transaction's TSN — a re-scan of a slot
     /// whose value a commit had not yet published missed them for good — and re-anchored the ring's base TSN under live producers.
     /// </summary>
-    private protected bool BeginRefreshFull() => DeltaBuffer.ClearOverflow();
+    /// <remarks>Owes a full refresh until <see cref="EndRefreshFull"/>: a refresh that throws in between leaves the next one a full one.</remarks>
+    private protected bool BeginRefreshFull()
+    {
+        var dropped = DeltaBuffer.ClearOverflow();
+        _refreshFullPending = true;
+        return dropped;
+    }
 
     /// <summary>
     /// Closes a full refresh, once the view has folded the entries at or below its transaction's TSN (and kept the newer ones): owes another full refresh
@@ -401,10 +408,19 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// </summary>
     /// <remarks>
     /// The entries at or below the TSN are FOLDED, not discarded: a commit's delta reaches the ring (Phase A of its publish) before its value reaches the
-    /// cluster slot the re-scan reads (Phase B), so the re-scan can miss a value whose entry is there. Folded after the re-scan's diff, an entry the
-    /// re-scan already reflects changes nothing (VDELTA-01).
+    /// cluster slot the re-scan reads (Phase B), so the re-scan can miss a value whose entry is there. An entry appended after the latest drop is folded:
+    /// the ring holds every later entry of its entity, so the last one folded is its newest. One appended before a drop is consumed unapplied
+    /// (<see cref="FoldsHead"/>): the drop may have taken a newer one, and the re-scan, which ran after it, stands for both. The refresh stays owed while
+    /// such entries are left above the TSN (VDELTA-01).
     /// </remarks>
-    private protected void EndRefreshFull(bool droppedBefore) => _refreshFullPending = DeltaBuffer.ClearOverflow() || droppedBefore;
+    private protected void EndRefreshFull(bool droppedBefore) =>
+        _refreshFullPending = DeltaBuffer.ClearOverflow() || droppedBefore || DeltaBuffer.HeadPrecedesDrop;
+
+    /// <summary>
+    /// Whether a full refresh's fold applies the entry at the head — not one appended before the latest drop, see <see cref="EndRefreshFull"/>. Read
+    /// before <c>Advance</c>.
+    /// </summary>
+    private protected bool FoldsHead => !DeltaBuffer.HeadPrecedesDrop;
 
     /// <summary>
     /// Leaves the view's first refresh a full one. A builder calls it once the view is populated: a commit whose delta was appended before the view was
@@ -413,8 +429,8 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     internal void OweRefreshFull() => _refreshFullPending = true;
 
     /// <summary>
-    /// Drains ring buffer entries that arrived during a RefreshFull re-scan, advancing the consumer position without processing entries
-    /// (the full scan already captured the authoritative entity set).
+    /// Drains, without applying them, the entries at or below <paramref name="targetTSN"/>: a membership resync takes its re-query as the set. Unlike a
+    /// full refresh's fold (<see cref="EndRefreshFull"/>), so a commit between its delta and its publication at that re-query is not covered here.
     /// </summary>
     protected void DrainBufferAfterRefreshFull(long targetTSN)
     {

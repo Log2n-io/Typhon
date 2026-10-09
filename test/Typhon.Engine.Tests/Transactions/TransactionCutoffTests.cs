@@ -32,6 +32,43 @@ class TransactionCutoffTests : TestBase<TransactionCutoffTests>
         ReleasedBeforeTheCleanup_ReaderFirst,
     }
 
+    /// <summary>
+    /// An empty commit leaves its transaction usable, and a tail's cutoff leaves its own snapshot out: trimming to it then (the empty-commit path drained
+    /// the cleanups the tail held back) took the revision the tail itself still reads. The tail must read its value after the commit as before it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TXC-01")]
+    [CancelAfter(10_000)]
+    public void AnEmptyCommitByTheTail_KeepsItsOwnSnapshot()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        EntityId entity;
+        using (var seed = dbe.CreateQuickTransaction())
+        {
+            entity = seed.Spawn<CompAArch>(CompAArch.A.Set(new CompA(Before)));
+            seed.Commit();
+        }
+
+        using var tail = dbe.CreateQuickTransaction();
+        Assert.That(tail.Open(entity).Read(CompAArch.A).A, Is.EqualTo(Before), "premise: the tail reads the seed");
+        using (var writer = dbe.CreateQuickTransaction())
+        {
+            var mut = writer.OpenMut(entity);
+            var a = mut.Read(CompAArch.A);
+            a.A = After;
+            mut.Set(CompAArch.A, a);
+            Assert.That(writer.Commit(), Is.True);
+        }
+
+        using var younger = dbe.CreateQuickTransaction();
+        Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.GreaterThan(0), "premise: the writer's cleanup waits behind the tail");
+        Assert.That(tail.Commit(), Is.True, "the tail's empty commit");
+        Assert.That(tail.TryOpen(entity, out var e), Is.True, "the tail lost its snapshot's revision to its own empty commit");
+        Assert.That(e.Read(CompAArch.A).A, Is.EqualTo(Before));
+    }
+
     [Test]
     [VerifiesRule("TXC-01")]
     [CancelAfter(20_000)]

@@ -50,6 +50,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — never accessed E, but deferred cleanup should process it
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // After T1 commits, deferred cleanup should have removed old revisions
         {
@@ -224,6 +225,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — triggers deferred cleanup
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // Queue should be empty after processing
         Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.EqualTo(0), "Queue should be empty after tail commits");
@@ -294,7 +296,11 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         }
 
         // T1 commits — should not crash even though entity was deleted
-        Assert.DoesNotThrow(() => t1.Commit(), "Processing deferred cleanup for a deleted entity should not throw");
+        Assert.DoesNotThrow(() =>
+        {
+            t1.Commit();
+            t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose (TXC-01)
+        }, "Processing deferred cleanup for a deleted entity should not throw");
 
         // Queue should be empty
         Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.EqualTo(0), "Queue should be empty after processing");
@@ -345,6 +351,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — triggers cleanup of all entities
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // All entities should now have 1 revision
         {
