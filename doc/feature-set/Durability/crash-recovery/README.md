@@ -54,8 +54,7 @@ catch (CorruptionException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **Fully automatic** — no recovery API, flag, or manual step; it runs on every open and is effectively free on
-  a clean reopen (the WAL window since the last checkpoint is empty).
+- **Fully automatic** — no recovery API, flag, or manual step; it runs only after an unclean close (no `CleanShutdown` flag set on disk); a clean reopen skips it entirely (rules CS-06, CS-07).
 - **Transaction is the atomicity unit** (LOG-04) — a `Deferred`/`GroupCommit` UoW recovers as exactly its
   durably-marked transactions, each whole, the set possibly a true prefix of what you committed. A crash never
   yields a half-applied transaction.
