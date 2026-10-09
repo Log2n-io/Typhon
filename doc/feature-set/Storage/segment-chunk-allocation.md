@@ -35,7 +35,7 @@ foreach (var seg in db.EnumerateStorageSegments().Where(s => s.IsChunkBased))
 
 - Chunk addressing is O(1): a magic-multiplier multiply+shift replaces the ~20–80 cycle integer divide that would otherwise be needed to locate a chunk's page.
 - Allocation is lock-free and near-constant time: ~2–3 `Interlocked` operations per successful `AllocateChunk`, walking only pages known to have free slots.
-- The per-page occupancy bitmap is the durable, persisted ground truth; the in-memory free-page list is rebuilt from it in O(pages) on database open — a crash can never leave allocator state that disagrees with what's on disk.
+- The per-page occupancy bitmap is the durable, persisted ground truth. Free-page tracking is an in-memory **room-bits bitmap** (one bit per page, a superset of the truth): on a clean open it is loaded from the `{bundle}/chunk-summary` file; on a crash-recovery open it is re-derived from the per-page chunk bitmaps in O(pages). A crash can never leave allocator state that disagrees with what's on disk.
 - Growth is capped-doubling (geometric while small, additive beyond 1,024 pages) so a single grow request never demands an unreasonably large page-allocation burst.
 - Every segment spans at least 2 pages: the directory-only root carries no chunk data, so chunk 0 always lives on the first data page, not the root.
 - Minimum chunk stride is 8 bytes; chunk 0 of every chunk-based segment is reserved as a sentinel and is never handed out by `AllocateChunk`.
