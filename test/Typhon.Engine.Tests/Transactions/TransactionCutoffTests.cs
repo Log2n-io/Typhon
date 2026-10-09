@@ -155,6 +155,76 @@ class TransactionCutoffTests : TestBase<TransactionCutoffTests>
         Assert.That(problems, Is.Empty, "a cutoff passed a live snapshot");
     }
 
+    /// <summary>
+    /// TXC-02: a transaction pushed into the chain that a Remove is emptying becomes the tail. The Remove of the lone tail is held just before or just after
+    /// its head CAS, and a transaction is pushed meanwhile.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TXC-02")]
+    [CancelAfter(20_000)]
+    public void APushIntoAnEmptyingChain_BecomesItsTail([Values] bool afterTheHeadCas) =>
+        AssertAPushIntoAnEmptyingChainBecomesItsTail(afterTheHeadCas, clearTheTailAfterTheCas: false);
+
+    [Test]
+    [RuleMutant("TXC-02")]
+    [CancelAfter(20_000)]
+    public void Mutant_TheTailClearedAfterTheHeadCas_LeavesTheChainWithoutATail() =>
+        RuleMutants.AssertDetects("TXC-02", "has no tail",
+            () => AssertAPushIntoAnEmptyingChainBecomesItsTail(afterTheHeadCas: true, clearTheTailAfterTheCas: true));
+
+    /// <param name="afterTheHeadCas">
+    /// The removal is held after its CAS emptied the head — the push then finds the chain empty and must find the tail cleared — or before it, and the push
+    /// makes that CAS fail: the removal re-scans and makes the pushed transaction the tail.
+    /// </param>
+    /// <param name="clearTheTailAfterTheCas">
+    /// The mutant: the removal clears the tail after its CAS instead of before (<c>TailClearedAfterCasMutantForTest</c>).
+    /// </param>
+    private void AssertAPushIntoAnEmptyingChainBecomesItsTail(bool afterTheHeadCas, bool clearTheTailAfterTheCas)
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        using var leavingThread = new Actor("leaving");
+        var tx = new Cast();
+        using var inWindow = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        var fired = 0;
+        dbe.TransactionChain.TailClearedAfterCasMutantForTest = clearTheTailAfterTheCas;
+        dbe.TransactionChain.RemoveTailProbe = casDone =>
+        {
+            if (casDone == afterTheHeadCas && Environment.CurrentManagedThreadId == leavingThread.ManagedThreadId && Interlocked.Exchange(ref fired, 1) == 0)
+            {
+                inWindow.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+            }
+        };
+
+        try
+        {
+            Assert.That(leavingThread.Run(() => tx.Tail = dbe.CreateReadOnlyTransaction()).Wait(TimeSpan.FromSeconds(5)), Is.True,
+                "the leaving one was not created");
+            Assert.That(dbe.TransactionChain.ActiveCount, Is.EqualTo(1), "premise: the leaving transaction is alone in the chain");
+            var gone = leavingThread.Run(() => tx.Tail.Dispose());
+            Assert.That(inWindow.Wait(TimeSpan.FromSeconds(5)), Is.True, "premise: the removal is held at its head CAS");
+            tx.Young = dbe.CreateReadOnlyTransaction();
+            release.Set();
+            Assert.That(gone.Wait(TimeSpan.FromSeconds(5)), Is.True, "the removal never finished");
+            tx.Tail = null;
+
+            Assert.That(dbe.TransactionChain.Tail, Is.SameAs(tx.Young), "a chain holding a transaction has no tail: no cutoff will ever be computed in it");
+            Assert.That(dbe.TransactionChain.MinTSN, Is.EqualTo(tx.Young.TSN), "the tail's TSN");
+        }
+        finally
+        {
+            release.Set();
+            dbe.TransactionChain.RemoveTailProbe = null;
+            dbe.TransactionChain.TailClearedAfterCasMutantForTest = false;
+            leavingThread.Run(() => tx.Tail?.Dispose()).Wait(TimeSpan.FromSeconds(5));
+            tx.Young?.Dispose();
+        }
+    }
+
     /// <summary>Reads the entity in <paramref name="reader"/>: the value its snapshot must see, or a problem.</summary>
     private static void Check(List<string> problems, string who, Transaction reader, EntityId entity, long writerTsn)
     {
@@ -189,7 +259,7 @@ class TransactionCutoffTests : TestBase<TransactionCutoffTests>
     }
 
     /// <summary>The test's transactions, each used only on the thread that created it.</summary>
-#pragma warning disable TYPHON005 // Each is disposed by the test's finally, on its own thread: a transaction is thread-affine, so a Dispose here could not do it.
+#pragma warning disable TYPHON005 // Each is disposed by the test's finally on its own thread: a transaction is thread-affine.
     private sealed class Cast
     {
         public Transaction Tail, Held, Young;

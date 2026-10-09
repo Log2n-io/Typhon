@@ -244,6 +244,15 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     private long _pendingNodeWaits;
 
+    /// <summary>
+    /// Test seam (TXC-02): invoked by a Remove of the tail alone in the chain, just before its CAS of the head (<c>false</c>) and, when that CAS emptied
+    /// the chain, just after it (<c>true</c>).
+    /// </summary>
+    internal Action<bool> RemoveTailProbe { get; set; }
+
+    /// <summary>TXC-02's mutant: a Remove that empties the chain clears the tail after its CAS of the head instead of before.</summary>
+    internal bool TailClearedAfterCasMutantForTest;
+
     /// <summary>Test seam (TXC-01's mutant): replaces the cutoff <see cref="ComputeNextMinTSN"/> computed.</summary>
     internal Func<long, long> CutoffProbe { get; set; }
 
@@ -287,6 +296,10 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         _control.EnterExclusiveAccess(ref WaitContext.Null);
         Interlocked.Decrement(ref _activeCount);
 
+        // The tail is the chain's last node, and only a Remove moves it off a node. A push that found the chain empty may still set it after this read, but
+        // `transaction` is then not the last node, and isTail is false either way.
+        var isTail = Volatile.Read(ref _tail) == transaction;
+
         // Scan for predecessor (singly-linked)
         var cur = Volatile.Read(ref _head);
         Transaction prev = null;
@@ -300,10 +313,41 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         if (prev != null)
         {
             prev.Next = transaction.Next;
+            if (isTail)
+            {
+                // The last node's predecessor is the new last node.
+                SetTail(prev);
+            }
         }
         else
         {
-            if (Interlocked.CompareExchange(ref _head, transaction.Next, transaction) != transaction)
+            if (isTail && !TailClearedAfterCasMutantForTest)
+            {
+                // Alone in the chain (TXC-02): the tail is cleared BEFORE the CAS that empties the head, which orders it. A push that then finds the chain
+                // empty finds the tail cleared too, and its own CAS makes it the tail. Cleared after, a push in between would fail that CAS against this
+                // transaction, and the chain would hold a node and no tail.
+                Volatile.Write(ref _minTSN, 0);
+                Volatile.Write(ref _tail, null);
+            }
+
+            if (isTail)
+            {
+                RemoveTailProbe?.Invoke(false);
+            }
+
+            if (Interlocked.CompareExchange(ref _head, transaction.Next, transaction) == transaction)
+            {
+                if (isTail)
+                {
+                    RemoveTailProbe?.Invoke(true);
+                    if (TailClearedAfterCasMutantForTest)
+                    {
+                        Volatile.Write(ref _tail, null);
+                        Volatile.Write(ref _minTSN, 0);
+                    }
+                }
+            }
+            else
             {
                 // PushHead prepended nodes between our Volatile.Read and CAS — re-scan for new predecessor
                 var p = Volatile.Read(ref _head);
@@ -312,22 +356,11 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
                     p = p.Next;
                 }
                 p.Next = transaction.Next;
-            }
-        }
-
-        // Tail maintenance
-        if (Volatile.Read(ref _tail) == transaction)
-        {
-            var newTail = Volatile.Read(ref _head);
-            if (newTail != null)
-            {
-                while (newTail.Next != null)
+                if (isTail)
                 {
-                    newTail = newTail.Next;
+                    SetTail(p);
                 }
             }
-            Volatile.Write(ref _tail, newTail);
-            Volatile.Write(ref _minTSN, newTail == null ? 0 : AwaitTsn(newTail));
         }
 
         // Capture pool decision under lock; transaction is fully unlinked, so Reset+Enqueue can safely happen outside the critical section to reduce hold time.
@@ -350,6 +383,15 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     /// <summary>Test seam (TXC-01): invoked inside a creation's window, between the push and the TSN draw. A test holds a creator there.</summary>
     internal Action CreationWindowProbe { get; set; }
+
+    /// <summary>
+    /// Makes <paramref name="node"/>, the chain's last node, the tail; its TSN may still be pending (TXC-01). Caller holds the exclusive lock.
+    /// </summary>
+    private void SetTail(Transaction node)
+    {
+        Volatile.Write(ref _tail, node);
+        Volatile.Write(ref _minTSN, AwaitTsn(node));
+    }
 
     /// <summary>
     /// Allocates a monotonically-increasing TSN without creating a Transaction.

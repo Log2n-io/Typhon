@@ -151,6 +151,30 @@ the chain's side of that contract: a transaction's snapshot is visible to every 
             TransactionChainTests.Stress_ConcurrentCreation_NoCutoffPassesALiveSnapshot — 8 readers and a writer for 300 ms,
             each reader finding the retention floor at or below its TSN [VerifiesRule]; it catches each real mutation 3/3.
 
+### TXC-02: A chain holding a transaction has a tail `[silent]`
+  invariant whenever no Remove is in progress and no push that found the chain empty is between its head CAS and its tail
+            CAS: head ≠ null ⇒ tail = the chain's last node, the first pushed of the live transactions; and once the tail's
+            own registration has returned, MinTSN = its TSN. (Such a push leaves the chain briefly with a head and no tail; it
+            sets the tail itself, one instruction later, and MinTSN when its TSN is published.)
+  enforce a Remove of the tail alone in the chain clears the tail BEFORE the CAS that empties the head; that CAS orders the
+          clear, so a push that finds the chain empty finds the tail cleared too, and its own CAS makes it the tail. If pushes
+          beat that CAS, the Remove re-scans and makes the node now before it the tail. A Remove of a tail with a predecessor
+          makes the predecessor the tail
+  never clear the tail after the head's CAS: a push in between fails its tail CAS against the leaving transaction, and the
+        chain is left with a head and no tail
+  scope: TransactionChain.Remove, TransactionChain.SetTail, TransactionChain.PushHead
+  rationale: only the tail computes a cutoff (TXC-01). With no tail, nothing computes one: the revision cleanup and the ECS
+             cleanup queue stop until the chain empties again, which under steady traffic may be never. Ordering the clear
+             before the CAS costs nothing; a full fence and a re-read of the head after it cost +7 % on a lone read-only
+             transaction's create and dispose, which empties the chain every time. The predecessor known from the unlink
+             also replaces the walk to the chain's end the tail's Remove used to make.
+  on_violation: liveness and space: queued cleanups wait and revision chains grow (#1255).
+  verified: TransactionCutoffTests.APushIntoAnEmptyingChain_BecomesItsTail — a Remove of the lone tail held right after its
+            head CAS emptied the chain, or right before that CAS, and a push meanwhile: the pushed transaction is the tail,
+            with its TSN as MinTSN [VerifiesRule]; with the tail cleared after the CAS (`TailClearedAfterCasMutantForTest`),
+            the chain has no tail [RuleMutant]. Real mutation: the clear moved after the CAS fails it. The code before #1255
+            (a plain clear after the head read) failed the same test with the probe at that window.
+
 ---
 
 ## Module: SNAP — MVCC snapshot retention
