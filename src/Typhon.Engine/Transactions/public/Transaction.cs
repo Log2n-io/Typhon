@@ -1498,10 +1498,13 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
-        // Free the chunk storing the content (if any)
+        // Free the chunk storing the content (if any) — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a copy-on-write or
+        // a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone. It was left
+        // set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one payload.
         if (compRevInfo.CurCompContentChunkId != 0)
         {
-            componentSegment.FreeChunk(compRevInfo.CurCompContentChunkId);
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
+            compRevInfo.CurCompContentChunkId = 0;
         }
 
         // If we roll back a created component, we must delete the revision table chunk
@@ -1576,6 +1579,16 @@ public unsafe partial class Transaction : EntityAccessor
         // Save the orphan index before AddCompRev changes CurRevisionIndex
         var conflictOrphanIndex = compRevInfo.CurRevisionIndex;
 
+        // A destroy wins the conflict as a destroy: a fresh tombstone after the commit it lost to, ours voided. There is no payload to carry over and nothing
+        // for a handler to resolve — the generic path below would publish a LIVE revision copied from chunk 0 (REAP-02).
+        if (compRevInfo.CurCompContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        {
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, lockHeld);
+            elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+            compRev.GetRevisionElement(conflictOrphanIndex).Element.Void();
+            return;
+        }
+
         // Create a new revision for the resolved data (under existing lock when handler is provided)
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, lockHeld);
 
@@ -1622,6 +1635,15 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // Save the chunk that holds our modified data
         var oldContentChunkId = compRevInfo.CurCompContentChunkId;
+
+        // A tombstone moves as a tombstone: nothing to copy, nothing to free (REAP-02). Relocated as data, it would publish a live revision copied from — and
+        // then free — chunk 0.
+        if (oldContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        {
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
+            compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
+            return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        }
 
         // Create new entry at end of chain (under existing lock)
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);

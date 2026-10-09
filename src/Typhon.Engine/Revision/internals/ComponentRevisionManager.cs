@@ -165,6 +165,65 @@ internal ref struct ComponentRevisionManager
         }
     }
 
+    /// <summary>
+    /// Turns this transaction's own, uncommitted revision — the one naming <paramref name="ownChunkId"/> — into its delete entry: content chunk 0, the
+    /// mark of a tombstone. For a destroy that follows a write in the same transaction (REAP-02): the write's revision becomes the tombstone instead of a
+    /// second one being added, and no committed element is left naming the chunk the destroy frees.
+    /// </summary>
+    /// <remarks>
+    /// The element is found under the chain's exclusive lock — at <c>CurRevisionIndex</c> when it is still there, by its chunk id otherwise (a compaction
+    /// may have moved it since the write). A commit that later finds another transaction committed in between relocates the tombstone as a tombstone.
+    /// </remarks>
+    /// <returns><c>false</c> when no uncommitted element names the chunk: nothing converted, and the caller must not free the chunk.</returns>
+    internal static bool MakeOwnRevisionTombstone(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, int ownChunkId)
+    {
+        ref var accessor = ref info.CompRevTableAccessor;
+        var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+        if (!header.Control.EnterExclusiveAccess(ref wc))
+        {
+            ThrowHelper.ThrowLockTimeout("RevisionChain/OwnTombstone", TimeoutOptions.Current.RevisionChainLockTimeout);
+        }
+
+        try
+        {
+            // Trusted only inside the chain and on our own, uncommitted element: a compaction may have shortened the chain and left stale bytes past it.
+            header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+            var index = compRevInfo.CurRevisionIndex;
+            var inChain = index >= header.FirstItemIndex && index < header.FirstItemIndex + header.ItemCount;
+            if (!inChain || GetRevisionElement(ref accessor, firstChunkId, index).Element is not { IsolationFlag: true } current
+                || current.ComponentChunkId != ownChunkId)
+            {
+                index = -1;
+                for (var i = 0; i < header.ItemCount; i++)
+                {
+                    var candidate = (short)(header.FirstItemIndex + i);
+                    ref var element = ref GetRevisionElement(ref accessor, firstChunkId, candidate).Element;
+                    if (element.IsolationFlag && element.ComponentChunkId == ownChunkId)
+                    {
+                        index = candidate;
+                        break;
+                    }
+                }
+            }
+
+            if (index < 0)
+            {
+                return false;
+            }
+
+            GetRevisionElement(ref accessor, firstChunkId, index).Element.ComponentChunkId = 0;
+            compRevInfo.CurRevisionIndex = index;
+            return true;
+        }
+        finally
+        {
+            header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+            header.Control.ExitExclusiveAccess();
+        }
+    }
+
     internal static unsafe int AllocCompRevStorage(ComponentInfo info, long tsn, ushort uowId, int firstChunkId, long pk)
     {
         var chunkId = info.CompRevTableSegment.AllocateChunk(false, info.CompRevTableAccessor.ChangeSet);
@@ -231,14 +290,20 @@ internal ref struct ComponentRevisionManager
         var skipCount = 0;
         var hasCollections = ct.HasCollections;
 
-        // Collect chunk IDs to free AFTER enumeration completes (avoid use-after-free in circular buffer)
-        // Maximum chunks we might need to free is ChainLength - 1 (we keep the first chunk)
-        Span<int> chunksToFree = (firstChunkHeader.ChainLength < 128) ? stackalloc int[firstChunkHeader.ChainLength] : new int[firstChunkHeader.ChainLength];
+        // Every overflow chunk of the old chain — the ChainLength - 1 chunks linked from the first: the compacted chain is the first chunk plus fresh ones,
+        // so all of them go, once the first chunk names the new chain (REAP-02). Exactly that many links: the last chunk's own link is not trusted to be 0.
+        // Following the enumeration instead missed every one of them when the chain started at index 0.
+        var chainLength = firstChunkHeader.ChainLength;
+        Span<int> chunksToFree = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
         var chunksToFreeCount = 0;
+        for (int next = firstChunkHeader.NextChunkId, left = chainLength - 1; next != 0 && left-- > 0;)
+        {
+            chunksToFree[chunksToFreeCount++] = next;
+            next = compRevTableAccessor.GetChunk<int>(next);   // an overflow chunk's first field is its own next-chunk id
+        }
 
         {
             using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
-            var prevChunkId = enumerator.IndexInChunk == 0 ? enumerator.CurChunkId : 0;
             var maxSkipCount = firstChunkHeader.ItemCount;
 
             // Sentinel: delayed-free pattern — each newer committed skip candidate frees the previous one's chunk.
@@ -250,18 +315,6 @@ internal ref struct ComponentRevisionManager
 
             while (enumerator.MoveNext())
             {
-                bool changedChunk = (enumerator.CurChunkId != prevChunkId) && (prevChunkId != 0);
-                if (changedChunk)
-                {
-                    // Mark the previous revision table chunk for freeing if it's not the first chunk (which we keep and reuse)
-                    // IMPORTANT: We defer freeing until after enumeration to avoid use-after-free in circular buffers
-                    if (prevChunkId != firstChunkId)
-                    {
-                        chunksToFree[chunksToFreeCount++] = prevChunkId;
-                    }
-                    prevChunkId = enumerator.CurChunkId;
-                }
-
                 // Skip phase: remove entries older than the cutoff, track the last committed one as sentinel. Active uncommitted entries (IsolationFlag=true)
                 // must NOT enter the skip phase — they belong to transactions that will commit later. Freeing them would corrupt their data.
                 // IsolationFlag check is before maxSkipCount decrement to avoid wasting the guard count.
@@ -314,7 +367,7 @@ internal ref struct ComponentRevisionManager
                                 curDestIndexInChunk = 0;
                                 tempFirstHeader[0].ChainLength++;
 
-                                newChunkId = ct.CompRevTableSegment.AllocateChunk(false, compRevTableAccessor.ChangeSet);
+                                newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0
                                 curNextChunkId[0] = newChunkId;
                                 var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
                                 newChunkSpan.Split(out curNextChunkId, out curDestElements);
@@ -342,30 +395,12 @@ internal ref struct ComponentRevisionManager
                     curDestIndexInChunk = 0;
                     tempFirstHeader[0].ChainLength++;
 
-                    newChunkId = ct.CompRevTableSegment.AllocateChunk(false, compRevTableAccessor.ChangeSet);
+                    newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0, the chain's end
                     curNextChunkId[0] = newChunkId;
                     var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
                     newChunkSpan.Split(out curNextChunkId, out curDestElements);
                 }
             }
-        }
-
-        // Now that enumeration is complete, free all the collected revision table chunks
-        // This is done AFTER the enumerator is disposed to avoid use-after-free in circular buffers
-        for (var i = 0; i < chunksToFreeCount; i++)
-        {
-            var chunkId = chunksToFree[i];
-            if (hasCollections)
-            {
-                foreach (var f in ct.CollectionFields)
-                {
-                    var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId).Slice(f.OffsetInComponentStorage).Cast<byte, int>()[0];
-                    var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
-                    f.Vsbs.BufferRelease(bufferId, ref collAccessor);
-                    collAccessor.Dispose();
-                }
-            }
-            ct.CompRevTableSegment.FreeChunk(chunkId);
         }
 
         // Cleanup does NOT increment CommitSequence. CS represents the total number of commits to this entity, and cleanup removing old entries
@@ -380,6 +415,22 @@ internal ref struct ComponentRevisionManager
         tempChunk.Slice(0, sizeof(int)).CopyTo(destSpan.Slice(0, sizeof(int)));
         tempChunk.Slice(controlFieldEnd).CopyTo(destSpan.Slice(controlFieldEnd));
         firstChunkHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+
+        // The old overflow chunks, now that nothing names them: deferred with the content frees, past every transaction alive now — a rollback or a
+        // conflict resolution can still write through a handle it took into the old layout before this pass took the lock. Immediately only without a
+        // deferral list (a caller with no live transactions). Their collection buffers are not theirs: a revision chunk holds elements, and each
+        // content chunk's buffers went with it above.
+        for (var i = 0; i < chunksToFreeCount; i++)
+        {
+            if (deferredChunkFrees != null)
+            {
+                deferredChunkFrees.Add(new DeferredCleanupManager.DeferredChunkFreeEntry { Table = ct, ChunkId = chunksToFree[i], Revision = true });
+            }
+            else
+            {
+                ct.CompRevTableSegment.FreeChunk(chunksToFree[i]);
+            }
+        }
 
         // Phase 6: capture entries freed (== skipCount, capped at u16) before disposing the span.
         versionCleanupScope.EntriesFreed = (ushort)Math.Min(skipCount, ushort.MaxValue);

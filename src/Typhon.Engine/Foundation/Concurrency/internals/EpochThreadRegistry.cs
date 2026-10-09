@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -376,6 +377,35 @@ internal sealed class EpochThreadRegistry : IDisposable
         }
 
         return min;
+    }
+
+    /// <summary>
+    /// The threads pinned to an epoch, oldest first: slot, pinned epoch, scope depth and thread name. Diagnostic — for a back-pressure timeout whose pages
+    /// are epoch-held, it names the scope holding the minimum back.
+    /// </summary>
+    internal string DescribePinnedThreads(long currentGlobalEpoch)
+    {
+        var pins = new List<(long Epoch, int Slot, int Depth, string Thread)>();
+        var scanLimit = Math.Min(Volatile.Read(ref _highWaterMark), MaxSlots);
+        for (var i = 0; i < scanLimit; i++)
+        {
+            var pinned = Volatile.Read(ref _slots[i].PinnedEpoch);
+            if (pinned != 0)
+            {
+                var owner = Volatile.Read(ref _ownerThreads[i]);
+                var who = owner == null ? "?" : $"{owner.Name ?? "unnamed"}#{owner.ManagedThreadId}{(owner.IsAlive ? "" : " (dead)")}";
+                pins.Add((pinned, i, _slots[i].Depth, who));
+            }
+        }
+
+        pins.Sort((a, b) => a.Epoch.CompareTo(b.Epoch));
+        var parts = new List<string>(pins.Count);
+        foreach (var (epoch, slot, depth, thread) in pins)
+        {
+            parts.Add($"{thread} slot {slot} epoch {epoch} ({currentGlobalEpoch - epoch} behind) depth {depth}");
+        }
+
+        return $"global epoch {currentGlobalEpoch}, {pins.Count} pinned: {string.Join("; ", parts)}";
     }
 
     public void Dispose()

@@ -32,14 +32,15 @@ public struct MkWallet
 }
 
 /// <summary>
-/// An item. <see cref="OwnerNo"/> 0 is the market (the item then sits at desk <c>1 + ItemNo % Desks</c>). <see cref="LastTradeSeq"/> is the audit
-/// sequence of its last transfer, or <c>-(ItemNo + 1)</c> before the first: unique, so a unique index churns on every trade.
+/// An item. <see cref="OwnerNo"/> 0 is the market (the item then sits at desk <c>1 + ItemNo % Desks</c>); a non-unique index on it moves the item
+/// between two keys on every transfer, one of which — the market's — holds most items. <see cref="LastTradeSeq"/> is the audit sequence of its last
+/// transfer, or <c>-(ItemNo + 1)</c> before the first: unique, so a unique index churns on every trade.
 /// </summary>
 [Component("Typhon.Test.Market.Item", 1)]
 public struct MkItem
 {
     public long ItemNo;
-    public long OwnerNo;
+    [Index(AllowMultiple = true)] public long OwnerNo;
     public long Price;
     public long TradeCount;
     [Index] public long LastTradeSeq;
@@ -109,14 +110,20 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// <remarks>
 /// <para><b>The world.</b> Market desks and players hold credits; items are listed at the market or owned by a player, and carry 512 bytes of lore
 /// derived from their number. Every transfer — a player buying from the market, selling back to it, or trading with another player — moves credits
-/// and one item, updates both sides' item counts, re-keys a unique index and appends an audit entry, all in one transaction.</para>
+/// and one item, updates both sides' item counts, re-keys a unique index and appends an audit entry, all in one transaction. A player may also
+/// <i>consume</i> an item: its entity is destroyed and the market crafts a new one with the same item number, in the same transaction — so entities
+/// die and slots are reused while the item count stays exact. One transfer in twenty does all of its writes, then rolls back.</para>
 /// <para><b>Phases.</b> (1) <i>Build</i>, once: bulk-load the world, close. Reused by later runs while its manifest matches the configuration.
 /// (2) <i>Stress</i>: open with the stress cache (default 8 GiB), snapshot and check the state, run the storm, check again. (3) <i>Reopen</i>:
 /// close, reopen with a full checksum sweep, check again.</para>
 /// <para><b>What is checked, exactly.</b> Items and credits are conserved. Every trader's <c>ItemsOwned</c> equals the items that name it.
 /// Replaying this run's audit entries, in sequence order, over the snapshot taken before the storm reproduces every item's owner, price, trade count
-/// and last trade, and every trader's credits and item count. The unique index finds exactly the items it should. Lore read during the storm, and
-/// a sample after it, matches its item. The storage integrity check is clean. After reopen, the state equals the one before the close.</para>
+/// and last trade, and every trader's credits and item count. The unique index finds exactly the items it should. The owner index — read through the
+/// index itself, never a scan — finds under each player exactly the items the player counts, alive, naming the player, each the item's current
+/// entity: during the storm for random players under their lock, after it for every player; the items it holds under players and the market's
+/// count add up to every item. Lore read during the storm, and a sample after it, matches its item. Every entity a consume
+/// destroyed is dead, and its old index key is gone. Nothing a rolled-back transfer wrote is found: not its sequence, its audit entry, nor the item
+/// a consume crafted. The storage integrity check is clean. After reopen, the state equals the one before the close.</para>
 /// <para><b>Coordination.</b> Concurrent writes to one entity resolve last-writer-wins in Typhon, and a commit cannot be refused by a conflict
 /// handler. So, like a game server, the storm serialises per item and per trader with ordered application locks: the engine is asked for isolation
 /// and durability, never to arbitrate. Any drift is then an engine fault.</para>
@@ -130,7 +137,9 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// <c>TYPHON_MKT_LORE_SAMPLE_PERMILLE</c> (lore checked after the storm, per thousand items; 50), <c>TYPHON_MKT_REOPEN_VERIFY</c>
 /// (0 None … 3 Standard; 3), <c>TYPHON_MKT_REBUILD</c> (1 forces a new build), <c>TYPHON_MKT_SEED</c> (945), <c>TYPHON_MKT_STALL_SECONDS</c> (120: no
 /// progress for that long fails the run), <c>TYPHON_MKT_SAMPLES</c> (the per-second CSV; default <c>samples-&lt;start time&gt;.csv</c> in the database
-/// directory).</para>
+/// directory), <c>TYPHON_MKT_SETTLE</c> (1: drain the storm's writeback debt before the parallel reads; 0 reproduces #1230),
+/// <c>TYPHON_MKT_OWNER_AUDIT</c> (1: audit the owner index during the storm, under each player's lock; 0 skips the auditor — a read concurrent
+/// with splits can miss a key's entries, #1235. The checks after the storm and the reopen always run).</para>
 /// <para><b>Run it:</b> <c>dotnet test test/Typhon.Engine.Tests -c Release --filter "FullyQualifiedName~MarketHardeningTests"</c>, with the variables
 /// set. A 50 GiB run, for instance: <c>TYPHON_MKT_ITEMS=75000000</c>, <c>TYPHON_MKT_CACHE_MIB=8192</c>, <c>TYPHON_MKT_OPERATIONS=20000000</c>.</para>
 /// <para><b>Reuse.</b> Each run continues from the previous one's state and records its totals in <c>manifest.json</c>. A run that fails part-way
@@ -142,8 +151,14 @@ class MkAuditArch : Archetype<MkAuditArch>
 [NonParallelizable]
 public class MarketHardeningTests
 {
-    private const long KindBuy = 1, KindSell = 2, KindTrade = 3;
-    private const int ReadBatch = 2048;
+    private const long KindBuy = 1, KindSell = 2, KindTrade = 3, KindConsume = 4;
+    /// <summary>
+    /// Items read per short transaction. A reader's pages stay epoch-protected while it lives, and so does every page ANY thread touches meanwhile: the
+    /// window is the pages all readers touch while the oldest one is open. Once consumes have scattered the items over clusters a batch touches about a
+    /// page per item, so the threads' batches together must stay well inside the cache — a quarter of it here — or the readers pin it all and time out
+    /// on back-pressure (a 64 MiB cache, 16 threads of 2,048 items: 8,101 of 8,192 slots epoch-held, nothing dirty).
+    /// </summary>
+    private int ReadBatch => (int)Math.Clamp((_c.CacheMiB << 20) / PagedMMF.PageSize / (_c.Threads * 4L), 64, 2048);
 
     #region Configuration and manifest
 
@@ -161,6 +176,8 @@ public class MarketHardeningTests
         public int Seed;
         public int StallSeconds;
         public string SamplesFile;
+        public bool Settle;
+        public bool OwnerAudit;
 
         public int TraderCount => Desks + Players;   // trader numbers 1..TraderCount
 
@@ -185,6 +202,8 @@ public class MarketHardeningTests
             Seed = (int)Env("SEED", 945),
             StallSeconds = (int)Env("STALL_SECONDS", 120),
             SamplesFile = Environment.GetEnvironmentVariable("TYPHON_MKT_SAMPLES"),
+            Settle = Env("SETTLE", 1) != 0,
+            OwnerAudit = Env("OWNER_AUDIT", 1) != 0,
         };
 
         private static long Env(string name, long fallback) =>
@@ -198,6 +217,16 @@ public class MarketHardeningTests
     /// <summary>What a build produced and every run since has added: the totals each run checks against.</summary>
     private sealed class Manifest
     {
+        /// <summary>
+        /// What this test writes and expects of a database it reuses — its schema and its id files. Bumped when either changes meaning (2: consumes
+        /// replace item entities, so the id file follows them; 3: <c>OwnerNo</c> is indexed), so an older database is rebuilt rather than misread.
+        /// </summary>
+        public const int CurrentVersion = 3;
+
+        public int Version { get; set; }
+
+        /// <summary>The run whose storm has started and not yet checked out: non-zero means a run failed part-way, after committing.</summary>
+        public int InProgressRun { get; set; }
         public int Items { get; set; }
         public int Players { get; set; }
         public int Desks { get; set; }
@@ -207,7 +236,7 @@ public class MarketHardeningTests
         public long LastSeq { get; set; }
         public int Runs { get; set; }
 
-        public bool Matches(Config c) => Items == c.Items && Players == c.Players && Desks == c.Desks && Seed == c.Seed;
+        public bool Matches(Config c) => Version == CurrentVersion && Items == c.Items && Players == c.Players && Desks == c.Desks && Seed == c.Seed;
     }
 
     private static string DatabaseFile(Config c) => Path.Combine(c.Directory, "market.typhon");
@@ -363,6 +392,8 @@ public class MarketHardeningTests
         // ── Stress ──
         State after;
         long runAudits;
+        List<DestroyedItem> destroyed;
+        List<RolledBack> rolledBack;
         sampler.Phase = "open";
         using (var dbe = Open(_c.CacheMiB, OpenVerification.Spine))
         {
@@ -378,10 +409,26 @@ public class MarketHardeningTests
             AssertNoErrors("before the storm");
 
             var firstSeq = manifest.LastSeq + 1;
+
+            // From here the run commits: until it checks out, the database runs ahead of this manifest and of the id files.
+            manifest.InProgressRun = runNo;
+            File.WriteAllText(ManifestFile(_c), JsonSerializer.Serialize(manifest));
             sampler.Phase = "storm";
-            var auditIds = Storm(dbe, traderIds, itemIds, runNo, firstSeq, out var lastSeq);
+            var auditIds = Storm(dbe, traderIds, itemIds, runNo, firstSeq, out var lastSeq, out destroyed, out rolledBack);
             AssertNoErrors("during the storm");
             runAudits = auditIds.Count;
+
+            // The storm leaves the cache full of writeback debt. Let the checkpoint drain it before the parallel reads: a reader that waits for a slot keeps
+            // its epoch pinned, every page the others touch meanwhile is then protected, and on a small cache they all time out together (#1230).
+            // TYPHON_MKT_SETTLE=0 skips it, to reproduce that. Remove once #1230 is fixed.
+            if (_c.Settle)
+            {
+                sampler.Phase = "settle";
+                sw.Restart();
+                Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromMinutes(10)), Is.True,
+                    "the checkpoint did not settle the storm: timed out, or checkpointing halted");
+                Log($"storm settled in {sw.Elapsed.TotalSeconds:F1} s");
+            }
 
             sampler.Phase = "state read";
             sw.Restart();
@@ -396,6 +443,9 @@ public class MarketHardeningTests
             CheckAuditCount(dbe, manifest.AuditEntries + runAudits, "after the storm");
             sampler.Phase = "index check";
             CheckIndex(dbe, after, itemIds, firstSeq, traded);
+            CheckOwnerIndex(dbe, after, itemIds, "after the storm");
+            CheckDestroyed(dbe, destroyed, "after the storm");
+            CheckRolledBack(dbe, rolledBack, "after the storm");
             sampler.Phase = "integrity check";
             CheckIntegrity(dbe, "after the storm");
             ReportCache(dbe);
@@ -404,6 +454,8 @@ public class MarketHardeningTests
             manifest.AuditEntries += runAudits;
             manifest.LastSeq = lastSeq;
             manifest.Runs = runNo;
+            manifest.InProgressRun = 0;
+            WriteIds(ItemIdsFile(_c), itemIds);   // consumed items are new entities: the next run reads them by their new ids
             File.WriteAllText(ManifestFile(_c), JsonSerializer.Serialize(manifest));
             Log("closing");
             sampler.Phase = "close";
@@ -419,6 +471,9 @@ public class MarketHardeningTests
             var reread = ReadState(dbe, traderIds, itemIds, _c.LoreSamplePermille);
             CompareStates(after, reread, "after reopen vs before close");
             CheckAuditCount(dbe, manifest.AuditEntries, "after reopen");
+            CheckOwnerIndex(dbe, after, itemIds, "after reopen");
+            CheckDestroyed(dbe, destroyed, "after reopen");
+            CheckRolledBack(dbe, rolledBack, "after reopen");
             sampler.Phase = "integrity check (reopen)";
             CheckIntegrity(dbe, "after reopen");
             AssertNoErrors("after reopen");
@@ -672,9 +727,19 @@ public class MarketHardeningTests
             var existing = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(ManifestFile(_c)));
             if (existing != null && existing.Matches(_c))
             {
+                if (existing.InProgressRun != 0)
+                {
+                    Assert.Fail($"run {existing.InProgressRun} failed part-way after committing: the database is ahead of its manifest and its id files. "
+                                + "Rebuild it with TYPHON_MKT_REBUILD=1.");
+                }
+
                 Log($"reusing the database built for this configuration ({existing.Runs} run(s) so far)");
                 return existing;
             }
+
+            Log(existing == null
+                ? "the manifest is unreadable: rebuilding"
+                : $"the database was built for another configuration or layout (version {existing.Version}, current {Manifest.CurrentVersion}): rebuilding");
         }
 
         if (Directory.Exists(DatabaseFile(_c)))
@@ -741,16 +806,23 @@ public class MarketHardeningTests
         WriteIds(ItemIdsFile(_c), itemIds);
         var manifest = new Manifest
         {
-            Items = _c.Items, Players = _c.Players, Desks = _c.Desks, Seed = _c.Seed, TotalCredits = totalCredits, AuditEntries = 0, LastSeq = 0, Runs = 0,
+            Version = Manifest.CurrentVersion, Items = _c.Items, Players = _c.Players, Desks = _c.Desks, Seed = _c.Seed, TotalCredits = totalCredits,
+            AuditEntries = 0, LastSeq = 0, Runs = 0,
         };
         File.WriteAllText(ManifestFile(_c), JsonSerializer.Serialize(manifest));
         return manifest;
     }
 
+    /// <summary>Writes the ids to a temporary file, then renames it over <paramref name="path"/>: a crash part-way leaves the old file whole.</summary>
     private static void WriteIds(string path, ulong[] ids)
     {
-        using var f = new FileStream(path, FileMode.Create, FileAccess.Write);
-        f.Write(MemoryMarshal.AsBytes(ids.AsSpan()));
+        var temporary = path + ".tmp";
+        using (var f = new FileStream(temporary, FileMode.Create, FileAccess.Write))
+        {
+            f.Write(MemoryMarshal.AsBytes(ids.AsSpan()));
+        }
+
+        File.Move(temporary, path, overwrite: true);
     }
 
     private static ulong[] ReadIds(string path, int count)
@@ -762,6 +834,34 @@ public class MarketHardeningTests
     }
 
     #endregion
+
+    /// <summary>
+    /// A parallel pass over read batches. The first back-pressure timeout in it logs who holds the cache — the eviction census and the epoch pins — from
+    /// the failing reader, before it unwinds, while the other readers still hold what they held.
+    /// </summary>
+    private void ReadInParallel(DatabaseEngine dbe, int batches, Action<int> body, int threads = 0)
+    {
+        var censusTaken = 0;
+        Parallel.For(0, batches, new ParallelOptions { MaxDegreeOfParallelism = threads > 0 ? threads : _c.Threads }, b =>
+        {
+            try
+            {
+                body(b);
+            }
+            catch (PageCacheBackpressureTimeoutException) when (Interlocked.Exchange(ref censusTaken, 1) == 0 && LogReadCensus(dbe))
+            {
+                // Unreachable: the filter logs and returns false, so the exception propagates untouched.
+            }
+        });
+    }
+
+    /// <summary>The census of a back-pressure timeout, for an exception filter: logs, then returns false so the exception is not caught.</summary>
+    private static bool LogReadCensus(DatabaseEngine dbe)
+    {
+        TryLog(() => $"back-pressure census: {dbe.MMF.DescribeEvictionBlockers()}");
+        TryLog(() => $"epoch pins: {dbe.EpochManager.DescribePinnedThreads()}");
+        return false;
+    }
 
     #region Reading the state — in short transactions, so no reader pins more of the cache than a batch
 
@@ -786,7 +886,7 @@ public class MarketHardeningTests
 
         var batches = (_c.Items + ReadBatch - 1) / ReadBatch;
         var loreChecked = 0L;
-        Parallel.For(0, batches, new ParallelOptions { MaxDegreeOfParallelism = _c.Threads }, b =>
+        ReadInParallel(dbe, batches, b =>
         {
             var checkedHere = 0;
             using var tx = dbe.CreateReadOnlyTransaction();
@@ -829,7 +929,18 @@ public class MarketHardeningTests
 
     #region The storm
 
-    private List<ulong> Storm(DatabaseEngine dbe, ulong[] traderIds, ulong[] itemIds, int runNo, long firstSeq, out long lastSeq)
+    /// <summary>An item entity a consume destroyed, and the unique-index key it held: neither may be found again.</summary>
+    private readonly record struct DestroyedItem(ulong Id, long Key, int ItemNo);
+
+    /// <summary>A transfer that did all of its writes, then rolled back: its sequence, its audit entry and the item a consume crafted never existed.</summary>
+    private readonly record struct RolledBack(long Seq, ulong AuditId, ulong CraftedId, int ItemNo);
+
+    /// <remarks>
+    /// <paramref name="itemIds"/> follows the storm: a consume replaces an item's entity, and its slot in the table is rewritten under the item's lock,
+    /// which is also the only place it is read during the storm.
+    /// </remarks>
+    private List<ulong> Storm(DatabaseEngine dbe, ulong[] traderIds, ulong[] itemIds, int runNo, long firstSeq, out long lastSeq,
+        out List<DestroyedItem> destroyed, out List<RolledBack> rolledBack)
     {
         var itemLocks = new object[1 << 16];
         var traderLocks = new object[1 << 12];
@@ -844,10 +955,13 @@ public class MarketHardeningTests
         }
 
         var seq = firstSeq - 1;
-        long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0;
+        long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0, consumes = 0, rollbacks = 0, ownerAudits = 0;
         var stop = 0;
+        var stormOver = 0;
         var censusTaken = 0;
         var audits = new List<ulong>[_c.Threads];
+        var destroyedBy = new List<DestroyedItem>[_c.Threads];
+        var rolledBackBy = new List<RolledBack>[_c.Threads];
         var threads = new Thread[_c.Threads];
         _sampler.CountOperations(() => Interlocked.Read(ref done));
 
@@ -855,19 +969,25 @@ public class MarketHardeningTests
         {
             var worker = w;
             audits[w] = new List<ulong>();
+            destroyedBy[w] = new List<DestroyedItem>();
+            rolledBackBy[w] = new List<RolledBack>();
             threads[w] = new Thread(() =>
             {
                 var rng = new Random(_c.Seed * 7919 + runNo * 104729 + worker);
                 var mine = audits[worker];
+                var myDestroyed = destroyedBy[worker];
+                var myRolledBack = rolledBackBy[worker];
                 var stripes = new int[4];
                 try
                 {
                     while (Volatile.Read(ref stop) == 0 && Interlocked.Increment(ref started) <= _c.Operations)
                     {
                         var itemNo = rng.Next(_c.Items);
-                        var itemId = EntityId.FromRawValue(itemIds[itemNo]);
                         lock (itemLocks[itemNo & (itemLocks.Length - 1)])
                         {
+                            // Under the lock: a consume replaces the item's entity, and rewrites this slot before releasing it.
+                            var itemId = EntityId.FromRawValue(itemIds[itemNo]);
+
                             // Who owns it. Read after taking the item's lock: every earlier transfer of this item committed before releasing it.
                             long owner, price;
                             using (var r = dbe.CreateReadOnlyTransaction())
@@ -880,6 +1000,7 @@ public class MarketHardeningTests
                             // The plan: who pays whom, where the item goes.
                             var desk = DeskOf(_c, itemNo);
                             long kind, to, payer, payee, amount, newPrice = price;
+                            var roll = owner == 0 ? 0 : rng.Next(10);
                             if (owner == 0)
                             {
                                 kind = KindBuy;
@@ -888,7 +1009,17 @@ public class MarketHardeningTests
                                 payee = desk;
                                 amount = price;
                             }
-                            else if (rng.Next(10) < 3)
+                            else if (roll < 2)
+                            {
+                                // Consumed: the item leaves the world, and its desk crafts it anew, at its base price, for a one-credit fee.
+                                kind = KindConsume;
+                                to = 0;
+                                payer = owner;
+                                payee = desk;
+                                amount = 1;
+                                newPrice = PriceOf(itemNo);
+                            }
+                            else if (roll < 5)
                             {
                                 kind = KindSell;
                                 to = 0;
@@ -961,11 +1092,24 @@ public class MarketHardeningTests
                                 }
 
                                 var s = Interlocked.Increment(ref seq);
+                                var oldKey = item.LastTradeSeq;
                                 item.OwnerNo = to;
                                 item.Price = newPrice;
                                 item.TradeCount++;
                                 item.LastTradeSeq = s;
-                                tx.OpenMut(itemId).Set(MkItemArch.Item, item);
+                                var newItemId = itemId;
+                                if (kind == KindConsume)
+                                {
+                                    // Destroyed and crafted anew in one transaction: the new entity carries the item's number, its count of transfers and
+                                    // this transfer's sequence; its lore is derived from the number again.
+                                    tx.Destroy(itemId);
+                                    newItemId = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(item));
+                                    tx.OpenMut(newItemId).Enable(MkItemArch.Lore, LoreOf(itemNo));
+                                }
+                                else
+                                {
+                                    tx.OpenMut(itemId).Set(MkItemArch.Item, item);
+                                }
 
                                 // One entity at a time: read, change the copy, set it back.
                                 var target = tx.OpenMut(EntityId.FromRawValue(traderIds[payer]));
@@ -991,6 +1135,17 @@ public class MarketHardeningTests
                                     Amount = amount, NewPrice = newPrice,
                                 }));
 
+                                // One in twenty changes its mind with every write done: the item, both wallets, both counts, the audit entry — and, for
+                                // a consume, a destroy, a spawn and an enable. None of it may be seen, and its sequence number stays unused.
+                                if (rng.Next(20) == 0)
+                                {
+                                    tx.Rollback();
+                                    myRolledBack.Add(new RolledBack(s, auditId.RawValue, kind == KindConsume ? newItemId.RawValue : 0, itemNo));
+                                    Interlocked.Increment(ref rollbacks);
+                                    Interlocked.Increment(ref done);
+                                    continue;
+                                }
+
                                 if (!tx.Commit())
                                 {
                                     Fail($"item {itemNo}: commit returned false");
@@ -999,7 +1154,13 @@ public class MarketHardeningTests
                                 }
 
                                 mine.Add(auditId.RawValue);
-                                if (kind == KindBuy)
+                                if (kind == KindConsume)
+                                {
+                                    itemIds[itemNo] = newItemId.RawValue;
+                                    myDestroyed.Add(new DestroyedItem(itemId.RawValue, oldKey, itemNo));
+                                    Interlocked.Increment(ref consumes);
+                                }
+                                else if (kind == KindBuy)
                                 {
                                     Interlocked.Increment(ref buys);
                                 }
@@ -1024,28 +1185,57 @@ public class MarketHardeningTests
                         }
                     }
                 }
+                catch (PageCacheBackpressureTimeoutException) when (Interlocked.Exchange(ref censusTaken, 1) == 0 && LogReadCensus(dbe))
+                {
+                    // Unreachable: the filter takes the census — every reason a page stays in the cache, and who pins the epoch — from inside the failing
+                    // worker before it unwinds, then returns false, so the exception reaches the handler below untouched.
+                }
                 catch (Exception e)
                 {
                     Fail($"worker {worker}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
-
-                    // The timeout names two reasons a page stays in the cache; the census names all of them, taken while the other workers still hold
-                    // the cache as it was. Guarded: an exception escaping this thread would end the test process and lose the failure above.
-                    if (e is PageCacheBackpressureTimeoutException && Interlocked.Exchange(ref censusTaken, 1) == 0)
-                    {
-                        TryLog(() => $"back-pressure census: {dbe.MMF.DescribeEvictionBlockers()}");
-                    }
-
                     Volatile.Write(ref stop, 1);
                 }
             }) { IsBackground = true, Name = $"market-{w}" };
         }
 
-        Log($"storm: {_c.Operations:N0} operations on {_c.Threads} threads");
+        // The owner index's auditor: a player's items found through it, against the count the player keeps, under the player's stripe lock — so no
+        // transfer of theirs is in flight and both sides are at the same commit. It holds that one lock alone: no cycle with the workers' order.
+        var ownerIndex = _c.OwnerAudit ? dbe.GetIndexRef<MkItem, long>(x => x.OwnerNo) : default;
+        var auditor = new Thread(() =>
+        {
+            var rng = new Random(_c.Seed * 31 + runNo);
+            try
+            {
+                while (_c.OwnerAudit && Volatile.Read(ref stormOver) == 0 && Volatile.Read(ref stop) == 0)
+                {
+                    var player = _c.Desks + 1 + rng.Next(_c.Players);
+                    lock (traderLocks[player & (traderLocks.Length - 1)])
+                    {
+                        CheckPlayerItems(dbe, ownerIndex, traderIds, itemIds, player, "during the storm");
+                    }
+
+                    Interlocked.Increment(ref ownerAudits);
+                }
+            }
+            catch (PageCacheBackpressureTimeoutException) when (Interlocked.Exchange(ref censusTaken, 1) == 0 && LogReadCensus(dbe))
+            {
+                // Unreachable: the filter logs and returns false.
+            }
+            catch (Exception e)
+            {
+                Fail($"owner auditor: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
+                Volatile.Write(ref stop, 1);
+            }
+        }) { IsBackground = true, Name = "market-auditor" };
+
+        Log($"storm: {_c.Operations:N0} operations on {_c.Threads} threads, and an owner-index auditor");
         var sw = Stopwatch.StartNew();
         foreach (var t in threads)
         {
             t.Start();
         }
+
+        auditor.Start();
 
         // Progress, and a stall watchdog: no completed operation for StallSeconds fails the run instead of hanging it.
         long lastDone = 0;
@@ -1056,7 +1246,9 @@ public class MarketHardeningTests
             {
                 var now = Interlocked.Read(ref done);
                 Log($"  {now:N0} ops, {now / sw.Elapsed.TotalSeconds:N0}/s (buys {Interlocked.Read(ref buys):N0}, sells " +
-                    $"{Interlocked.Read(ref sells):N0}, trades {Interlocked.Read(ref trades):N0}, skipped {Interlocked.Read(ref skipped):N0})");
+                    $"{Interlocked.Read(ref sells):N0}, trades {Interlocked.Read(ref trades):N0}, consumed {Interlocked.Read(ref consumes):N0}, " +
+                    $"rolled back {Interlocked.Read(ref rollbacks):N0}, skipped {Interlocked.Read(ref skipped):N0}; " +
+                    $"{Interlocked.Read(ref ownerAudits):N0} owner audits)");
                 if (now != lastDone)
                 {
                     lastDone = now;
@@ -1067,15 +1259,27 @@ public class MarketHardeningTests
                     Fail($"the storm made no progress for {_c.StallSeconds} s at {now:N0} operations");
                     TryLog(() => $"stall census: {dbe.MMF.DescribeEvictionBlockers()}");
                     Volatile.Write(ref stop, 1);
-                    AbandonIfStuck(threads);
+                    AbandonIfStuck([.. threads, auditor]);
                     Assert.Fail(string.Join("\n", _errors));
                 }
             }
         }
 
+        Volatile.Write(ref stormOver, 1);
+        if (!auditor.Join(TimeSpan.FromSeconds(60)))
+        {
+            Fail("the owner auditor did not stop within 60 s of the storm's end");
+            AbandonIfStuck([auditor]);
+        }
+
         lastSeq = Interlocked.Read(ref seq);
         Log($"storm done in {sw.Elapsed.TotalSeconds:F1} s: {done:N0} ops ({done / sw.Elapsed.TotalSeconds:N0}/s), buys {buys:N0}, sells {sells:N0}, " +
-            $"trades {trades:N0}, skipped for lack of credits {skipped:N0}");
+            $"trades {trades:N0}, consumed {consumes:N0}, rolled back {rollbacks:N0}, skipped for lack of credits {skipped:N0}; " +
+            $"{ownerAudits:N0} owner audits");
+        if (_c.OwnerAudit && ownerAudits == 0)
+        {
+            Log("note: the storm ended before the owner auditor completed an audit");
+        }
 
         var all = new List<ulong>();
         foreach (var list in audits)
@@ -1083,9 +1287,21 @@ public class MarketHardeningTests
             all.AddRange(list);
         }
 
-        if (all.Count != buys + sells + trades)
+        if (all.Count != buys + sells + trades + consumes)
         {
-            Fail($"{all.Count:N0} audit entries recorded for {buys + sells + trades:N0} committed transfers");
+            Fail($"{all.Count:N0} audit entries recorded for {buys + sells + trades + consumes:N0} committed transfers");
+        }
+
+        destroyed = new List<DestroyedItem>();
+        foreach (var list in destroyedBy)
+        {
+            destroyed.AddRange(list);
+        }
+
+        rolledBack = new List<RolledBack>();
+        foreach (var list in rolledBackBy)
+        {
+            rolledBack.AddRange(list);
         }
 
         return all;
@@ -1100,7 +1316,7 @@ public class MarketHardeningTests
     {
         var entries = new MkAudit[auditIds.Count];
         var batches = (auditIds.Count + ReadBatch - 1) / ReadBatch;
-        Parallel.For(0, batches, new ParallelOptions { MaxDegreeOfParallelism = _c.Threads }, b =>
+        ReadInParallel(dbe, batches, b =>
         {
             using var tx = dbe.CreateReadOnlyTransaction();
             var end = Math.Min(auditIds.Count, (b + 1) * ReadBatch);
@@ -1220,6 +1436,256 @@ public class MarketHardeningTests
         {
             Fail($"{phase}: {total:N0} items accounted for, expected {_c.Items:N0}");
         }
+    }
+
+    /// <summary>
+    /// Every entity a consume destroyed is dead — checked for all of them, in short transactions like the state read — and, for one in sixteen, the
+    /// unique index finds nothing under the key it held: keys are sequence numbers, never reused, so any hit is a stale entry.
+    /// </summary>
+    private void CheckDestroyed(DatabaseEngine dbe, List<DestroyedItem> destroyed, string phase)
+    {
+        var sw = Stopwatch.StartNew();
+        var batches = (destroyed.Count + ReadBatch - 1) / ReadBatch;
+        long alive = 0, indexed = 0;
+        ReadInParallel(dbe, batches, b =>
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            var end = Math.Min(destroyed.Count, (b + 1) * ReadBatch);
+            for (var i = b * ReadBatch; i < end; i++)
+            {
+                var d = destroyed[i];
+                var id = EntityId.FromRawValue(d.Id);
+                if (tx.IsAlive(id) || tx.TryOpen(id, out _))
+                {
+                    if (Interlocked.Increment(ref alive) <= 10)
+                    {
+                        Fail($"{phase}: item {d.ItemNo}'s destroyed entity {id} is still alive");
+                    }
+                }
+
+                // Sampled: a point lookup is a B+Tree descent and a cluster read.
+                if ((i & 15) == 0)
+                {
+                    var key = d.Key;
+                    var found = tx.Query<MkItemArch>().WhereField<MkItem>(x => x.LastTradeSeq == key).Execute();
+                    if (found.Count != 0 && Interlocked.Increment(ref indexed) <= 10)
+                    {
+                        Fail($"{phase}: the unique index still finds {found.Count} entit(y|ies) under item {d.ItemNo}'s destroyed key {key}");
+                    }
+                }
+            }
+        });
+
+        if (alive > 10 || indexed > 10)
+        {
+            Fail($"{phase}: {alive:N0} destroyed entities alive, {indexed:N0} still indexed, of {destroyed.Count:N0}");
+        }
+
+        Log($"{destroyed.Count:N0} destroyed entities checked dead ({phase}) in {sw.Elapsed.TotalSeconds:F1} s");
+    }
+
+    /// <summary>
+    /// The items the owner index finds under <paramref name="player"/> are exactly the player's: as many as the player counts, each alive, naming the
+    /// player, and the item's current entity. Read through the index itself — a query may scan the clusters instead, which tests nothing here and sweeps
+    /// the whole cache — in one transaction, so both sides are one snapshot; the caller makes sure no transfer of the player's is in flight.
+    /// </summary>
+    private void CheckPlayerItems(DatabaseEngine dbe, IndexRef ownerIndex, ulong[] traderIds, ulong[] itemIds, long player, string phase)
+    {
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var counted = tx.Open(EntityId.FromRawValue(traderIds[player])).Read(MkTraderArch.Trader).ItemsOwned;
+        var found = 0;
+        using (var e = tx.EnumerateIndex<MkItem, long>(ownerIndex, player, player))
+        {
+            while (e.MoveNext())
+            {
+                found++;
+                var item = e.CurrentComponent;
+                var id = (ulong)e.CurrentEntityPK;
+                if (item.OwnerNo != player)
+                {
+                    Fail($"{phase}: the owner index finds item {item.ItemNo} under player {player}, but it names owner {item.OwnerNo}");
+                }
+                else if (Volatile.Read(ref itemIds[item.ItemNo]) != id)
+                {
+                    Fail($"{phase}: the owner index finds entity {EntityId.FromRawValue(id)} for item {item.ItemNo} under player {player}, which is not the "
+                         + "item's entity");
+                }
+            }
+        }
+
+        if (found != counted)
+        {
+            Fail($"{phase}: the owner index finds {found} item(s) under player {player}, who counts {counted}");
+        }
+    }
+
+    /// <summary>
+    /// The owner index after the storm, or the reopen, for every player: each player's key holds exactly the items the state gives them, each naming
+    /// them and the item's current entity — read through the index in ranges of player keys, a short transaction each, like the state read. And the raw
+    /// count of every key's value buffer, the market's included (most of the items, one huge buffer, never walked): no stale entry for a dead entity,
+    /// which a read through the index skips, and no append that went where no read reaches (IXW-08).
+    /// </summary>
+    private void CheckOwnerIndex(DatabaseEngine dbe, State s, ulong[] itemIds, string phase)
+    {
+        var sw = Stopwatch.StartNew();
+        var ownerIndex = dbe.GetIndexRef<MkItem, long>(x => x.OwnerNo);
+        long atMarket = 0;
+        for (var i = 0; i < _c.Items; i++)
+        {
+            atMarket += s.Owner[i] == 0 ? 1 : 0;
+        }
+
+        var archetype = EntityId.FromRawValue(itemIds[0]).ArchetypeId;
+        var rawMarket = RawOwnerEntries(dbe, archetype, 0);
+        if (rawMarket != atMarket)
+        {
+            Fail($"{phase}: the owner index's market key holds {rawMarket:N0} entries; {atMarket:N0} items are at the market");
+        }
+
+        // ReadBatch is a budget in ITEMS at about a page each — what the state read touches. An item resolved through the index touches about four (its
+        // leaf and value buffer, its cluster, its map record, its revision and content), and every key a raw count's descent: a batch takes a quarter of
+        // the players that hold ReadBatch items. And ONE reader: with several, every page any of them touches is held for the oldest (#1230), and on a
+        // cold cache after the reopen four of them pinned 8,188 of 8,192 slots.
+        long firstPlayer = _c.Desks + 1;
+        var perPlayer = Math.Max(1L, (_c.Items - atMarket) / Math.Max(1, _c.Players));
+        var playersPerBatch = (int)Math.Max(1, ReadBatch / (4 * perPlayer));
+        var batches = (_c.Players + playersPerBatch - 1) / playersPerBatch;
+        long held = 0, wrong = 0;
+        ReadInParallel(dbe, batches, b =>
+        {
+            var lo = firstPlayer + (long)b * playersPerBatch;
+            var hi = Math.Min(_c.TraderCount, lo + playersPerBatch - 1);
+            var counts = new int[hi - lo + 1];
+            long here = 0;
+            using var tx = dbe.CreateReadOnlyTransaction();
+            using (var e = tx.EnumerateIndex<MkItem, long>(ownerIndex, lo, hi))
+            {
+                while (e.MoveNext())
+                {
+                    here++;
+                    var key = e.CurrentKey;
+                    var item = e.CurrentComponent;
+                    var id = (ulong)e.CurrentEntityPK;
+                    if (key < lo || key > hi || item.OwnerNo != key || itemIds[item.ItemNo] != id)
+                    {
+                        if (Interlocked.Increment(ref wrong) <= 10)
+                        {
+                            Fail($"{phase}: the owner index holds entity {EntityId.FromRawValue(id)} (item {item.ItemNo}, owner {item.OwnerNo}) "
+                                 + $"under key {key}");
+                        }
+
+                        continue;
+                    }
+
+                    counts[key - lo]++;
+                }
+            }
+
+            for (var p = lo; p <= hi; p++)
+            {
+                if (counts[p - lo] != s.ItemsOwned[p] && Interlocked.Increment(ref wrong) <= 10)
+                {
+                    Fail($"{phase}: the owner index holds {counts[p - lo]} item(s) under player {p}, who owns {s.ItemsOwned[p]}");
+                }
+
+                var raw = RawOwnerEntries(dbe, archetype, p);
+                if (raw != s.ItemsOwned[p] && Interlocked.Increment(ref wrong) <= 10)
+                {
+                    Fail($"{phase}: the owner index's key {p} holds {raw} raw entries; the player owns {s.ItemsOwned[p]}");
+                }
+            }
+
+            Interlocked.Add(ref held, here);
+        }, threads: 1);
+
+        if (wrong > 10)
+        {
+            Fail($"{phase}: {wrong:N0} owner-index problems in all");
+        }
+
+        Log($"owner index checked ({phase}): {held:N0} items under {_c.Players:N0} players, {rawMarket:N0} at the market, in {sw.Elapsed.TotalSeconds:F1} s");
+    }
+
+    /// <summary>
+    /// The raw number of entries the owner index holds under <paramref name="key"/>: its value buffer's count, with no MVCC filter — a stale entry for a
+    /// dead entity counts, where a read through the index skips it. O(1) per key. Only while no transfer is in flight.
+    /// </summary>
+    private static unsafe int RawOwnerEntries(DatabaseEngine dbe, ushort archetype, long key)
+    {
+        var ownerOffset = (int)Marshal.OffsetOf<MkItem>(nameof(MkItem.OwnerNo));
+        foreach (var slot in dbe._stateByRouting[archetype].ClusterState.IndexSlots)
+        {
+            foreach (var field in slot.Fields)
+            {
+                if (!field.AllowMultiple || field.FieldOffset != ownerOffset)
+                {
+                    continue;
+                }
+
+                using var guard = EpochGuard.Enter(dbe.EpochManager);
+                var accessor = field.Index.Segment.CreateChunkAccessor();
+                try
+                {
+                    var buffer = field.Index.TryGetMultiple(&key, ref accessor);
+                    var count = buffer.IsValid ? buffer.TotalCount : 0;
+                    buffer.Dispose();
+                    return count;
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
+            }
+        }
+
+        throw new InvalidOperationException("the item archetype has no OwnerNo index");
+    }
+
+    /// <summary>
+    /// Nothing a rolled-back transfer wrote is found: its audit entry was never born, nor was the item a consume crafted — for every one — and, for one in
+    /// sixteen (a point lookup is a B+Tree descent), no item is keyed by its sequence. The rest — the item, the wallets, the counts — is checked by the
+    /// replay, which never sees the transfer.
+    /// </summary>
+    private void CheckRolledBack(DatabaseEngine dbe, List<RolledBack> rolledBack, string phase)
+    {
+        var sw = Stopwatch.StartNew();
+        var batches = (rolledBack.Count + ReadBatch - 1) / ReadBatch;
+        long found = 0;
+        ReadInParallel(dbe, batches, b =>
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            var end = Math.Min(rolledBack.Count, (b + 1) * ReadBatch);
+            for (var i = b * ReadBatch; i < end; i++)
+            {
+                var r = rolledBack[i];
+                var seq = r.Seq;
+                string what = null;
+                if (tx.IsAlive(EntityId.FromRawValue(r.AuditId)))
+                {
+                    what = $"its audit entry {EntityId.FromRawValue(r.AuditId)} is alive";
+                }
+                else if (r.CraftedId != 0 && tx.IsAlive(EntityId.FromRawValue(r.CraftedId)))
+                {
+                    what = $"the item it crafted, {EntityId.FromRawValue(r.CraftedId)}, is alive";
+                }
+                else if ((i & 15) == 0 && tx.Query<MkItemArch>().WhereField<MkItem>(x => x.LastTradeSeq == seq).Count() != 0)
+                {
+                    what = "an item is keyed by its sequence";
+                }
+
+                if (what != null && Interlocked.Increment(ref found) <= 10)
+                {
+                    Fail($"{phase}: transfer {seq} of item {r.ItemNo} was rolled back, yet {what}");
+                }
+            }
+        });
+
+        if (found > 10)
+        {
+            Fail($"{phase}: {found:N0} of {rolledBack.Count:N0} rolled-back transfers left something behind");
+        }
+
+        Log($"{rolledBack.Count:N0} rolled-back transfers checked ({phase}) in {sw.Elapsed.TotalSeconds:F1} s");
     }
 
     private void CheckAuditCount(DatabaseEngine dbe, long expected, string phase)

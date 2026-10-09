@@ -436,8 +436,19 @@ internal abstract partial class BTree<TKey, TStore>
                     // in this leaf, the leaf loses an entry with nothing coming in; if that would take it under half full, only the SMO path can borrow or
                     // merge — so bail to it now, while nothing has been written. Move's two-leaf path has always had this guard; MoveValue had it nowhere,
                     // and CheckConsistency found the empty leaves it left behind (#887).
-                    if (_storage.BufferElementCount(oldBufferId, ref sibAccessor) == 1 && leaf.Find(newKey, Comparer, ref opAccessor) >= 0
-                        && !CanLoseAnEntryInPlace(leaf, ref opAccessor))
+                    var emptiesOldBuffer = _storage.BufferElementCount(oldBufferId, ref sibAccessor) == 1;
+                    var newKeyPresent = leaf.Find(newKey, Comparer, ref opAccessor) >= 0;
+                    if (emptiesOldBuffer && newKeyPresent && !CanLoseAnEntryInPlace(leaf, ref opAccessor))
+                    {
+                        latch.AbortWriteLock();
+                        break; // fall to pessimistic
+                    }
+
+                    // Asked BEFORE the buffer mutation too: a full leaf that must take a new key, with no slot freed by the old key leaving, needs a split
+                    // — the pessimistic path's. This used to be decided after the element had left its buffer, and undone by appending it back: the
+                    // append lands in the buffer's tail chunk, not the chunk the caller's element id names, so the pessimistic retry found nothing and the
+                    // move was dropped — the entity stayed under its old key for good (#1232, IXW-06).
+                    if (!newKeyPresent && !emptiesOldBuffer && leaf.GetIsFull(ref opAccessor))
                     {
                         latch.AbortWriteLock();
                         break; // fall to pessimistic
@@ -465,17 +476,8 @@ internal abstract partial class BTree<TKey, TStore>
                     }
                     else
                     {
-                        // newKey doesn't exist — need to insert a new key entry
-                        // If leaf is full and we won't reclaim a slot, bail to pessimistic.
-                        // We can only reclaim when res==0 (the old buffer emptied).
-                        if (leaf.GetIsFull(ref opAccessor) && res != 0)
-                        {
-                            // Undo the buffer removal — re-add the element
-                            _storage.Append(oldBufferId, value, ref sibAccessor);
-                            latch.WriteUnlock();
-                            break; // fall to pessimistic
-                        }
-
+                        // newKey doesn't exist — need to insert a new key entry. A full leaf was sent to the pessimistic path before the removal unless
+                        // the old buffer emptied (res == 0), whose key leaving frees the slot below.
                         newBufferId = _storage.CreateBuffer(ref sibAccessor);
                         newElementId = _storage.Append(newBufferId, value, ref sibAccessor);
                         ni = ~ni;

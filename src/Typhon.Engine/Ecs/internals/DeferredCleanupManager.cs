@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 
 namespace Typhon.Engine.Internals;
@@ -35,6 +36,9 @@ internal class DeferredCleanupManager
     {
         public ComponentTable Table;
         public int ChunkId;
+
+        /// <summary>A revision-chain chunk (freed in the table's revision segment), not a content chunk.</summary>
+        public bool Revision;
     }
 
     // Primary storage: sorted by blocking TSN for efficient range queries
@@ -293,7 +297,7 @@ internal class DeferredCleanupManager
             using var chunkFreeGuard = EpochGuard.Enter(dbe.EpochManager);
             foreach (var entry in chunksToFree)
             {
-                FreeContentChunk(entry.Table, entry.ChunkId);
+                FreeDeferred(entry);
             }
             ChunkFreedTotal += chunksToFree.Count;
         }
@@ -356,6 +360,18 @@ internal class DeferredCleanupManager
         }
 
         return cleanedCount;
+    }
+
+    private static void FreeDeferred(DeferredChunkFreeEntry entry)
+    {
+        if (entry.Revision)
+        {
+            entry.Table.CompRevTableSegment.FreeChunk(entry.ChunkId);
+        }
+        else
+        {
+            FreeContentChunk(entry.Table, entry.ChunkId);
+        }
     }
 
     /// <summary>
@@ -446,7 +462,7 @@ internal class DeferredCleanupManager
             using var guard = EpochGuard.Enter(epochManager);
             foreach (var entry in allEntries)
             {
-                FreeContentChunk(entry.Table, entry.ChunkId);
+                FreeDeferred(entry);
             }
             ChunkFreedTotal += allEntries.Count;
         }
@@ -457,7 +473,7 @@ internal class DeferredCleanupManager
     /// Shares CompRevTable and CompContent accessors across the batch to avoid per-entity creation overhead.
     /// Caller must be inside an epoch scope.
     /// </summary>
-    private static void CleanupEntityRevisionsBatched(Span<CleanupEntry> entries, long nextMinTSN, ChangeSet changeSet,
+    private void CleanupEntityRevisionsBatched(Span<CleanupEntry> entries, long nextMinTSN, ChangeSet changeSet,
         List<DeferredChunkFreeEntry> collectedChunkFrees, ref int cleanedCount)
     {
         Debug.Assert(entries.Length > 0);
@@ -475,6 +491,15 @@ internal class DeferredCleanupManager
 
             var firstChunkId = entry.FirstChunkId;
 
+            // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
+            // all: compacting it would rearrange someone else's revisions (REAP-02).
+            if (!table.CompRevTableSegment.IsChunkAllocated(firstChunkId)
+                || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
+            {
+                Interlocked.Increment(ref ForeignChainsSkipped);
+                continue;
+            }
+
             // Acquire exclusive lock — cleanup restructures the chain, must be serialized with AddCompRev.
             // Use TryEnter: if contended, skip this entry — it will be retried on the next cleanup pass.
             ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
@@ -483,10 +508,9 @@ internal class DeferredCleanupManager
                 continue;
             }
 
-            bool isDeleted;
             try
             {
-                isDeleted = ComponentRevisionManager.CleanUpUnusedEntriesCore(
+                _ = ComponentRevisionManager.CleanUpUnusedEntriesCore(
                     table, firstChunkId, nextMinTSN, ref compRevTableAccessor, ref compContentAccessor, collectedChunkFrees);
             }
             finally
@@ -495,20 +519,159 @@ internal class DeferredCleanupManager
                 header.Control.ExitExclusiveAccess();
             }
 
-            if (isDeleted)
-            {
-                table.CompRevTableSegment.FreeChunk(firstChunkId);
-            }
-            else
-            {
-                compRevTableAccessor.DirtyChunk(firstChunkId);
-            }
+            // A lone tombstone is not freed here, though nothing can read it any more: only an ECS destroy writes tombstones, and the destroyed entity's
+            // cleanup frees the chain once the entity is past every snapshot (ReleaseDestroyedEntityChain). Both used to free it, and between the two
+            // frees a spawn on another thread could take the chunk: the second free then took a LIVE chain, and its commit found its own revision gone
+            // (AP-05). One owner, the one that also unmaps the entity.
+            compRevTableAccessor.DirtyChunk(firstChunkId);
 
             cleanedCount++;
         }
 
         compRevTableAccessor.Dispose();
         compContentAccessor.Dispose();
+    }
+
+    /// <summary>Revision-GC entries skipped because their chain names another owner, or is no longer allocated. Diagnostic.</summary>
+    internal long ForeignChainsSkipped;
+
+    /// <summary>Destroyed entities' chains released whole by <see cref="ReleaseDestroyedEntityChain"/>. Diagnostic.</summary>
+    internal long DestroyedChainsReleased;
+
+    /// <summary>
+    /// Releases put off for a later cleanup pass: a revision cleanup pending, the chain's lock held, or an uncommitted revision in it. Diagnostic.
+    /// </summary>
+    internal long DestroyedChainsDeferred;
+
+    /// <summary>
+    /// Destroyed entities' chain roots that were not theirs (not allocated, or naming another owner): not freed. Diagnostic — each is a bug.
+    /// </summary>
+    internal long DestroyedChainsForeign;
+
+    /// <summary>What <see cref="ReleaseDestroyedEntityChain"/> did with a chain.</summary>
+    internal enum ChainRelease
+    {
+        /// <summary>Every chunk of the chain and every content chunk it names is queued for freeing.</summary>
+        Released,
+
+        /// <summary>Not yet: try again on a later pass. Nothing was touched.</summary>
+        Deferred,
+
+        /// <summary>The root is not this entity's chain: nothing freed, nothing to retry.</summary>
+        NotThisEntitys,
+    }
+
+    /// <summary>
+    /// Releases a destroyed entity's revision chain for one Versioned component, whole: every chunk of the chain and every content chunk a live element of
+    /// it names, queued for freeing once every transaction alive now has finished. Called by the entity cleanup once the entity's death is below every
+    /// live snapshot, which makes it the chain's one owner (REAP-02): the revision GC trims a destroyed chain to its tombstone and never frees the root.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Put off, never forced</b>, while the chain is not quiescent: a revision cleanup still pending for it (the GC must not meet a released root),
+    /// its lock held, or an element still uncommitted (a transaction that opened the entity before the destroy and has not finished). The caller keeps the
+    /// entity queued and tries again.</para>
+    /// <para><b>Deferred frees</b>, the root included: a transaction that resolved the entity before its destroy committed can still walk the chain until it
+    /// finishes. The content chunks of voided elements were freed by whoever voided them; a lone tombstone names none.</para>
+    /// </remarks>
+    internal ChainRelease ReleaseDestroyedEntityChain(ComponentTable table, int firstChunkId, long entityPK, ChangeSet changeSet,
+        List<DeferredChunkFreeEntry> frees)
+    {
+        if (HasPendingRevisionCleanup(table, entityPK))
+        {
+            Interlocked.Increment(ref DestroyedChainsDeferred);
+            return ChainRelease.Deferred;
+        }
+
+        var revisions = table.CompRevTableSegment;
+        if (revisions == null || !revisions.IsChunkAllocated(firstChunkId))
+        {
+            Interlocked.Increment(ref DestroyedChainsForeign);
+            return ChainRelease.NotThisEntitys;
+        }
+
+        var accessor = revisions.CreateChunkAccessor(changeSet);
+        try
+        {
+            ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+            if (header.EntityPK != entityPK)
+            {
+                Interlocked.Increment(ref DestroyedChainsForeign);
+                return ChainRelease.NotThisEntitys;
+            }
+
+            if (!header.Control.TryEnterExclusiveAccess())
+            {
+                Interlocked.Increment(ref DestroyedChainsDeferred);
+                return ChainRelease.Deferred;
+            }
+
+            var firstFree = frees.Count;
+            try
+            {
+                for (var i = 0; i < header.ItemCount; i++)
+                {
+                    ref var element = ref ComponentRevisionManager.GetRevisionElement(ref accessor, firstChunkId, (short)(header.FirstItemIndex + i)).Element;
+                    if (element.IsVoid)
+                    {
+                        continue;
+                    }
+
+                    if (element.IsolationFlag)
+                    {
+                        // A transaction still writing this entity: it ends, then the chain is quiescent.
+                        frees.RemoveRange(firstFree, frees.Count - firstFree);
+                        Interlocked.Increment(ref DestroyedChainsDeferred);
+                        return ChainRelease.Deferred;
+                    }
+
+                    if (element.ComponentChunkId > 0)
+                    {
+                        frees.Add(new DeferredChunkFreeEntry { Table = table, ChunkId = element.ComponentChunkId });
+                    }
+                }
+
+                // The chain's chunks: the root, then its ChainLength - 1 overflow chunks through their leading next-chunk ids — exactly that many: the last
+                // one's link is not trusted to be 0 (a chunk reissued uncleared kept its previous owner's).
+                frees.Add(new DeferredChunkFreeEntry { Table = table, ChunkId = firstChunkId, Revision = true });
+                var next = header.NextChunkId;
+                for (var left = header.ChainLength - 1; next != 0 && left > 0; left--)
+                {
+                    frees.Add(new DeferredChunkFreeEntry { Table = table, ChunkId = next, Revision = true });
+                    next = accessor.GetChunk<int>(next);
+                }
+            }
+            finally
+            {
+                header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+                header.Control.ExitExclusiveAccess();
+            }
+
+            Interlocked.Increment(ref DestroyedChainsReleased);
+            return ChainRelease.Released;
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>Whether a revision cleanup is queued for (<paramref name="table"/>, <paramref name="pk"/>).</summary>
+    private bool HasPendingRevisionCleanup(ComponentTable table, long pk)
+    {
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_lock.EnterExclusiveAccess(ref wc))
+        {
+            return true;   // cannot tell: treat as pending, and retry later
+        }
+
+        try
+        {
+            return _entityToBlockingTSN.ContainsKey((table, pk));
+        }
+        finally
+        {
+            _lock.ExitExclusiveAccess();
+        }
     }
 
     /// <summary>Rent a list from the pool or create a new one. Must be called under lock.</summary>

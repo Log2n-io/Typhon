@@ -941,6 +941,11 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         return res;
     }
 
+    /// <summary>
+    /// Frees of a chunk that was already free. Diagnostic: each is a double free that a concurrent allocation would have turned into two owners.
+    /// </summary>
+    internal long DoubleFreeCount;
+
     public void FreeChunk(int chunkId)
     {
         // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would give its page room again and AllocateChunk would hand
@@ -960,9 +965,11 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
 
         var prev = Interlocked.And(ref metadata[wordIndex], ~mask);
 
-        // Guard against double-free - only proceed if the bit was actually set
+        // Guard against double-free - only proceed if the bit was actually set. Counted: a second free is harmless only while nobody has taken the chunk
+        // in between, so every one is a latent shared chunk (REAP-02) — the counter is what lets a single-threaded test see it.
         if ((prev & mask) == 0)
         {
+            Interlocked.Increment(ref DoubleFreeCount);
             return;
         }
 

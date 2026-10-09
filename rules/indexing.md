@@ -500,6 +500,10 @@ written for the read path; these are the write-path obligations that went unwrit
         optimistic descent and this rule closes it for the pessimistic one
   never an unbounded retry around the authority test — it is a STATE test, and a stale separator nobody fixes would spin forever (IXW-01); the loop is
         bounded by `MaxPessimisticRestarts` and throws, as `RemoveIterative`'s `RemoveLeafNotAuthoritative` bail does
+  never an optimistic `MoveValue` path that bails to the pessimistic path after its first storage write — a full leaf that must take a new key is
+        decided before the element leaves its buffer. Decided after, and undone by appending the element back, it moved the element to the
+        buffer's tail chunk: the pessimistic retry, holding the old element id, found nothing and dropped the move, the entity under its old key
+        for good (#1232; `OwnerIndexChurnTests.MovesThatEachCreateAKey_FillingTheLeaf_LoseNoEntry` [VerifiesRule] — the 19th key lost its item)
   never an optimistic `MoveValue` path taking an entry out of a leaf that would underflow — when the move empties the old buffer and no entry comes in
         (two-leaf always; same-leaf when the new key already exists) it bails to the pessimistic path BEFORE any storage write, as `Move` always did;
         without that the two-leaf path left EMPTY leaves linked in the chain, which `CheckConsistency` reports and the census cannot see
@@ -580,3 +584,15 @@ written for the read path; these are the write-path obligations that went unwrit
             reservation allocates nothing under its lock (with the reservation capped at 64 it did); a fault in a bulk insert's write phase leaves no
             bucket locked and the map's count equal to what its buckets hold (without the release, the scan spins until the 15 s guard)
   requires IXW-01 (the bounded retry that turned a latch held across a slow allocation into that report)
+
+### IXW-08: A value buffer's append cursor stays in its chain `[fatal]` `[silent]`
+  invariant a multi-value buffer's append cursor — `FirstStoredChunkId`, where `AddElement` appends without walking the chain — is always a chunk of
+            its storage chain: a reader that unlinks the empty chunks it walks past (`VariableSizedBufferAccessor.NextChunk`) never unlinks the cursor,
+            however empty it is
+  scope: VariableSizedBufferAccessor.NextChunk, VariableSizedBufferSegment.AddElement
+  on_violation: the cursor, unlinked and parked on the buffer's free list (or freed to the segment), keeps receiving appends: every element appended
+                after the walk is in a chunk no walk reaches — an index entry that exists and is never found — and is wiped when AddElement takes the
+                chunk off the free list, or the segment reissues it. Found through MarketHardeningTests' owner index (#1232): a key whose last chunk
+                was emptied, then walked by a reader, lost the next append
+  verified: OwnerIndexChurnTests.AKeyWhoseLastChunkWasEmptied_ThenWalked_FindsWhatIsAppendedNext [VerifiesRule] — move a key's last 1, 2, 8, 32 or
+            100 items out, walk the key, move one back: the key finds it (before the fix, at 100: "finds 300, expected 301")
