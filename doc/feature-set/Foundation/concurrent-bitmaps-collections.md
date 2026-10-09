@@ -40,8 +40,8 @@ if (pool.Pick(index, out var owned))      // atomic claim; false = already taken
 | Type | Capacity | Concurrency |
 |---|---|---|
 | `ConcurrentBitmap` | caller-defined, fixed | Lock-free `Set`/`Clear`/`IsSet` |
-| `ConcurrentBitmapL3Any` / `BitmapL3Any` | up to 262,144 bits (64×64×64), fixed | `Set` spin-locked across levels (`Any`); `BitmapL3Any` is single-threaded only |
-| `ConcurrentBitmapL3All` | 262,144 bits per bank, multi-bank growable | Fully lock-free CAS, self-correcting hints |
+| `ConcurrentBitmapL3Any` / `BitmapL3Any` | caller-defined, fixed at construction | `Set` spin-locked across levels (`Any`); `BitmapL3Any` is single-threaded only |
+| `ConcurrentBitmapL3All` | caller-defined power-of-2 capacity per bank, multi-bank growable | Fully lock-free CAS, self-correcting hints |
 | `ConcurrentArray<T>` | fixed at construction | `Pick`/`PutBack`/`Remove` atomic per slot |
 
 ## ⚠️ Guarantees & limits
@@ -49,7 +49,7 @@ if (pool.Pick(index, out var owned))      // atomic claim; false = already taken
 - All four types are `internal` (`Typhon.Engine.Internals`) — engine plumbing, no public API surface.
 - `ConcurrentBitmapL3Any.Set` serializes through one spin-lock scoped to that bitmap instance — concurrent `Set` calls on the *same* instance don't run in parallel; `Clear` and `IsSet` never take it.
 - `ConcurrentBitmapL3All`'s L0 bit is always the ground truth; L1/L2 summary bits are best-effort hints that self-correct after a race, so a summary can be transiently stale but `IsSet`/`ClearL0`/`SetL0` results are always exact.
-- The 3-level scheme is sized for ≤64×64×64 = 262,144 bits per instance/bank; beyond that, `ConcurrentBitmapL3All` grows by appending a new bank (`Grow()`) rather than enlarging the existing one — `ConcurrentBitmapL3Any`/`BitmapL3Any` have no growth path at all, capacity is fixed at construction.
+- `ConcurrentBitmapL3All` grows by appending a new bank (`Grow()`) rather than enlarging the existing one; `ConcurrentBitmapL3Any`/`BitmapL3Any` have no growth path at all — capacity is fixed at construction and is caller-defined with no enforced upper bound.
 - `ConcurrentBitmapL3All` is wired into the engine's resource tree and metrics pipeline (`IResource`, `IMetricSource`, `IDebugPropertiesProvider`) — capacity, utilization, and per-bank stats are reportable.
 - `ConcurrentArray<T>.Remove` spin-waits indefinitely on a slot currently picked by another thread, and will wait forever if called on a slot that holds no item — callers must pair every `Pick` with `PutBack` or `Release`.
 - `ConcurrentArray<T>.Add` throws once `Capacity` is reached; there is no automatic growth.

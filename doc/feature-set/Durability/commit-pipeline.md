@@ -1,11 +1,11 @@
 ---
 uid: feature-durability-commit-pipeline
 title: 'Commit Pipeline (append-before-publish)'
-description: 'Transaction.Commit''s VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never…'
+description: 'Transaction.Commit''s PREPARE→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never…'
 ---
 
 # Commit Pipeline (append-before-publish)
-> Transaction.Commit's VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back.
+> Transaction.Commit's PREPARE→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Durability](./README.md)
 
@@ -15,7 +15,7 @@ A commit has to update many things at once — entity visibility, indexes, the W
 
 ## ⚙️ How it works (in brief)
 
-`Transaction.Commit` runs six phases in order: **VALIDATE** (conflict checks), **PREPARE** (all fallible work — allocation, index-key extraction — without touching visibility), **BUILD** (assemble the WAL batch from the prepared values), **APPEND** (write the batch to the WAL — the point of no return), **PUBLISH** (flip visibility — clear isolation, copy values to their committed slot, update indexes and the entity map), **WAIT** (only for `DurabilityMode.Immediate`: block until the appended batch is fsync'd). APPEND is the point of no return: once it succeeds, the transaction *is* committed and PUBLISH never rolls back. PUBLISH itself does no fallible allocation, so it cannot fail partway — it either runs to completion or the process is already going down for unrelated reasons. WAIT runs last and only for `Immediate` commits, specifically so the durability fsync is never on the critical path of any lock PUBLISH might still be holding.
+`Transaction.Commit` runs four phases in order: **PREPARE** (conflict checks plus all fallible work — allocation, index-key extraction — without touching visibility), **APPEND** (build and write the WAL batch — the point of no return), **PUBLISH** (flip visibility — clear isolation, copy values to their committed slot, update indexes and the entity map), **WAIT** (only for `DurabilityMode.Immediate`: block until the appended batch is fsync'd). APPEND is the point of no return: once it succeeds, the transaction *is* committed and PUBLISH never rolls back. PUBLISH itself does no fallible allocation, so it cannot fail partway — it either runs to completion or the process is already going down for unrelated reasons. WAIT runs last and only for `Immediate` commits, specifically so the durability fsync is never on the critical path of any lock PUBLISH might still be holding.
 
 ## 💻 Usage
 
@@ -29,7 +29,7 @@ UpdateAccountBalance(tx, accountId, newBalance);
 
 try
 {
-    tx.Commit();   // VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT; returns once durable
+    tx.Commit();   // PREPARE→APPEND→PUBLISH→WAIT; returns once durable
 }
 catch (CommitDurabilityUncertainException ex)
 {
