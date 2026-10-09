@@ -245,18 +245,21 @@ scheduler.DispatchDeferredTracks()
 
 The fence emits its own WAL records (`ClusterTickFence` chunks) and the subsequent `UoW.Flush` waits for the LSN covering them — see [11-durability §recovery](11-durability.md).
 
-### WAL-only fallback
+### Serial fallback
 
 ```csharp
-if (Engine.WalManager == null) {
+if (_parallelFenceEnabled) {
+    RunParallelFence(scheduler);
+} else {
+    using var window = Engine.EpochManager.FenceWindow.Open();
     InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(...));
-    return;
+    ...
 }
 ```
 
-Parallel fence is **WAL-mode only**. The per-worker `ChangeSet` cleanup (`ReleaseExcessDirtyMarks`) is correct only in WAL mode — WAL-less mode would risk torn writes across workers touching the same page. When no `WalManager` is configured, the runtime falls back to the serial `WriteTickFence` on the TickDriver thread, which uses the UoW's single-thread `ChangeSet` correctly.
+The parallel fence is the default. Each fence chunk writes through a `ChangeSet` of its own, rented from the pool and released with `ReleaseDirtyMarks` when the chunk is done — a `ChangeSet` has one writer at a time ([PS-05a](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)). WAL and checkpoint are mandatory (there is no WAL-less mode — ADR-054), so the checkpoint writes the pages the chunks touched; no worker calls `SaveChanges`.
 
-The split is also why `EnableParallelFence` exists as an off switch in `RuntimeOptions` — a diagnostic safety valve.
+`RuntimeOptions.EnableParallelFence = false` is the only way to the serial `WriteTickFence`, run on the TickDriver thread with the UoW's own `ChangeSet` — a diagnostic safety valve.
 
 ---
 
