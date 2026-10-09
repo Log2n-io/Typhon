@@ -23,9 +23,9 @@ namespace Typhon.Engine.Internals;
 /// <list type="number">
 ///   <item>Durability barrier: flush the WAL through <c>LastAppendedLsn</c>, then capture <c>barrierLsn = DurableLsn</c> (CK-01/CK-02)</item>
 ///   <item>Collect dirty memory page indices from the page cache</item>
-///   <item>Write dirty pages to the data file (without decrementing DirtyCounter)</item>
+///   <item>Write the owed pages to the data file, in batches (CK-15); DirtyCounter is never touched (PS-05)</item>
 ///   <item>Flush the WAL through the post-capture <c>LastAppendedLsn</c> (CK-02), then fsync the data file</item>
-///   <item>Decrement DirtyCounter for each written page (re-dirtied pages stay &gt; 0)</item>
+///   <item>Publish each written page's captured generation (<c>MarkCaptured</c>) after the fsync; a page re-dirtied since its capture stays owed (CP-04)</item>
 ///   <item>Transition UoW entries from WalDurable → Committed</item>
 ///   <item>Advance CheckpointLSN in the file header + fsync</item>
 ///   <item>Recycle WAL segments below CheckpointLSN</item>

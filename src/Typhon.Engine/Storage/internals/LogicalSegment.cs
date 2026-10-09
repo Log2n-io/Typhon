@@ -326,14 +326,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 lsh.TwinPageIndex = _store.GetOrAllocateDirectoryTwin(filePageIndices[0], changeSet);
             }
 
-            // Durability: see comment in the map-page-update block of CreateOrGrow — CP-04 race defence needs DC ≥ 2 BEFORE
-            // the checkpoint snapshot. With ChangeSet, two tracked IncrementDirty calls (Add + RegisterReDirty) take DC to 2
-            // and ReleaseDirtyMarks drains the excess via the same primitive as the checkpoint — no race.
-            // Without ChangeSet, fall back to untracked EnsureDirtyAtLeast(2).
+            // Durability: record the modification before the page is unlatched, so it is owed a write from the moment it is reachable (CP-04,
+            // PS-10). With a ChangeSet the first registration also takes the page's mark; without one, MarkPageModified records it alone.
             if (changeSet != null)
             {
                 changeSet.AddByMemPageIndex(memPageIdx);
-                changeSet.RegisterReDirty(memPageIdx);
             }
             else
             {
@@ -747,8 +744,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                                 _store.GetOrAllocateDirectoryTwin(mapIndices[curIndexMapIndex + 1], changeSet);
                             changeSet?.AddByMemPageIndex(endMemIdx);
                             endPage.RawData<int>(0, 1)[0] = 0;
-                            // Durability: AddByMemPageIndex already bumps DC to 1 via tracked IncrementDirty. Without a
-                            // ChangeSet, fall back to untracked EnsureDirtyAtLeast(1) — same DC outcome, just untracked.
+                            // Durability: AddByMemPageIndex above records the modification. Without a ChangeSet, MarkPageModified records it alone.
                             if (changeSet == null)
                             {
                                 _store.MarkPageModified(endMemIdx);
@@ -776,16 +772,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
                 if (isPageDirty)
                 {
-                    // Durability: directory map-page write (root or extension) must survive a checkpoint regardless of
-                    // whether the caller provided a ChangeSet. CP-04 race defence needs DC ≥ 2 BEFORE the checkpoint
-                    // snapshot fires, so even one DecrementDirty leaves DC ≥ 1 and the page stays dirty for the next
-                    // cycle. With a ChangeSet, two tracked IncrementDirty calls (Add + RegisterReDirty) take DC to 2 —
-                    // ReleaseDirtyMarks then drains the excess via the same primitive the checkpoint uses, no
-                    // race (issue #385). Without a ChangeSet, fall back to untracked EnsureDirtyAtLeast(2).
+                    // Durability: a directory map-page write (root or extension) must survive a checkpoint whether or not the caller provided a
+                    // ChangeSet. Recording the modification keeps the page owed even if a checkpoint captured it earlier in this cycle (CP-04).
+                    // With a ChangeSet the first registration also takes the page's mark; without one, MarkPageModified records it alone.
                     if (changeSet != null)
                     {
                         changeSet.AddByMemPageIndex(memPageIdx);
-                        changeSet.RegisterReDirty(memPageIdx);
                     }
                     else
                     {
@@ -814,9 +806,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 var oldTailPage = _store.GetPage(oldTailMemIdx);
                 ref var oldTailLsh = ref oldTailPage.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
                 oldTailLsh.LogicalSegmentNextRawDataPBID = filePageIndices[growFrom];
-                // Durability: AddByMemPageIndex already bumps DC to 1 via tracked IncrementDirty. Without a ChangeSet, fall
-                // back to untracked EnsureDirtyAtLeast(1) for the same DC outcome — see the comment block in InitDataPages
-                // for the full CP-04 rationale.
+                // Durability: record the modification (CP-04) — see InitDataPages.
                 if (changeSet != null)
                 {
                     changeSet.AddByMemPageIndex(oldTailMemIdx);

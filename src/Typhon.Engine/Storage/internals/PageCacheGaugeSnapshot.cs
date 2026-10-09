@@ -21,10 +21,10 @@ internal readonly struct PageCacheGaugeSnapshot
     /// <summary>Pages unallocated / available for reuse (<c>PageState.Free</c>).</summary>
     public int FreePages { get; }
 
-    /// <summary>Idle pages with no pending checkpoint writes (<c>PageState.Idle &amp;&amp; DirtyCounter == 0</c>).</summary>
+    /// <summary>Idle pages with no pending checkpoint writes (<c>PageState.Idle</c>, no writeback debt: <c>WritebackGen == CapturedGen</c>).</summary>
     public int CleanUsedPages { get; }
 
-    /// <summary>Idle pages with pending checkpoint writes (<c>PageState.Idle &amp;&amp; DirtyCounter &gt; 0</c>).</summary>
+    /// <summary>Idle pages with pending checkpoint writes (<c>PageState.Idle</c>, writeback debt: <c>WritebackGen != CapturedGen</c>).</summary>
     public int DirtyUsedPages { get; }
 
     /// <summary>Pages held under exclusive latch or transient Allocating state (<c>PageState.Exclusive</c> or <c>PageState.Allocating</c>).</summary>

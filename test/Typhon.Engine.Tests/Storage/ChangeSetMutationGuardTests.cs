@@ -14,8 +14,8 @@ namespace Typhon.Engine.Tests;
 /// <b>Why this is not an owner-thread assert.</b> #705 asks for "a Debug owner-thread assert on ChangeSet mutation", but in <c>Deferred</c> and
 /// <c>GroupCommit</c> the UnitOfWork deliberately SHARES one ChangeSet across every transaction it creates (<c>UnitOfWork.cs:64-66</c>), and those
 /// transactions run on different threads — that is the production default. An owner-thread assert would fire on correct code. The guard therefore detects what
-/// is actually illegal: two threads inside a mutating method AT THE SAME TIME. <c>_marksByPage</c> is a plain <c>Dictionary</c> and <c>_deferredEvictions</c> a
-/// plain <c>List</c>, so concurrent mutation loses marks or corrupts the map — #400's mechanism, silent in 36 of 40 runs.
+/// is actually illegal: two threads inside a mutating method AT THE SAME TIME. <c>_markedPages</c> is a plain <c>HashSet</c> and <c>_deferredEvictions</c> a
+/// plain <c>List</c>, so concurrent mutation loses marks or corrupts the collection — #400's mechanism, silent in 36 of 40 runs.
 /// </para>
 /// <para>
 /// Both directions are pinned. A guard that fired on sequential hand-off would be worse than no guard: it would alarm on the engine's normal operation, and
@@ -32,8 +32,8 @@ internal sealed class ChangeSetMutationGuardTests : TestBase<ChangeSetMutationGu
         return new ChangeSet(dbe.MMF);
     }
 
-    // DeferEviction is the mutating method to drive these through: it appends to `_deferredEvictions` and touches NOTHING else. AddByMemPageIndex and
-    // RegisterReDirty call PagedMMF.IncrementDirty, which indexes the real page-state array — feeding them synthetic page indices tears down the test host
+    // DeferEviction is the mutating method to drive these through: it appends to `_deferredEvictions` and touches NOTHING else. AddByMemPageIndex
+    // calls PagedMMF.IncrementDirty, which indexes the real page-state array — feeding them synthetic page indices tears down the test host
     // rather than testing the guard, which is exactly what the first version of this fixture did.
 
 #if DEBUG
@@ -42,8 +42,8 @@ internal sealed class ChangeSetMutationGuardTests : TestBase<ChangeSetMutationGu
     /// </summary>
     /// <remarks>
     /// <b>The overlap is produced by contention, not constructed</b> — there is no injection point inside the guarded region to park a thread in. With two
-    /// threads each performing 200,000 dictionary inserts on the same instance the windows overlap essentially immediately, and the test carries its own
-    /// evidence either way: if the guard does not fire, the raw <c>Dictionary</c> corruption it exists to pre-empt usually does, and that is reported as a
+    /// threads each performing 200,000 <c>DeferEviction</c> appends on the same instance the windows overlap essentially immediately, and the test carries its own
+    /// evidence either way: if the guard does not fire, the raw <c>List</c> corruption it exists to pre-empt usually does, and that is reported as a
     /// distinct (and worse) outcome rather than passing quietly.
     /// </remarks>
     [Test]
@@ -71,7 +71,7 @@ internal sealed class ChangeSetMutationGuardTests : TestBase<ChangeSetMutationGu
                 }
                 catch (Exception ex)
                 {
-                    // A Dictionary mutated from two threads throws its own way (IndexOutOfRange, NullReference, or an InvalidOperationException about
+                    // A List mutated from two threads throws its own way (IndexOutOfRange, NullReference, or an InvalidOperationException about
                     // concurrent operations). Recorded separately: it proves the window was real, but it means the guard did not get there first.
                     Interlocked.CompareExchange(ref corruption, ex, null);
                     return;

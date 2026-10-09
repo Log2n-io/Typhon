@@ -146,19 +146,15 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// <summary>
     /// Marks a slot dirty and signals the page as actively being written.
     /// <para>
-    /// Three protections are applied on the 0→1 dirty transition for each slot:
+    /// Two protections are applied on the 0→1 dirty transition for each slot:
     /// <list type="number">
     ///   <item><b>ActiveChunkWriters</b>: Atomically incremented so that <see cref="PagedMMF.WritePagesForCheckpoint"/>
     ///   skips this page (CAS sentinel). This prevents checkpoint from capturing a snapshot with partially-written
     ///   B+Tree data (e.g., a node with odd OLC version).</item>
-    ///   <item><b>ChangeSet</b>: Eagerly registered via <see cref="ChangeSet.AddByMemPageIndex"/> so that
-    ///   dirty pages are tracked for writeback. On first registration, ChangeSet itself bumps DirtyCounter via
-    ///   <see cref="PagedMMF.IncrementDirty"/>.</item>
-    ///   <item><b>DirtyCounter guard (CP-04)</b>: On re-registration (same page re-dirtied in a subsequent accessor
-    ///   rental within the same UoW), <see cref="PagedMMF.IncrementDirty"/> unconditionally bumps DC. This handles
-    ///   the race where checkpoint snapshots the page (Step 3) between two accessor rentals: the snapshot is stale,
-    ///   so IncrementDirty ensures DC &gt; 1, surviving the pending DecrementDirty (Step 5).
-    ///   <see cref="ChangeSet.ReleaseDirtyMarks"/> caps DC at 1 when the UoW disposes.</item>
+    ///   <item><b>ChangeSet</b>: Eagerly registered via <see cref="ChangeSet.AddByMemPageIndex"/>, which takes the page's
+    ///   one mark on first registration and records the modification on every call — including a re-dirty in a later
+    ///   accessor rental of the same UoW. That record is the CP-04 defence: if a checkpoint captured the page between two
+    ///   rentals, the bump moves <c>WritebackGen</c> past the capture, so the page stays owed to the next cycle.</item>
     /// </list>
     /// </para>
     /// ActiveChunkWriters is decremented in <see cref="CommitChanges"/> for live slots, and deferred
@@ -176,29 +172,10 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             _dirtyFlags |= mask;
             var memPageIndex = GetMemPageIndexFromSlot(slot);
             _store.IncrementActiveChunkWriters(memPageIndex);
-            if (_changeSet != null)
-            {
-                if (_changeSet.AddByMemPageIndex(memPageIndex))
-                {
-                    // First registration: AddByMemPageIndex called IncrementDirty → DC≥1.
-                    // ACW > 0 (set above) blocks checkpoint from snapshotting this page
-                    // during the current write window.
-                }
-                else
-                {
-                    // Page already tracked by ChangeSet (re-dirtied in a subsequent accessor rental).
-                    // Must IncrementDirty — NOT EnsureDirtyAtLeast — to satisfy CP-04:
-                    //   If checkpoint snapshots the page between our previous CommitChanges (ACW→0)
-                    //   and this re-dirty, the snapshot is stale. IncrementDirty pushes DC to ≥2,
-                    //   so the pending DecrementDirty (Step 5) leaves DC≥1, keeping the page dirty
-                    //   for the next checkpoint cycle which will capture our new modifications.
-                    // Routed through ChangeSet.RegisterReDirty (was: direct _store.IncrementDirty) so the
-                    // per-page mark count stays accurate — ReleaseDirtyMarks then decrements the
-                    // exact excess via the same conservation-respecting primitive as the checkpoint's
-                    // own DecrementDirty, eliminating the cap-vs-decrement race captured in #385.
-                    _changeSet.RegisterReDirty(memPageIndex);
-                }
-            }
+            // First registration takes the page's mark; a re-dirty in a later rental (the page is already tracked) records the modification, which
+            // keeps the page owed if a checkpoint captured it between the two rentals (CP-04). ACW > 0 (set above) blocks the checkpoint from capturing
+            // it during the current write window.
+            _changeSet?.AddByMemPageIndex(memPageIndex);
         }
     }
 

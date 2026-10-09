@@ -1100,9 +1100,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   impl the checkpoint samples WritebackGen BEFORE the seqlock copy, under the ACW sentinel, and publishes THAT value
     after its fsync. Any modification in between advances the generation past it, so MarkCaptured's monotonic CAS leaves
     the page owed. No counter floor, and no dependence on how many writes are in flight.
-  scope: CheckpointManager.cs, ChunkAccessor.MarkSlotDirty, ChangeSet.AddByMemPageIndex / RegisterReDirty,
+  scope: CheckpointManager.cs, ChunkAccessor.MarkSlotDirty, ChangeSet.AddByMemPageIndex,
          PagedMMF.WritePagesForCheckpoint, PagedMMF.MarkCaptured
-  verified: ChangeSetDirtyMarkConservationTests
+  verified: ChangeSetDirtyMarkConservationTests; ChangeSetConservationTests.Add_TwiceForSamePage_TakesOneMark_ButRecordsBothModifications;
+            ChangeSetCallSiteRecordingTests (a write after a capture leaves the page owed, through AllocateChunk and a ChunkAccessor rental,
+            first registration and re-dirty — #1245)
   on_violation: concurrent modification lost — page appears clean,
     eviction discards the re-dirty, data silently gone
   rationale: 🔴 REWRITTEN 2026-08-16. The old formulation was arithmetic on the mutator's counter — "re-dirty pushes DC
@@ -1403,9 +1405,10 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ## Module: Page Safety
 
 ### PS-01: Eviction predicate `[fatal]`
-  invariant page evictable ↔ (DirtyCounter == 0 ∧ ActiveChunkWriters == 0
+  invariant page evictable ↔ (DirtyCounter == 0 ∧ WritebackGen == CapturedGen ∧ ActiveChunkWriters == 0
     ∧ SlotRefCount == 0 ∧ AccessEpoch < MinActiveEpoch)
-  never evict page with DirtyCounter > 0 (uncommitted/unflushed data)
+  never evict page with DirtyCounter > 0 (a unit of work still holds a mutator mark on it)
+  never evict page with WritebackGen != CapturedGen (bytes not yet durable on the data file — PS-10)
   never evict page with ActiveChunkWriters > 0 (OLC write in progress)
   never evict page with SlotRefCount > 0 (live ChunkAccessor slot reference)
   never evict page with AccessEpoch ≥ MinActiveEpoch (epoch-protected)
@@ -1441,18 +1444,21 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     clock-sweep interprets as clean → premature eviction of dirty page
 
 ### PS-05: DirtyCounter marks are owner-scoped and exactly conserved `[fatal]`
-  invariant only a ChangeSet may raise DirtyCounter, and only via AddByMemPageIndex / RegisterReDirty
-  invariant a ChangeSet releases exactly the N marks it took, for every page it took them on — no more, no fewer
+  invariant only a ChangeSet may raise DirtyCounter, and only via AddByMemPageIndex — one mark per page, taken on its first
+            registration; a re-dirty of a page it already tracks records the modification and takes no second mark
+  invariant a ChangeSet releases exactly the marks it took, one for every page it took one on — no more, no fewer
   invariant every ChangeSet is released by whoever created it: a UoW-owned set on UoW dispose, a
             transaction-owned set on transaction dispose, a locally-created set before its creator returns
   never release marks taken by another owner (that is #385's lost write)
   never retain a mark "for the checkpoint to consume" (that is #824's leak)
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
-  scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
+  scope: ChangeSet.AddByMemPageIndex / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
          UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally)
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
-            throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected
+            throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected;
+            ChangeSetCallSiteRecordingTests.ReleasingOneOwnersMarks_LeavesTheOtherOwnersMarkInPlace (an over-release, which Release's clamp
+            hides on a lone owner, shows on a co-owned page)
   on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
     over-release → page evictable with unwritten bytes, data lost before reaching stable media (#385)
   rationale: 🔴 REWRITTEN 2026-08-16. This rule used to REQUIRE the defect: "issues exactly (N-1) decrements, leaving one
@@ -1469,7 +1475,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     the rule: one field, one owner, one meaning.
 
 ### PS-05a: A ChangeSet has one writer at a time; a transaction running beside its unit of work's others owns its own `[fatal]` `[silent]`
-  invariant a ChangeSet's tracking (a Dictionary and a List) is mutated by one thread at a time; hand-off between threads is legal, overlap is not
+  invariant a ChangeSet's tracking (a HashSet and a List) is mutated by one thread at a time; hand-off between threads is legal, overlap is not
             (ChangeSet.EnterMutation detects overlap and throws, #400)
   invariant a Deferred or GroupCommit unit of work's shared ChangeSet serves only transactions that do not run concurrently: one transaction per
             system per tick, on that system's thread
@@ -1559,7 +1565,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             MUST only ever be advanced AFTER the bytes are physically on disk. `_fileSize` is advanced post-write on every
             path: the synchronous paths (WritePageDirect, WritePagesForCheckpoint) advance it after `RandomAccess.Write`
             returns; the ASYNC path (SavePageInternal) must NOT advance it at write-issue — SavePages advances it once in its
-            post-`FlushToDisk` continuation, BEFORE any page in the batch becomes evictable (DecrementDirty).
+            post-`FlushToDisk` continuation, BEFORE any page in the batch becomes evictable (MarkCaptured).
   rationale: `_fileSize` is the sole gate that authorizes a disk read. If it is advanced before the async `WriteAsync`
              physically extends the file, a reader that cache-misses a page in the not-yet-written region issues a read past
              the real EOF → 0 bytes → a torn/zero page. Coupling "durable AND covered by `_fileSize`" before evictability

@@ -5,7 +5,8 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Passively waits for in-flight IO to complete, making dirty pages evictable.
-/// Signaled by <see cref="PagedMMF.DecrementDirty"/> when a page's dirty counter reaches 0.
+/// Signaled when a page is left with no mutator marks and no writeback debt: by <see cref="PagedMMF.MarkCaptured"/> after a checkpoint write, or by
+/// a ChangeSet releasing a page's last mark.
 /// </summary>
 internal sealed class WaitForIOStrategy : IPageCacheBackpressureStrategy, IDisposable
 {

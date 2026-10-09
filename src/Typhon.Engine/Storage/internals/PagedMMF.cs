@@ -1364,7 +1364,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>
     /// Reports whether file page <paramref name="filePageIndex"/> is currently resident in the page cache and, if so, whether it is dirty
-    /// (<see cref="PageInfo.DirtyCounter"/> &gt; 0). Non-faulting — a directory lookup only, never triggers page I/O — so it reflects residency as it stands
+    /// (holds writeback debt: bytes not yet on the data file). Non-faulting — a directory lookup only, never triggers page I/O — so it reflects residency as it stands
     /// before any introspection read.
     /// </summary>
     internal bool TryGetPageResidency(int filePageIndex, out bool resident, out bool dirty)
@@ -3164,10 +3164,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     private static readonly List<string> AcwOutstanding = [];
 
     // ─── DirtyCounter balance tracing ────────────────────────────────────────────────────────────────────────────
-    // Same ledger, applied to DC. Note DC is NOT strictly conserved by design — DecrementDirtyToMin and
-    // DecrementDirtyByDelta both CLAMP, so an over-decrement is silently absorbed while a MISSING decrement leaks
-    // permanently. That asymmetry is why a leak here shows up as a dirty-page count that only ever climbs, and why
-    // the surviving increments at a quiesced end of run are the ones worth reading.
+    // Same ledger, applied to DC. DC is exactly conserved (PS-05), but DecrementDirtyByDelta CLAMPS at zero, so in
+    // Release an over-decrement is absorbed while a MISSING decrement leaks permanently. That asymmetry is why a leak
+    // here shows up as a dirty-page count that only ever climbs, and why the surviving increments at a quiesced end of
+    // run are the ones worth reading.
 
     /// <summary>Page to trace DirtyCounter mutations for, or -1 (off). Diagnostic only.</summary>
     internal static int DirtyTracePage = -1;
@@ -3277,8 +3277,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     /// <remarks>
     /// <para>
-    /// O(1) regardless of <paramref name="delta"/>, where looping <see cref="DecrementDirty"/> is O(delta) and a hot page
-    /// in a long-running unit of work can carry thousands of marks.
+    /// O(1) regardless of <paramref name="delta"/>. A <see cref="ChangeSet"/> holds one mark per page and releases it here with a delta of 1:
+    /// unlike <see cref="DecrementDirty"/>, this tolerates a store that has already been torn down (see below).
     /// </para>
     /// <para>
     /// Callers must pass exactly the number of marks they hold. The clamp at zero is a belt-and-braces guard against a
@@ -3464,7 +3464,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     {
                         // Writer has held the page for >100ms — likely blocked (e.g., waiting for
                         // backpressure to free cache pages). Skip this page to avoid deadlock:
-                        // the writer may be waiting for this checkpoint to complete DecrementDirty.
+                        // the writer may be waiting for this checkpoint to discharge debt (MarkCaptured).
                         LogSeqlockWriterHeldSkip(Logger, (int)elapsedMs, counter);
                         Interlocked.Increment(ref CheckpointSkipWriterHeld);
                         return false;
@@ -3739,7 +3739,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // CK-05 (C2): protected segment-directory pages must be written to their ALTERNATE slot (gen+1 + CRC + fsync + flip,
         // all inside PersistProtectedPage) — they cannot be coalesced with their in-place neighbors. Handle them individually
         // here and build `normalPages` (sorted, protected pages removed) for the coalesced in-place path below. memPageIndices
-        // is left intact so the continuation's DecrementDirty still releases the protected pages' DirtyCounter.
+        // is left intact so the continuation's MarkCaptured still discharges the protected pages' writeback debt.
         // The common structural flush touches ZERO protected pages (pure data), so scan first — a cheap dictionary probe per
         // page, no allocation — and only build the partitioned `normalPages` list when a protected page is actually present.
         // (The previous version allocated a full-length List<int> on EVERY flush and discarded it whenever protectedCount==0.)
@@ -3833,7 +3833,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         BuildWriteRuns(normalPages, filePages, operations);
 
         // Highest byte offset this batch will have made durable once its async writes + fsync complete. SavePageInternal no longer advances
-        // _fileSize (it is the async path); we advance it once in the continuation below, AFTER FlushToDisk and BEFORE DecrementDirty, so a
+        // _fileSize (it is the async path); we advance it once in the continuation below, AFTER FlushToDisk and BEFORE MarkCaptured, so a
         // page is covered by the read gate's durable watermark before it can ever become evictable. Mirrors the per-write growth the
         // synchronous paths (WritePageDirect / WritePagesForCheckpoint) already do post-write.
         long batchEndOffset = 0;
