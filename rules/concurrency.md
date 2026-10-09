@@ -175,6 +175,26 @@ the chain's side of that contract: a transaction's snapshot is visible to every 
             the chain has no tail [RuleMutant]. Real mutation: the clear moved after the CAS fails it. The code before #1255
             (a plain clear after the head read) failed the same test with the probe at that window.
 
+### TXC-03: A TSN never outgrows its 48-bit storage `[fatal]` `[silent]`
+  invariant every TSN draw — a transaction's (`CreateTransaction`) and a point-in-time snapshot's (`AllocateTSN`) — first compares the counter
+            with 2^46 (`TsnWarningThreshold`): one predictable branch, a plain read. Past it, the engine warns once (`WarnTsnHeadroomLow`); at
+            `TsnRefusalThreshold` = 2^47 − 2^24 it refuses the draw with `TransactionSequenceExhaustedException` — not transient — drawing nothing
+  invariant the margin is fixed, not per live transaction: draws pass the check and then draw, so concurrent ones overshoot it by up to one per
+            thread, and the commit-stamp design (option C) will draw a stamp at a commit point that cannot be refused. 2^24 covers both; bit 47
+            stays free for that design's pending mark
+  invariant a counter restored at open (`SetNextFreeId`) past the refusal threshold refuses the open; past 2^46 it warns then
+  invariant the 48-bit packed setters (`CompRevStorageElement.TSN`, `EntityRecordHeader.BornTSN` / `DiedTSN`) assert the range in Debug
+  never let a TSN pass 2^48: the packed setters keep its low 48 bits, and a wrapped TSN reads as "born at genesis, alive" to every MVCC check
+  scope: TransactionChain.CreateTransaction, TransactionChain.AllocateTSN, TransactionChain.SetNextFreeId, TransactionChain.TsnRefusalThreshold,
+         CompRevStorageElement.TSN, EntityRecordHeader.BornTSN, EntityRecordHeader.DiedTSN
+  rationale: #1208. The 2^46 check was an empty TODO. At a million transactions a second (read-only ones draw a TSN too) the warning comes after
+             about 2.2 years, the refusal after 4.5, and 2^48 itself would be 8.9
+  on_violation: visibility silently wrong for every revision and entity stamped past the wrap
+  verified: TsnHeadroomTests — BelowTheWarningThreshold_NothingIsLoggedOrRefused, PastTheWarningThreshold_ItWarnsOnce (a transaction's draw or a
+            snapshot's first), NearTheLimit_ATsnStoresWhole (a snapshot taken before a spawn near the limit does not see it),
+            AtTheRefusalThreshold_NoTsnIsDrawn, ACounterRestoredPastTheLimit_IsRefusedAtOpen (the counter seeded by `SetNextFreeIdForTest`)
+            [VerifiesRule]. Real mutations: the refusal removed, the check dropped from `CreateTransaction`, the open-time refusal removed — each
+            fails
 ---
 
 ## Module: SNAP — MVCC snapshot retention

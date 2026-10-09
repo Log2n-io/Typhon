@@ -6071,6 +6071,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         + "checkpoint below those records and will close as a crash. Reopen the database to recover the transaction from the log.")]
     internal partial void LogCommitPipelineStopped(long tsn, long firstLsn, Exception failure);
 
+    [LoggerMessage(LogLevel.Warning, "Transaction sequence numbers are running out: {next} drawn of {limit}. Transactions will be refused at {limit}, "
+        + "before the 48-bit stored TSN can wrap (#1208).")]
+    internal partial void LogTsnHeadroomLow(long next, long limit);
+
+    /// <summary>Logs the TSN headroom warning (#1208) and counts it.</summary>
+    internal void WarnTsnHeadroomLow(long next, long limit)
+    {
+        Interlocked.Increment(ref _tsnHeadroomWarnings);
+        LogTsnHeadroomLow(next, limit);
+    }
+
+    /// <summary>How many TSN headroom warnings this engine logged (#1208): one at most.</summary>
+    internal int TsnHeadroomWarnings => Volatile.Read(ref _tsnHeadroomWarnings);
+
+    private int _tsnHeadroomWarnings;
+
     [LoggerMessage(LogLevel.Error, "Transaction TSN {tsn}: the rollback of a commit that failed before its append threw; Dispose retries it.")]
     internal partial void LogRollbackAfterFailedCommitFailed(long tsn, Exception failure);
 

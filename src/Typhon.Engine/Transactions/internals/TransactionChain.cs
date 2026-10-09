@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -76,6 +77,7 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     public TransactionChain(int maxActiveTransactions, IResource parent) : base("TransactionChain", ResourceType.TransactionPool, parent)
     {
+        _dbe = parent as DatabaseEngine;
         _maxActiveTransactions = maxActiveTransactions;
         _nextFreeId = 1;
         _pool = new ConcurrentQueue<Transaction>();
@@ -89,7 +91,27 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     /// Sets the next free TSN to the given value. Used during engine reload to restore the TSN counter from the persisted header so that MVCC visibility
     /// works for entities created by previous sessions.
     /// </summary>
-    internal void SetNextFreeId(long value) => _nextFreeId = value;
+    internal void SetNextFreeId(long value)
+    {
+        _nextFreeId = value;
+
+        // A reopened database whose counter is past the limit is refused at open, not at its first transaction (#1208); one past the warning says so now.
+        if (value >= TsnRefusalThreshold)
+        {
+            throw new TransactionSequenceExhaustedException(value, TsnRefusalThreshold);
+        }
+
+        if (value >= TsnWarningThreshold)
+        {
+            WarnTsnHeadroomOnce(value);
+        }
+    }
+
+    /// <summary>Test seam: sets the TSN counter without the open-time check of <see cref="SetNextFreeId"/>.</summary>
+    internal void SetNextFreeIdForTest(long value) => _nextFreeId = value;
+
+    /// <summary>The engine this chain belongs to (its resource parent), for the TSN headroom warning; null in a fixture without one.</summary>
+    private readonly DatabaseEngine _dbe;
 
     public ref AccessControl Control => ref _control;
 
@@ -397,7 +419,65 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     /// Allocates a monotonically-increasing TSN without creating a Transaction.
     /// Used by <see cref="PointInTimeAccessor"/> to get an MVCC visibility snapshot point.
     /// </summary>
-    internal long AllocateTSN() => Interlocked.Increment(ref _nextFreeId);
+    internal long AllocateTSN()
+    {
+        CheckTsnHeadroom();
+        return Interlocked.Increment(ref _nextFreeId);
+    }
+
+    /// <summary>
+    /// The counter above which a TSN draw takes the slow path (#1208): a warning, once, then the refusal at <see cref="TsnRefusalThreshold"/>. A TSN is
+    /// stored in 48 bits (<c>CompRevStorageElement.TSN</c>, <c>EntityRecordHeader.BornTSN</c>/<c>DiedTSN</c>); bit 47 stays free for the commit-stamp
+    /// design's pending mark.
+    /// </summary>
+    internal const long TsnWarningThreshold = 1L << 46;
+
+    /// <summary>
+    /// No TSN is drawn once the counter reaches this (#1208): 2^47 minus a fixed margin of 2^24. Fixed, not per live transaction: draws pass the check
+    /// and then draw, so concurrent ones can overshoot it by up to one per thread, and the commit-stamp design (option C) draws a stamp at a commit point
+    /// that can never be refused. 2^24 covers both with room to spare, at a cost of one part in 10^7 of the range.
+    /// </summary>
+    internal const long TsnRefusalThreshold = (1L << 47) - (1L << 24);
+
+    private int _tsnWarned;
+
+    /// <summary>
+    /// The begin path's one predictable branch (#1208): below <see cref="TsnWarningThreshold"/> nothing happens. Above it, a warning once; at
+    /// <see cref="TsnRefusalThreshold"/>, <see cref="ResourceExhaustedException"/> — a refusal before the 48-bit stored TSN can wrap and read as "born at
+    /// genesis, alive".
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CheckTsnHeadroom()
+    {
+        // A plain read: the value is advisory (the margin absorbs a stale one) and takes part in no ordering.
+        var next = _nextFreeId;
+        if (next >= TsnWarningThreshold)
+        {
+            TsnHeadroomSlowPath(next);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void TsnHeadroomSlowPath(long next)
+    {
+        if (next >= TsnRefusalThreshold)
+        {
+            throw new TransactionSequenceExhaustedException(next, TsnRefusalThreshold);
+        }
+
+        WarnTsnHeadroomOnce(next);
+    }
+
+    private void WarnTsnHeadroomOnce(long next)
+    {
+        if (Interlocked.Exchange(ref _tsnWarned, 1) == 0)
+        {
+            _dbe?.WarnTsnHeadroomLow(next, TsnRefusalThreshold);
+        }
+    }
+
+    /// <summary>Whether the TSN headroom warning has been logged (#1208).</summary>
+    internal bool TsnHeadroomWarned => Volatile.Read(ref _tsnWarned) != 0;
 
     /// <summary>
     /// Lock-free transaction creation. No lock acquired — uses ConcurrentQueue for pooling, then <see cref="Register"/>: CAS-based push, atomic TSN increment.
@@ -411,6 +491,8 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
             ThrowHelper.ThrowResourceExhausted("Data/TransactionChain/CreateTransaction", ResourceType.Service, _activeCount, _maxActiveTransactions);
         }
 
+        CheckTsnHeadroom();
+
         if (!_pool.TryDequeue(out var t))
         {
             t = new Transaction();
@@ -422,12 +504,6 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         // DatabaseEngine.CreateQuickTransaction, DatabaseEngine.CreateReadOnlyTransaction) funnels through this method, so one
         // increment here counts every transaction exactly once. Pooled (dequeued) and newly-allocated paths both pass through.
         Interlocked.Increment(ref _createdTotal);
-
-        // Are we getting short on Ids? The max is 1 << 47
-        if (_nextFreeId > (1L << 46))
-        {
-            // TODO Log some warning
-        }
 
         return t;
     }

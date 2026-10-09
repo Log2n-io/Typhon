@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -43,6 +44,8 @@ public struct EntityRecordHeader
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set
         {
+            // 48 bits: TransactionChain refuses transactions well before a TSN outgrows them (#1208).
+            Debug.Assert((ulong)value < 1UL << 48, "a BornTSN outgrew its 48-bit storage");
             BornTsnHigh = (uint)(value >> 16);
             BornTsnLow = (ushort)(value & 0xFFFF);
         }
@@ -56,6 +59,7 @@ public struct EntityRecordHeader
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set
         {
+            Debug.Assert((ulong)value < 1UL << 48, "a DiedTSN outgrew its 48-bit storage");
             DiedTsnHigh = (uint)(value >> 16);
             DiedTsnLow = (ushort)(value & 0xFFFF);
         }

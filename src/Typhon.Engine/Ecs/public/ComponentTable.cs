@@ -124,6 +124,8 @@ internal struct CompRevStorageElement
         get => (long)((ulong)_packedTickHigh << 16 | _packedTickLow);
         set
         {
+            // 48 bits: TransactionChain refuses transactions well before a TSN outgrows them (#1208).
+            Debug.Assert((ulong)value < 1UL << 48, "a TSN outgrew its 48-bit storage");
             _packedTickHigh = (uint)(value >> 16);
             _packedTickLow = (ushort)(value & 0xFFFF);
         }
