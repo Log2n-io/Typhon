@@ -130,6 +130,21 @@ public class CrudCompareBenchmarks
         t.Commit();
     }
 
+    /// <summary>Scenario 4b: Update 100 pre-populated entities, roll back: each rollback voids its own revision under the chain's lock (CHAIN-01).</summary>
+    [Benchmark]
+    public void Update100_Rollback()
+    {
+        using var t = _dbe.CreateQuickTransaction();
+        for (int i = 0; i < 100; i++)
+        {
+            var mut = t.OpenMut(_prePopIds[i]);
+            var data = mut.Read(BenchArch.Data);
+            data.Value = i + 20000;
+            mut.Set(BenchArch.Data, data);
+        }
+        t.Rollback();
+    }
+
     /// <summary>Scenario 5: Create 50, destroy 25, commit. Mixed lifecycle.</summary>
     [Benchmark]
     public void Create50_Destroy25_Commit()

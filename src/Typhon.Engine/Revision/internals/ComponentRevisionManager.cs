@@ -224,6 +224,106 @@ internal ref struct ComponentRevisionManager
         }
     }
 
+    /// <summary>
+    /// Voids this transaction's own pending entry (CHAIN-01): found by its identity under the chain's exclusive lock, wherever a compaction has moved it.
+    /// For a rollback, which has nothing to fail into: the lock is waited for without a deadline, and the wait ends — a cleanup only tries the lock, a
+    /// publish or a conflict-handler commit holding it releases it (AP-05's argument).
+    /// </summary>
+    /// <param name="info">The component's table info.</param>
+    /// <param name="firstChunkId">The chain's root chunk.</param>
+    /// <param name="ownChunkId">The content chunk this transaction's entry names; 0 for a delete entry.</param>
+    /// <param name="tsn">This transaction's TSN, which identifies a delete entry.</param>
+    /// <param name="hintIndex">Where the transaction last saw its entry; checked first.</param>
+    /// <returns>
+    /// <c>false</c> when the chain holds no pending entry of this transaction: nothing is voided, and the caller must not free <paramref name="ownChunkId"/> —
+    /// an entry naming it, if any, is committed and not this transaction's to void (#1252).
+    /// </returns>
+    internal static bool VoidOwnPendingEntry(ComponentInfo info, int firstChunkId, int ownChunkId, long tsn, short hintIndex)
+    {
+        ref var accessor = ref info.CompRevTableAccessor;
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+
+        // A rollback run while this thread holds the chain already — a conflict handler, under the lock its commit holds, disposing another transaction
+        // that wrote the entity — voids under that lock: waiting for the lock it holds would never end.
+        var held = header.Control.IsLockedByCurrentThread;
+        if (!held)
+        {
+            var unbounded = new WaitContext(Deadline.Infinite, default);
+            header.Control.EnterExclusiveAccess(ref unbounded);
+        }
+
+        try
+        {
+            var index = FindOwnPendingEntry(ref accessor, firstChunkId, ownChunkId, tsn, hintIndex);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            VoidEntry(ref accessor, firstChunkId, index);
+            return true;
+        }
+        finally
+        {
+            if (!held)
+            {
+                header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+                header.Control.ExitExclusiveAccess();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The index of this transaction's pending entry: isolated, and naming <paramref name="ownChunkId"/> — or, for a delete (<paramref name="ownChunkId"/>
+    /// 0), naming no chunk and carrying <paramref name="tsn"/>. -1 when the chain holds none. The caller holds the chain's exclusive lock.
+    /// </summary>
+    /// <param name="accessor">Accessor for revision table chunks.</param>
+    /// <param name="firstChunkId">The chain's root chunk.</param>
+    /// <param name="ownChunkId">The content chunk this transaction's entry names; 0 for a delete entry.</param>
+    /// <param name="tsn">This transaction's TSN, which identifies a delete entry.</param>
+    /// <param name="hintIndex">Where the transaction last saw its entry; checked first, and trusted only inside the chain.</param>
+    internal static short FindOwnPendingEntry(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, int ownChunkId, long tsn, short hintIndex)
+    {
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+        if (hintIndex >= header.FirstItemIndex && hintIndex < header.FirstItemIndex + header.ItemCount
+            && IsOwnPendingEntry(GetRevisionElement(ref accessor, firstChunkId, hintIndex).Element, ownChunkId, tsn))
+        {
+            return hintIndex;
+        }
+
+        // One walk: the enumerator takes no lock of its own under the one the caller holds, so its budget is never consulted.
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            if (IsOwnPendingEntry(enumerator.Current, ownChunkId, tsn))
+            {
+                return (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool IsOwnPendingEntry(in CompRevStorageElement element, int ownChunkId, long tsn) =>
+        element.IsolationFlag && element.ComponentChunkId == ownChunkId && (ownChunkId != 0 || element.TSN == tsn);
+
+    /// <summary>
+    /// Voids the entry at <paramref name="index"/>, and drops the chain's item count only when it is the chain's last entry: a void elsewhere is a hole —
+    /// readers skip it, the next compaction drops it — and dropping the count would drop the chain's last entry instead: another transaction's revision,
+    /// appended after this one (#1233). The caller holds the chain's exclusive lock.
+    /// </summary>
+    internal static void VoidEntry(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short index)
+    {
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+        var last = index == header.FirstItemIndex + header.ItemCount - 1;
+        GetRevisionElement(ref accessor, firstChunkId, index).Element.Void();
+        if (last)
+        {
+            header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            --header.ItemCount;
+        }
+    }
+
     internal static unsafe int AllocCompRevStorage(ComponentInfo info, long tsn, ushort uowId, int firstChunkId, long pk)
     {
         var chunkId = info.CompRevTableSegment.AllocateChunk(false, info.CompRevTableAccessor.ChangeSet);
@@ -281,6 +381,7 @@ internal ref struct ComponentRevisionManager
         tempChunk.Clear();
         tempChunk.Split(out Span<CompRevStorageHeader> tempFirstHeader, out Span<CompRevStorageElement> tempElements);
         tempFirstHeader[0].ChainLength = 1;
+        tempFirstHeader[0].LastCommitRevisionIndex = -1;   // no commit until one is copied, as a new chain (a cleared header said 0: the first entry)
         tempFirstHeader[0].CommitSequence = firstChunkHeader.CommitSequence;
         tempFirstHeader[0].EntityPK = firstChunkHeader.EntityPK;
         var curNextChunkId = tempChunk.Slice(0, sizeof(int)).Cast<byte, int>();
@@ -315,6 +416,16 @@ internal ref struct ComponentRevisionManager
 
             while (enumerator.MoveNext())
             {
+                // A void — a rolled-back entry, or a conflict's orphan — is not an entry (CHAIN-01): dropped wherever it is, and it counts for nothing. Kept,
+                // it ended the skip phase as the chain's last entry and the sentinel, the last committed revision, was freed as no longer needed; copied, it
+                // took LastCommitRevisionIndex, though it is no commit.
+                if (enumerator.Current.IsVoid)
+                {
+                    enumerator.CurrentAsSpan.Clear();
+                    skipCount++;
+                    continue;
+                }
+
                 // Skip phase: remove entries older than the cutoff, track the last committed one as sentinel. Active uncommitted entries (IsolationFlag=true)
                 // must NOT enter the skip phase — they belong to transactions that will commit later. Freeing them would corrupt their data.
                 // IsolationFlag check is before maxSkipCount decrement to avoid wasting the guard count.
@@ -336,7 +447,7 @@ internal ref struct ComponentRevisionManager
                     }
                     else
                     {
-                        // Voided entry (all fields zeroed from rollback): ComponentChunkId is 0, effectively a no-op.
+                        // No TSN, yet not void: no such entry is written. Freed like a void's chunk would be (0, a no-op).
                         DeferOrFreeContentChunk(ct, ref compContentAccessor, revChunkId, hasCollections, deferredChunkFrees);
                     }
 
@@ -400,6 +511,25 @@ internal ref struct ComponentRevisionManager
                     var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
                     newChunkSpan.Split(out curNextChunkId, out curDestElements);
                 }
+            }
+
+            // Every entry was skipped — what followed the last committed one was voids: the sentinel is the chain's newest revision, and stays. The count
+            // guard above keeps the last entry, but only when it is no void.
+            if (inSkipPhase && hasSentinel)
+            {
+                curDestElements[curDestIndexInChunk] = sentinelEntry;
+                tempFirstHeader[0].ItemCount++;
+                tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
+                skipCount--;
+            }
+
+            // Nothing but voids: the chain keeps one, the shape the recovery scrub gives a chain with no committed revision — readers find nothing in it,
+            // and a chain is never empty.
+            if (tempFirstHeader[0].ItemCount == 0)
+            {
+                tempElements[0] = default;
+                tempFirstHeader[0].ItemCount = 1;
+                skipCount--;
             }
         }
 

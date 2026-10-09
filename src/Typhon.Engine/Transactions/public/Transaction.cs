@@ -1517,44 +1517,35 @@ public unsafe partial class Transaction : EntityAccessor
 
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
-        // Get the chunk storing the revision we want to roll back as well as the index of the element
-        var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        _dbe.ChainVoidProbe?.Invoke(info.ComponentTable, firstChunkId);
 
-        // Validate CurRevisionIndex — chain compaction by another transaction's cleanup may have
-        // shifted entry positions since our read. Best-effort (no lock).
-        if (elementHandle.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
-        {
-            var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
-            if (fixedIndex >= 0)
-            {
-                compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
-            }
-        }
-
-        // Free the chunk storing the content (if any) — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a copy-on-write or
-        // a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone. It was left
-        // set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one payload.
-        if (compRevInfo.CurCompContentChunkId != 0)
-        {
-            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
-            compRevInfo.CurCompContentChunkId = 0;
-        }
-
-        // If we roll back a created component, we must delete the revision table chunk
+        // If we roll back a created component, we must delete the revision table chunk. No other transaction can reach a chain this one created.
         if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
+            FreeOwnContentChunk(info, ref compRevInfo);
             revTableSegment.FreeChunk(firstChunkId);
 
             // Early exit: the RevTable chunk is gone — continuing would access freed memory.
             return true;
         }
 
-        // In case of update or delete, mark void the revision entry we added
+        // In case of update or delete, void the revision entry we added (CHAIN-01): under the chain's exclusive lock, found by its identity — a compaction
+        // may have moved it, and another transaction's revision may now sit where it was, or after it. Its content chunk is freed only when the entry was
+        // this transaction's: when the first write failed before adding one, CurCompContentChunkId still names the committed revision's chunk (#1252).
         if ((compRevInfo.Operations & (ComponentInfo.OperationType.Updated | ComponentInfo.OperationType.Deleted)) != 0)
         {
-            compRev.VoidElement(elementHandle);
+            if (_dbe.RollbackVoidsRecordedIndexForTest)
+            {
+                new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId)
+                    .VoidElement(ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, firstChunkId, compRevInfo.CurRevisionIndex));
+                FreeOwnContentChunk(info, ref compRevInfo);
+            }
+            else if (ComponentRevisionManager.VoidOwnPendingEntry(info, firstChunkId, compRevInfo.CurCompContentChunkId, TSN, compRevInfo.CurRevisionIndex))
+            {
+                FreeOwnContentChunk(info, ref compRevInfo);
+            }
+
+            compRevInfo.CurCompContentChunkId = 0;
         }
 
         // Enqueue for deferred cleanup
@@ -1572,6 +1563,21 @@ public unsafe partial class Transaction : EntityAccessor
         compRevInfo.PrevRevisionIndex = 0;
 
         return false;
+    }
+
+    /// <summary>
+    /// Frees the content chunk this transaction's revision named — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a
+    /// copy-on-write or a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone.
+    /// It was left set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one
+    /// payload.
+    /// </summary>
+    private static void FreeOwnContentChunk(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo)
+    {
+        if (compRevInfo.CurCompContentChunkId != 0)
+        {
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
+            compRevInfo.CurCompContentChunkId = 0;
+        }
     }
 
     /// <summary>
@@ -1611,52 +1617,109 @@ public unsafe partial class Transaction : EntityAccessor
         var conflictType = (byte)(conflictSolver != null ? 0 : 1);
         TyphonEvent.EmitDataTransactionConflict(tsn, pk, 0, conflictType);
 
-        // Save the orphan index before AddCompRev changes CurRevisionIndex
-        var conflictOrphanIndex = compRevInfo.CurRevisionIndex;
+        // Last-writer-wins (no handler): PREPARE holds no chain lock, and between the conflict check and here a cleanup on another thread can compact the
+        // chain, moving the orphan and the commit it lost to. The resolution takes the lock (CHAIN-01) and finds its orphan again by identity; the commit's
+        // PUBLISH takes it again for the new entry (AP-05). With a handler the lock is held since PREPARE.
+        var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
+        var lockTaken = false;
+        if (!lockHeld)
+        {
+            dbe?.ChainVoidProbe?.Invoke(info.ComponentTable, firstChunkId);
+            ref var lockHeader = ref info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            var wc = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+            if (!lockHeader.Control.EnterExclusiveAccess(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("RevisionChain/ConflictResolve", TimeoutOptions.Current.RevisionChainLockTimeout);
+            }
+
+            lockTaken = true;
+        }
+
+        try
+        {
+            ResolveConflictUnderLock(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, lastCommitRevisionIndex, readCompChunkId, tsn, uowId);
+        }
+        finally
+        {
+            if (lockTaken)
+            {
+                info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).Control.ExitExclusiveAccess();
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock: a new revision at the end carrying this transaction's value —
+    /// resolved by the handler, if any — and this transaction's first entry, the orphan, voided where it now is.
+    /// </summary>
+    private static void ResolveConflictUnderLock(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short lastCommitRevisionIndex, int readCompChunkId,
+        long tsn, ushort uowId)
+    {
+        var conflictSolver = context.Solver;
+        ref var accessor = ref info.CompRevTableAccessor;
+        var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
+
+        // The orphan, found by identity: a compaction may have moved it since CurRevisionIndex was recorded.
+        var orphanChunkId = compRevInfo.CurCompContentChunkId;
+        var conflictOrphanIndex = ComponentRevisionManager.FindOwnPendingEntry(ref accessor, firstChunkId, orphanChunkId, tsn, compRevInfo.CurRevisionIndex);
+        if (conflictOrphanIndex < 0)
+        {
+            ThrowHelper.ThrowInvalidOp("DetectAndResolveConflict: the transaction's revision entry is not in its chain");
+        }
+
+        compRevInfo.CurRevisionIndex = conflictOrphanIndex;
 
         // A destroy wins the conflict as a destroy: a fresh tombstone after the commit it lost to, ours voided. There is no payload to carry over and nothing
         // for a handler to resolve — the generic path below would publish a LIVE revision copied from chunk 0 (REAP-02).
-        if (compRevInfo.CurCompContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        if (orphanChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
         {
-            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, lockHeld);
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
             elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-            compRev.GetRevisionElement(conflictOrphanIndex).Element.Void();
+            ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);
             return;
         }
 
-        // Create a new revision for the resolved data (under existing lock when handler is provided)
-        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, lockHeld);
+        // Create a new revision for the resolved data, under the lock
+        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
 
-        // Copy the dirty-write data to the new revision as starting point
-        var dstChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
-        var srcChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.PrevCompContentChunkId);
-        var sizeToCopy = info.ComponentTable.ComponentTotalSize;
-        new Span<byte>(srcChunk, sizeToCopy).CopyTo(new Span<byte>(dstChunk, sizeToCopy));
-
-        // Update elementHandle to point to the new revision
-        elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-
-        // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
-        if (conflictSolver != null)
+        // The orphan is voided as soon as the new entry exists, before anything that can throw — the copy's page access, the handler: a throw aborts the
+        // commit, whose rollback finds only the new entry, and left isolated the orphan would stay so for good (no compaction passes an isolated entry).
+        // Its content chunk is the copy's source and the handler's committing value, so it is freed last, whatever happens; the new revision's copy took
+        // the collection buffers it named.
+        ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);
+        try
         {
-            var lastCommitHandle = compRev.GetRevisionElement(lastCommitRevisionIndex);
-            var overhead = info.ComponentTable.ComponentOverhead;
-            var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
-            var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.PrevCompContentChunkId) + overhead;
-            var toCommitChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead;
-            var committedChunkAddr = info.CompContentAccessor.GetChunkAddress(lastCommitHandle.Element.ComponentChunkId) + overhead;
+            // Copy the dirty-write data to the new revision as starting point
+            var dstChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
+            var srcChunk = info.CompContentAccessor.GetChunkAddress(orphanChunkId);
+            var sizeToCopy = info.ComponentTable.ComponentTotalSize;
+            new Span<byte>(srcChunk, sizeToCopy).CopyTo(new Span<byte>(dstChunk, sizeToCopy));
 
-            conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr);
-            context.Handler(ref conflictSolver);
+            // Update elementHandle to point to the new revision
+            elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+
+            // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
+            if (conflictSolver != null)
+            {
+                var lastCommitHandle = compRev.GetRevisionElement(lastCommitRevisionIndex);
+                var overhead = info.ComponentTable.ComponentOverhead;
+                var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
+                var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(orphanChunkId) + overhead;
+                var toCommitChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead;
+                var committedChunkAddr = info.CompContentAccessor.GetChunkAddress(lastCommitHandle.Element.ComponentChunkId) + overhead;
+
+                conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr);
+                context.Handler(ref conflictSolver);
+            }
         }
-
-        // Void the orphaned entry at the old position and free its content chunk
-        var conflictOrphan = compRev.GetRevisionElement(conflictOrphanIndex);
-        if (conflictOrphan.Element.ComponentChunkId > 0)
+        finally
         {
-            info.CompContentSegment.FreeChunk(conflictOrphan.Element.ComponentChunkId);
+            if (orphanChunkId > 0)
+            {
+                info.CompContentSegment.FreeChunk(orphanChunkId);
+            }
         }
-        conflictOrphan.Element.Void();
     }
 
     /// <summary>
@@ -1676,23 +1739,27 @@ public unsafe partial class Transaction : EntityAccessor
         if (oldContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
         {
             ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
-            compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
+            ComponentRevisionManager.VoidEntry(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, compRevInfo.PrevRevisionIndex);
             return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
         }
 
         // Create new entry at end of chain (under existing lock)
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
 
-        // Copy our data to the new content chunk
-        var srcAddr = info.CompContentAccessor.GetChunkAddress(oldContentChunkId);
-        var dstAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
-        new Span<byte>(srcAddr, info.ComponentTable.ComponentTotalSize)
-            .CopyTo(new Span<byte>(dstAddr, info.ComponentTable.ComponentTotalSize));
-
-        // Free the old content chunk and void the orphaned entry. The old entry at PrevRevisionIndex retains
-        // IsolationFlag=true which blocks deferred cleanup compaction. Voiding it makes it a harmless placeholder.
-        info.CompContentSegment.FreeChunk(oldContentChunkId);
-        compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
+        // Void the old entry as soon as the new one exists (CHAIN-01): it keeps IsolationFlag, which no compaction passes, and a throw in the copy below
+        // would leave it so for good — the rollback finds only the new entry. Its content chunk is the copy's source: freed last.
+        ComponentRevisionManager.VoidEntry(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, compRevInfo.PrevRevisionIndex);
+        try
+        {
+            var srcAddr = info.CompContentAccessor.GetChunkAddress(oldContentChunkId);
+            var dstAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
+            new Span<byte>(srcAddr, info.ComponentTable.ComponentTotalSize)
+                .CopyTo(new Span<byte>(dstAddr, info.ComponentTable.ComponentTotalSize));
+        }
+        finally
+        {
+            info.CompContentSegment.FreeChunk(oldContentChunkId);
+        }
 
         return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
     }

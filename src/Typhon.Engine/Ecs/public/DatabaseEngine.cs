@@ -6017,6 +6017,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
 
     /// <summary>
+    /// Test hook (#1233): runs where a transaction voids its own revision entry — a rollback, and a last-writer-wins conflict's orphan — before the void, with
+    /// the component table and the entity's revision-chain root: the window in which another thread's cleanup can compact the chain. Per engine. Null in
+    /// production.
+    /// </summary>
+    internal Action<ComponentTable, int> ChainVoidProbe { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (CHAIN-01): when set, a rollback voids the entry at the index its transaction recorded, without the chain's lock and without
+    /// checking it is still its own, and drops the chain's item count whatever entry it was — what CHAIN-01 forbids — so the rule's mutant can show the
+    /// verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool RollbackVoidsRecordedIndexForTest { get; set; }
+
+    /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
     /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
     /// </summary>
