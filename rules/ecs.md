@@ -823,6 +823,48 @@ easy to get wrong — the copy is invisible at the call site and outlives everyt
 
 ---
 
+## Module: VDELTA — How an incremental view folds its delta ring
+
+An incremental view (`WhereField`, a navigation view) keeps its entity set current by draining the index deltas commits append to its ring
+(`ViewDeltaRingBuffer`), and re-scans storage when the ring overflowed. Scope: `EcsView`, `NavigationView`, `ViewBase`. Source: #1264, step 1.5 of
+`claude/design/Revision/06-mvcc-commit-path-implementation-plan.md`.
+
+### VDELTA-01: A view's membership is its own, and a full refresh loses nothing it did not cover `[fatal]` `[silent]`
+  invariant whether an entity WAS in the view is the view's own state — its set (`_entityIds`), or for an OR view the branch's bit, which a
+            creation does not reset — never the delta's BeforeKey. Whether it is in now is decided by the delta's AfterKey against EVERY evaluator
+            of the field (a range on one field is two), or, for an enable, whose entry carries no key, by reading the entity
+            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out). An entry applied twice is then harmless
+  invariant a full refresh never discards the ring: it clears the overflow flag (`BeginRefreshFull`), re-scans, diffs, then FOLDS the entries at
+            or below its transaction's TSN through the same processing as an incremental refresh, keeps the newer ones, and when the ring dropped
+            entries before or during it, owes one more full refresh (`EndRefreshFull`, `_refreshFullPending`) — as a membership resync stays in
+            resync (MEMB). A builder leaves a new view's first refresh a full one (`OweRefreshFull`)
+  invariant a navigation view's full refresh re-populates its set from the entity maps (`PopulateFromEntityMaps`)
+  invariant the ring's consumer publishes its advanced head with a release store, after clearing the slot's written flag (`Advance`)
+  never take "was in view" from the BeforeKey: it is the writer's read value, and two last-writer-wins writers of one entity both read the same
+        one — the second's delta says "was in" for an entity the first just took out, and the view keeps the wrong side for good
+  never discard, at a full refresh, an entry the re-scan may not have covered: a commit's delta reaches the ring (Phase A of its publish, AP-07)
+        before its value reaches the cluster slot the re-scan reads (Phase B). Discarded, the change is in neither. (The ring's Reset did that, and
+        re-anchored its base TSN under live producers; it is gone)
+  scope: EcsView.ProcessEntry, EcsView.ProcessEntryOr, EcsView.RefreshFull, EcsView.RefreshFullOr, EcsView.FoldEntriesAfterRefreshFull,
+         NavigationView.ProcessEntry, NavigationView.RefreshFull, ViewBase.BeginRefreshFull, ViewBase.EndRefreshFull, ViewBase.OweRefreshFull,
+         ViewBase.ApplyMembership, ViewDeltaRingBuffer.Advance
+  status: **RESIDUAL:**
+          - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
+            view read the other fields' old values (#1266);
+          - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
+          - two last-writer-wins writers publishing out of revision order (AP-06) leave the view on the older value, as the index (#1263);
+          - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
+            single-field drain measures at parity)
+  on_violation: a view silently misses entities whose committed value passes, or keeps ones that fail; an overflowed navigation view empties
+  verified: ViewDeltaRingDefectTests — TwoConcurrentWritersOfOneEntity_LeaveTheViewOnTheNewestValue (single-field, multi-field, OR),
+            AFullRefreshBetweenACommitsDeltaAndItsValue_IsFollowedByAnother and TheOwedFullRefresh_FoldsACommitBetweenItsDeltaAndItsValue (the
+            commit held between its delta and its value by `DatabaseEngine.PublishAfterIndexesProbe` while the view re-scans),
+            ARangeOnOneField_IsDecidedByBothBounds, DisableThenEnable_BringsTheEntityBack (with and without a value),
+            AnOrViewOverTwoFields_KeepsEveryBranchOfASpawn (either branch left holding), AnOverflowedNavigationView_RebuildsItsSet [VerifiesRule].
+            Real mutations, each failing its test: the BeforeKey membership restored (single-field, OR), the owed refresh dropped, the fold replaced
+            by the drain, the navigation re-population removed, one evaluator per field, the enable not re-read, the OR creation reset. Not
+            covered by a test: `Advance`'s release store (an arm64 reordering), the overflow telemetry no longer emitted for an owed refresh
+
 ## Module: QFENCE — What an indexed query answers between a write and its tick fence
 
 A `SingleVersion` write under the default TickFence discipline, and any `Transient` write, lands in place at once, while

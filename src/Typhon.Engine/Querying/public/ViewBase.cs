@@ -315,6 +315,22 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         }
     }
 
+    /// <summary>
+    /// Sets the entity's membership to <paramref name="shouldBeInView"/> — whether its new value passes — from the view's own set (VDELTA-01), with the
+    /// one set operation the change needs: the add or the removal itself says whether it was in.
+    /// </summary>
+    private protected void ApplyMembership(long pk, bool shouldBeInView)
+    {
+        if (shouldBeInView)
+        {
+            CompactDelta(pk, _entityIds.TryAdd(pk) ? DeltaKind.Added : DeltaKind.Modified);
+        }
+        else if (_entityIds.TryRemove(pk))
+        {
+            CompactDelta(pk, DeltaKind.Removed);
+        }
+    }
+
     private protected void CompactDelta(long pk, DeltaKind newKind)
     {
         if (!_deltas.TryGetValue(pk, out var existing))
@@ -361,6 +377,40 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
                 return;
         }
     }
+
+    /// <summary>
+    /// Set while a full refresh is still owed: the last one began after an overflow, or met one, and the entries the ring dropped may belong to a commit
+    /// that had appended its deltas but not yet published the value the re-scan reads. The next refresh re-scans again, as a membership resync stays in
+    /// resync (<c>EcsView.RefreshMembershipResync</c>) — one more O(N) at a later snapshot, which covers them.
+    /// </summary>
+    private protected bool _refreshFullPending;
+
+    /// <summary>Whether this refresh must re-scan: the ring dropped entries, or the last full refresh left one owed.</summary>
+    private protected bool NeedsRefreshFull => _refreshFullPending || DeltaBuffer.HasOverflow;
+
+    /// <summary>
+    /// Opens a full refresh: clears the ring's overflow flag WITHOUT discarding its entries, and reports whether it had been set. The ring's Reset, which
+    /// refreshes used before (and which is gone), also threw away the entries of commits above the refreshing transaction's TSN — a re-scan of a slot
+    /// whose value a commit had not yet published missed them for good — and re-anchored the ring's base TSN under live producers.
+    /// </summary>
+    private protected bool BeginRefreshFull() => DeltaBuffer.ClearOverflow();
+
+    /// <summary>
+    /// Closes a full refresh, once the view has folded the entries at or below its transaction's TSN (and kept the newer ones): owes another full refresh
+    /// when entries were dropped before or during this one.
+    /// </summary>
+    /// <remarks>
+    /// The entries at or below the TSN are FOLDED, not discarded: a commit's delta reaches the ring (Phase A of its publish) before its value reaches the
+    /// cluster slot the re-scan reads (Phase B), so the re-scan can miss a value whose entry is there. Folded after the re-scan's diff, an entry the
+    /// re-scan already reflects changes nothing (VDELTA-01).
+    /// </remarks>
+    private protected void EndRefreshFull(bool droppedBefore) => _refreshFullPending = DeltaBuffer.ClearOverflow() || droppedBefore;
+
+    /// <summary>
+    /// Leaves the view's first refresh a full one. A builder calls it once the view is populated: a commit whose delta was appended before the view was
+    /// registered, and whose value reached the cluster slot after the population scan read it, is in neither.
+    /// </summary>
+    internal void OweRefreshFull() => _refreshFullPending = true;
 
     /// <summary>
     /// Drains ring buffer entries that arrived during a RefreshFull re-scan, advancing the consumer position without processing entries

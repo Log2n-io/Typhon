@@ -2012,6 +2012,7 @@ public unsafe partial class Transaction : EntityAccessor
         if (e.IndexPending)
         {
             PublishClusterIndexes(in e);
+            _dbe.PublishAfterIndexesProbe?.Invoke();
         }
 
         // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here

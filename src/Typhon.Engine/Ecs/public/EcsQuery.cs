@@ -1009,6 +1009,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // Process any deltas that arrived during population
         view.RefreshFromScheduler(_tx);
         view.ClearDelta();
+        view.OweRefreshFull();
 
         return view;
     }
@@ -1030,6 +1031,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         view.PopulateInitialOr(_tx);
         view.RefreshFromScheduler(_tx);
         view.ClearDelta();
+        view.OweRefreshFull();
 
         return view;
     }

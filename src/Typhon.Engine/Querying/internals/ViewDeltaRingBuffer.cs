@@ -27,7 +27,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     // Immutable configuration
     private readonly int _capacity;
     private readonly int _capacityMask;
-    private long _baseTSN;
+    private readonly long _baseTSN;
 
     // Single allocation block holding all SOA arrays
     private PinnedMemoryBlock _block;
@@ -198,9 +198,12 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Advance()
     {
-        var index = (int)(_head.Value & _capacityMask);
-        _written[index] = 0;
-        _head.Value++;
+        var head = _head.Value;
+        _written[(int)(head & _capacityMask)] = 0;
+
+        // Release: a producer that sees the advanced head may claim this slot and set its written flag; on arm64 a plain store here could become visible
+        // before the clear above, which would then overwrite the producer's flag and leave the consumer spinning on a slot that was written.
+        Volatile.Write(ref _head.Value, head + 1);
     }
 
     /// <summary>
@@ -208,9 +211,8 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="Reset"/> is the only other way to clear <c>_overflow</c>, and it also throws away every entry — including ones a producer appended for a
-    /// commit the resyncing reader could not yet see. A membership resync re-queries at its own snapshot and then wants the flag gone but the not-yet-visible
-    /// tail kept, which is exactly this.
+    /// The only way to clear <c>_overflow</c>. A resync — membership or full — re-queries and then wants the flag gone but every entry kept: those above its
+    /// snapshot are for commits it cannot see yet, and those below it for commits whose value its re-scan may have missed (VDELTA-01).
     /// </para>
     /// <para>
     /// <b>Interlocked, and it returns the previous value, because a plain write here loses entries.</b> A producer sets the flag AFTER dropping entries and
@@ -220,26 +222,6 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </para>
     /// </remarks>
     public bool ClearOverflow() => Interlocked.Exchange(ref _overflow, 0) != 0;
-
-    /// <summary>
-    /// Reset the buffer to empty state. Not thread-safe — caller must ensure no concurrent access.
-    /// </summary>
-    /// <param name="newBaseTSN">When >= 0, reanchors the base TSN for delta computation.</param>
-    public void Reset(long newBaseTSN = -1)
-    {
-        NativeMemory.Clear(_written, (nuint)_capacity);
-        NativeMemory.Clear(_componentTags, (nuint)_capacity);
-        _head.Value = 0;
-        _tail.Value = 0;
-        // Interlocked for the same reason ClearOverflow is: a plain store here can swallow an overflow a producer raised concurrently, and the
-        // caller then treats a buffer that dropped entries as clean. Reset's own doc says callers must exclude concurrent access, but its callers
-        // (EcsView.RefreshFull / RefreshFullOr, NavigationView) run on the consumer thread while commit-path producers are live.
-        Interlocked.Exchange(ref _overflow, 0);
-        if (newBaseTSN >= 0)
-        {
-            _baseTSN = newBaseTSN;
-        }
-    }
 
     /// <summary>True while the pinned block behind this buffer is still mapped — false once it has actually been freed.</summary>
     /// <remarks>Exists so a verifier can assert that a write racing a disposal lands in live memory, which is the whole claim of #864's fix.</remarks>
@@ -289,8 +271,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </summary>
     /// <remarks>
     /// Nulling here rather than in <see cref="Retire"/> is the difference between a loud fault and silent corruption. Before the free the pointers
-    /// must stay valid (a late publisher writes through them); after it they must NOT, or any later use — <see cref="Reset"/>'s 8 KB
-    /// <c>NativeMemory.Clear</c> most of all — writes into memory the allocator has re-issued.
+    /// must stay valid (a late publisher writes through them); after it they must NOT, or any later use writes into memory the allocator has re-issued.
     /// </remarks>
     internal void OnBlockReclaimed()
     {

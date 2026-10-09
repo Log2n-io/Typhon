@@ -113,6 +113,7 @@ public class NavigationQueryBuilder<TSource, TTarget> where TSource : unmanaged 
         // Drain any concurrent entries that arrived during population (engine-internal — no user execution site)
         view.RefreshFromScheduler(tx);
         view.ClearDelta();
+        view.OweRefreshFull();
 
         return view;
     }

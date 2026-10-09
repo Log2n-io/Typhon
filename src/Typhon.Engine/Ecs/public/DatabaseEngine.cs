@@ -6134,6 +6134,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal bool PrepareReconcilesIndexesForTest { get; set; }
 
     /// <summary>
+    /// Test hook (view ring, step 1.5): runs in a Versioned commit's publish after its index and view deltas (Phase A), before its value reaches the
+    /// cluster slot (Phase B) — the window in which a view's full re-scan reads the old value while the delta is already in the ring, or dropped. Per
+    /// engine. Null in production.
+    /// </summary>
+    internal Action PublishAfterIndexesProbe { get; set; }
+
+    /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
     /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
     /// </summary>
