@@ -1571,66 +1571,89 @@ public unsafe partial class Transaction
         // so the CompRevInfo is re-resolved with a direct chain walk (single-entry fast path in the steady state).
         ref var cri = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
 
-        if (!cached)
+        // CHAIN-02: an entry this call inserted is removed on any throw until it claims a revision — the resolve below can time out on the chain's lock,
+        // the append can fail. Left behind, it was a default entry naming chain 0, which a retried write appended to.
+        var claimed = false;
+        try
         {
-            if (chainRootChunkId != 0)
+            if (!cached)
             {
-                // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence stays snapshot-correct: the walk computes it
-                // position-based (CS - totalCommitted + visibleOrdinal), so a commit that landed between resolve and write still trips the
-                // first-committer-wins check at our commit.
-                var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, this);
-                if (!walk.IsFailure)
+                if (chainRootChunkId != 0)
                 {
-                    cri = walk.Value;
-                    cri.Operations = ComponentInfo.OperationType.Read;
-                }
-            }
-
-            if (cri.CompRevTableFirstChunkId == 0)
-            {
-                // Fallback: Write without prior Open (edge case), or the chain-root walk failed
-                var result = GetCompRevInfoFromIndex(pk, info, TSN);
-                if (result.IsFailure)
-                {
-                    info.SingleCache.Remove(pk);
-                    throw new InvalidOperationException($"Entity {entityId} not found in PK index for {compType.Name}");
-                }
-                cri = result.Value;
-            }
-        }
-
-        // Only allocate new revision on FIRST write. Created (from Spawn) already has a chunk.
-        bool alreadyWritten = (cri.Operations & (ComponentInfo.OperationType.Updated | ComponentInfo.OperationType.Created)) != 0;
-
-        if (!alreadyWritten)
-        {
-            int oldChunkId = cri.CurCompContentChunkId;
-            cri.Operations |= ComponentInfo.OperationType.Updated;
-
-            // AddCompRev: allocates NEW chunk, adds revision entry with IsolationFlag=true
-            ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false);
-
-            // Copy old data to new chunk
-            byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);
-            byte* newPtr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
-            Unsafe.CopyBlock(newPtr, oldPtr, (uint)table.ComponentTotalSize);
-
-            // If the component has collections, increment RefCounters for shared collection buffers.
-            // The byte copy above duplicated the _bufferId fields — both old and new revisions now
-            // reference the same collection storage, so RefCounter must reflect that.
-            if (table.HasCollections)
-            {
-                foreach (var f in table.CollectionFields)
-                {
-                    int bufferId = *(int*)(newPtr + table.ComponentOverhead + f.OffsetInComponentStorage);
-                    if (bufferId != 0)
+                    // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence stays snapshot-correct: the walk computes it
+                    // position-based (CS - totalCommitted + visibleOrdinal), so a commit that landed between resolve and write still trips the
+                    // first-committer-wins check at our commit.
+                    var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, this);
+                    if (!walk.IsFailure)
                     {
-                        var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
-                        f.Vsbs.BufferAddRef(bufferId, ref accessor);
-                        accessor.Dispose();
+                        cri = walk.Value;
+                        cri.Operations = ComponentInfo.OperationType.Read;
+                    }
+                }
+
+                if (cri.CompRevTableFirstChunkId == 0)
+                {
+                    // Fallback: Write without prior Open (edge case), or the chain-root walk failed
+                    var result = GetCompRevInfoFromIndex(pk, info, TSN);
+                    if (result.IsFailure)
+                    {
+                        throw new InvalidOperationException($"Entity {entityId} not found in PK index for {compType.Name}");   // the catch removes the entry
+                    }
+                    cri = result.Value;
+                }
+            }
+
+            // Only allocate new revision on FIRST write. Created (from Spawn) already has a chunk.
+            bool alreadyWritten = (cri.Operations & (ComponentInfo.OperationType.Updated | ComponentInfo.OperationType.Created)) != 0;
+
+            if (!alreadyWritten)
+            {
+                int oldChunkId = cri.CurCompContentChunkId;
+
+                // AddCompRev: allocates NEW chunk, adds revision entry with IsolationFlag=true. The entry claims a write only once that revision exists
+                // (CHAIN-02, #1252): marked Updated before, a throw here — the chain-lock timeout, an allocation failure — left it naming the committed
+                // revision as this transaction's own, and a retried write in the same transaction was handed the committed chunk to write into, in place.
+                if (_dbe.FirstWriteClaimsBeforeAppendForTest)
+                {
+                    cri.Operations |= ComponentInfo.OperationType.Updated;
+                    claimed = true;
+                }
+
+                ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false);
+                cri.Operations |= ComponentInfo.OperationType.Updated;
+                claimed = true;
+
+                // Copy old data to new chunk
+                byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);
+                byte* newPtr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
+                Unsafe.CopyBlock(newPtr, oldPtr, (uint)table.ComponentTotalSize);
+
+                // If the component has collections, increment RefCounters for shared collection buffers.
+                // The byte copy above duplicated the _bufferId fields — both old and new revisions now
+                // reference the same collection storage, so RefCounter must reflect that.
+                if (table.HasCollections)
+                {
+                    foreach (var f in table.CollectionFields)
+                    {
+                        int bufferId = *(int*)(newPtr + table.ComponentOverhead + f.OffsetInComponentStorage);
+                        if (bufferId != 0)
+                        {
+                            var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
+                            f.Vsbs.BufferAddRef(bufferId, ref accessor);
+                            accessor.Dispose();
+                        }
                     }
                 }
             }
+        }
+        catch
+        {
+            if (!cached && !claimed)
+            {
+                info.SingleCache.Remove(pk);
+            }
+
+            throw;
         }
 
         byte* ptr = info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true);
@@ -3501,26 +3524,53 @@ public unsafe partial class Transaction
         }
         else
         {
-            // Not in cache — read from index
-            var result = GetCompRevInfoFromIndex(pk, info, TSN);
-            if (result.IsFailure)
+            // Not in cache — read from index. A throw (the walk's lock timeout) takes the entry this call inserted with it (CHAIN-02).
+            ComponentInfo.CompRevInfo resolved;
+            try
+            {
+                var result = GetCompRevInfoFromIndex(pk, info, TSN);
+                if (result.IsFailure)
+                {
+                    info.SingleCache.Remove(pk);
+                    return;
+                }
+
+                resolved = result.Value;
+            }
+            catch
             {
                 info.SingleCache.Remove(pk);
-                return;
+                throw;
             }
-            cri = result.Value;
-        }
 
-        cri.Operations |= ComponentInfo.OperationType.Deleted;
+            cri = resolved;
+        }
 
         // Create the tombstone revision only on the first mutation — UpdateComponent's guard, which this used to paraphrase as "was read". An entry that
         // was read and then WRITTEN carries both bits: it already has this transaction's revision, which the cleared chunk id above turns into the
         // tombstone. Adding a second one left that first revision isolated for ever, its chunk freed above, so neither the GC nor the entity cleanup could
         // reduce the chain to its tombstone: every write-then-destroy leaked the chain and the committed content it still listed.
+        //
+        // The tombstone is appended before the entry claims the delete (CHAIN-02): claimed first, a failed append (the chain-lock timeout, at commit) left
+        // an entry marked Deleted that named the committed revision — a retried commit skipped the tombstone and took that revision for its own.
         if (!cached || (cri.Operations & (ComponentInfo.OperationType.Created | ComponentInfo.OperationType.Updated)) == 0)
         {
-            ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, true);
+            try
+            {
+                ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, true);
+            }
+            catch
+            {
+                if (!cached)
+                {
+                    info.SingleCache.Remove(pk);
+                }
+
+                throw;
+            }
         }
+
+        cri.Operations |= ComponentInfo.OperationType.Deleted;
     }
 
     /// <summary>

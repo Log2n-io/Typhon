@@ -6031,6 +6031,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal bool RollbackVoidsRecordedIndexForTest { get; set; }
 
     /// <summary>
+    /// Test-only mutant switch (CHAIN-02): when set, a first write marks its cache entry written before its revision is appended — what CHAIN-02 forbids —
+    /// so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool FirstWriteClaimsBeforeAppendForTest { get; set; }
+
+    /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
     /// pre-#1158 behaviour, under the lock — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
     /// </summary>

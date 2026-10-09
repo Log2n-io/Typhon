@@ -408,9 +408,41 @@ append after it.
             mutations: the count dropped on every void fails the first three; the orphan at its recorded index fails the
             conflict test; the rollback at its recorded index without the lock fails both rollback tests; the compaction
             keeping voids fails the hole, reverse-rollback and handler tests; the orphan voided after the handler fails the
-            handler test. Not covered: the rollback of a delete entry (a destroy's tombstone exists only inside its commit)
+            handler test. Not covered: the rollback of a delete entry (a destroy's tombstone is added at its commit; a
+            commit that throws after PrepareEcsDestroys leaves one to roll back, a stage step 1.4's seams can build)
             and the conflict's destroy branch (its tombstone is added after any newer commit, so no conflict is detected
             without a concurrent commit inside that PREPARE)
+
+### CHAIN-02: A transaction's cache entry claims a revision only once the revision exists `[fatal]` `[silent]`
+  invariant a first write of a Versioned component marks its cache entry written (`Operations |= Updated`) only after
+            `AddCompRev` appended its revision; a destroy marks it deleted only once its tombstone exists — appended, or its
+            own revision converted (`MakeOwnRevisionTombstone`)
+  invariant an entry a first touch inserted (`GetValueRefOrAddDefault`) is removed when anything throws before the entry is
+            complete — resolved, and for a write or a destroy its revision appended: the resolve's walk timing out on the
+            chain lock, the append failing. An entry that was already there keeps what it said. (Resolving into a local and
+            inserting after, as `ResolveClusterVersionedForDestroy` does, holds this by construction)
+  never mark the entry before the append: a throw there — the chain-lock timeout (readers can starve the append, #1253),
+        an allocation failure, back-pressure — leaves an entry naming the committed revision as this transaction's own. A
+        retried write in the same transaction is then handed the committed revision's chunk and writes into it in place,
+        visible to every reader before it commits; a retried destroy skips its tombstone; before CHAIN-01, the rollback
+        freed and voided the committed revision
+  never leave an inserted entry behind a throw: a default entry names chain 0, and a retried write appends there
+  scope: Transaction.EcsVersionedCopyOnWrite, Transaction.MarkComponentDeleted, Transaction.QueryRead,
+         ComponentRevisionManager.AddCompRev
+  on_violation: an uncommitted write is visible to every snapshot, a rolled-back one stays, a retried destroy does not commit,
+                a retried write lands in another chain (#1252)
+  verified: FirstWriteFailureTests — AFailedFirstWrite_ThenARetry_WritesItsOwnRevision (a reader holds the chain shared, so
+            the first write's append times out past its own walk; the retry is invisible until it commits),
+            ADestroyWhoseTombstoneFails_CommitsWhenRetried, AFailedResolve_ThenARetry_WritesItsOwnRevision (the chain held
+            exclusive fails the copy-on-write's own walk), AStormOfFailingFirstWrites_LosesNoCommitAndKeepsNoRollback (a 10 µs
+            chain-lock timeout and long readers, hundreds of appends retried a run, one transfer in four rolled back, every
+            account where the committed transfers put it) [VerifiesRule]; mutant
+            AFirstWriteThatClaimsBeforeAppending_LeaksItsRetry (`FirstWriteClaimsBeforeAppendForTest`) [RuleMutant]. Real
+            mutations: the write's mark before the append fails the retry test and the storm; the destroy's mark before its
+            tombstone fails the destroy test; the inserted entry kept after a throw fails the resolve test. Not covered by a
+            test: QueryRead's guard and `MarkComponentDeleted`'s not-cached guards (the destroy's own pre-resolve inserts the
+            entry first, so the cached path is the one reached). AFailedFirstWriteThatClaimedTheCommittedRevision_ThenARollback_LeavesIt
+            verifies CHAIN-01's backstop: the claim forced, the rollback finds no pending entry of its own and touches nothing
 
 ---
 

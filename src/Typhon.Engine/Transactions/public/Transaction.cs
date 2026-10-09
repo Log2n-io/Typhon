@@ -1271,8 +1271,18 @@ public unsafe partial class Transaction : EntityAccessor
         ref var compRevInfo = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var exists);
         if (!exists)
         {
-            // Couldn't find in the cache, get it from the index
-            var result = GetCompRevInfoFromIndex(pk, info, TSN);
+            // Couldn't find in the cache, get it from the index. A throw (the walk's lock timeout) takes the entry with it, as a failure does below.
+            Result<ComponentInfo.CompRevInfo, RevisionReadStatus> result;
+            try
+            {
+                result = GetCompRevInfoFromIndex(pk, info, TSN);
+            }
+            catch
+            {
+                info.SingleCache.Remove(pk);
+                throw;
+            }
+
             if (result.IsFailure)
             {
                 // NotFound, SnapshotInvisible, or Deleted — all mean no readable component. Remove the default entry that GetValueRefOrAddDefault added to
