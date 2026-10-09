@@ -1550,6 +1550,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Hoist stackalloc out of loop — max record size is 78B (14B header + 16 components × 4B)
         var readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        List<DeferredCleanupManager.DeferredChunkFreeEntry> frees = null;
+        List<EcsCleanupEntry> putOff = null;
 
         foreach (var entry in toProcess)
         {
@@ -1578,6 +1580,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // components"), so indexing it unguarded is an unconditional NullReferenceException for every all-SingleVersion or all-Transient archetype.
                 // The guard is the same one ArchetypeAccessor.ResolveClusterVersionedSlots already uses. It went unnoticed because this method's only callers
                 // were two tests, both on a Versioned archetype — the population that never takes this branch (#681).
+                //
+                // Each chain is released whole, by ReleaseDestroyedEntityChain — its one owner (REAP-02): the revision GC trims a destroyed entity's chain
+                // to its tombstone and leaves the rest to this cleanup. Freeing only the root used to leak the rest, and the GC freed the same root too —
+                // twice freed, a chunk a concurrent spawn had just taken was freed under it. A chain not yet quiescent puts the whole entity off to a later
+                // pass, its record kept; a chain already released is detached from the record first, so the retry never releases it twice.
+                var deferred = false;
+                var detached = false;
                 var layout = meta.ClusterLayout;
                 if (layout.SlotToVersionedIndex != null && engineState.SlotToComponentTable != null)
                 {
@@ -1590,19 +1599,61 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
 
                         var chainRoot = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(readBuf, vi);
-                        if (chainRoot != 0)
+                        if (chainRoot == 0)
                         {
-                            engineState.SlotToComponentTable[slot].CompRevTableSegment?.FreeChunk(chainRoot);
+                            continue;
+                        }
+
+                        frees ??= [];
+                        var release = DeferredCleanupManager.ReleaseDestroyedEntityChain(engineState.SlotToComponentTable[slot], chainRoot,
+                            (long)entry.Id.RawValue, changeSet, frees);
+                        if (release == DeferredCleanupManager.ChainRelease.Deferred)
+                        {
+                            deferred = true;
+                        }
+                        else
+                        {
+                            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(readBuf, vi, 0);
+                            detached = true;
                         }
                     }
                 }
 
-                // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries the
-                // dirty marks — so the call does not read as though this write is exempt from ownership.
-                engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
+                if (deferred)
+                {
+                    if (detached)
+                    {
+                        engineState.EntityMap.Upsert(entry.Id.EntityKey, readBuf, ref accessor, changeSet);
+                    }
+
+                    (putOff ??= []).Add(entry);
+                }
+                else
+                {
+                    // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries
+                    // the dirty marks — so the call does not read as though this write is exempt from ownership.
+                    engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
+                }
             }
 
             accessor.Dispose();
+        }
+
+        // The released chains' chunks and the content chunks they named: freed once every transaction alive now has gone — one that resolved an entity
+        // before its destroy committed can still walk its chain until it finishes.
+        if (frees is { Count: > 0 })
+        {
+            DeferredCleanupManager.EnqueueChunkFrees(TransactionChain.NextFreeId, frees);
+        }
+
+        // Entities whose chains were not quiescent yet go back in the queue, for the next drain.
+        if (putOff != null)
+        {
+            lock (_ecsCleanupLock)
+            {
+                _ecsCleanupQueue.AddRange(putOff);
+                Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
+            }
         }
 
         // Also prune EnabledBits overrides
@@ -1821,6 +1872,52 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    [LoggerMessage(LogLevel.Warning, "Close: the cleanup drain failed; what it did not free stays allocated")]
+    private partial void LogCloseDrainFailed(Exception exception);
+
+    /// <summary>
+    /// A clean close runs the cleanups still queued: revision GC entries, destroyed entities, and the chunk frees deferred past the transactions alive
+    /// when they were queued. With no transaction left, all of it is due, and none of it may outlive the close — a destroyed entity's chain root still
+    /// allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
+    /// </summary>
+    /// <remarks>
+    /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. Skipped while a transaction is
+    /// still alive — its snapshot may need what is queued.
+    /// </remarks>
+    private void DrainCleanupsAtClose()
+    {
+        if (TransactionChain.ActiveCount != 0 || DeferredCleanupManager == null)
+        {
+            return;
+        }
+
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            // Each pass can queue work the next one finishes: an entity's cleanup defers its chunk frees, and puts off an entity whose chain a revision
+            // cleanup still names. The cutoff is past every TSN issued, so everything queued is mature.
+            var cutoff = TransactionChain.NextFreeId + 1;
+            for (var pass = 0; pass < 4; pass++)
+            {
+                var revisions = Volatile.Read(ref DeferredCleanupManager.QueueSize);
+                var frees = Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize);
+                if (revisions == 0 && frees == 0 && EcsCleanupQueueSize == 0)
+                {
+                    break;
+                }
+
+                DeferredCleanupManager.ProcessDeferredCleanups(long.MaxValue, cutoff, this, changeSet);
+                ProcessEcsCleanups(cutoff, changeSet);
+            }
+
+            DeferredCleanupManager.FlushChunkFrees(EpochManager);
+        }
+        finally
+        {
+            changeSet.ReleaseDirtyMarks();
+        }
+    }
+
     // Engine teardown, split out so Dispose() can guarantee owned-provider disposal in a finally (see there). A throw from
     // any step here propagates out of Dispose() after the finally has released the owned container.
     private void DisposeCore(bool disposing)
@@ -1846,6 +1943,21 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             if (_archetypeInitIncomplete && _constructed)
             {
                 CheckpointManager?.PrepareCrashStop();
+            }
+
+            // Before the final cycle, so what the drain changes is written with everything else.
+            if (!_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete)
+            {
+                // A drain that fails leaves what it did not free leaked, as before it existed — never the close itself undone: the final checkpoint and
+                // the clean-shutdown marker still follow.
+                try
+                {
+                    DrainCleanupsAtClose();
+                }
+                catch (Exception e)
+                {
+                    LogCloseDrainFailed(e);
+                }
             }
 
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down

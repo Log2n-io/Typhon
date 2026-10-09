@@ -1027,8 +1027,10 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
                     // BEWARE: Each successful latch needs its corresponding unlatch call!
                     if (_accessor.TryLatchExclusive(prevChunkId))
                     {
-                        // We jump over empty chunks as long as there are some
-                        while ((curChunk != null) && (curChunk->ElementCount == 0))
+                        // We jump over empty chunks as long as there are some — but never the append cursor. AddElement appends into FirstStoredChunkId
+                        // without looking at the chain: unlinked here, the chunk stayed the cursor, so the next appends landed in a chunk no walk reaches,
+                        // parked for reuse — and wiped when AddElement or the segment reissued it. An index lost every entry appended after the walk.
+                        while ((curChunk != null) && (curChunk->ElementCount == 0) && (curChunkId != rootChunk.FirstStoredChunkId))
                         {
                             if (_accessor.TryLatchExclusive(curChunkId))
                             {

@@ -40,6 +40,26 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
         return ids;
     }
 
+    /// <summary>
+    /// Stages the debt the measured cycle settles, right before it: a forced cycle drains what the spawns left — a background cycle may already have
+    /// taken part of it, by an amount the machine's load decides (99, then 55 owed pages under a loaded gate) — and one transaction then rewrites every
+    /// entity, owing the same pages again in one burst.
+    /// </summary>
+    private static void StageDebt(DatabaseEngine dbe, EntityId[] ids)
+    {
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)), Is.True, "the draining cycle did not cover");
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in ids)
+        {
+            var e = tx.OpenMut(id);
+            var a = e.Read(CompAArch.A);
+            a.B++;
+            e.Set(CompAArch.A, a);
+        }
+
+        tx.Commit();
+    }
+
     /// <summary>Forces a cycle and returns the cache's writeback debt before it and at each of its fsyncs.</summary>
     private static (int OwedBefore, List<int> OwedAtFsync) ForceCycleSamplingDebt(DatabaseEngine dbe)
     {
@@ -63,7 +83,8 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
             mmf.FlushToDiskInterceptor = null;
         }
 
-        Assert.That(owedBefore, Is.GreaterThan(100), "premise: enough owed pages for several batches");
+        // Four batches are what the drop count needs; the staging owes far more.
+        Assert.That(owedBefore, Is.GreaterThanOrEqualTo(4 * BatchPages), "premise: enough owed pages for several batches");
         return (owedBefore, owedAtFsync);
     }
 
@@ -95,7 +116,7 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
         var ck = dbe.CheckpointManager;
         ck.WriteBatchMaxPagesForTest = BatchPages;
         ck.WriteSubBatchPagesForTest = SubBatchPages;
-        Spawn(dbe);
+        StageDebt(dbe, Spawn(dbe));
 
         var wavesBefore = Volatile.Read(ref ck.ParallelWaveCount);
         var (owedBefore, owedAtFsync) = ForceCycleSamplingDebt(dbe);
@@ -115,7 +136,7 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
         dbe.RegisterComponentFromAccessor<CompA>();
         dbe.InitializeArchetypes();
         dbe.CheckpointManager.WriteBatchMaxPagesForTest = int.MaxValue;
-        Spawn(dbe);
+        StageDebt(dbe, Spawn(dbe));
 
         var (owedBefore, owedAtFsync) = ForceCycleSamplingDebt(dbe);
 
