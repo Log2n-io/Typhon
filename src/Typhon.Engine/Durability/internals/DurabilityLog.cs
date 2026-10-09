@@ -23,6 +23,25 @@ internal sealed class DurabilityLog : IDurabilityLog
     /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
     internal Action AfterFloorProbe { get; set; }
 
+    /// <summary>
+    /// Stops every later append (AP-03): set by <see cref="DatabaseEngine.LatchCommitPipelineFailure"/> when a commit's publish failed after its records
+    /// were appended. Memory then holds a partial publish, and nothing more is logged over it — a commit, a fence, a bulk manifest alike. The callers check
+    /// the engine's latch first (a fence returns, a commit rolls back); this is the backstop for any that does not, and for a latch set between the two.
+    /// </summary>
+    internal void Stop(Exception failure) => Interlocked.CompareExchange(ref _stoppedBy, failure, null);
+
+    private Exception _stoppedBy;
+
+    private void ThrowIfStopped()
+    {
+        if (Volatile.Read(ref _stoppedBy) is { } stopped)
+        {
+            throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                "The engine stopped committing after a commit failed between its append and the end of its publish; nothing more is appended. Reopen the "
+                + "database to recover it.", stopped);
+        }
+    }
+
     public long DurableLsn => _wal.DurableLsn;
 
     public long LastAppendedLsn => _wal.CommitBuffer.NextLsn - 1;
@@ -55,6 +74,7 @@ internal sealed class DurabilityLog : IDurabilityLog
             return 0;
         }
 
+        ThrowIfStopped();
         var size = RecordCodec.MeasureFenceBlocks(blocks, slotIndices.Length, totalComponentSize, out _);
 
         // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
@@ -94,6 +114,8 @@ internal sealed class DurabilityLog : IDurabilityLog
         {
             return 0;
         }
+
+        ThrowIfStopped();
 
         var size = RecordCodec.Measure(in batch, out var recordCount, out _);
 

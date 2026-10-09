@@ -108,6 +108,17 @@ public enum TyphonErrorCode
     /// </summary>
     CommitDurabilityUncertain       = 7008,
 
+    /// <summary>
+    /// A transaction's records were appended but its publish did not complete; the engine stopped committing
+    /// (see <see cref="CommitPublishIncompleteException"/>).
+    /// </summary>
+    CommitPublishIncomplete         = 7009,
+
+    /// <summary>
+    /// A commit was refused because the engine stopped committing after an incomplete publish (see <see cref="DatabaseEngine.CommitPipelineFailure"/>).
+    /// </summary>
+    CommitPipelineStopped           = 7010,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

@@ -84,8 +84,24 @@ public class TimeoutOptions
     public TimeSpan PageCacheBackpressureTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// How long a commit's publish may wait out page-cache back-pressure, from the moment its records are in the WAL, before giving up and stopping the
+    /// engine (AP-03).
+    /// </summary>
+    /// <remarks>
+    /// Past the append a commit cannot roll back: an allocation that gave up after <see cref="PageCacheBackpressureTimeout"/> would leave a partial
+    /// publish, which stops the engine until a reopen recovers the commit from the log. The publish waits instead, logging each
+    /// <see cref="PageCacheBackpressureTimeout"/> it outlasts. One bound for the whole publish, however many allocations it makes. It is far above any
+    /// checkpoint stall, and still makes a cache that cannot free a page — every page held by the epochs of running transactions, the publisher's own among
+    /// them — stop the engine instead of hanging it.
+    /// </remarks>
+    public TimeSpan CommitPublishBackpressureTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// Timeout for WAL commit buffer back-pressure waits.
     /// When the ring buffer is full, commit threads spin-wait for the WAL writer to drain it.
     /// </summary>
     public TimeSpan WalBackPressureTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>A copy of these options, every property included — for a test that changes one and restores the rest.</summary>
+    internal TimeoutOptions Clone() => (TimeoutOptions)MemberwiseClone();
 }

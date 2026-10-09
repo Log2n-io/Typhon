@@ -1863,6 +1863,28 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         set => _clockSweepCurrentIndex.Value = value % MemPagesCount;
     }
 
+    /// <summary>
+    /// Non-zero on a thread while a commit publishes, past its WAL append (AP-03): the end of the append, a <see cref="Stopwatch"/> timestamp. Its page
+    /// allocations wait back-pressure out instead of throwing after <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/>, until
+    /// <see cref="TimeoutOptions.CommitPublishBackpressureTimeout"/> after it — one bound for the whole publish, however many allocations it makes.
+    /// A throw there could not roll the commit back, only stop the engine.
+    /// </summary>
+    internal static long PublishSince
+    {
+        get => t_publishSince;
+        set => t_publishSince = value;
+    }
+
+    [ThreadStatic] private static long t_publishSince;
+
+    /// <summary>How many times a publish's allocation outlasted <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> and went on waiting.</summary>
+    internal long PublishBackpressureExtensions => Interlocked.Read(ref _publishBackpressureExtensions);
+
+    private long _publishBackpressureExtensions;
+
+    /// <summary>Test seam: while it returns true, every allocation round finds no slot, a whole lap's worth — back-pressure, on demand.</summary>
+    internal Func<bool> ForceBackpressureForTest;
+
     private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
         CancellationToken cancellationToken = default)
     {
@@ -1909,10 +1931,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             memPageIndex = -1;
             int evictedFilePageIndex = -1;
 
+            var forced = ForceBackpressureForTest != null && ForceBackpressureForTest();
+            if (forced)
+            {
+                cursor = Math.Max(cursor, 0);
+                lapVisits = pageCount;
+            }
+
             // If we already have a MemPage fetch for the FilePage just before the one we allocate, then we try to take the MemPage that follows
             // We request FilePage 123, there's a FilePage 122 allocated to MemPage 34, then we try to allocate 35 for 123, which will allow, if needed,
             //  one file write operation for both pages
-            if (filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
+            if (!forced && filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
             {
                 memPageIndex = prevMemPageIndex + 1;
                 pi = Slot(memPageIndex);
@@ -1930,7 +1959,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (found == false)
             {
                 long attempts = 0;
-                while (attempts < firstPassMax)
+                while (!forced && attempts < firstPassMax)
                 {
                     memPageIndex = AdvanceClockHand();
                     pi = Slot(memPageIndex);
@@ -1953,7 +1982,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                 // Should almost never happen, right. ...right?
                 // But if it is, loop one more time, same thing, but ignoring the ClockSweepCounter, take the first page available
-                if (found == false)
+                if (found == false && !forced)
                 {
                     var visits = attempts;
                     if (cursor < 0)
@@ -2053,9 +2082,25 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // then a strategy that gives up just does not wait.
                         if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount) && lapComplete)
                         {
-                            ThrowHelper.ThrowPageCacheBackpressureTimeout(
-                                dirtyCount, epochCount,
-                                TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                            // AP-03: past a commit's WAL append, a give-up cannot roll the commit back, only stop the engine. The publish waits on, a
+                            // fresh PageCacheBackpressureTimeout at a time, up to CommitPublishBackpressureTimeout from the end of its append.
+                            var publishSince = t_publishSince;
+                            var limit = TimeoutOptions.Current.CommitPublishBackpressureTimeout;
+                            if (publishSince != 0 && Stopwatch.GetElapsedTime(publishSince) < limit)
+                            {
+                                Interlocked.Increment(ref _publishBackpressureExtensions);
+                                LogPublishBackpressureWaitExtended(Logger, dirtyCount, epochCount, Stopwatch.GetElapsedTime(publishSince).TotalMilliseconds,
+                                    limit.TotalMilliseconds);
+                                bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
+                            }
+                            else
+                            {
+                                ThrowHelper.ThrowPageCacheBackpressureTimeout(
+                                    dirtyCount, epochCount,
+                                    publishSince != 0
+                                        ? Stopwatch.GetElapsedTime(backpressureSince)
+                                        : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                            }
                         }
                     }
                     finally

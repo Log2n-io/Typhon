@@ -5,6 +5,8 @@ using BenchmarkDotNet.Toolchains.InProcess.Emit;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Runtime.InteropServices;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Benchmark;
 
@@ -50,6 +52,7 @@ public class CrudCompareBenchmarks
         _sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         _dbe = _sp.GetRequiredService<DatabaseEngine>();
         _dbe.RegisterComponentFromAccessor<BenchComp>();
+        _dbe.RegisterComponentFromAccessor<BenchUniqueComp>();
         _dbe.InitializeArchetypes();
 
         // Pre-populate for read/update benchmarks
@@ -162,4 +165,35 @@ public class CrudCompareBenchmarks
         }
         t.Commit();
     }
+
+    private int _nextUniqueKey;
+
+    /// <summary>100 spawns under a unique index: the commit checks each key against the index before its append (AP-03), and the publish inserts it.</summary>
+    [Benchmark]
+    public void CreateUnique100_Commit()
+    {
+        using var t = _dbe.CreateQuickTransaction();
+        for (int i = 0; i < 100; i++)
+        {
+            var comp = new BenchUniqueComp { Key = ++_nextUniqueKey };
+            t.Spawn<BenchUniqueArch>(BenchUniqueArch.Data.Set(in comp));
+        }
+        t.Commit();
+    }
+}
+
+[Component("Typhon.Benchmark.BenchUniqueComp", 1)]
+[StructLayout(LayoutKind.Sequential)]
+public struct BenchUniqueComp
+{
+    [Index]
+    public int Key;
+
+    public int Pad;
+}
+
+[Archetype]
+class BenchUniqueArch : Archetype<BenchUniqueArch>
+{
+    public static readonly Comp<BenchUniqueComp> Data = Register<BenchUniqueComp>();
 }

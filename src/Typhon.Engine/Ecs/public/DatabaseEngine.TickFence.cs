@@ -50,6 +50,13 @@ public partial class DatabaseEngine
     /// <returns>Highest LSN written, or 0 if nothing was serialized.</returns>
     public long WriteTickFence(long tickNumber, ChangeSet changeSet = null)
     {
+        // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory; the fence appends nothing over it and maintains nothing from it.
+        // It returns rather than throws: the tick loop goes on, and the commits it makes are the ones refused.
+        if (FenceMustNotAppend(tickNumber))
+        {
+            return 0;
+        }
+
         // When the caller doesn't supply a ChangeSet (e.g., tests that invoke WriteTickFence outside a UoW), we own the lifecycle: create a fresh
         // ChangeSet, thread it through the per-table tick-fence callees, and commit it ourselves at the end. Production callers (TyphonRuntime)
         // pass _currentUow.ChangeSet so dirty-page tracking is consolidated with everything else this tick — UoW.Flush handles the actual writeback.
@@ -119,6 +126,12 @@ public partial class DatabaseEngine
 
     private long AppendFenceBatch(ref CommitBatchBuilder batch)
     {
+        // AP-03: the runtime's parallel fence reaches here without passing WriteTickFence's check.
+        if (FenceMustNotAppend(batch.Tsn))
+        {
+            return 0;
+        }
+
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
         return DurabilityLog.Append(ref batch, ref wc);
     }
@@ -224,6 +237,12 @@ public partial class DatabaseEngine
         int totalComponentSize,
         ReadOnlySpan<ulong> columnHandleRanges)
     {
+        // AP-03: the runtime's parallel fence reaches here without passing WriteTickFence's check.
+        if (FenceMustNotAppend(tickNumber))
+        {
+            return 0;
+        }
+
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
         return DurabilityLog.AppendFenceBlocks(
             blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,

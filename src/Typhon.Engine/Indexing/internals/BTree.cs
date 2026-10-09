@@ -761,6 +761,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public override int EntryCount => _count;
 
+    public override unsafe bool KeysEqual(void* left, void* right) => CompareKeys(*(TKey*)left, *(TKey*)right, Comparer) == 0;
+
+    // The default equality agrees with the default comparison for every key type an index takes: float and double hash -0/+0 alike and every NaN alike.
+    public override unsafe int KeyHash(void* key) => EqualityComparer<TKey>.Default.GetHashCode(*(TKey*)key);
+
     /// <summary>Number of deferred nodes pending reclamation (test visibility).</summary>
     internal int DeferredNodeCount => _deferredNodes.Count;
 

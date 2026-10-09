@@ -18,6 +18,12 @@ public partial class PagedMMF
 
     [LoggerMessage(
         Level = LogLevel.Warning,
+        Message = "Page cache backpressure during a commit's publish, past its WAL append: still waiting (dirty={DirtyCount} epoch={EpochCount}) "
+                + "{WaitedMs}ms into its publish, up to {LimitMs}ms — a give-up there would stop the engine")]
+    private static partial void LogPublishBackpressureWaitExtended(ILogger logger, int dirtyCount, int epochCount, double waitedMs, double limitMs);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
         Message = "CopyPageWithSeqlock: page {MemPageIndex} has odd ModificationCounter={Counter} but is not Exclusive-latched — "
                 + "stale seqlock counter, skipping without wait.")]
     private static partial void LogStaleSeqlockCounterSkip(ILogger logger, int memPageIndex, int counter);

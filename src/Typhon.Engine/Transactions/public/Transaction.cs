@@ -2970,6 +2970,51 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
+    /// The commit failed after its append (AP-02/AP-03): it reports Committed and is never rolled back. When its publish had completed, only the durability
+    /// wait or the finalization failed: <see cref="CommitDurabilityUncertainException"/>. Otherwise memory holds part of it: the engine stops committing and
+    /// pins its records below the checkpoint (<see cref="DatabaseEngine.LatchCommitPipelineFailure"/>), its records are made durable when they can be, and
+    /// <see cref="CommitPublishIncompleteException"/> tells the caller to reopen. Always throws.
+    /// </summary>
+    private void CompleteAfterFailedPublish(long walHighLsn, bool published, Exception failure)
+    {
+        if (published)
+        {
+            TransitionTo(TransactionState.Committed);
+            throw new CommitDurabilityUncertainException(walHighLsn, failure);
+        }
+
+        // Latch, then Committed, then anything that can throw: from here on, a throw must not leave the transaction for Dispose to roll back.
+        var firstLsn = Volatile.Read(ref _inFlightLsnFloor);
+        _dbe.LatchCommitPipelineFailure(firstLsn, failure);
+        TransitionTo(TransactionState.Committed);
+
+        // The chain locks of entries the drain did not reach are released before the durability wait, which must not span them (as WaitAndFinalize's
+        // never does). The drain cursor makes the commit's own finally a no-op after this.
+        ReleaseRetainedPublishLocks();
+        _dbe.LogCommitPipelineStopped(TSN, firstLsn, failure);
+
+        // The records' durability decides whether the restart recovers this commit: confirmed when it can be, on a budget of its own (the unit of work's
+        // may be what ran out).
+        var durable = false;
+        if (walHighLsn > 0 && _dbe.WalManager != null)
+        {
+            try
+            {
+                _dbe.WalManager.RequestFlush();
+                var wc = WaitContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout);
+                _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
+                durable = true;
+            }
+            catch (Exception)
+            {
+                // Unconfirmed: the exception says so. Never a rollback.
+            }
+        }
+
+        throw new CommitPublishIncompleteException(walHighLsn, durable, failure);
+    }
+
+    /// <summary>
     /// AP-01 WAIT/finalize step: for Immediate durability, waits until the appended LSN is durable, then transitions the transaction to Committed and
     /// records metrics. Runs AFTER publish (so the per-entity handler locks are already released — the wait never spans an fsync while holding them).
     /// A wait timeout here occurs post-publish: the transaction is logically committed (AP-02), so the exception means "durability uncertain", not
@@ -2977,7 +3022,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// </summary>
     private void WaitAndFinalize(ref UnitOfWorkContext ctx, long walHighLsn, long startTicks)
     {
-        TyphonException durabilityUncertain = null;
+        Exception durabilityUncertain = null;
 
         // Durability wait for Immediate mode. Publish already ran (AP-01), so the transaction is logically committed: a wait failure here (back-pressure
         // timeout or fatal writer error) MUST NOT roll back (AP-02). Capture it, finish the Committed transition, then surface it as
@@ -2991,8 +3036,9 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
             }
-            catch (TyphonException ex)
+            catch (Exception ex)
             {
+                // Any failure, not only a TyphonException: the transaction is published, so the wait's failure is uncertainty, never a rollback.
                 durabilityUncertain = ex;
             }
         }
@@ -3062,6 +3108,16 @@ public unsafe partial class Transaction : EntityAccessor
         if (State is TransactionState.Rollbacked or TransactionState.Committed)
         {
             return false;
+        }
+
+        // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory. Nothing more is appended over it: the restart that recovers
+        // that commit replays the log, and a later commit would build on what the partial publish left. Refused before PREPARE, so this one rolls back
+        // clean.
+        if (_dbe.CommitPipelineFailure is { } stopped)
+        {
+            throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                "The engine stopped committing after a commit failed between its append and the end of its publish; reopen the database to recover it.",
+                stopped);
         }
 
         // ── Yield point: safe to cancel before any modifications ──
@@ -3176,6 +3232,10 @@ public unsafe partial class Transaction : EntityAccessor
                 }
             }
 
+            // AP-03: what the publish would fail on — a unique key taken when it publishes, a spawn without the component a unique index or its spatial
+            // cell needs — is checked here, after PREPARE and before the point of no return: past it a failure could only stop the engine.
+            ValidatePublishBeforeAppend();
+
             // ── PREPARE complete. Deferred-cleanup enqueue is prepare-side bookkeeping (no visibility) — it runs before Append. ──
             _dbe.LogCommitPhase(TSN, "DeferredCleanup");
 
@@ -3194,32 +3254,61 @@ public unsafe partial class Transaction : EntityAccessor
                 hasConflict = true;
             }
 
+            // AP-03: an engine that stopped while this commit prepared takes no more records: checked again at the last moment the commit can roll back.
+            if (_dbe.CommitPipelineFailure is { } stoppedMeanwhile)
+            {
+                throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                    "The engine stopped committing after a commit failed between its append and the end of its publish; reopen the database to recover it.",
+                    stoppedMeanwhile);
+            }
+
             // ── AP-01: APPEND before PUBLISH. Build + append the WAL batch from the prepared (conflict-resolved) state. This is the point of no
             //    return (AP-02): nothing above made any change visible. ──
             _dbe.LogCommitPhase(TSN, "Append");
             // CK-13: the append records the batch's first LSN in _inFlightLsnFloor before publishing its frame. It stays there, keeping the checkpoint
             // below these records, until the publish below has put their page effects in memory.
             var walHighLsn = AppendToWal(ref ctx);
-            _dbe.CommitAfterAppendProbe?.Invoke();
+            var published = false;
 
-            // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
-            //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
-            //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
-            _dbe.LogCommitPhase(TSN, "Publish");
-            PublishPreparedComponents();
-            FlushEcsPendingOperations();
-            // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
-            // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
-            _dbe.CommitBeforeStagedPublishProbe?.Invoke();
-            PublishStagedCommitWrites();
+            // AP-03: past the append, page-cache back-pressure is waited out rather than thrown (up to CommitPublishBackpressureTimeout from here): a throw
+            // could not roll this commit back, only stop the engine.
+            var outerPublishSince = PagedMMF.PublishSince;
+            PagedMMF.PublishSince = _dbe.PublishGivesUpOnBackpressureForTest ? 0 : Stopwatch.GetTimestamp();
+            try
+            {
+                _dbe.CommitAfterAppendProbe?.Invoke();
 
-            // CK-13: every page effect is in memory and marked dirty, so a checkpoint that passes these records now also collects their pages.
-            Volatile.Write(ref _inFlightLsnFloor, 0);
+                // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
+                //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
+                //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
+                _dbe.LogCommitPhase(TSN, "Publish");
+                PublishPreparedComponents();
+                FlushEcsPendingOperations();
+                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
+                // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
+                _dbe.CommitBeforeStagedPublishProbe?.Invoke();
+                PublishStagedCommitWrites();
 
-            // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
-            //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
-            _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
-            WaitAndFinalize(ref ctx, walHighLsn, startTicks);
+                // CK-13: every page effect is in memory and marked dirty, so a checkpoint that passes these records now also collects their pages.
+                published = true;
+                Volatile.Write(ref _inFlightLsnFloor, 0);
+
+                // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
+                //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
+                _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
+                WaitAndFinalize(ref ctx, walHighLsn, startTicks);
+            }
+            catch (Exception failure) when (State != TransactionState.Committed)
+            {
+                // AP-02/AP-03: past the append the records are in the log, and the commit is never rolled back.
+                CompleteAfterFailedPublish(walHighLsn, published, failure);
+                throw;   // unreachable: CompleteAfterFailedPublish always throws
+            }
+            finally
+            {
+                PagedMMF.PublishSince = outerPublishSince;
+            }
+
             _dbe.LogCommitPhase(TSN, "Complete");
             scope.ConflictDetected = hasConflict;
             return true;

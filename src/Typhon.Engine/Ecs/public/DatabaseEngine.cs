@@ -1974,7 +1974,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // `_constructed` short-circuits a failed open (see the field docs): there is nothing to persist, and trying would bury the construction exception
             // under a teardown fault. `_archetypeInitIncomplete` does the same for an open that failed after the constructor, in InitializeArchetypes: it
             // closes as a crash, because persisting a half-built archetype table orphans data and flags it clean (#1147).
-            if (!_simulateHardCrash && _constructed && !_archetypeInitIncomplete)
+            // A stopped commit pipeline (AP-03) closes as a crash too: memory holds a partial publish, and the next open must replay its records — persisting
+            // the pages and the clean flag would make that open trust them instead.
+            if (!_simulateHardCrash && _constructed && !_archetypeInitIncomplete && CommitPipelineFailure == null)
             {
                 Logger?.LogInformation("Engine disposing: PersistArchetypeState");
                 // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
@@ -2106,8 +2108,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PersistArchetypeState();
             }
         };
-        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish.
-        CheckpointManager.InFlightCommitFloor = () => TransactionChain.LowestInFlightLsn();
+        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish — and below one whose publish failed, for
+        // good (AP-03).
+        CheckpointManager.InFlightCommitFloor = () => Math.Min(TransactionChain.LowestInFlightLsn(), PinnedCommitFloor);
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -6017,6 +6020,84 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
 
     /// <summary>
+    /// The failure that stopped this engine's commits: a commit whose records were appended threw before its publish completed (AP-03), so memory holds a
+    /// partial publish. Null while the engine commits. Once set, every commit that would write is refused, the checkpoint stays below that commit's
+    /// records, and the engine closes as a crash, so the next open replays them. Only reopening clears it.
+    /// </summary>
+    public Exception CommitPipelineFailure => Volatile.Read(ref _commitPipelineFailure);
+
+    private Exception _commitPipelineFailure;
+
+    /// <summary>
+    /// The first LSN of the commit that stopped the pipeline (<see cref="CommitPipelineFailure"/>), or <see cref="long.MaxValue"/>: the checkpoint's floor
+    /// once that transaction has left the chain and taken its own (CK-13). Its records must be replayed after a restart, since memory holds only part of
+    /// them, so no checkpoint passes them until the engine is reopened.
+    /// </summary>
+    internal long PinnedCommitFloor => Volatile.Read(ref _pinnedCommitFloor);
+
+    private long _pinnedCommitFloor = long.MaxValue;
+
+    /// <summary>
+    /// Stops this engine's commits after a commit whose records were appended failed before its publish completed (AP-03): pins its records below the
+    /// checkpoint and records the failure. The first failure wins; later ones only lower the pin.
+    /// </summary>
+    /// <param name="firstLsn">The failed commit's first appended LSN; 0 when it appended nothing (nothing to pin).</param>
+    /// <param name="failure">What interrupted the publish.</param>
+    /// <remarks>Nothing here can throw: the caller latches before it marks the transaction Committed, and logs (<see cref="LogCommitPipelineStopped"/>)
+    /// after.</remarks>
+    internal void LatchCommitPipelineFailure(long firstLsn, Exception failure)
+    {
+        if (firstLsn > 0)
+        {
+            var seen = Volatile.Read(ref _pinnedCommitFloor);
+            while (firstLsn < seen)
+            {
+                var prior = Interlocked.CompareExchange(ref _pinnedCommitFloor, firstLsn, seen);
+                if (prior == seen)
+                {
+                    break;
+                }
+
+                seen = prior;
+            }
+        }
+
+        Interlocked.CompareExchange(ref _commitPipelineFailure, failure, null);
+        (DurabilityLog as DurabilityLog)?.Stop(failure);
+    }
+
+    [LoggerMessage(LogLevel.Critical,
+        "Commit TSN {tsn} failed after appending its records (first LSN {firstLsn}), before its publish completed: the engine stops committing, keeps its "
+        + "checkpoint below those records and will close as a crash. Reopen the database to recover the transaction from the log.")]
+    internal partial void LogCommitPipelineStopped(long tsn, long firstLsn, Exception failure);
+
+    [LoggerMessage(LogLevel.Critical, "Tick fence {tick}: nothing logged, nor in any fence after it — the engine stopped committing after an incomplete "
+        + "publish. Reopen the database.")]
+    private partial void LogTickFenceSkippedOnStoppedEngine(long tick);
+
+    private int _tickFenceSkipLogged;
+
+    /// <summary>
+    /// AP-03: whether a fence must log nothing — the engine stopped committing over a partial publish. Logged once. Both fence paths call it before they
+    /// append: the serial <see cref="WriteTickFence"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
+    /// path must not throw, so the fence returns instead of meeting <see cref="DurabilityLog"/>'s refusal.
+    /// </summary>
+    private bool FenceMustNotAppend(long tickNumber)
+    {
+        if (CommitPipelineFailure == null)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _tickFenceSkipLogged, 1) == 0)
+        {
+            LogTickFenceSkippedOnStoppedEngine(tickNumber);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Test hook (#1233): runs where a transaction voids its own revision entry — a rollback, and a last-writer-wins conflict's orphan — before the void, with
     /// the component table and the entity's revision-chain root: the window in which another thread's cleanup can compact the chain. Per engine. Null in
     /// production.
@@ -6035,6 +6116,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
     /// </summary>
     internal bool FirstWriteClaimsBeforeAppendForTest { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-03): when set, a commit's publish gives up on page-cache back-pressure after the ordinary allocation timeout, as any
+    /// allocation does, instead of waiting it out — what AP-03 forbids — so the rule's mutant can show the verifier rejects it. Per engine. Never set in
+    /// production.
+    /// </summary>
+    internal bool PublishGivesUpOnBackpressureForTest { get; set; }
 
     /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the

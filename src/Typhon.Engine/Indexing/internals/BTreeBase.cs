@@ -27,6 +27,8 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     public abstract unsafe Result<int, BTreeLookupStatus> TryGet(void* keyAddr, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe bool RemoveValue(void* keyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe VariableSizedBufferAccessor<int, TStore> TryGetMultiple(void* keyAddr, ref ChunkAccessor<TStore>accessor);
+    public abstract unsafe bool KeysEqual(void* left, void* right);
+    public abstract unsafe int KeyHash(void* key);
 
     /// <summary>
     /// Compound move: atomically removes <paramref name="value"/> from <paramref name="oldKeyAddr"/>

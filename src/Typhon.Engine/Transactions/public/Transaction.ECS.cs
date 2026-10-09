@@ -2085,6 +2085,496 @@ public unsafe partial class Transaction
     }
 
     /// <summary>
+    /// AP-03: rejects, before the append, a commit its publish would fail on. Past the append the commit is in the log (AP-02), so a failure there could
+    /// only stop the engine; found here, the commit throws and rolls back clean. The checks:
+    /// <list type="bullet">
+    /// <item>a spawn or Commit-discipline write that would put a key in a unique index that holds it when the write publishes — committed, or put by
+    /// another spawn or write of this transaction: <see cref="UniqueConstraintViolationException"/>;</item>
+    /// <item>a spawn that leaves unset a Versioned component a unique index covers: <see cref="FinalizeSpawns"/> would index it under whatever bytes its
+    /// claimed cluster slot holds (#1259) — <see cref="InvalidOperationException"/>;</item>
+    /// <item>a spawn of a spatial archetype that leaves its spatial component unset, which <see cref="FinalizeSpawns"/> cannot place in a cell:
+    /// <see cref="InvalidOperationException"/>.</item>
+    /// </list>
+    /// </summary>
+    /// <remarks>
+    /// The checks follow the publish's order: spawns (<see cref="FinalizeSpawns"/>), then destroys (<see cref="FlushPendingDestroys"/>), then the staged
+    /// writes in the order <see cref="PublishStagedCommitWrites"/> visits them. A staged write may take a key a destroy of this transaction removes from the
+    /// index, or one a staged write visited before it moves away. Two transactions that put one key concurrently both pass this check; the later publish
+    /// then fails and stops the engine (#1258).
+    /// </remarks>
+    private void ValidatePublishBeforeAppend()
+    {
+        // The common commit checks nothing: no spawn of an archetype with a unique index or a spatial cell, no staged write to a unique-indexed component.
+        // It returns here, before the epoch scope and the accessors.
+        var checkSpawns = _spawnedEntities is { Count: > 0 } && AnySpawnNeedsCheck();
+        var checkStaged = _commitStagingBuffer != null && AnyStagedWriteNeedsCheck();
+        if (!checkSpawns && !checkStaged)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(_epochManager);
+        var check = new PublishCheck();
+        try
+        {
+            if (checkSpawns)
+            {
+                t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
+                t_validationOwnKeys.EnsureCapacity(_spawnedEntities.Count);
+                CheckSpawns(ref check);
+            }
+
+            if (checkStaged)
+            {
+                CheckStagedUniqueKeys(ref check);
+            }
+        }
+        finally
+        {
+            check.Dispose();
+            RecycleKeySet(ref t_validationOwnKeys);
+            RecycleKeySet(ref t_validationFreedKeys);
+        }
+    }
+
+    /// <summary>
+    /// The keys a commit's validation puts, and those its earlier staged writes free. Per thread, since the validation runs on the committing thread and
+    /// does not nest: a bulk load's commits of thousands of spawns reuse one set instead of regrowing one per transaction.
+    /// </summary>
+    [ThreadStatic] private static HashSet<UniqueKeyRef> t_validationOwnKeys;
+
+    [ThreadStatic] private static HashSet<UniqueKeyRef> t_validationFreedKeys;
+
+    private static void RecycleKeySet(ref HashSet<UniqueKeyRef> set)
+    {
+        if (set == null)
+        {
+            return;
+        }
+
+        // Clear zeroes the entries, so no index or key pointer outlives the validation. A set grown past a large bulk commit is dropped.
+        if (set.Count > 65_536)
+        {
+            set = null;
+        }
+        else
+        {
+            set.Clear();
+        }
+    }
+
+    /// <summary>Whether a spawn of this commit is of an archetype with a unique index or a spatial cell: the archetypes <see cref="CheckSpawns"/>
+    /// checks.</summary>
+    private bool AnySpawnNeedsCheck()
+    {
+        var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+        var lastArchetype = -1;
+        for (var i = 0; i < spawns.Length; i++)
+        {
+            var archetype = spawns[i].Id.ArchetypeId;
+            if (archetype == lastArchetype)
+            {
+                continue;
+            }
+
+            lastArchetype = archetype;
+            var cs = _dbe._stateByRouting[archetype]?.ClusterState;
+            if (cs != null && (cs.UniqueIndexedSlots != 0 || IsSpatialRouted(cs)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether a staged write of this commit is to a component a unique index covers.</summary>
+    private bool AnyStagedWriteNeedsCheck()
+    {
+        foreach (var kvp in _componentInfos)
+        {
+            var info = kvp.Value;
+            if (info.CommitStaged == null || info.CommitStaged.Count == 0 || info.ComponentTable.StorageMode != StorageMode.SingleVersion)
+            {
+                continue;
+            }
+
+            var lastArchetype = -1;
+            foreach (var staged in info.CommitStaged)
+            {
+                var archetype = EntityId.FromRaw(staged.Key).ArchetypeId;
+                if (archetype == lastArchetype)
+                {
+                    continue;
+                }
+
+                lastArchetype = archetype;
+                if (StagedSlotIsUniqueIndexed(info, (ushort)archetype, out _, out _))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The component's slot in the archetype, when a unique index of the persistent home covers it — the home a staged write publishes to.</summary>
+    private bool StagedSlotIsUniqueIndexed(ComponentInfo info, ushort archetype, out ArchetypeMetadata meta, out int compSlot)
+    {
+        meta = _dbe.GetMetaByRouting(archetype);
+        compSlot = -1;
+        var cs = _dbe._stateByRouting[archetype]?.ClusterState;
+        if (cs?.IndexSlots == null || !meta.TryGetSlot(info.ComponentTypeId, out var slot))
+        {
+            return false;
+        }
+
+        compSlot = slot;
+        return (cs.UniqueIndexedSlots & (1 << slot)) != 0;
+    }
+
+    private bool IsSpatialRouted(ArchetypeClusterState cs)
+    {
+        ref readonly var ss = ref cs.SpatialSlot;
+        return ss.HasSpatialIndex && (_dbe.Realm0Grid != null || ss.HasRealmKey);
+    }
+
+    /// <summary>The chunk accessors one validation reuses, so a run of keys in one index pins its root and inner nodes once.</summary>
+    private struct PublishCheck : IDisposable
+    {
+        public SegmentAccessorCache<PersistentStore> Contents;
+        public SegmentAccessorCache<PersistentStore> Clusters;
+        public SegmentAccessorCache<PersistentStore> PersistentIndexes;
+        public SegmentAccessorCache<PersistentStore> PersistentIndexesS64;
+        public SegmentAccessorCache<TransientStore> TransientIndexes;
+        public SegmentAccessorCache<TransientStore> TransientIndexesS64;
+
+        public void Dispose()
+        {
+            Contents.Dispose();
+            Clusters.Dispose();
+            PersistentIndexes.Dispose();
+            PersistentIndexesS64.Dispose();
+            TransientIndexes.Dispose();
+            TransientIndexesS64.Dispose();
+        }
+    }
+
+    /// <summary>One chunk accessor, rebuilt only when the segment changes.</summary>
+    private struct SegmentAccessorCache<TStore> : IDisposable where TStore : struct, IPageStore
+    {
+        private ChunkBasedSegment<TStore> _segment;
+        private ChunkAccessor<TStore> _accessor;
+
+        [UnscopedRef]
+        public ref ChunkAccessor<TStore> For(ChunkBasedSegment<TStore> segment)
+        {
+            if (!ReferenceEquals(segment, _segment))
+            {
+                Dispose();
+                _accessor = segment.CreateChunkAccessor();
+                _segment = segment;
+            }
+
+            return ref _accessor;
+        }
+
+        public void Dispose()
+        {
+            if (_segment != null)
+            {
+                _accessor.Dispose();
+                _segment = null;
+            }
+        }
+    }
+
+    /// <summary>The spawns' checks, the per-archetype facts resolved once per run of one archetype, as <see cref="FinalizeSpawns"/> does.</summary>
+    private void CheckSpawns(ref PublishCheck check)
+    {
+        var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+        var lastArchetype = -1;
+        ArchetypeEngineState es = null;
+        ArchetypeClusterState cs = null;
+        var spatial = false;
+        var uniquePersistent = false;
+        var uniqueTransient = false;
+        for (var i = 0; i < spawns.Length; i++)
+        {
+            ref var entry = ref spawns[i];
+            if (_pendingDestroys != null && _pendingDestroys.Contains(entry.Id))
+            {
+                continue;
+            }
+
+            if (entry.Id.ArchetypeId != lastArchetype)
+            {
+                lastArchetype = entry.Id.ArchetypeId;
+                es = _dbe._stateByRouting[lastArchetype];
+                cs = es?.ClusterState;
+                if (cs != null)
+                {
+                    spatial = IsSpatialRouted(cs);
+                    var unique = cs.UniqueIndexedSlots;
+                    uniquePersistent = (unique & 0xFFFF) != 0;
+                    uniqueTransient = (unique >> 16) != 0;
+                }
+            }
+
+            if (cs == null)
+            {
+                continue;
+            }
+
+            if (spatial)
+            {
+                CheckSpawnSpatialComponent(es, cs, in entry);
+            }
+
+            if (uniquePersistent)
+            {
+                CheckSpawnUniqueKeys(cs.IndexSlots, cs.IndexSegmentString64, es, in entry, ref check, ref check.PersistentIndexes,
+                    ref check.PersistentIndexesS64);
+            }
+
+            if (uniqueTransient)
+            {
+                CheckSpawnUniqueKeys(cs.TransientIndexSlots, cs.TransientIndexSegmentString64, es, in entry, ref check, ref check.TransientIndexes,
+                    ref check.TransientIndexesS64);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A spawn routed to a spatial cell must carry its spatial component: <see cref="FinalizeSpawns"/> reads its bounds to pick the cell. The routing
+    /// condition is <see cref="SetupSpawnAccessors"/>'s; only a Versioned component can be missing, as a SingleVersion one is always staged.
+    /// </summary>
+    private static void CheckSpawnSpatialComponent(ArchetypeEngineState es, ArchetypeClusterState cs, in SpawnEntry entry)
+    {
+        ref readonly var ss = ref cs.SpatialSlot;
+        var missing = es.SlotToComponentTable[ss.Slot].StorageMode == StorageMode.Versioned ? entry.VerLoc[ss.Slot] == 0 : entry.Stage[ss.Slot] == 0;
+        if (missing)
+        {
+            throw new InvalidOperationException($"Spatial archetype must provide its spatial component at spawn time (slot {ss.Slot} is missing).");
+        }
+    }
+
+    /// <summary>One spawn's unique keys, in one index home of its archetype.</summary>
+    private void CheckSpawnUniqueKeys<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ChunkBasedSegment<TStore> s64Segment, ArchetypeEngineState es,
+        in SpawnEntry entry, ref PublishCheck check, ref SegmentAccessorCache<TStore> indexes, ref SegmentAccessorCache<TStore> indexesS64)
+        where TStore : struct, IPageStore
+    {
+        for (var ixs = 0; ixs < ixSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref ixSlots[ixs];
+            if (ixSlot.Fields == null || !HasUniqueField(ixSlot.Fields))
+            {
+                continue;
+            }
+
+            var table = es.SlotToComponentTable[ixSlot.Slot];
+            byte* source;
+            if (table.StorageMode == StorageMode.Versioned)
+            {
+                var chunkId = entry.VerLoc[ixSlot.Slot];
+                if (chunkId == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"A spawn must provide each Versioned component a unique index covers (slot {ixSlot.Slot} is missing): unset, it would be "
+                        + "indexed under whatever its claimed cluster slot holds.");
+                }
+
+                source = check.Contents.For(table.ComponentSegment).GetChunkAddress(chunkId) + table.ComponentOverhead;
+            }
+            else
+            {
+                var stage = entry.Stage[ixSlot.Slot];
+                if (stage == 0)
+                {
+                    continue;
+                }
+
+                source = SpawnArena.Resolve(stage) + table.ComponentOverhead;
+            }
+
+            var fields = ixSlot.Fields;
+            for (var fi = 0; fi < fields.Length; fi++)
+            {
+                ref var field = ref fields[fi];
+                if (field.AllowMultiple)
+                {
+                    continue;
+                }
+
+                var key = source + field.FieldOffset;
+                ref var accessor = ref ReferenceEquals(field.Index.Segment, s64Segment) ? ref indexesS64.For(s64Segment) : ref indexes.For(field.Index.Segment);
+                if (field.Index.TryGet(key, ref accessor).IsSuccess)
+                {
+                    ThrowHelper.ThrowUniqueConstraintViolation();
+                }
+
+                ClaimOwnKey(field.Index, key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The Commit-discipline staged writes' unique keys: the ones a write changes, as <c>PublishStagedEntry</c> moves them, in its order. A key the index
+    /// holds is free for the write when a destroy of this transaction removes its holder's entry in the publish, before the staged writes, or when a staged
+    /// write visited earlier moves it away.
+    /// </summary>
+    private void CheckStagedUniqueKeys(ref PublishCheck check)
+    {
+        foreach (var kvp in _componentInfos)
+        {
+            var info = kvp.Value;
+            if (info.CommitStaged == null || info.ComponentTable.StorageMode != StorageMode.SingleVersion)
+            {
+                continue;
+            }
+
+            foreach (var staged in info.CommitStaged)
+            {
+                var entityId = EntityId.FromRaw(staged.Key);
+                if (_pendingDestroys != null && _pendingDestroys.Contains(entityId))
+                {
+                    continue;
+                }
+
+                if (!StagedSlotIsUniqueIndexed(info, entityId.ArchetypeId, out var meta, out var compSlot))
+                {
+                    continue;
+                }
+
+                var cs = _dbe._stateByRouting[entityId.ArchetypeId].ClusterState;
+                var location = staged.Value.Location;
+                var layout = cs.Layout;
+                byte* head = null;
+                for (var ixs = 0; ixs < cs.IndexSlots.Length; ixs++)
+                {
+                    ref var ixSlot = ref cs.IndexSlots[ixs];
+                    if (ixSlot.Slot != compSlot || !HasUniqueField(ixSlot.Fields))
+                    {
+                        continue;
+                    }
+
+                    if (head == null)
+                    {
+                        head = check.Clusters.For(cs.ClusterSegment).GetChunkAddress(location >> 6) + layout.ComponentOffset(compSlot)
+                               + (location & 63) * layout.ComponentSize(compSlot);
+                    }
+
+                    var value = _commitStagingBuffer + staged.Value.Offset;
+                    var fields = ixSlot.Fields;
+                    for (var fi = 0; fi < fields.Length; fi++)
+                    {
+                        ref var field = ref fields[fi];
+                        var key = value + field.FieldOffset;
+                        var current = head + field.FieldOffset;
+
+                        // Unchanged: the publish moves nothing (ReconcileClusterIndexAndViews compares the same bytes).
+                        if (field.AllowMultiple || new ReadOnlySpan<byte>(current, field.FieldSize).SequenceEqual(new ReadOnlySpan<byte>(key, field.FieldSize)))
+                        {
+                            continue;
+                        }
+
+                        ref var accessor = ref ReferenceEquals(field.Index.Segment, cs.IndexSegmentString64)
+                            ? ref check.PersistentIndexesS64.For(cs.IndexSegmentString64)
+                            : ref check.PersistentIndexes.For(field.Index.Segment);
+                        var holder = field.Index.TryGet(key, ref accessor);
+                        if (holder.IsSuccess && holder.Value != location && !IsFreedBeforeThisWrite(field.Index, key)
+                            && !IsRemovedByOwnDestroy(meta, cs, ref check, holder.Value, compSlot))
+                        {
+                            ThrowHelper.ThrowUniqueConstraintViolation();
+                        }
+
+                        ClaimOwnKey(field.Index, key);
+
+                        // Once this write publishes, its old key is free for the writes visited after it.
+                        t_validationFreedKeys ??= new HashSet<UniqueKeyRef>();
+                        t_validationFreedKeys.Add(new UniqueKeyRef(field.Index, current));
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Records a key this transaction puts in a unique index; a second put of one key — by the index's own comparison — is a violation.</summary>
+    private static void ClaimOwnKey(IBTreeIndex index, byte* key)
+    {
+        t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
+        if (!t_validationOwnKeys.Add(new UniqueKeyRef(index, key)))
+        {
+            ThrowHelper.ThrowUniqueConstraintViolation();
+        }
+    }
+
+    private static bool IsFreedBeforeThisWrite(IBTreeIndex index, byte* key) =>
+        t_validationFreedKeys != null && t_validationFreedKeys.Contains(new UniqueKeyRef(index, key));
+
+    /// <summary>
+    /// Whether the entity at <paramref name="holderLocation"/> is destroyed by this transaction and its destroy removes its entry for
+    /// <paramref name="compSlot"/> in the publish: <see cref="FlushPendingDestroys"/> leaves a slot the tick fence maintains to the fence when the entity has
+    /// a pending shadow, the same mask computed the same way.
+    /// </summary>
+    private bool IsRemovedByOwnDestroy(ArchetypeMetadata meta, ArchetypeClusterState cs, ref PublishCheck check, int holderLocation, int compSlot)
+    {
+        if (_pendingDestroys == null)
+        {
+            return false;
+        }
+
+        var holderBase = check.Clusters.For(cs.ClusterSegment).GetChunkAddress(holderLocation >> 6);
+        var holder = EntityId.FromRaw(*(long*)(holderBase + cs.Layout.EntityIdsOffset + (holderLocation & 63) * 8));
+        if (!_pendingDestroys.Contains(holder))
+        {
+            return false;
+        }
+
+        var hasPendingShadow = cs.ClusterShadowBitmap != null && cs.ClusterShadowBitmap.Test(holderLocation);
+        var removeHereMask = hasPendingShadow ? (ushort)~meta.FenceMaintainedSlotsUnder(_discipline) : ushort.MaxValue;
+        return (removeHereMask & (1 << compSlot)) != 0;
+    }
+
+    private static bool HasUniqueField<TStore>(ClusterIndexField<TStore>[] fields) where TStore : struct, IPageStore
+    {
+        for (var i = 0; i < fields.Length; i++)
+        {
+            if (!fields[i].AllowMultiple)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// A key in one unique index, by reference: the bytes stay put while the validation's epoch scope lives. Equal and hashed by the index's own key
+    /// comparison, so a floating-point -0 and +0 are one key, as are two NaNs.
+    /// </summary>
+    private readonly struct UniqueKeyRef : IEquatable<UniqueKeyRef>
+    {
+        private readonly IBTreeIndex _index;
+        private readonly byte* _key;
+        private readonly int _hash;
+
+        public UniqueKeyRef(IBTreeIndex index, byte* key)
+        {
+            _index = index;
+            _key = key;
+            _hash = HashCode.Combine(RuntimeHelpers.GetHashCode(index), index.KeyHash(key));
+        }
+
+        public bool Equals(UniqueKeyRef other) => ReferenceEquals(_index, other._index) && _index.KeysEqual(_key, other._key);
+
+        public override bool Equals(object obj) => obj is UniqueKeyRef other && Equals(other);
+
+        public override int GetHashCode() => _hash;
+    }
+
+    /// <summary>
     /// Finalize spawned entities: set BornTSN from sentinel (MaxValue) to actual TSN, making them visible.
     /// Also inserts SV secondary indexes (Versioned secondary indexes are handled by CommitComponentCore).
     /// </summary>

@@ -2368,6 +2368,53 @@ internal sealed unsafe partial class ArchetypeClusterState
     public ClusterIndexSlot<PersistentStore>[] IndexSlots;
 
     /// <summary>
+    /// The component slots a unique (non-AllowMultiple) index covers, one bit per slot: the persistent home in bits 0-15, the transient home in bits
+    /// 16-31. Read by a commit's pre-append check (AP-03) to pass archetypes and components with nothing to check at one bit test. Computed on first
+    /// use — the index slots are built after this object — and racing computations agree.
+    /// </summary>
+    internal int UniqueIndexedSlots
+    {
+        get
+        {
+            if (Volatile.Read(ref _uniqueIndexedSlotsComputed) == 0)
+            {
+                _uniqueIndexedSlots = UniqueSlotsOf(IndexSlots) | (UniqueSlotsOf(TransientIndexSlots) << 16);
+                Volatile.Write(ref _uniqueIndexedSlotsComputed, 1);
+            }
+
+            return _uniqueIndexedSlots;
+        }
+    }
+
+    private int _uniqueIndexedSlots;
+    private int _uniqueIndexedSlotsComputed;
+
+    private static int UniqueSlotsOf<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    {
+        var mask = 0;
+        if (ixSlots != null)
+        {
+            foreach (var ixSlot in ixSlots)
+            {
+                if (ixSlot.Fields == null)
+                {
+                    continue;
+                }
+
+                foreach (var field in ixSlot.Fields)
+                {
+                    if (!field.AllowMultiple)
+                    {
+                        mask |= 1 << ixSlot.Slot;
+                    }
+                }
+            }
+        }
+
+        return mask;
+    }
+
+    /// <summary>
     /// Where the tick fence's Migrate phase stages <c>(key, oldValue, newValue)</c> for this archetype's indexed fields, and where the IndexMassUpdate phase
     /// reads them from (#872 step 6). Null until <c>InitializeIndexes</c> has run; empty for an archetype with no indexed field.
     /// </summary>

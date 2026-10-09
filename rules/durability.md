@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-07 |
+| Last Updated | 2026-10-09 |
 | Domain | WAL, Checkpoint, Crash Recovery, Page Safety, Versioned HEAD Reopen |
 
 > Type-location notes (post-#329 layout): WAL/Checkpoint/Recovery internals live in
@@ -191,21 +191,88 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   scope: `Transaction.AppendToWal` (point of no return), `Transaction.WaitAndFinalize` (publish-then-surface-uncertain)
   on_violation: appended-but-rolled-back state → recovery resurrects a rolled-back tx
 
-### AP-03: Publish is non-throwing `[fatal]`
-  invariant the publish phase performs no fallible allocation and no bounded-timeout lock acquisition
-  scope: `Transaction.PublishComponent` / `PublishClusterVersionedSlot` (component publish); `FlushEcsPendingOperations` /
-         `FinalizeSpawns` (spawn publish)
-  status: **PARTIAL.** Component publish is non-throwing — the revision handle is reconstructed in publish from coordinates
-          captured in PREPARE, re-checked under the chain lock taken with an UNBOUNDED wait (AP-05), and the publish acts are
-          field writes + memcpy; the publish drain releases each retained lock exactly once via a drain cursor. The wait cannot
-          deadlock, but it is not bounded either: readers walking a chain with a pending entry hold the lock shared, and
-          AccessControlSmall gives a waiting writer no preference. **RESIDUAL:** the spawn publish (`FinalizeSpawns`)
-          can still throw on allocation (cluster `ClaimSlot` grow, EntityMap `InsertNew` grow, index B+Tree node alloc under
-          page-cache backpressure). Full closure is P2-entangled — the clean sentinel-`BornTSN` flip is blocked for cluster by
-          the SoA occupancy-based iteration (it would leak prepared, not-yet-published spawns to bulk SoA scans), so eliminating
-          spawn-publish throws requires pre-growing all spawn segments before Append and/or unbounded-watchdog insert locks.
-          Tracked: **#396** (to be done with the P2 cluster-durability rework)
-  on_violation: partial publish with no compensation (TXW-8 class)
+### AP-03: A commit past its append completes its publish, or the engine stops `[fatal]`
+  invariant what the publish could reject is rejected before the append, after PREPARE (`ValidatePublishBeforeAppend`), and
+            the commit then rolls back clean — no record, nothing visible:
+            - a key a unique index holds when the write publishes (`UniqueConstraintViolationException`), followed in the
+              publish's order: spawns first, then destroys, then the staged Commit-discipline writes in their visiting order.
+              A staged write may take a key its transaction's destroy removes in the publish (the destroy path's own
+              shadow mask decides which slots it removes; under the Commit discipline, the only one with staged writes,
+              it removes every persistent slot), one a staged write visited earlier moves away, or one its own entity
+              holds. Keys are compared by the index's own comparison (`IBTreeIndex.KeysEqual` / `KeyHash`): -0 and +0
+              are one float key;
+            - a spawn that leaves unset a Versioned component a unique index covers: `FinalizeSpawns` would index it under
+              whatever its claimed cluster slot holds (`InvalidOperationException`; the same stale key under an AllowMultiple
+              index is #1259);
+            - a spawn of a spatial archetype without its spatial component (`InvalidOperationException`)
+  invariant past the append, page-cache back-pressure is waited out: the committing thread publishes with
+            `PagedMMF.PublishSince` set when its append returns, so an allocation that outlasts `PageCacheBackpressureTimeout`
+            logs and waits on, a fresh timeout at a time, until `TimeoutOptions.CommitPublishBackpressureTimeout` (60 s) after
+            it — one bound for the whole publish
+  invariant any other failure between the append and the end of the publish (`CompleteAfterFailedPublish`): the engine latches
+            `CommitPipelineFailure` and pins the commit's first LSN below the checkpoint (`PinnedCommitFloor`, CK-13), then
+            the transaction is Committed — never rolled back (AP-02) — and only then is anything that can throw done: the
+            chain locks the drain did not reach are released, then the log, then the durability wait on a fresh budget. The caller gets `CommitPublishIncompleteException` (`Durable` says
+            whether the records were confirmed). A reopen replays the commit whole. A failure once the publish completed —
+            the durability wait, the finalization — is `CommitDurabilityUncertainException` (AP-02)
+  invariant a stopped engine appends nothing more: the latch stops `DurabilityLog` itself (`DurabilityLog.Stop`), which
+            refuses every later append — a commit, a fence, a bulk manifest. The callers check first: a writable commit is
+            refused (`DurabilityException`, `CommitPipelineStopped`) at its start and again just before its append, so one
+            that was in PREPARE when the engine stopped rolls back clean; both fence paths — the serial `WriteTickFence` and
+            the runtime's parallel fence, whose appends never pass through it — return without appending
+            (`FenceMustNotAppend`), since a tick path must not throw. The engine closes as a crash (no clean flag)
+  never roll back a commit whose records were appended: recovery replays them, so the rollback is undone at the next open,
+        and until then readers have seen part of it and other commits have built on its absence
+  never go on appending over a partial publish: a later record builds on what the partial publish left, and recovery replays
+        the log over the pages, not over what memory held
+  scope: Transaction.Commit, Transaction.ValidatePublishBeforeAppend, Transaction.CheckStagedUniqueKeys,
+         Transaction.IsRemovedByOwnDestroy, Transaction.CompleteAfterFailedPublish, Transaction.WaitAndFinalize,
+         PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
+         DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
+         DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop
+  status: the component publish cannot throw: its handle is rebuilt from PREPARE's coordinates, re-checked under the chain lock
+          taken with an unbounded wait (AP-05), and its acts are field writes and copies; the drain releases each retained lock
+          exactly once. The spawn and pending-operation publishes allocate (cluster claim and growth, EntityMap insert, index
+          nodes): their back-pressure is waited out, and a failure that is not back-pressure — a page-cache or segment lock
+          timeout (5-10 s, a stall rather than pressure), the data file failing to grow — stops the engine as above. A
+          lock is rarely held across an allocation (the page-occupancy map's, whose pages stay resident), so a publisher
+          waiting out back-pressure seldom makes another one time out; when it does, that one stops the engine. A stopped
+          engine's checkpoint and deferred cleanups go on: what they write is what a crash during that publish would leave,
+          which recovery handles from the pinned floor.
+          **RESIDUAL:** a concurrent change between the check and the publish is not seen: two transactions that put one
+          unique key both pass, and the later publish stops the engine (#1258). A commit that passed `DurabilityLog`'s own
+          check just before another commit latched still appends and publishes (a window of a few instructions). A staged
+          write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
+          fence) is not modelled; the publish's own reconcile shares the assumption. A unique key a Versioned write changes is checked in PREPARE by
+          `RejectUniqueIndexCollision`, which throws `InvalidOperationException`, not the documented type (#1260)
+  rationale: #396's recommendation was to reserve, before the append, every page the publish would consume. The reservation
+             would have to size cluster growth, EntityMap splits and index node splits per transaction, and still would not cover
+             a lock timeout or an I/O failure; the fail-stop covers every case, and the wait-out keeps the one transient case,
+             back-pressure, from reaching it
+  on_violation: an appended commit rolled back while recovery will replay it, or a partial publish other records build on
+                (TXW-8 class)
+  verified: PostAppendFailureTests — AThrowAfterTheAppend_KeepsTheCommit_StopsTheEngine_AndARestartRecoversIt (a throw
+            injected after the append: Committed, the engine stopped, a later commit refused, the checkpoint below the
+            record, the value back after a disposal or a hard crash), AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
+            (a Versioned or SingleVersion spawn over a committed key, two spawns of one key, a Commit-discipline write moved onto
+            a held key), AKeyTakenByTheIndexsOwnComparison_IsRejectedBeforeTheAppend (+0/-0 float spawns; a second unique field),
+            AStagedWrite_OntoAKeyFreedEarlierInThePublish_Commits (the holder destroyed, or moved away first, in the same commit),
+            AStagedWrite_OntoAKeyMovedAwayLaterInThePublish_IsRejectedBeforeTheAppend,
+            ASpawnWithoutItsUniqueIndexedComponent_IsRejectedBeforeTheAppend, ASpatialSpawnWithoutItsSpatialComponent_IsRejectedBeforeTheAppend,
+            BackpressureDuringTheSpawnPublish_IsWaitedOut_AndTheCommitCompletes (the publishing thread alone held under
+            back-pressure until its publish outlasts the allocation timeout: every one of 3 000 spawns visible and complete),
+            BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns (the partial spawn publish comes
+            back whole), AnEngineThatStopsDuringACommitsPrepare_RefusesItsAppend, AStoppedEnginesTickFence_AppendsNothing,
+            AStoppedEnginesParallelFence_AppendsNothing (the runtime's default fence; without the stop it logs the pending
+            write), AStagedWrite_OntoTheKeyItsEntityHolds_Commits (-0f to +0f), and a String64 key among the comparison shapes
+            [VerifiesRule]; mutant APublishThatGivesUpOnBackpressure_StopsTheEngine (`PublishGivesUpOnBackpressureForTest`)
+            [RuleMutant]. Real mutations, each failing its test: no catch after the append, the floor not pinned, a stopped
+            engine closing clean, the unique pre-check removed, an unset unique component let through, the spatial pre-check
+            removed, keys freed earlier in the publish or by the commit's destroy not accepted, byte equality instead of the
+            index's, the re-check before the append removed, the serial or the parallel fence not gated (the parallel one
+            then meets `DurabilityLog`'s refusal and the runtime stalls), the own-entity holder not accepted, the publish not
+            waiting out, the wait-out ignoring its limit. Not covered by a test: the latch-then-Committed-then-log order (a
+            throwing logger), the locks released before the durability wait, the publish bound starting at the append
 
 ### AP-04: Every byte a publish writes is owed to the disk `[fatal]` `[silent]`
   invariant ∀ page p a commit writes through its cluster accessor — in PUBLISH the Versioned HEAD copy into the cluster slot and a
@@ -746,8 +813,9 @@ CK-08 (flush-only cycles) are later increments.
 ### CK-13: A checkpoint never passes a commit that is between its append and its publish `[fatal]` `[silent]`
   invariant CheckpointLSN < the first LSN appended by any commit still between its WAL append and the end of its publish
   invariant a commit records its first LSN (its floor) inside the append, after claiming it and before publishing the WAL frame, and
-            withdraws it once every publish-time page effect is in memory and marked dirty, or when the commit throws (AP-03's residual,
-            #396: the partial publish then outlives the next checkpoint, as it did before this rule)
+            withdraws it once every publish-time page effect is in memory and marked dirty, or when the commit throws. A commit that
+            throws after its append, before its publish completed, first pins its floor on the engine (`PinnedCommitFloor`, AP-03),
+            which holds the checkpoint below its records until the engine is reopened
   invariant the cycle reads the lowest floor AFTER its barrier and BEFORE collecting dirty pages. A barrier that covers a record has drained
             its frame (the drain stops at the first unpublished frame, and LSN order is buffer order, WP-06), so the floor, stored before the
             frame was published, is visible; a commit that has withdrawn has already dirtied the pages the collection finds
@@ -761,7 +829,8 @@ CK-08 (flush-only cycles) are later increments.
   requires: AP-01 (nothing is published before its records are appended), CK-01/CK-02 (the barrier the floor caps), WP-06 (LSN order is
             buffer order)
   scope: DurabilityLog.Append, Transaction.Commit, Transaction.InFlightLsnFloor, Transaction.ResetCore, TransactionChain.LowestInFlightLsn,
-         CheckpointManager.InFlightCommitFloor, CheckpointManager.RunCheckpointCycle, DatabaseEngine.InitializeCheckpointManager (the wiring)
+         DatabaseEngine.PinnedCommitFloor, CheckpointManager.InFlightCommitFloor, CheckpointManager.RunCheckpointCycle,
+         DatabaseEngine.InitializeCheckpointManager (the wiring)
   on_violation: a commit's publish-time page effects (DiedTSN, EnabledBits, the HEAD copy into the cluster slot, spawn finalize,
                 Commit-discipline staged writes) are in no page the cycle writes, yet CheckpointLSN passes their record. Recovery skips
                 records at or below it, so a crash loses the committed change with no error. Measured: a Commit-discipline write and a
@@ -778,7 +847,9 @@ CK-08 (flush-only cycles) are later increments.
             CommittedDisciplineRecoveryTests.CommitDiscipline_AnAppendThatFailsAfterItsClaim_WithdrawsItsFloor (the append throws after its claim:
             the floor was stored before the frame's publish and is withdrawn when the commit throws, so the checkpoint reads no floor while the
             failed transaction is still alive);
-            CheckpointManagerTests.InFlightFloor_CapsTheWatermark
+            CheckpointManagerTests.InFlightFloor_CapsTheWatermark;
+            PostAppendFailureTests.AThrowAfterTheAppend_KeepsTheCommit_StopsTheEngine_AndARestartRecoversIt (the pinned floor: a
+            checkpoint forced after the failed publish stays below its record; with the pin removed, it passes it)
   note: NEW-CK-1 in the 2026-07-06 assessment. For Versioned commits the CK-03 gate already held the watermark back: in the measured destroy,
         update and spawn every cycle skipped a page a live chunk writer held (skip cause A). TrueCrashE2ETests.ACheckpointDuringAPublish_* guards
         that but cannot fail on this rule. A Commit-discipline write or destroy touches no page before publish (CM-01), so nothing did
