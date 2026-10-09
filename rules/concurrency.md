@@ -117,6 +117,42 @@ mid-split. The gaps cancel out — and stop cancelling the moment either one is 
 
 ---
 
+## Module: TXC — the transaction chain
+
+The chain is what the revision cleanup's cutoff reads, and a snapshot the cutoff cannot see is not retained (SNAP). TXC is
+the chain's side of that contract: a transaction's snapshot is visible to every cutoff from the moment it exists.
+
+### TXC-01: A cutoff never passes a snapshot that exists or is being created `[fatal]` `[silent]`
+  invariant ∀ cutoff C = `TransactionChain.ComputeNextMinTSN()`, computed by the tail L, ∀ transaction T ≠ L alive when C is
+            computed or created concurrently with it: C ≤ T.TSN. (L's own snapshot is not retained past its cutoff: L computes
+            C to clean up after itself.)
+  enforce (1) a transaction is in the chain before its TSN exists: `Register` pushes it with its TSN pending (0), then draws
+          the TSN and publishes it (`Volatile.Write`);
+          (2) the cutoff is the minimum over every node but the leaving tail, and over `issued + 1`, the counter read BEFORE
+          the head. A creator the walk does not see pushed after that read, so it draws above it; a pending node the walk
+          does see is awaited (`AwaitTsn`), its creator two instructions from publishing it
+  never draw a TSN before the push: a cutoff computed in between cannot see that snapshot
+  never take the second-to-last node's TSN for the minimum: concurrent creations push in any order, so the chain is not in
+        TSN order, whether the draw comes before the push or after it
+  scope: TransactionChain.Register, TransactionChain.ComputeNextMinTSN, TransactionChain.AwaitTsn, TransactionChain.Remove,
+         Transaction.Init
+  rationale: a pending node costs a cutoff walker the creator's two remaining instructions (a spin that yields — `Sleep(0)`
+             or `Yield`, never `Sleep(1)`), and a creator never waits. The minimum walks the nodes the second-to-last search
+             already walked; the TSN it reads sits beside the link it follows (`Transaction._link`), so the walk still reads one
+             cache line per node. Considered and not taken: the creator stores a lower bound (the counter + 1) before its push, so no
+             walker ever waits — at the price of a read of the counter's contended line on every begin.
+  on_violation: the cleanup trims a revision a live snapshot still needs, and that snapshot reads the component as zeros, with
+                no error: SNAP-01's exception covers unregistered snapshots only (#1254).
+  verified: TransactionCutoffTests.ACutoffNeverPassesASnapshot — a creator held between its push and its draw, in three
+            interleavings: the tail trims while it is held, staged on the tail finishing or waiting on its pending TSN
+            (writer first); or after its release, the writer before or after a younger reader. Every snapshot reads its own
+            value [VerifiesRule]; a cutoff above every TSN issued is caught [RuleMutant]. Real mutations: the draw moved before
+            the push fails `HeldAcrossTheCleanup`; the second-to-last cutoff fails `ReleasedBeforeTheCleanup_ReaderFirst`.
+            TransactionChainTests.Stress_ConcurrentCreation_NoCutoffPassesALiveSnapshot — 8 readers and a writer for 300 ms,
+            each reader finding the retention floor at or below its TSN [VerifiesRule]; it catches each real mutation 3/3.
+
+---
+
 ## Module: SNAP — MVCC snapshot retention
 
 A TSN is not a snapshot. Revisions are retained for the OLDEST TSN the transaction chain can see, so holding a TSN that is

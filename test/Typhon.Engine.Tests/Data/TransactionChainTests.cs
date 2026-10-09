@@ -238,6 +238,101 @@ class TransactionChainTests : TestBase<TransactionChainTests>
     }
 
     /// <summary>
+    /// TXC-01 under concurrency: 8 threads create, read and dispose quick transactions — each disposal as the tail runs the revision cleanup — while a writer
+    /// updates one entity without pause. No cutoff may pass a live snapshot: each reader reads the entity, and before its disposal finds the retention floor
+    /// (the highest cutoff published) at or below its own TSN.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TXC-01")]
+    [CancelAfter(10_000)]
+    public void Stress_ConcurrentCreation_NoCutoffPassesALiveSnapshot()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        EntityId entity;
+        using (var seed = dbe.CreateQuickTransaction())
+        {
+            entity = seed.Spawn<CompAArch>(CompAArch.A.Set(new CompA(1)));
+            seed.Commit();
+        }
+
+        const int readerCount = 8;
+        using var stop = new ManualResetEventSlim(false);
+        var errors = new ConcurrentQueue<string>();
+        var reads = new long[readerCount];
+        var writes = 0L;
+        var threads = new List<Thread>();
+        for (var i = 0; i < readerCount; i++)
+        {
+            var index = i;
+            threads.Add(new Thread(() =>
+            {
+                try
+                {
+                    while (!stop.IsSet && errors.IsEmpty)
+                    {
+                        using var tx = dbe.CreateQuickTransaction();
+                        if (!tx.TryOpen(entity, out var e) || e.Read(CompAArch.A).A < 1)
+                        {
+                            errors.Enqueue($"snapshot {tx.TSN} lost the entity's value");
+                        }
+
+                        var floor = dbe.TransactionChain.RetainedMinTSN;
+                        if (floor > tx.TSN)
+                        {
+                            errors.Enqueue($"a cutoff of {floor} passed live snapshot {tx.TSN}");
+                        }
+
+                        reads[index]++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errors.Enqueue($"reader {index}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }) { IsBackground = true });
+        }
+
+        threads.Add(new Thread(() =>
+        {
+            try
+            {
+                while (!stop.IsSet && errors.IsEmpty)
+                {
+                    using var w = dbe.CreateQuickTransaction();
+                    var value = w.Open(entity).Read(CompAArch.A);
+                    value.A++;
+                    w.OpenMut(entity).Set(CompAArch.A, value);
+                    w.Commit();
+                    writes++;
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue($"writer: {ex.GetType().Name}: {ex.Message}");
+            }
+        }) { IsBackground = true });
+
+        foreach (var t in threads)
+        {
+            t.Start();
+        }
+
+        stop.Wait(TimeSpan.FromMilliseconds(300));
+        stop.Set();
+        foreach (var t in threads)
+        {
+            Assert.That(t.Join(TimeSpan.FromSeconds(5)), Is.True, "a thread did not stop");
+        }
+
+        TestContext.Out.WriteLine($"{reads.Sum():N0} reader transactions, {writes:N0} commits");
+        Assert.That(errors, Is.Empty, "a cutoff passed a live snapshot");
+        Assert.That(writes, Is.GreaterThan(0), "premise: the writer committed");
+        Assert.That(dbe.DeferredCleanupManager.ProcessedTotal, Is.GreaterThan(0), "premise: the readers' disposals trimmed the entity's chain");
+    }
+
+    /// <summary>
     /// 8 threads, 200ms stress — create/dispose loop (no entity ops). Validates lock-free PushHead + Remove
     /// under high contention without page cache pressure.
     /// </summary>

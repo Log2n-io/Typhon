@@ -148,7 +148,24 @@ public unsafe partial class Transaction : EntityAccessor
     internal ushort UowId => OwningUnitOfWork?.UowId ?? 0;
 
     /// <summary>Intrusive link to the next transaction in the engine's transaction chain. Managed by the engine; not intended for external use.</summary>
-    public Transaction Next { get; internal set; }
+    public Transaction Next { get => _link.Next; internal set => _link.Next = value; }
+
+    /// <summary>
+    /// This transaction's node in the chain: the link to the next (older) node and the TSN as the chain's walkers read it (TXC-01), side by side. A cutoff
+    /// walk reads both for every node, and a Transaction is several KiB: <see cref="EntityAccessor.TSN"/> sits 4.5 KiB from where the link would be on
+    /// its own, a second cache line per node.
+    /// </summary>
+    private ChainLink _link;
+
+#pragma warning disable TYPHON005 // A link to another chain node, never owned: the chain removes and disposes nothing through it.
+    private struct ChainLink
+    {
+        public Transaction Next;
+
+        /// <summary>0 while the transaction is in the chain but its TSN is not drawn yet (TXC-01).</summary>
+        public long Tsn;
+    }
+#pragma warning restore TYPHON005
 
     /// <summary>
     /// Number of component operations this transaction carries: the sum of cached entries across every touched component type plus components deleted during
@@ -172,11 +189,11 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, fixes the MVCC
-    /// snapshot at <paramref name="tsn"/>, and selects the commit discipline. Called by the engine when a transaction is created; not for direct use.
+    /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, selects the commit
+    /// discipline, then registers in the transaction chain, which draws the TSN that fixes the MVCC snapshot (TXC-01: in the chain first, then the TSN).
+    /// Called by the engine when a transaction is created; not for direct use.
     /// </summary>
     /// <param name="dbe">Owning database engine.</param>
-    /// <param name="tsn">Transaction sequence number that fixes this transaction's MVCC read snapshot.</param>
     /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
     /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
     /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
@@ -184,19 +201,20 @@ public unsafe partial class Transaction : EntityAccessor
     /// When <see langword="true"/>, the transaction makes and releases its own <see cref="ChangeSet"/> even inside a unit of work that has a shared one: for a
     /// transaction that runs concurrently with others of the same unit of work, whose shared ChangeSet is single-thread-affine (#1116).
     /// </param>
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
+    public void Init(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
         bool ownChangeSet = false)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
-        var initScope = TyphonEvent.BeginDataTransactionInit(tsn, uow?.UowId ?? 0);
-        // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. EnterScope/CreateChangeSet/PushHead are engine-internal.
+        // The TSN is drawn at the end, by the chain (TXC-01); the span carries it, set before the span is emitted.
+        var initScope = TyphonEvent.BeginDataTransactionInit(0, uow?.UowId ?? 0);
+        // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. EnterScope/CreateChangeSet/Register are engine-internal.
         // If a future change adds a throw path, re-tag to variant B.
         _dbe = dbe;
         _epochManager = _dbe.EpochManager;
-        _dbe.LogTxInitPhase(tsn, "entering epoch");
+        _dbe.LogTxInitPhase(0, "entering epoch");
         _ = _epochManager.EnterScope(); // Depth unused: Transaction uses ExitScopeUnordered (not LIFO)
-        _dbe.LogTxInitPhase(tsn, "epoch entered");
+        _dbe.LogTxInitPhase(0, "epoch entered");
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
@@ -221,12 +239,22 @@ public unsafe partial class Transaction : EntityAccessor
         // Rented from the engine's pool and returned at dispose, so a per-chunk transaction allocates nothing in steady state.
         _changeSet = readOnly ? null : _ownsChangeSet ? _dbe.MMF.RentChangeSet() : uow.ChangeSet;
         State = TransactionState.Created;
-        TSN = tsn;
 
-        _dbe.TransactionChain.PushHead(this);
+        // TXC-01: in the chain first, its TSN pending (0), then the TSN. A cutoff computed meanwhile waits for it instead of passing this snapshot.
+        _link.Tsn = 0;
+        var tsn = _dbe.TransactionChain.Register(this);
+        TSN = tsn;
+        _dbe.LogTxInitPhase(tsn, "registered");
+        initScope.Tsn = tsn;
         // PROFILING-SPAN-NO-THROW-END
         initScope.Dispose();
     }
+
+    /// <summary>Publishes this transaction's TSN, drawn after it entered the chain (TXC-01). Pairs with <see cref="ReadPublishedTsn"/>.</summary>
+    internal void PublishTsn(long tsn) => Volatile.Write(ref _link.Tsn, tsn);
+
+    /// <summary>This transaction's TSN as another thread may read it: 0 while the creator is between its push and its draw (TXC-01).</summary>
+    internal long ReadPublishedTsn() => Volatile.Read(ref _link.Tsn);
 
     /// <summary>Reset all state for pooling reuse. Called by TransactionChain after unlinking.</summary>
     internal void Reset() => ResetCore();
