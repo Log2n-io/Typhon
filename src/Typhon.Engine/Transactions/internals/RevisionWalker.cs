@@ -1,6 +1,7 @@
 // unset
 
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -75,21 +76,21 @@ internal static class RevisionChainReader
     }
 
     /// <summary>
-    /// Overload for the transactional resolve path: the caller supplies the chain-lock <see cref="WaitContext"/> (composed
-    /// ONCE per transaction — see <c>Transaction.ChainLockWaitContext</c>), so <c>Stopwatch.GetTimestamp()</c> is not
-    /// re-armed for every Versioned slot of every entity opened. Tries the optimistic single-entry fast path first (the
-    /// steady-state shape: cleanup trims every chain to its head after commit); any concurrent locked mutation is detected
-    /// by the exclusive-holder probe + content re-validation and falls back to the locked walk.
+    /// Overload for the transactional resolve path. Tries the optimistic single-entry fast path first (the steady-state shape: cleanup trims every
+    /// chain to its head after commit), which takes no lock and reads no clock; any concurrent locked mutation is detected by the exclusive-holder
+    /// probe + content re-validation and falls back to the locked walk. That walk reads no clock either unless its lock is contended: only then does
+    /// <paramref name="tx"/> compose the wait's budget — for that acquisition, never once per transaction (CX-06).
     /// </summary>
     internal static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChain(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
-        long transactionTSN, WaitContext lockWc)
+        long transactionTSN, Transaction tx)
     {
+        Debug.Assert(tx != null, "the transactional walk composes its wait budget from the transaction (CX-06)");
         if (TryWalkSingleEntryOptimistic(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, out var fastResult))
         {
             return fastResult;
         }
 
-        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, lockWc);
+        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, default, tx);
     }
 
     /// <summary>
@@ -188,7 +189,7 @@ internal static class RevisionChainReader
     }
 
     private static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChainCore(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
-        long transactionTSN, WaitContext lockWc)
+        long transactionTSN, WaitContext lockWc, Transaction budgetOwner = null)
     {
         // ── Full walk: handles multi-entry chains, voided entries, non-monotonic TSN ordering ──
         short prevCompRevisionIndex = -1;
@@ -203,7 +204,7 @@ internal static class RevisionChainReader
 
 
         {
-            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, compRevFirstChunkId, false, true, lockWc);
+            using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, compRevFirstChunkId, false, true, lockWc, budgetOwner);
             readCommitSequence = compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).CommitSequence;
             int totalCommitted = 0;
             int visibleOrdinal = 0;

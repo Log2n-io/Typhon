@@ -57,11 +57,6 @@ public unsafe partial class Transaction : EntityAccessor
     // to flush in a single batch (one lock acquire instead of N). Never re-allocated after warmup.
     private List<DeferredCleanupManager.CleanupEntry> _deferredEnqueueBatch;
 
-    // Composed once per transaction (lazily), reused for every revision-chain lock acquisition on the read/resolve path
-    // so Stopwatch.GetTimestamp() is not re-armed per Versioned slot per entity. Reset in Init(). See ChainLockWaitContext().
-    private WaitContext _chainLockWc;
-    private bool _chainLockWcResolved;
-
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
     private bool _batchIndexActive;
@@ -205,7 +200,7 @@ public unsafe partial class Transaction : EntityAccessor
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
-        _chainLockWcResolved = false;   // recompute the composed chain-lock deadline for this logical transaction
+        ChainLockWaitContextProbe = null;
         _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
         _committedOperationCount = null;
         _deletedComponentCount = 0;
@@ -1038,7 +1033,7 @@ public unsafe partial class Transaction : EntityAccessor
                     }
 
 
-                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN);
+                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN, _tx);
                     if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
                     {
                         continue;   // not visible at this snapshot, or tombstoned
@@ -1434,7 +1429,7 @@ public unsafe partial class Transaction : EntityAccessor
         int chunkId = ResolveEntityMapSlotChunkId(pk, info);
         if (chunkId != 0)
         {
-            return RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chunkId, TSN);
+            return RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chunkId, TSN, this);
         }
         return new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(RevisionReadStatus.NotFound);
     }
@@ -1448,23 +1443,35 @@ public unsafe partial class Transaction : EntityAccessor
         => WaitContext.FromDeadline(Deadline.Min(ctx.WaitContext.Deadline, Deadline.FromTimeout(subsystemTimeout)));
 
     /// <summary>
-    /// The <see cref="WaitContext"/> used to acquire a revision-chain lock while READING (resolve/walk), composed ONCE
-    /// per transaction as the tighter of the owning UoW deadline and <c>RevisionChainLockTimeout</c>. Caching it collapses
-    /// the per-walk <c>Stopwatch.GetTimestamp()</c> — previously paid for every Versioned slot of every entity opened — to
-    /// a single QPC per transaction. The deadline is only consulted under lock contention, so a transaction-scoped budget
-    /// is an adequate (and stricter) liveness backstop than a fresh per-acquisition one.
+    /// The <see cref="WaitContext"/> for ONE revision-chain lock acquisition while reading (resolve/walk): the tighter of the owning UoW's deadline and
+    /// <c>RevisionChainLockTimeout</c> from now. Composed per acquisition, and only when that acquisition has to wait: the single-entry fast path takes
+    /// no lock, and the locked walk first tries the lock without waiting (<c>AccessControlSmall.TryEnterSharedAccess</c>), which reads no clock
+    /// (<see cref="RevisionChainReader.WalkChain(ref ChunkAccessor{PersistentStore}, int, long, Transaction)"/>, <see cref="RevisionEnumerator"/>).
     /// </summary>
+    /// <remarks>
+    /// Never cached for the transaction (CX-06). It was, to save a <c>Stopwatch.GetTimestamp()</c> per walk: the budget then ran from the transaction's
+    /// first locked walk, so once the transaction was older than the timeout every contended walk threw at once — a reader holding its snapshot past
+    /// 5 s failed on its first wait (MarketHardeningTests' long readers, on the desks' chains).
+    /// </remarks>
     internal WaitContext ChainLockWaitContext()
     {
-        if (!_chainLockWcResolved)
+        if (ChainLockWaitContextProbe is { } probe)
         {
-            _chainLockWc = OwningUnitOfWork != null
-                ? OwningUnitOfWork.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
-                : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
-            _chainLockWcResolved = true;
+            return probe();
         }
-        return _chainLockWc;
+
+        // A unit of work already disposed has no deadline left to compose with (and its token source is gone): the lock's own budget applies.
+        return OwningUnitOfWork is { IsDisposed: false } uow
+            ? uow.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
+            : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
     }
+
+    /// <summary>
+    /// Test seam (CX-06): when set, supplies the chain-lock budget in place of <see cref="ChainLockWaitContext"/>'s own, so the rule's mutant can bring
+    /// back a budget cached for the transaction and show the verifier rejects it. Cleared by <c>Init</c>. Null in production: one null check per locked
+    /// walk, none on the single-entry fast path.
+    /// </summary>
+    internal Func<WaitContext> ChainLockWaitContextProbe { get; set; }
 
     /// <summary>
     /// Rolls back a single component revision: frees content chunks, voids revision entries, and enqueues for deferred cleanup.

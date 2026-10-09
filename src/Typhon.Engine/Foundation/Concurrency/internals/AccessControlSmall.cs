@@ -209,6 +209,34 @@ internal struct AccessControlSmall
         }
     }
 
+    /// <summary>
+    /// Enters shared (reader) access without waiting: succeeds unless an exclusive holder is present, retrying only a CAS lost to another reader. Sets
+    /// no contention flag, emits no contention event and reads no clock — for a caller that composes a wait budget only when it has to wait (CX-06).
+    /// </summary>
+    /// <returns>True if access was acquired; false if an exclusive holder is present.</returns>
+    public bool TryEnterSharedAccess()
+    {
+        while (true)
+        {
+            int initial = _data;
+            if ((initial >> ThreadIdShift) != 0)
+            {
+                return false;
+            }
+
+            if ((initial & SharedUsedCounterMask) >= SharedUsedCounterMask)
+            {
+                ThrowInvalidOperationException("Too many concurrent shared accesses");
+            }
+
+            if (Interlocked.CompareExchange(ref _data, initial + 1, initial) == initial)
+            {
+                TyphonEvent.EmitConcurrencyAccessControlSmallSharedAcquire((ushort)Environment.CurrentManagedThreadId);
+                return true;
+            }
+        }
+    }
+
     /// <summary>Exits shared (reader) access.</summary>
     public void ExitSharedAccess()
     {

@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-07 |
-| Domain | UnitOfWorkContext, HoldoffScope, Deadline, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
+| Last Updated | 2026-10-09 |
+| Domain | UnitOfWorkContext, HoldoffScope, Deadline, WaitContext, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
 
 > Invariants governing cooperative cancellation and the structural-mutation regions it must not
 > interrupt. The two are a **coupled pair**: neither is safe to change without the other, which is
@@ -85,6 +85,35 @@ mid-split. The gaps cancel out — and stop cancelling the moment either one is 
         this bounds **simultaneously-live** threads, not threads over process lifetime.
   on_violation: `LockedByThreadId` returns a negative id; ownership comparisons fail; a lock is
                 released by a thread that does not hold it.
+
+---
+
+## Module: Lock waits
+
+### CX-06: A lock wait's budget starts when the wait does `[correctness]`
+  invariant ∀ acquisition A of a revision-chain lock through `RevisionChainReader.WalkChain(…, Transaction)` — a transaction's
+            point read and resolve, its first write's re-resolve, its index-scan enumerator — A waits until
+            min(the owning UoW's deadline, now_at_A + RevisionChainLockTimeout). Callers that pass their own budget compose it per
+            call (`WalkChain(…, bool skipTimeout)`: a fresh timeout, or infinite for point-in-time accessors and for a destroy's
+            resolve of a cluster entity's Versioned slots, `Transaction.ResolveClusterVersionedForDestroy`)
+  never a per-acquisition timeout composed once and reused for every acquisition of a transaction, or of any longer-lived scope:
+        the budget then runs from the scope's first acquisition, and a scope older than the timeout fails its first contended wait
+        at once
+  scope: Transaction.ChainLockWaitContext, RevisionChainReader.WalkChain, RevisionEnumerator, AccessControlSmall.TryEnterSharedAccess
+  rationale: the budget costs a clock read, so it is composed only when an acquisition has to wait. The single-entry fast path takes
+             no lock; the locked walk first tries the lock without waiting (`TryEnterSharedAccess` / `TryEnterExclusiveAccess`: no
+             clock, no contention flag, no contention event), which succeeds whenever nobody holds the chain exclusively. Only a
+             failed try composes the budget and waits. Caching the budget per transaction saved the clock read too, but turned a lock
+             timeout into a transaction lifetime. Composing it on every locked walk cost +12 ns per walk (95 -> 107 ns,
+             `RevisionLockedWalkBenchmarks`); trying first costs nothing measurable (99.4 / 102.0 ns against main's
+             100.3 / 100.4).
+  on_violation: a reader holding a snapshot longer than `RevisionChainLockTimeout` (5 s) throws `LockTimeoutException` on its
+                first walk of a chain a writer holds for microseconds. MarketHardeningTests' long readers failed that way on the
+                desks' chains, 5 s into their snapshot (#1250).
+  verified: ChainLockBudgetTests — a reader 1.5 budgets old waits out a hold on a chain it walks; the holder releases only after
+            it has seen the reader waiting (the contention flag a waiting acquisition sets), so each walk is proven to have waited
+            [VerifiesRule]; with the budget composed at the first contended walk and reused (the seam `ChainLockWaitContextProbe`),
+            the same wait throws [RuleMutant]
 
 ---
 

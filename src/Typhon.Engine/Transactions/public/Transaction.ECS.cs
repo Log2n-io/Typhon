@@ -1485,8 +1485,8 @@ public unsafe partial class Transaction
                         }
 
 
-                        // Walk revision chain (chain-lock wc composed once per tx — no per-walk Stopwatch.GetTimestamp)
-                        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, ChainLockWaitContext());
+                        // Walk revision chain (the single-entry fast path reads no clock; a locked walk composes its own wait budget, CX-06)
+                        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, this);
                         if (chainResult.IsFailure)
                         {
                             continue;
@@ -1537,7 +1537,7 @@ public unsafe partial class Transaction
                         continue;
                     }
 
-                    var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, ChainLockWaitContext());
+                    var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, this);
                     if (chainResult.IsFailure)
                     {
                         continue;
@@ -1578,7 +1578,7 @@ public unsafe partial class Transaction
                 // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence stays snapshot-correct: the walk computes it
                 // position-based (CS - totalCommitted + visibleOrdinal), so a commit that landed between resolve and write still trips the
                 // first-committer-wins check at our commit.
-                var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, ChainLockWaitContext());
+                var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, this);
                 if (!walk.IsFailure)
                 {
                     cri = walk.Value;
