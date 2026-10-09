@@ -87,7 +87,7 @@ The pricing argument is straightforward: `Deferred` amortizes fsync over a whole
 
 ### 2.2 The ChangeSet model
 
-`Deferred` and `GroupCommit` share a single `ChangeSet` across all transactions in the UoW — the page mutations from every transaction land in one batch. `Immediate` gives each transaction its *own* `ChangeSet` so its `Commit()` can flush in isolation. The `ChangeSet` is the dirty-page accounting layer that the page cache ([02-storage §5](02-storage.md#5-changeset--dirty-tracking)) uses to decide what to write.
+`Deferred` and `GroupCommit` share a single `ChangeSet` across the transactions in the UoW that use `uow.CreateTransaction()` — the page mutations from every such transaction land in one batch. `Immediate` gives each transaction its *own* `ChangeSet` so its `Commit()` can flush in isolation. The shared `ChangeSet` is single-thread-affine; transactions that run concurrently with their UoW siblings — specifically the per-chunk transactions a parallel `QuerySystem` declared `WritesVersioned()` creates internally via `CreateConcurrentTransaction()` — rent a separate `ChangeSet` from the engine's pool and return it at `Dispose`, rather than routing dirty pages through the shared one (rule PS-05a). The `ChangeSet` is the dirty-page accounting layer that the page cache ([02-storage §5](02-storage.md#5-changeset--dirty-tracking)) uses to decide what to write.
 
 The UoW pre-allocates the shared `ChangeSet` before allocating the `UowId`. That ordering is deliberate: registry page mutations (writing the new `UowRegistryEntry`) piggyback on this `ChangeSet` instead of triggering a synchronous I/O on whatever thread is calling `CreateUnitOfWork`.
 
