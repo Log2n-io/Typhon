@@ -226,26 +226,19 @@ Stores fixed-size chunks (minimum stride 8 B). Each page reserves part of its 12
 
 - `ChunkCountRootPage` — chunks per root page. With the directory-only root (v4) the directory fills the whole root, so this is **always 0** — chunk 0 lives on segment page 1, not the root.
 - `ChunkCountPerPage` — chunks per data (non-root) page
-- `_divMagic` — magic multiplier for `chunkIdx / ChunkCountPerPage` (multiply + shift, ~3 cycles, vs 20–80 for division)
+- `_pageDivider` (`ChunkPageDivider`) — exact 64-bit magic multiplier for `chunkIdx / ChunkCountPerPage` (one `Math.BigMul`, ~3 cycles, vs 20–80 for division); replaces the 32-bit multiplier that overflowed at large chunk ids (#1204)
 
 Alignment padding ensures chunks start at stride-aligned absolute page offsets — for `stride = 128`, each data page wastes 64 B (because `PageHeaderSize = 192` isn't a multiple of 128). For `stride = 64`, padding is zero. (The root carries no chunks, so its alignment is moot.)
 
-#### The lock-free forward singly-linked list
+#### Room-bits bitmap
 
-Free-page tracking is a lock-free **forward SLL** over the pages that have at least one free chunk:
+Free-page tracking is a **room-bits bitmap** (`RoomBlock[] _roomBlocks`): one bit per page, set when the page *may* have a free chunk (a conservative superset of the truth — a bit set on a full page is a false positive, corrected on the next allocation attempt). Three additional fields manage the invariant concurrently:
 
-- `_freeHead` — head index, or `EMPTY_PAGE = -1` when no page has free space
-- `_nextPage[i]` — successor index, `EMPTY_PAGE` for tail, `NOT_IN_LIST = -2` when removed
-- `HEAD_SENTINEL = -3` — used internally by allocators to indicate "predecessor is the head pointer itself"
+- `_roomGeneration` — bumped each time a room or summary bit goes from clear to set; an allocation that found no room grows the segment only when this counter is unchanged since its search, preventing a grow past a chunk freed behind the scan.
+- `_transientClears` — counts allocations that have cleared a room or summary bit but not yet re-read the page or word; a grow waits for zero before concluding that no chunk is available.
+- `_allocationCursor` — next-fit hint; avoids rescanning from page 0 on every allocation.
 
-`AllocateChunk` walks the chain, scans a page's bitmap (`Interlocked.Or` with a bit mask), and on success calls `_store.EnsureDirtyAtLeast(memPageIdx, 1)` + `Interlocked.Increment(_allocatedCount)`. When a page's bitmap is fully set, it's removed from the chain via **two-phase mark + unlink**:
-
-```
-Phase A (linearization point):  CAS _nextPage[cur] from capturedNext → NOT_IN_LIST
-Phase B (best-effort unlink):   CAS predecessor's pointer from cur → capturedNext
-```
-
-Phase A is the linearization point — once it succeeds, the page is "removed" as far as any concurrent traverser is concerned. Phase B failure is harmless: a later walk hits `NOT_IN_LIST` and restarts from `_freeHead` with a bounded restart counter (`restarts > length` triggers `RebuildFreeList` under `_growLock`). Freed pages are appended at the tail. The minimum chunk size is 8 bytes.
+`AllocateChunk` finds the first page with its room bit set (`NextPageWithRoom`), scans its per-chunk bitmap (`Interlocked.Or` with a bit mask), and on success calls `_store.EnsureDirtyAtLeast(memPageIdx, 1)` + `Interlocked.Increment(_allocatedCount)`. When the page is found full, the allocation clears its room bit and re-reads the page — setting the bit back if a chunk was freed in the window. `FreeChunk` clears the chunk's bitmap bit, then sets the page's room bit. The minimum chunk size is 8 bytes.
 
 #### Growth — uses your `ChangeSet`
 
