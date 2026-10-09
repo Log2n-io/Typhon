@@ -146,6 +146,28 @@ public sealed class RealmRegistry
         }
     }
 
+    /// <summary>
+    /// Which incarnation of id <paramref name="id"/> this is: 0 for one registered for the first time, one more each time a retired id is registered again.
+    /// </summary>
+    /// <param name="id">A registered realm.</param>
+    /// <returns>The catalog generation, or 0 for a realm this database has no catalog row for (realm 0 of a single-world database).</returns>
+    /// <remarks>
+    /// <b>A realm's identity is the pair <c>(id, generation)</c>, not the id</b> (12-realms § 1.1): ids are reused once a realm is retired, so an application
+    /// that caches or compares by id alone can mistake a reused id for the realm it replaced. This is the second half, and it is the same number the
+    /// <c>REALM</c> block puts on the wire, so a server and its clients agree about which incarnation they are talking about.
+    /// <para>
+    /// It only advances across an open — see <see cref="RealmR1.Generation"/> — so within one run it is a constant per id. Compare it anyway: the code that
+    /// does not is correct today and wrong after the first restart.
+    /// </para>
+    /// </remarks>
+    /// <remarks>
+    /// <b>Read from a published array, not from the catalog dictionary.</b> The catalog is mutated at run time — a registration inserts, a retirement removes —
+    /// and this is called from wherever an application wants a realm's identity, including a web request thread serving a realm directory. A
+    /// <c>Dictionary.TryGetValue</c> racing an insert that resizes is undefined behaviour, and taking the realm lifecycle lock here would let a stats call stall
+    /// a fence. Two acquire loads instead.
+    /// </remarks>
+    public int GenerationOf(RealmId id) => _engine.RealmGenerationOf(id.Value);
+
     /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>
     /// <remarks>A realm Unregister has closed reads <see cref="RealmRunState.Closing"/> at once: entries are refused from the call on. Its policy state
     /// — what dispatch reads — follows at the next tick start (RLM-03).</remarks>

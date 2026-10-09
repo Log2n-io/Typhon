@@ -176,12 +176,12 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
                 if ((i & 1) == 0)
                 {
                     expected[i] = 1_000_000 + i;
-                    tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = expected[i], Payload = i };
+                    tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = expected[i], Payload = i });
                 }
                 else
                 {
                     expected[i] = i;
-                    tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = i, Payload = i };
+                    tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = i, Payload = i });
                 }
             }
 
@@ -239,7 +239,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
             {
                 var i = order[k];
                 moved.Add(i);
-                tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = SharedTag, Payload = i };
+                tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = SharedTag, Payload = i });
             }
 
             tx.Commit();
@@ -290,7 +290,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
         {
             for (var k = 0; k < EntityCount; k++)
             {
-                tx.OpenMut(ids[order[k]]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = SharedTag, Payload = order[k] };
+                tx.OpenMut(ids[order[k]]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = SharedTag, Payload = order[k] });
             }
 
             tx.Commit();
@@ -320,7 +320,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
             for (var k = 0; k < EntityCount; k++)
             {
                 var i = order[k];
-                tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = 500_000 + i, Payload = i };
+                tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = 500_000 + i, Payload = i });
 
                 // Mutate THEN destroy, in the same transaction — the case PrepareEcsDestroys does not cover and the drain has to.
                 if (i % 5 == 0)
@@ -375,7 +375,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
             {
                 var i = order[k];
                 newKeys.Add(900_000 + i);
-                tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = 900_000 + i, Payload = i };
+                tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = 900_000 + i, Payload = i });
             }
 
             tx.Commit();
@@ -405,7 +405,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
                 for (var k = 0; k < mutateCount; k++)
                 {
                     var i = order[k];
-                    tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = (generation * 100_000) + i, Payload = generation };
+                    tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = (generation * 100_000) + i, Payload = generation });
                 }
 
                 tx.Commit();
@@ -458,7 +458,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
                 {
                     var i = order[k];
                     newKeys.Add((generation * 100_000) + i);
-                    tx.OpenMut(ids[i]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = (generation * 100_000) + i, Payload = generation };
+                    tx.OpenMut(ids[i]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = (generation * 100_000) + i, Payload = generation });
                 }
 
                 tx.Commit();
@@ -498,7 +498,7 @@ class ClusterShadowDrainOrderTests : TestBase<ClusterShadowDrainOrderTests>
         {
             for (var k = 0; k < shareCount; k++)
             {
-                tx.OpenMut(ids[order[k]]).Write(ShDrainUnit.Comp) = new ShDrainComp { Tag = SharedTag, Payload = order[k] };
+                tx.OpenMut(ids[order[k]]).Set(ShDrainUnit.Comp, new ShDrainComp { Tag = SharedTag, Payload = order[k] });
             }
 
             tx.Commit();

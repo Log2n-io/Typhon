@@ -416,8 +416,9 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(itemId);
-            ref var item = ref entity.Write(CascadeItem.Item);
+            var item = entity.Read(CascadeItem.Item);
             item.Owner = bag2Id;
+            entity.Set(CascadeItem.Item, item);
             t.Commit();
         }
 
@@ -460,8 +461,9 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         using (var t = dbe.CreateQuickTransaction())
         {
             var entity = t.OpenMut(itemId);
-            ref var item = ref entity.Write(CascadeItem.Item);
+            var item = entity.Read(CascadeItem.Item);
             item.Weight = 99;
+            entity.Set(CascadeItem.Item, item);
 
             // Now destroy the parent — cascade should find the item despite the write
             t.Destroy(bagId);

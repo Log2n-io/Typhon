@@ -99,7 +99,10 @@ using (var tx = dbe.CreateQuickTransaction())
 // mutate: OpenMut for a writable handle
 using (var tx = dbe.CreateQuickTransaction())
 {
-    tx.OpenMut(id).Write(Character.Data).Credits += 10;
+    var entity = tx.OpenMut(id);
+    var data = entity.Read(Character.Data);
+    data.Credits += 10;
+    entity.Set(Character.Data, data);
     tx.Commit();
 }
 
@@ -130,7 +133,7 @@ Typhon is an ECS database (not SQL) from the `Typhon` NuGet package. Rules:
   `[Archetype(Name="…")]`) with `public static readonly Comp<T> X = Register<T>();`. Archetypes self-register at assembly load.
 - Open the engine with DatabaseEngine.Open(path, o => o.Register<T>()) — register components; archetypes need no registration call.
 - All changes happen in a transaction: `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`.
-  Spawn: `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`. Mutate: `tx.OpenMut(id).Write(Foo.X).Field = …`.
+  Spawn: `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`. Mutate: `var e = tx.OpenMut(id); var x = e.Read(Foo.X); x.Field = …; e.Set(Foo.X, x);` — reads copy, writes are `Set`; there is no `Write`.
 - Query with the fluent view API: `tx.Query<Foo>().Where<T>(x => …).Count()` — NOT LINQ. To read an
   entity, use `tx.Open(id).Read(Foo.X)`, not the query-enumerated reference.
 - Full docs: https://doc.typhondb.io/llms.txt

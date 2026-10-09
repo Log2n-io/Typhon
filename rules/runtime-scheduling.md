@@ -287,13 +287,13 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
 
 A runtime strict-mode check, opt-in in every build (see DV-01), that catches declaration drift.
 
-### DV-01: Write<T> requires declared Writes<T> or SideWrites<T> `[strict-mode][opt-in]`
-  pre  EntityRefMut.Write<T>() called from inside dispatched system body
+### DV-01: Set<T> requires declared Writes<T> or SideWrites<T> `[strict-mode][opt-in]`
+  pre  EntityRefMut.Set<T>() (WriteRef) called from inside dispatched system body
   pre  the check is ENABLED — it is gated on CheckConfig.DeclaredAccessActive, a static readonly bool read from
        configuration key `Typhon:Checks:DeclaredAccess`, which defaults to FALSE (including in Debug builds)
   invariant when enabled: SystemAccessValidator.Current is set to the executing system's descriptor
   invariant typeof(T) ∈ descriptor.Writes ∪ descriptor.SideWrites OR descriptor.HasAnyDeclaration == false
-  scope: SystemAccessValidator.AssertWrite, EntityRefMut.Write
+  scope: SystemAccessValidator.AssertWrite, EntityRefMut.WriteRef
   on_violation: throws InvalidAccessException with system name + undeclared type + declared set
   release_behavior: available in Release; when the gate is off the JIT constant-folds the branch away — zero overhead
   rationale: 🔴 CORRECTED 2026-07-27. This rule was tagged [debug-only] and claimed `[Conditional("DEBUG")] strips the
@@ -342,7 +342,13 @@ A runtime strict-mode check, opt-in in every build (see DV-01), that catches dec
       return before TickStartCallback, so no UoW is created and no SV/Transient write happens. This rule's failure mode is mutate-then-skip;
       with no mutation there is nothing for a fence to cover. The damage a fence failure DOES leave is on its own tick, and stopping bounds
       it rather than undoing it.
-  scope: TyphonRuntime.OnTickEndInternal; RuntimeOptions.SystemExceptionPolicy = AbortTickAndStop; DagScheduler.ExecuteCallbacks
+  invariant a graceful stop keeps the tick in flight whole: TyphonRuntime.Shutdown, called off the tick thread, closes the tick entry and
+      waits for the tick it did not stop in time — its systems, its fence, its flush — before the workers go. A stop that abandons a tick
+      between its systems and its fence is mutate-then-skip by another route (#1085: the moved entities a box query then missed, the
+      un-logged pages a checkpoint could then persist). On the tick thread (an OnTickAborted handler calling it) it cannot wait for the
+      tick it is part of, and a tick hung past the drain's timeout is logged and abandoned
+  scope: TyphonRuntime.OnTickEndInternal; RuntimeOptions.SystemExceptionPolicy = AbortTickAndStop; DagScheduler.ExecuteCallbacks;
+    TyphonRuntime.Shutdown, DagScheduler.StopTicksAndDrain
   on_violation: SingleVersion / Transient writes are made IN PLACE into cluster pages and receive their WAL record at
     the fence. Skipping the fence leaves the page mutated, dirty and un-logged; the checkpoint thread then persists it
     on its own schedule, producing a durable mutation with no WAL record behind it. CK-02's WAL-before-data ordering
@@ -357,7 +363,8 @@ A runtime strict-mode check, opt-in in every build (see DV-01), that catches dec
     together and only together. Engine-tagged systems are exempt from the scheduler's tick-abort guard, which is what
     makes the fence run on an aborted tick, so the replication track does NOT inherit the suppression: it opts out
     itself, in every stage's ShouldRun.
-  verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule]
+  verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule];
+    ShutdownDrainTests.AShutdownDuringATick_LeavesThatTickFenced [VerifiesRule] (red when the drain does not wait)
 
 ### TP-02: Parallel cluster dispatch binds to the system's own view archetype `[fatal][silent]`
   invariant a system's cluster-range dispatch binds to the ArchetypeClusterState of THAT system's queried archetype,
@@ -478,7 +485,7 @@ descends from this one property.
 
 ### CD-02: A dispatch's chunks tile the cluster list Prepare counted `[fatal]` `[silent]`
   invariant the cluster ranges a parallel QuerySystem's chunks walk tile the list its dispatch splits exactly: chunk k of n walks its share of an
-            equal split (ChunkClusterRange), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
+            equal split (PlanQueryChunks, written once into the dispatch's per-chunk plan, CD-03), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
   invariant the list and its length are read once, in Prepare (OnParallelQueryPrepare), and every chunk walks that array and splits that length,
             never the live pair: a spawn can append to an archetype's list while the chunks run (AddToActiveList, under its latch), and chunks that
             read two lengths do not tile. An append leaves the array's first entries as they are, even when it moves the list to a larger array.
@@ -487,13 +494,42 @@ descends from this one property.
             of the length protects against)
   on_violation: silent: a cluster walked twice (its entities updated twice, its queries counted twice) or not at all (a tick of work skipped for
     its entities), with nothing raised
-  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, ChunkClusterRange, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
+  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, PlanQueryChunks, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
   verified: ChunkClusterRangeTests.AListThatGrowsDuringTheDispatch_IsStillTiled (the first chunk spawns a new cluster before the next reads its
             range, on the accessor path and on the per-chunk Transaction path; against the code that split the live length it fails:
             "[0,18) [19,37)" for a list of 36 on both paths, the second chunk splitting the 37 clusters the spawn left). The change-filtered path reaches the
-            same ChunkClusterRange but no test drives it
+            same plan but no test drives it
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
+
+### CD-03: A chunk runs with the record its own dispatch's prepare wrote `[fatal]` `[silent]`
+  invariant a typed chunked system's prepare (ChunkedCallbackSystem<TContext, TChunk>.Prepare, or a Dag.ChunkedSystem prepare lambda) sizes its
+            ChunkTable with Reset and writes every record BEFORE it returns; chunk c of that dispatch runs with record c and no other
+  invariant a ChunkTable is written only by prepare, and prepare runs only between dispatches: a dispatch's prepare starts after every chunk of
+            the previous dispatch of that system has completed (CompleteParallelDispatch), so no chunk reads a table being rewritten
+  invariant the records need no fence of their own: prepare's writes precede the release that publishes the claim word (OpenChunkClaims, CD-01)
+            and a chunk is reached only through an Interlocked claim on that word
+  invariant a dispatch never reads past what its prepare wrote: a prepare returning more chunks than records fails the system at prepare
+            (ChunkPlans.Checked), and a chunk whose index is not below the table's Count throws rather than reading a record left over from a
+            larger dispatch — including under -1, which keeps the static ChunkedParallel count and still needs that many records
+  never a ChunkTable written from inside a chunk, or shared by two systems
+  on_violation: silent — a chunk does the work of another chunk, or of an earlier dispatch: work done twice or skipped, with nothing raised
+  scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem),
+         PushHub.cs (Plan, PlaceWorker, FoldFarChunk), TyphonRuntime.cs (PlanQueryChunks), QueryChunk.cs,
+         FenceWorkPlan.cs (Build, FenceChunk), FenceExecSystem.cs (DispatchItem)
+  verified: ChunkTableTests.TypedSystem_EachChunkRunsWithTheRecordItsDispatchWrote and
+            ChunkTableTests.LambdaSystem_EachChunkRunsWithTheRecordItsDispatchWrote (60+ dispatches of 1-13 chunks on 4 workers, the count
+            rising and falling; every chunk checks its record's dispatch, index and checksum, and every planned chunk runs once). Run against an
+            Execute that read record 0 for every chunk: the typed test and MinusOne_KeepsTheStaticCount fail.
+            RealmReplicationTests.EveryServedRealmsIndexChunkReachesItsOwnRealmAndChunk covers the engine's first user, PushHub's realm plan (#1112):
+            three served realms each merging in several chunks through the hub; it fails when every record names realm 0, and when every record names
+            its realm's chunk 0.
+            QueryChunkPlanTests (change-filtered and Versioned parallel dispatches, 600 entities in 16 chunks: every entity to exactly one chunk, every tick)
+            covers the runtime's own query plan (#1114) with ChunkClusterRangeTests on its cluster side; both fail when every record takes chunk 0's
+            share. Before #1114 no test covered the entity slices at all.
+            The parallel fence's plan (#1115) — each chunk's run of FenceWorkPlan.Items, and the item's plan position handed to DispatchItem — is
+            covered by PrepSliceEquivalenceTests' SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath (2, 4 and 8 workers), which fail when every item of a chunk
+            is given the chunk's first position
 
 ## Module: RT — Epoch scope around system bodies
 
@@ -780,3 +816,87 @@ all. Both failures are silent.
   verified: SystemInputViewLivenessTests.SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning — spawns while the
             runtime is ticking, which no fixture anywhere did before, and asserts the system sees 20 rather than 10.
   requires BIND-01 (a system with no input View has no membership to keep fresh)
+
+## Module: TR — Tick telemetry ring readers
+
+`TickTelemetryRing` is written once per tick by the tick driver and read by everything that reports what the engine is doing: the HTTP stats
+snapshot, the `STATS` block that reaches game clients, the push-replication operator records. Its two bounds are the only thing a reader has to
+go on, and both report `-1` while the ring is empty — which is the state EVERY reader sees on tick 0, because the ring is written at the end of a
+tick. The hand-written window pass does not survive that, and three shipped copies of it did not.
+
+### TR-01: A window pass over the tick telemetry ring never asks it for a tick the ring does not hold `[fatal]` `[silent]`
+  invariant a reader resolves its window through `TickTelemetryRing.TryGetRange`, which returns false for an empty ring and otherwise yields
+            `first >= OldestAvailableTick` and `last == NewestTick`; every tick in `[first, last]` is one `GetTick` / `GetSystemMetrics` accepts
+  never a reader forming its own bounds as `Math.Max(OldestAvailableTick, tick - window)`: on an empty ring that is `Math.Max(-1, -1)` and the
+        loop's first call is `GetTick(-1)`, which throws `ArgumentOutOfRangeException`
+  note: `[fatal]` because of WHERE these readers run, not because a percentile matters. The operator emission is called from
+        `SubscriptionsContext.Reset`, on the unconditional tick path, BEFORE the ring is written — so the throw stopped the recording that would
+        have made the next tick's call legal and the condition sustained itself for every tick of the run. `[silent]` is the reason it needs a
+        rule: arguments are evaluated before a gated emit is entered, so the throw fires whether or not anyone wanted the record, and it surfaced
+        as 508 ticks with 2 337 trace records and not one record of the expected kind, every gate true and every null check passing. Nobody saw
+        an exception
+  note: `TryGetRange` takes an absolute `fromInclusive`, not a width, deliberately. The two shipped readers disagree by one on what "the window"
+        means — `StatsEncoder` walks `[tick - window, newest]` and `ReadStats` walks `[newest - window + 1, newest]` — and a helper that took a
+        width would have to pick one and silently change the other's published percentiles. Settling that is #1066's business, not this rule's
+  scope: TickTelemetryRing.cs (TryGetRange, GetTick, GetSystemMetrics, OldestAvailableTick, NewestTick), StatsEncoder.cs
+         (DurabilityWaitPercentile, FillTickSamples, SystemMeans), TyphonRuntime.cs (ReadStats)
+  verified: TickTelemetryRingTests.TryGetRange_RefusesAnEmptyRing_AndNeverYieldsATickGetTickWouldRefuse — asserts the property directly, over
+            every `from` a caller could compute against a ring from empty through wrapped, including the negative one the trap produces;
+            SubscriptionsOperatorTelemetryTests.EveryTickTelemetryWindowPassSurvivesAnEmptyRing — the consumer end, on a real encoder
+  note: no RuleMutant. The guard was mutation-verified by hand when it landed — widening it to `newest < -99` reproduced the exact
+        `ArgumentOutOfRangeException` the empty-ring test names — and a mutant of `TryGetRange` itself is caught by the exhaustive cross-check,
+        which calls `GetTick` on every tick the helper returns
+
+## Module: Deferred Entity Commands
+
+`ctx.Commands` lets a system inside a parallel chunk queue a spawn or a destroy and get the entity's final id back
+immediately (#1099). The id comes from a per-chunk key block, which is the whole reason the push path needs no atomic
+per command — and the reason the disjointness question below has a wrong answer that looks right.
+
+### EC-01: A key block is owned by a (archetype, ChunkIndex) pair, and that pair is NOT exclusive `[fatal][silent]`
+  invariant ∀ reserved runs r1, r2 issued by EntityKeyBlocks: r1 ∩ r2 = ∅
+  invariant the scheduler guarantees disjoint WORKER SLOTS, not disjoint ChunkIndex values:
+            ∃ sys_a, sys_b with no derived dependency, both dispatched with ChunkCount == 1,
+            both therefore reporting ChunkIndex == 0, running concurrently
+  invariant ⟹ the cursor for (archetype, ChunkIndex) may be read-modify-written by more than one
+            thread at a time, and must be updated atomically
+  scope: EntityKeyBlocks.Reserve, EntityKeyBlocks.TryEnsureGeneration, TickContext.Commands
+  rationale: striding key blocks by ChunkIndex rather than by worker slot is what makes an issued id
+    independent of which worker picked the chunk up, and therefore reproducible at a different worker
+    count. That is correct and worth keeping. What it does NOT buy is exclusivity: slot disjointness is
+    a scheduler guarantee, chunk-index disjointness is not, and `ctx.Commands` requires no resource
+    declaration, so two systems can hold the same chunk index in the same tick with no edge between
+    them. A CallbackSystem is one chunk, so two of them is the easiest case, not an exotic one.
+  enforced_by:
+    - the (generation, used) pair is one packed long, updated by Interlocked.CompareExchange, so a
+      losing producer retries and re-reads rather than overwriting
+    - a generation's base is published once under a CAS gate and read with Volatile.Read, so the base
+      a retry reads is the one the winner wrote
+  on_violation: two producers are handed the SAME key. Two identical EntityIds reach
+    SpawnBatchAllocateRaw, which inserts two rows into the EntityMap under one key — silently, with no
+    throw and no counter, and every later lookup of that key resolves to whichever row it finds first.
+  verified: EntityCommandReviewFixTests.TwoProducersOnOneChunkIndexNeverShareAKey — two writers on one
+            chunk index and two worker slots, released by a barrier and repeated, asserting the issued
+            key sets are disjoint; EntityCommandReviewFixTests.EveryReservedRunIsDisjoint — the same
+            property over randomised (chunk, count) sequences, which also covers the block-boundary case
+            where a run takes a fresh generation and must not reissue the tail it left
+  note: the reproducibility guarantee is therefore scoped, and the scope is the rule rather than a
+        caveat: an id sequence reproduces across worker counts while ONE system owns an archetype's
+        spawning in a tick. Two concurrent systems spawning into one archetype have a timing-dependent
+        order, and no cursor discipline fixes that — only keying the block by system index as well would,
+        which nothing needs yet.
+
+### EC-02: The declared per-tick command budget is the real bound on one producer `[silent]`
+  invariant EntityKeyBlocks.MaxKeysPerProducerPerTick >= RuntimeOptions.EntityCommandsPerTick
+  scope: EntityKeyBlocks.DeriveBlockSize, EntityKeyBlocks constructor (_maxGenerations)
+  rationale: a block is the budget divided by the stride, and a producer that exhausts one takes
+    another generation. If the generation ceiling is a constant rather than derived from the budget,
+    the two numbers disagree and the smaller one wins without saying so.
+  on_violation: a producer is refused inside its declared budget and the caller gets EntityId.Null for
+    entities it had every reason to expect. Measured before the fix: a block capped at 1 024 / stride
+    with an 8-generation ceiling let ONE chunk queue 1 024 entities per tick whatever the budget said,
+    so a 3 000-entity burst from a serial system silently lost 1 976 of them — found by counting rows in
+    the entity map, not by any counter, because the per-tick counters had been cleared by then.
+  verified: EntityCommandWriteSideTests.OneProducerCanQueueTheWholeDeclaredBudget — asserted from ONE
+            chunk deliberately, because spread over eight the old arithmetic would have passed
+

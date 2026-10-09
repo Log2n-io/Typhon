@@ -169,8 +169,10 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
         // Mutate Score (100 → 200)
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var s = ref tx.OpenMut(id).Write(ClQUnit.Stats);
+            var opened = tx.OpenMut(id);
+            var s = opened.Read(ClQUnit.Stats);
             s.Score = 200;
+            opened.Set(ClQUnit.Stats, s);
             tx.Commit();
         }
 
@@ -209,8 +211,10 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
         // Mutate Score (30 → 60, crosses into view range)
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var s = ref tx.OpenMut(id).Write(ClQUnit.Stats);
+            var target = tx.OpenMut(id);
+            var s = target.Read(ClQUnit.Stats);
             s.Score = 60;
+            target.Set(ClQUnit.Stats, s);
             tx.Commit();
         }
 
@@ -353,8 +357,10 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
             {
                 for (var i = 0; i < population; i += 4)
                 {
-                    ref var stats = ref tx.OpenMut(ids[i]).Write(ClQUnit.Stats);
-                    stats.Score = 500 + (tick % 3);          // all written entities crowd into the middle of the range
+                    var target = tx.OpenMut(ids[i]);
+                    var stats = target.Read(ClQUnit.Stats);
+                    stats.Score = 500 + (tick % 3);
+                    target.Set(ClQUnit.Stats, stats);          // all written entities crowd into the middle of the range
                 }
 
                 tx.Commit();
@@ -668,8 +674,10 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
         // Mutate entity
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var s = ref tx.OpenMut(id).Write(ClQUnit.Stats);
+            var target = tx.OpenMut(id);
+            var s = target.Read(ClQUnit.Stats);
             s.Score = 999;
+            target.Set(ClQUnit.Stats, s);
             tx.Commit();
         }
 

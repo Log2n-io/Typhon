@@ -43,6 +43,18 @@ export class BinaryReader {
   }
 
   /**
+   * Read an f64. Added for kind 70, the first record to carry one.
+   *
+   * The engine sends the tightness numerators and the relocation spend as f64 rather than the f32 means kind 66 uses,
+   * because a consumer folding several realms must re-derive a mean from summed numerators over a summed sample count —
+   * and that sum is checkable against the archetype-wide total in f64, only approximately so after an f32 round trip.
+   * A `number` is an f64, so nothing is lost on this side.
+   */
+  readF64(offset: number): number {
+    return this.view.getFloat64(offset, /*littleEndian*/ true);
+  }
+
+  /**
    * Read an i64 as a Number. Only safe for values within 2^53 — use <see cref="readI64Decimal"/> for IDs/TSNs that can exceed that range.
    * OK for timestamp values that get divided by ticksPerUs immediately (the division compresses the range).
    */

@@ -1145,7 +1145,8 @@ internal abstract class EcsViewFieldReader
 }
 
 /// <summary>
-/// Typed implementation that reads component <typeparamref name="T"/> via <see cref="EntityAccessor.Open(EntityId)"/> + <see cref="EntityRef.TryRead{T}"/>.
+/// Typed implementation that reads component <typeparamref name="T"/> via <see cref="EntityAccessor.Open(EntityId)"/> +
+/// <see cref="EntityRef.TryRead{T}(out T)"/>.
 /// </summary>
 internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T : unmanaged
 {

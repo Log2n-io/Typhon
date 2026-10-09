@@ -157,12 +157,14 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         // comment exists rather than a NaN literal.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            ref var pos = ref tx.OpenMut(bad).Write(ClSpatialUnit.Pos);
+            var target = tx.OpenMut(bad);
+            var pos = target.Read(ClSpatialUnit.Pos);
             pos.Bounds = new AABB3F
             {
                 MinX = 60f, MinY = 60f, MinZ = 60f,
                 MaxX = 40f, MaxY = 40f, MaxZ = 40f,
             };
+            target.Set(ClSpatialUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -391,8 +393,9 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClSpatialUnit.Pos);
+            var pos = eref.Read(ClSpatialUnit.Pos);
             pos = MakePos(200, 200, 200);
+            eref.Set(ClSpatialUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -510,8 +513,9 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClSpatialUnit.Pos);
-            pos = MakePos(11, 11, 11); // +1 from center, within fat AABB
+            var pos = eref.Read(ClSpatialUnit.Pos);
+            pos = MakePos(11, 11, 11);
+            eref.Set(ClSpatialUnit.Pos, pos); // +1 from center, within fat AABB
             tx.Commit();
         }
 
@@ -579,8 +583,9 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClSpatialUnit.Pos);
+            var pos = eref.Read(ClSpatialUnit.Pos);
             pos = MakePos(200, 200, 200);
+            eref.Set(ClSpatialUnit.Pos, pos);
             tx.Destroy(id);
             tx.Commit();
         }

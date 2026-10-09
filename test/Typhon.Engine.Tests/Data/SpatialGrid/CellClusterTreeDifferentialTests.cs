@@ -63,7 +63,7 @@ unsafe class CellClusterTreeDifferentialTests
         Span<int> pages = stackalloc int[8];
         store.AllocatePages(ref pages, 0, null);
         var segment = new ChunkBasedSegment<TransientStore>(em, store, desc.Stride);
-        segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, pages, false);
+        segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, pages);
         return segment;
     }
 

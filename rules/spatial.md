@@ -1406,13 +1406,17 @@
     of a coordinate, or of something tracking one; for an index on an unrelated quantity a re-sort neither helps
     nor harms, and claiming otherwise would be claiming magic
   scope: ArchetypeClusterState.InvalidateClusterZoneMaps, ZoneMapArray.Invalidate, ZoneMapArray.TryGetBounds
+  requires IXS-08 — the conservative direction holds only for a cluster the map has seen. A widen that started the bounds of a
+    cluster loaded at open did narrow, to the one value it carried, and hid the cluster's other rows (#1151). Invalidate
+    returns a cluster to Unset, which is right only for an empty cluster such as a destination a repair allocates. The
+    migration then widens its occupants into the persistent index home only, not the Transient one (#1162)
   verified: ClusterRepairTests.ARepairNarrowsTheZoneMapsOfTheCellItRepacks measures total recorded width before
     and after over every cluster of the cell and every indexed field; measured 3 541 -> 796 (22 %) at 2 000
     entities in 41 clusters. It also asserts the total is non-zero afterwards, so "narrower" cannot be satisfied
     by "invalidated and never re-widened"
   on_violation:
     invalidate omitted → the re-packed cluster inherits a stale wide bound and prunes nothing
-    invalidate without a following widen → the map reads "unknown", which is conservative but buys no pruning
+    invalidate without a following widen → the map has no bounds (Unset), which is conservative but buys no pruning
 
 ### TH-04: The maintenance budget follows the queries' efficiency, and the configured budget is its ceiling `[perf][silent]`
   invariant every consumer of the re-clustering budget — the repair planner (DatabaseEngine.FinishArchetypeFencePrep), the throttle
@@ -1682,13 +1686,25 @@
     slot (CA-01) until it moves. A recovery or schema-migration claim (ClaimSlot) is cell-agnostic, so without the check
     a mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits
     the cell plus the band; only the others scan their slots (Realms P0.2)
+  invariant a write-time crossing flag is never lost to a fence it was not part of. The drain TAKES each cluster's pending
+    slots (Interlocked.Exchange), so ClearAabbRefreshBookkeeping clears only what this fence consumed: a pending bit still
+    set at the clear was raised after the drain — by a transaction committing on another thread while the fence ran — and
+    keeps its cluster's process bit, hint and shrink axes for the next fence. The dirty scan (step b) skips what the drain
+    took (ClusterMigrationTakenSlots). Writers order pending bit before process bit (FlagOutOfBarrierSpatialWrite), which
+    is what makes the clear's take-then-check sound
+  invariant a spatial or realm-key write that lands at COMMIT (Commit discipline) is flagged again when it is published
+    (Transaction.PublishStagedEntry): the flag Teleport raised when the write was staged may have been consumed by a fence
+    in between, against the old value. Without both, a barrier-only archetype — whose fence runs no dirty scan — never sees
+    the move: the realm key says the new realm, the cluster stays in the old one (the SWG demo's lost portal crossings)
   invariant CellClusterPool's per-cell (head, count) pair and its backing array are published and read in a fixed
     order (release: pool → head → entry → count; acquire: count → head → pool). A reader pairing a new count with
     an old head runs past its cell's segment into the next cell's, and a claim lands in a cluster of another cell
   scope: ArchetypeClusterState.AddClusterToPerCellIndex, ArchetypeClusterState.AddClusterToPerCellIndexLocked,
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
     DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
-    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots
+    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots,
+    ArchetypeClusterState.ClearAabbRefreshBookkeeping, ArchetypeClusterState.ClusterMigrationTakenSlots,
+    ArchetypeClusterState.FlagOutOfBarrierSpatialWrite, Transaction.PublishStagedEntry
   verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
     four cells into shared clusters; the rebuild files exactly the slots outside their cluster's cell and none survives the
     first fence). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
@@ -1696,7 +1712,11 @@
     occupied slot resolves to its cluster's mapped cell and the two cells count what was spawned (7 of 30 runs
     failed before the latch and the occupancy-before-publish ordering; about 1 cold launch in 10 before the drain
     re-derived the destination). ClusterMigrationTests.WriteSpatial_CrossAndReturnInOneTick_StaysInItsCell and
-    WriteSpatial_TwoCrossingsInOneTick_LandsWhereItIs pin the drain's decision with two writes, no race
+    WriteSpatial_TwoCrossingsInOneTick_LandsWhereItIs pin the drain's decision with two writes, no race. ForeignWriteDuringFenceTests: a
+    Teleport committed from another thread inside a fence's clear (BeforeBookkeepingClearProbe), and one whose Commit-discipline
+    commit straddles a fence, are both filed in their new realm by a later fence — on the dirty-scan and the barrier-only
+    paths. Before: both barrier-only cases left the entity in its old realm, deterministically; reading the pending mask
+    instead of taking it double-enqueued the dirty-scan path's crossings
   on_violation:
     an entity in a cluster mapped to another cell → invisible to its own cell's index → SQ-01 false negative,
       counters balanced
@@ -1909,7 +1929,7 @@
     trusted: ZoneMapBatchOpens == MigrationSliceCount x indexed fields, an identity that does not mention the
     migration count. A number that starts tracking the migration count is the per-element acquire having come back,
     and no timing is needed to see it
-  scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, any new per-element
+  scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, RealmTickCounters, any new per-element
     Interlocked-mutated array, ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.BeginBatchAtCapacity,
     ZoneMapArray.Grow, ZoneMapArray.ThreadBatchDepth, SpatialMigrationTelemetry.ZoneMapBatchOpens,
     ArchetypeClusterState.LastTickZoneMapBatchOpens
@@ -2256,6 +2276,75 @@
 
 ## Module: Realms — catalog and open (Realms C2, decision D-1)
 
+### SO-03: A realm's rates are attributed to the realm that produced them, and silence is not zero `[silent]`
+  invariant the per-tick maintenance rates are partitioned by REALM as well as by archetype. The `LastTick*` block on
+    ArchetypeClusterState is summed across every realm an archetype lives in, so on a multi-realm engine it names no
+    realm; the per-realm copy lives in RealmTickCounters, one block per (realm, archetype), on RealmArchetypeSpatial
+  invariant where a counter is partitioned at all, its realms' shares sum to the archetype-wide counter they
+    partition. The per-realm fold ADDS an attribution and never moves one, so a consumer reading the archetype total
+    sees exactly what it saw before realms existed. The agreement is PER COUNTER, not per block: counters excluded
+    below have no per-realm twin at all, which is a different statement from having one that reads zero
+  note two paths leave the archetype-wide counter ahead of the sum of its realms, both by design and both stated here
+    rather than left to be rediscovered: (a) a realm lookup that answers null — an archetype with no realm table, or an
+    id past its length — is counted archetype-wide and attributed to nobody; (b) PinsRejected increments archetype-wide
+    unconditionally while its realm bump is skipped when the grid resolves to no realm state. Neither can strand a
+    count in the fold (SO-03's clearing clause), and neither may be "fixed" by dropping the archetype-wide increment
+  invariant the fold is per realm RUN, not per cluster. Every producer already branches when the realm changes from one
+    item to the next — the AABB refresh reloads its whole AabbRealmFrame, the migration loop and both detection scans
+    reload their grid — so the counters ride that branch and the per-item cost is a register increment, as it was. The
+    migration and repair queues are sorted with the realm in the key's high half, so a realm's requests are one run
+    there too (RP-08)
+  note the THROTTLE is the one producer whose runs are not guaranteed: it cuts the prefix BEFORE the radix sort puts it
+    in (realm, cell) order. Its producers still walk clusters in chunk-id order so runs exist in practice, and if the
+    fold ever shows up in a profile there the remedy is a per-realm scratch indexed by realm id — legitimate at that
+    site precisely because the throttle is SERIAL per archetype, and NOT the keyed map that would be wrong at the
+    parallel sites
+  invariant a producer with no run behind it — a cell-tree promotion, a demotion, a rejected pin, a repair unit — bumps
+    the realm directly rather than opening a fold. There is no sequence of same-realm items to amortise one over, and a
+    fold there would publish once per item anyway while costing a reset
+  forbid attributing a counter whose producers do not ALL carry a realm. Two are excluded for that reason and the
+    exclusion is the rule, not an omission: RealmKeyReverts (its second producer is on the COMMIT path, where the
+    realm's spatial state need not exist and creating it would be a behaviour change) and HysteresisAbsorbed (its
+    second producer is a live write-time accumulator drained at the fence AFTER the per-tick reset, so a per-realm copy
+    needs its own live accumulator and its own drain). A counter attributed for one producer of two reports a realm
+    total that is silently short — which is the failure kind 67's own documentation names
+  note the exclusion must name the REAL obstruction. StaleFlagsDropped was excluded on the claim that its producer had
+    no realm in hand; it does — the drain's realm-change branch loads the grid two lines above the increment — so it
+    is attributed. A wrong justification is worse than none here, because the forbid clause above makes it load-bearing
+  invariant a counter fold must never be the reason a lookup throws. RealmSpatialForFold answers null for an archetype
+    with no realm table, because an archetype with no realm state has nothing to attribute and that is an answer, not
+    an error; every other caller keeps the throwing GetOrCreateRealmSpatial, where a missing table means the fence is
+    running against state that was supposed to exist
+  invariant a realm the fence did NOT touch is not marked. The flag is set by the fold, with the counters it vouches
+    for and only when at least one of them moved, so a marked realm is one that was measured
+  contract THE EMITTER DOES NOT EXIST YET, and these two clauses bind it when it does rather than describing today's
+    code: a per-(realm, archetype) rates record is emitted only for realms whose flag is set, and its ABSENCE means
+    "not measured" — never "measured as zero". A realm that did work and counted zero is a different reading from a
+    realm that ran no work at all, and SO-01's "zero means zero, never unknown" is what forces the distinction to be
+    carried by presence rather than by a zero. Nothing outside the per-tick reset reads the block today, so a verifier
+    for these two lands with the emitter
+  invariant the Touched flag is what the per-tick reset reads, and is the same flag the emitter above must gate on, so
+    the two cannot disagree: a block that is emitted is a block that is cleared
+  invariant the reset is O(present realms), not O(registered realms). Present realms are the ones an archetype has
+    state in, created lazily; an engine with a thousand registered realms and one populated one clears one block
+  forbid a shared list of touched realms in place of the per-realm flag — the counters are flushed from parallel
+    workers, so a list needs a lock, which is new synchronisation on the fence's hot path for bookkeeping
+  forbid a generation stamp in place of clearing ("these counters are zero unless their tick matches") — it moves a
+    comparison onto every read in the fold, which is the hot path, to save stores on the cold one
+  invariant the counters are plain stores at reset and Interlocked at flush, the same discipline as the archetype-wide
+    block: what orders the reset against the worker publications that follow is the fence phase barrier, not a release
+    on the store, and giving the per-realm copies a different one would imply a distinction that does not exist
+  invariant the block is a padded struct, not fields on the class and not parallel per-counter arrays (MD-03).
+    RealmArchetypeSpatial is read by every spatial query on its Grid, PerCellIndex, CellClusterPool and ClusterReach
+    while the fence mutates these, so the counters carry their own leading and trailing reserve; the class is laid out
+    LayoutKind.Auto, so declaration ORDER buys nothing and only the padding inside the struct isolates them
+  scope: RealmTickCounters, RealmFold, RealmFold.Switch, RealmFold.Flush, RealmFold.Bump,
+    RealmArchetypeSpatial.Counters, ArchetypeClusterState.ResetRealmTickCounters, ArchetypeClusterState.RealmSpatialForFold,
+    ArchetypeClusterState.AabbRealmFrame, ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice,
+    ArchetypeClusterState.OrderDrainAndMeasureArrivals, ArchetypeClusterState.RepairOneCell,
+    ArchetypeClusterState.ApplyMigrationThrottle, DatabaseEngine.ExecuteMigrations, DatabaseEngine.DetectClusterMigrations,
+    DatabaseEngine.ResetArchetypeFenceTickState
+
 ### RLM-01: Every realm the data names is known at open, from the catalog if not from the application `[fatal][silent]`
   invariant every named realm's identity (bounds, cell size, hysteresis) is persisted in the realm catalog (RealmR1) at its first registration,
     SYNCHRONOUSLY: the spatial rebuild at the next open runs before the WAL is replayed, so a realm known only to the WAL would be unknown
@@ -2309,13 +2398,20 @@
   on_violation: an entity that left a realm answers that realm's queries with coordinates of another frame (SQ-08 broken for one tick)
 
 ### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
-  invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
-    GetSpan, or an in-place write into a pending spawn) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+  invariant validated paths (Spawn, WriteSpatial, Teleport, and EntityRefMut.Set when the value changes the key) throw at the call for an
+    unregistered, closing or incompatible realm, a Static archetype or a non-finite position, and store nothing; Set then flags the slot as
+    Teleport does, so a barrier-only archetype's fence sees the move. An unvalidated write (ClusterRef.GetSpan / Get, or a key valid when
+    written whose realm is gone since) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
     modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
     LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
-  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
-  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
-    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
+  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry, EntityRefMut.Set,
+    ArchetypeMetadata.RealmKeySlotMask
+  note: until #1199 Set handed out a `ref T`, so D-2 listed it among the unvalidated paths; since it takes the value it validates like Teleport
+  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown (a raw span write),
+    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing,
+    CrossRealmMigrationTests.Set_IntoAnUnregisteredRealm_Throws_AtTheCall_AndStoresNothing (by handle and by type),
+    CrossRealmMigrationTests.ASetIntoAPendingSpawn_WithAnInvalidKey_Throws_AndTheSpawnKeepsItsRealm,
+    CrossRealmMigrationTests.Set_RealmChange_MovesABarrierOnlyArchetype_WhoseFenceRunsNoDirtyScan; each fails with its part removed
   on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way
 
 ### RM-06: The rebuild checks every slot's realm, not only the first `[fatal][silent]`

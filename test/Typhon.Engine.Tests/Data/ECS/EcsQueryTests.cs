@@ -265,7 +265,7 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         int count = 0;
         foreach (var entity in tx2.Query<EcsUnit>())
         {
-            ref readonly var p = ref entity.Read(EcsUnit.Position);
+            var p = entity.Read(EcsUnit.Position);
             Assert.That(p.X, Is.EqualTo(10f));
             Assert.That(p.Y, Is.EqualTo(20f));
             count++;
@@ -491,8 +491,10 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         {
             foreach (var id in ids)
             {
-                ref var d = ref tx.OpenMut(id).Write(CompDArch.D);
+                var target = tx.OpenMut(id);
+                var d = target.Read(CompDArch.D);
                 d = new CompD(d.A + 100f, d.B + 100, d.C);
+                target.Set(CompDArch.D, d);
             }
             tx.Commit();
         }
@@ -611,7 +613,7 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         int count = 0;
         foreach (var entity in tx2.Query<EcsUnit>().Where<EcsPosition>(p => p.X > 30))
         {
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
+            var pos = entity.Read(EcsUnit.Position);
             Assert.That(pos.X, Is.GreaterThan(30f));
             count++;
         }

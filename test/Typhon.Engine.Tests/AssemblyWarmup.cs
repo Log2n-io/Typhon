@@ -24,6 +24,10 @@ public class AssemblyWarmup
         // database elsewhere cannot silently start writing rows into a real %LOCALAPPDATA%. DatabaseRegistryTests re-enables it around its own cases.
         DatabaseRegistry.SuppressForProcess = true;
 
+        // Every page cache in this process starts filled with 0xA5 instead of the zeroes a fresh allocation happens to hold, so a
+        // test fails if anything reads a slot's initial content (PS-14).
+        PagedMMF.PoisonCacheForProcess = true;
+
         // Install a last-chance handler so unhandled exceptions on background threads
         // dump their stack trace before the process dies.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
@@ -125,8 +129,10 @@ public class AssemblyWarmup
                     t.Spawn<CompDArch>(CompDArch.D.Set(in d));
 
                     t.Open(warmupId1).Read(CompAArch.A);
-                    ref var wa = ref t.OpenMut(warmupId1).Write(CompAArch.A);
+                    var entity = t.OpenMut(warmupId1);
+                    var wa = entity.Read(CompAArch.A);
                     wa.A = 999;
+                    entity.Set(CompAArch.A, wa);
                     t.Destroy(id2);
                     t.Commit();
                 }

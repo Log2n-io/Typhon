@@ -84,6 +84,7 @@ internal sealed unsafe class NativeFrameMemoryManager : MemoryManager<byte>
             throw new ArgumentOutOfRangeException(nameof(length), length, "A message buffer is at least one byte.");
         }
 
+        // native-alloc: owned by the manager this returns and freed in its Dispose; 64-aligned for the transport's write
         var pointer = (byte*)NativeMemory.AlignedAlloc((nuint)length, 64);
         return new NativeFrameMemoryManager(pointer, length, owned: true);
     }

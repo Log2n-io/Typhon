@@ -25,8 +25,9 @@ This is transparent engine plumbing — transactions enter/exit epoch scopes aut
 using var tx = dbe.CreateQuickTransaction();  // epoch scope entered here
 
 EntityRefMut e = tx.OpenMut(entityId);
-ref Position p = ref e.Write(Unit.Pos);       // pages touched are epoch-protected
+Position p = e.Read(Unit.Pos);       // pages touched are epoch-protected
 p.X += 1f;
+e.Set(Unit.Pos, p);
 tx.Commit();                                  // epoch scope exited on tx dispose
 ```
 

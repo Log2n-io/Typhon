@@ -35,11 +35,15 @@ public readonly struct Codec : IEquatable<Codec>
     // catalog builder decides how to spell them — nothing here enumerates it.
     private readonly Type _enumType;
 
-    private Codec(CatalogCodec catalog, Type enumType, bool saturating)
+    // Codec.Exact: no wire codec yet — the stored type's exact one, resolved where the type is known (CodecPairing.Resolve, 13 § 2.1).
+    private readonly bool _exact;
+
+    private Codec(CatalogCodec catalog, Type enumType, bool saturating, bool exact = false)
     {
         _catalog = catalog;
         _enumType = enumType;
         Saturating = saturating;
+        _exact = exact;
     }
 
     private Codec(CatalogCodec catalog) : this(catalog, null, false)
@@ -47,7 +51,10 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     /// <summary>Whether this value names a codec at all. <see langword="false"/> for <c>default(Codec)</c>.</summary>
-    public bool IsDeclared => _catalog != null;
+    public bool IsDeclared => _catalog != null || _exact;
+
+    /// <summary>Whether this is <see cref="Exact"/>, not yet resolved against the field's stored type.</summary>
+    internal bool IsExact => _exact && _catalog == null;
 
     /// <summary>
     /// The codec's wire token — <c>u8</c>, <c>varu</c>, <c>bits</c>, <c>unorm</c> … — as the catalog spells it. The empty string when
@@ -64,8 +71,9 @@ public readonly struct Codec : IEquatable<Codec>
     public string EnumName => _enumType?.Name;
 
     /// <summary>
-    /// Whether a 64-bit source value may be narrowed into this codec by clamping. Set only by <see cref="Saturate"/>, and required of any projected field
-    /// whose source is a <see cref="long"/> or a <see cref="ulong"/> — no 64-bit integer reaches the wire, and the narrowing is never implicit.
+    /// Whether a source value may be narrowed into this integer codec by clamping. Set only by <see cref="Saturate"/>, and required of any field whose
+    /// integral source has a range the codec cannot hold — an <c>int</c> in a <c>u8</c> as much as a <c>long</c> in a <c>varu</c>: the narrowing is never
+    /// implicit (design/Subscriptions/13 § 2.3).
     /// </summary>
     public bool Saturating { get; }
 
@@ -98,6 +106,29 @@ public readonly struct Codec : IEquatable<Codec>
 
     /// <summary>Zigzag-encoded signed LEB128 varint, 1–5 bytes.</summary>
     public static Codec VarInt => new(new CatalogCodec { Kind = CodecKind.Vari });
+
+    /// <summary>Unsigned 64-bit integer, little-endian (W32): an id or a balance above 2³², exact on every client.</summary>
+    public static Codec U64 => new(new CatalogCodec { Kind = CodecKind.U64 });
+
+    /// <summary>Signed 64-bit integer, little-endian two's complement (W32).</summary>
+    public static Codec I64 => new(new CatalogCodec { Kind = CodecKind.I64 });
+
+    /// <summary>Unsigned LEB128 varint of a 64-bit value, 1–10 bytes (W32): the cheapest exact codec for a 64-bit value that is usually small.</summary>
+    public static Codec VarUInt64 => new(new CatalogCodec { Kind = CodecKind.Varu64 });
+
+    /// <summary>Zigzag-encoded signed LEB128 varint of a 64-bit value, 1–10 bytes (W32).</summary>
+    public static Codec VarInt64 => new(new CatalogCodec { Kind = CodecKind.Vari64 });
+
+    /// <summary>IEEE double, little-endian (W32): a <see cref="double"/> sent whole.</summary>
+    public static Codec F64 => new(new CatalogCodec { Kind = CodecKind.F64 });
+
+    /// <summary>
+    /// The exact codec of whatever the field stores (13 § 2.1), resolved where the field's type is known: <c>u64</c> for a <see cref="ulong"/>,
+    /// <c>i64</c> for a <see cref="long"/>, <c>f64</c> for a <see cref="double"/>, <c>f32 × 3</c> for a <c>Point3F</c>, <c>i32</c> for an
+    /// <see cref="int"/>, a pack of the narrowest width for an enum. "Exact" is one word whatever the type; a field that must be narrower declares the
+    /// lossy codec it wants instead.
+    /// </summary>
+    public static Codec Exact => new(null, null, false, exact: true);
 
     /// <summary>IEEE single.</summary>
     public static Codec F32 => new(new CatalogCodec { Kind = CodecKind.F32 });
@@ -247,24 +278,6 @@ public readonly struct Codec : IEquatable<Codec>
     /// <returns>The codec.</returns>
     public static Codec Str(int maxBytes) => Bounded(CodecKind.Str, maxBytes, nameof(maxBytes));
 
-    /// <summary>Raw bytes with a <c>varu</c> length.</summary>
-    /// <param name="maxBytes">The largest encoded length accepted, above zero.</param>
-    /// <returns>The codec.</returns>
-    public static Codec Blob(int maxBytes) => Bounded(CodecKind.Blob, maxBytes, nameof(maxBytes));
-
-    /// <summary>Exactly <paramref name="n"/> raw bytes, with no length on the wire.</summary>
-    /// <param name="n">The byte count, above zero.</param>
-    /// <returns>The codec.</returns>
-    public static Codec Bytes(int n)
-    {
-        if (n <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(n), n, "Codec.Bytes(n) needs a positive byte count.");
-        }
-
-        return new Codec(new CatalogCodec { Kind = CodecKind.Bytes, N = n });
-    }
-
     /// <summary>
     /// The codec a replication attribute declares for a field of type <typeparamref name="TField"/> (design/Subscriptions/11 § 5): <paramref name="kind"/>
     /// through the factory of that name, validated as that factory validates it, or — for <see cref="CodecKind.Unknown"/> — the codec the type travels
@@ -276,7 +289,7 @@ public readonly struct Codec : IEquatable<Codec>
     /// <param name="min">A <c>Quant</c>'s lower bound.</param>
     /// <param name="max">A <c>Quant</c>'s upper bound.</param>
     /// <param name="scale">A <c>Vec2/3</c>'s step.</param>
-    /// <param name="maxBytes">A <c>Str</c> or <c>Blob</c>'s cap, or the length of <c>Bytes</c>.</param>
+    /// <param name="maxBytes">A <c>Str</c>'s cap.</param>
     /// <param name="saturate">Whether the codec clamps out-of-range values (<see cref="Saturate"/>).</param>
     /// <returns>The codec.</returns>
     [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
@@ -293,6 +306,14 @@ public readonly struct Codec : IEquatable<Codec>
         switch (kind)
         {
             case CodecKind.Unknown:
+                // An inline string is its text, capacity less its terminator (13 § 2.1). A message field resolves the same way, and the command and event
+                // binders refuse it there: messages carry text as Utf8Text, so a String64 in a message is an error caught at Start either way.
+                var textCapacity = CodecPairing.TextCapacityOf(fieldType);
+                if (textCapacity > 0)
+                {
+                    return Str(textCapacity - 1);
+                }
+
                 var byType = MessageContract.DefaultCodec(fieldType, out var enumType);
                 if (!byType.IsDeclared)
                 {
@@ -309,6 +330,11 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.I16: return I16;
             case CodecKind.U32: return U32;
             case CodecKind.I32: return I32;
+            case CodecKind.U64: return U64;
+            case CodecKind.I64: return I64;
+            case CodecKind.Varu64: return VarUInt64;
+            case CodecKind.Vari64: return VarInt64;
+            case CodecKind.F64: return F64;
             case CodecKind.Varu: return VarUInt;
             case CodecKind.Vari: return VarInt;
             case CodecKind.F32: return F32;
@@ -325,8 +351,6 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.Vec2: return Vec2(scale, RequiredBits(kind, bits));
             case CodecKind.Vec3: return Vec3(scale, RequiredBits(kind, bits));
             case CodecKind.Str: return Str(maxBytes);
-            case CodecKind.Blob: return Blob(maxBytes);
-            case CodecKind.Bytes: return Bytes(maxBytes);
             case CodecKind.Bits:
                 var packed = Bits(RequiredBits(kind, bits));
                 if (!fieldType.IsEnum)
@@ -343,12 +367,22 @@ public readonly struct Codec : IEquatable<Codec>
                 }
 
                 return new Codec(packed._catalog, fieldType, false);
+            case CodecKind.Bytes:
+            case CodecKind.Blob:
+            case CodecKind.List:
+                throw new NotSupportedException(NoSourceType(kind));
             default:
                 throw new NotSupportedException(
-                    $"CodecKind.{kind} cannot be declared by an attribute: it needs arguments one cannot carry (a list's element codec) or exists only " +
+                    $"CodecKind.{kind} cannot be declared by an attribute: it needs arguments one cannot carry (a collection's bound) or exists only " +
                     "inside a position. Declare the field in the builder call.");
         }
     }
+
+    // The protocol's raw-byte and list codecs have no engine source: no field type is a byte array, and a ComponentCollection<T> travels as coll (13 § 2.1).
+    // The built-in ClientRegion command carries its own list, built by the protocol.
+    private static string NoSourceType(CodecKind kind) =>
+        $"CodecKind.{kind} has no field type to carry: a component or message field is never a byte array, and a ComponentCollection<T> travels as " +
+        "Codec.Coll. Narrow the value into fields, or into a collection of elements.";
 
     private static int RequiredBits(CodecKind kind, int bits)
         => bits != 0 ? bits : throw new ArgumentException($"CodecKind.{kind} needs its width: set Bits on the attribute.", nameof(bits));
@@ -362,31 +396,26 @@ public readonly struct Codec : IEquatable<Codec>
         return bits;
     }
 
-    /// <summary>A counted sequence of <paramref name="of"/>: a <c>varu</c> count, then that many elements.</summary>
-    /// <param name="of">The element codec.</param>
-    /// <param name="minCount">The fewest elements accepted.</param>
-    /// <param name="maxCount">The most elements accepted, at most 255.</param>
-    /// <returns>The codec.</returns>
-    public static Codec List(Codec of, int minCount, int maxCount)
+    /// <summary>
+    /// A <c>ComponentCollection&lt;T&gt;</c> field as a collection (W34): its first <paramref name="maxCount"/> elements, each element field in its exact
+    /// codec, and the collection's real count — a longer one is cut and the client sees it was. The whole list travels when it changes.
+    /// </summary>
+    /// <param name="maxCount">The most elements sent, 1 to 65 535. Required: a collection's bound is load-bearing and has no default.</param>
+    /// <returns>The codec; its element is filled from <c>T</c>'s fields where the field is declared.</returns>
+    public static Codec Coll(int maxCount)
     {
-        if (!of.IsDeclared)
+        if (maxCount is < 1 or > ProtocolConstants.MaxCollCount)
         {
-            throw new ArgumentException("Codec.List needs an element codec.", nameof(of));
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, $"Codec.Coll needs 1 <= maxCount <= {ProtocolConstants.MaxCollCount}.");
         }
 
-        if (minCount < 0 || minCount > maxCount || maxCount > ProtocolConstants.MaxListCount)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount,
-                $"Codec.List needs 0 <= minCount <= maxCount <= {ProtocolConstants.MaxListCount}.");
-        }
-
-        return new Codec(new CatalogCodec { Kind = CodecKind.List, Of = of._catalog, MinCount = minCount, MaxCount = maxCount });
+        return new Codec(new CatalogCodec { Kind = CodecKind.Coll, MaxCount = maxCount });
     }
 
     /// <summary>
-    /// Marks this integer codec as the explicit narrowing of a 64-bit source value: out-of-range values clamp and the clamp is counted. A projected field
-    /// whose source is a <see cref="long"/> or a <see cref="ulong"/> is refused without it, because a silent truncation of a credit balance is a bug that
-    /// only shows up once someone is rich.
+    /// Marks this integer codec as the explicit narrowing of a wider source: out-of-range values clamp to the codec's range, and a projected field counts
+    /// every clamp. A field whose integral source the codec cannot hold — an <c>int</c> in a <c>u8</c>, a <c>long</c> in a <c>varu</c> — is refused
+    /// without it, because a silent truncation is a bug that only shows up once a value is large.
     /// </summary>
     /// <returns>The same codec, marked saturating.</returns>
     public Codec Saturate()
@@ -405,6 +434,36 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     /// <summary>
+    /// This scalar codec repeated <paramref name="count"/> times (W33): a point, a box, a sphere or a quaternion travels as its components, in its shape's
+    /// order. A shape field (<c>Point3F</c>, <c>AABB2D</c>…) gets its count from its type; declaring one is only needed to state it, and must agree.
+    /// </summary>
+    /// <param name="count">2 to 16.</param>
+    /// <returns>The counted codec.</returns>
+    public Codec Count(int count)
+    {
+        if (_catalog == null)
+        {
+            throw new InvalidOperationException("Count(n) needs a codec to repeat; Codec.Exact takes its count from the field's type.");
+        }
+
+        if (!CatalogValidator.TakesCount(_catalog.Kind))
+        {
+            throw new InvalidOperationException(
+                $"Count(n) applies to a byte-aligned scalar codec; '{Token}' is not one — a bool, bits, text, a reference or a vector codec is a shape of its own.");
+        }
+
+        if (count is < 2 or > ProtocolConstants.MaxCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), count, $"Count(n) takes 2 to {ProtocolConstants.MaxCount}; one value is the codec itself.");
+        }
+
+        return new Codec(_catalog.WithCount(count), _enumType, Saturating);
+    }
+
+    /// <summary>The same codec with its catalog form replaced: the resolution of <see cref="Exact"/> and of a shape's count.</summary>
+    internal Codec WithCatalog(CatalogCodec catalog, Type enumType = null) => new(catalog, enumType ?? _enumType, Saturating);
+
+    /// <summary>
     /// The codec's canonical text: its token, its parameters, its enum and its saturation — everything that distinguishes one declaration from another.
     /// </summary>
     /// <returns>The canonical text, or <c>"(none)"</c> when nothing was declared.</returns>
@@ -412,18 +471,16 @@ public readonly struct Codec : IEquatable<Codec>
     {
         if (_catalog == null)
         {
-            return "(none)";
+            return _exact ? "exact" : "(none)";
         }
 
         var text = new StringBuilder(_catalog.Type);
         switch (_catalog.Kind)
         {
             case CodecKind.Bits:
-            case CodecKind.Bytes:
                 text.Append('{').Append(_catalog.N).Append('}');
                 break;
             case CodecKind.Str:
-            case CodecKind.Blob:
                 text.Append('{').Append(_catalog.MaxBytes).Append('}');
                 break;
             case CodecKind.Quant:
@@ -433,9 +490,6 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.Vec3:
                 text.Append('{').Append(_catalog.Scale).Append(',').Append(_catalog.Bits).Append('}');
                 break;
-            case CodecKind.List:
-                text.Append('{').Append(Element).Append(',').Append(_catalog.MinCount).Append("..").Append(_catalog.MaxCount).Append('}');
-                break;
             default:
                 if (_catalog.Bits != 0)
                 {
@@ -443,6 +497,11 @@ public readonly struct Codec : IEquatable<Codec>
                 }
 
                 break;
+        }
+
+        if (_catalog.Count > 1)
+        {
+            text.Append('x').Append(_catalog.Count);
         }
 
         if (_enumType != null)
@@ -457,9 +516,6 @@ public readonly struct Codec : IEquatable<Codec>
 
         return text.ToString();
     }
-
-    /// <summary>The element codec of a list, or <c>default</c> when this is not a list.</summary>
-    public Codec Element => _catalog?.Of == null ? default : new Codec(_catalog.Of);
 
     /// <summary>Whether two codecs declare the same thing.</summary>
     /// <param name="other">The other codec.</param>
@@ -528,6 +584,6 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     private static bool IsIntegerKind(CodecKind kind) => kind
-        is CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32 or CodecKind.I32
-        or CodecKind.Varu or CodecKind.Vari or CodecKind.Bits;
+        is CodecKind.Bool or CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32 or CodecKind.I32
+        or CodecKind.Varu or CodecKind.Vari or CodecKind.Bits or CodecKind.U64 or CodecKind.I64 or CodecKind.Varu64 or CodecKind.Vari64;
 }

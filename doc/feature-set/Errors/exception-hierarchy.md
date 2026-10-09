@@ -24,7 +24,9 @@ try
 {
     using var tx = dbe.CreateQuickTransaction();
     var e = tx.OpenMut(soldier);
-    e.Write(Unit.Health).Current -= 25;
+    var health = e.Read(Unit.Health);
+    health.Current -= 25;
+    e.Set(Unit.Health, health);
     tx.Commit();
 }
 catch (LockTimeoutException ex)
@@ -60,7 +62,7 @@ catch (TyphonException ex)
 | `ResourceExhaustedException` | `TyphonException` | `true` | see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
 | `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff`, `Failures`, `PersistedRevision`/`RuntimeRevision` |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |
-| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (DEBUG-only) |
+| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (opt-in; `Typhon:Checks:DeclaredAccess`) |
 
 ## ⚠️ Guarantees & limits
 

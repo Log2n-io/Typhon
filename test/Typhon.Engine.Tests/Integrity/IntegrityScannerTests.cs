@@ -586,4 +586,133 @@ internal sealed class IntegrityScannerTests
             $"spine read {smallReads} pages on a {smallPages}-page database and {big.PagesRead} on a {big.PageCount}-page one. "
             + "The cost must track segment count, not file size.");
     }
+
+    // ── Forward chains and the chunk summary (#1143): checked at Quick, never by the tier every open runs ─────────────────────────────────────────
+
+    /// <summary>
+    /// A database built in one transaction, checkpointed, and closed — cleanly, or as a crash. The chain tests need segments a few pages long, not one
+    /// commit per entity.
+    /// </summary>
+    private void BuildBulkDatabase(int entityCount, bool uncleanClose = false)
+    {
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < entityCount; i++)
+                {
+                    var comp = new CompA(i + 1, i, i);
+                    tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                }
+
+                tx.Commit();
+            }
+
+            dbe.ForceCheckpoint();
+            dbe.SimulateUncleanShutdownForTest = uncleanClose;
+        }
+
+        _serviceProvider.Dispose();
+        _serviceProvider = null;
+    }
+
+    /// <summary>A provider over the existing bundle that verifies at <paramref name="verify"/> when the storage opens.</summary>
+    private ServiceProvider BuildVerifyingProvider(OpenVerification verify)
+    {
+        var services = new ServiceCollection();
+        services
+            .AddLogging(b => b.SetMinimumLevel(LogLevel.Critical))
+            .AddResourceRegistry()
+            .AddMemoryAllocator()
+            .AddEpochManager()
+            .AddHighResolutionSharedTimer()
+            .AddDeadlineWatchdog()
+            .AddScopedManagedPagedMemoryMappedFile(opts =>
+            {
+                opts.DatabaseName = CurrentDatabaseName;
+                opts.DatabaseDirectory = DbDir;
+                opts.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize * 4;
+                opts.VerifyOnOpen = verify;
+            });
+
+        return services.BuildServiceProvider();
+    }
+
+    /// <summary>Counting a forward chain reads every data page, so Spine leaves it to Quick — and says so.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void SpineTier_LeavesTheForwardChainsToQuick_AndSaysSo()
+    {
+        BuildBulkDatabase(512);
+
+        var report = Scan(ScanDepth.Spine);
+
+        Assert.That(report.Limits.ChecksSkipped, Has.Some.Contains(Internals.SegmentChecks.DirectoryChain));
+    }
+
+    /// <summary>
+    /// A chain that stops a page short of its directory is found at Quick, from the forward pointers the sweep records, and not at Spine. It refuses an
+    /// open — through open-time verification, not just in principle — unless the crash path will replace the segment: after an unclean close, and only
+    /// for the kinds it replaces with a fresh one. What WAL replay then refills is only what followed the last checkpoint (#1180).
+    /// </summary>
+    [TestCase(StorageSegmentKind.Cluster, false, true, TestName = "AShortenedClusterChain_AfterACleanClose_RefusesTheOpen")]
+    [TestCase(StorageSegmentKind.Cluster, true, false, TestName = "AShortenedClusterChain_AfterACrash_OpensForRecoveryToRebuild")]
+    [TestCase(StorageSegmentKind.Revision, true, true, TestName = "AShortenedRevisionChain_AfterACrash_RefusesTheOpen")]
+    [CancelAfter(30_000)]
+    [VerifiesRule("CS-08")]
+    public void AShortenedChain_IsFoundAtQuick_AndRefusesTheOpenUnlessRecoveryRebuildsIt(StorageSegmentKind kind, bool uncleanClose, bool refused)
+    {
+        BuildBulkDatabase(3000, uncleanClose);
+        var damage = Integrity.DamageKit.ShortenForwardChain(BundlePath, out var root, kind);
+
+        Assert.That(Scan(ScanDepth.Spine).Findings.Any(f => f.Code == Internals.SegmentChecks.DirectoryChain), Is.False, "Spine does not read chains");
+        var report = Scan(ScanDepth.Quick);
+        if (!uncleanClose)
+        {
+            Integrity.DamageKit.AssertDetectedExactly(report, damage);
+        }
+
+        // After an unclean close this fixture's WAL, kept outside the bundle, also reads as missing (CHK-BOO-06): DataLoss, never refusing.
+        Assert.That(report.Findings.Single(f => f.Code == Internals.SegmentChecks.DirectoryChain).Locus.SegmentRootPage, Is.EqualTo(root));
+
+        using var reopened = BuildVerifyingProvider(OpenVerification.Quick);
+        Exception thrown = null;
+        try
+        {
+            using var scope = reopened.CreateScope();
+            scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        }
+        catch (Exception ex)
+        {
+            thrown = ex;
+        }
+
+        if (refused)
+        {
+            Assert.That(FindIntegrityException(thrown), Is.Not.Null, "the open must be refused, with the report attached");
+        }
+        else
+        {
+            Assert.That(thrown, Is.Null, "after an unclean close the crash path replaces this kind of segment: the finding is reported, the open proceeds");
+        }
+    }
+
+    /// <summary>
+    /// A chain that never ends is fatal, found from the recorded pointers by a constant-memory cycle test rather than a visited set of every page.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal()
+    {
+        BuildBulkDatabase(3000);
+        var damage = Integrity.DamageKit.LoopForwardChain(BundlePath, out _);
+
+        var report = Scan(ScanDepth.Quick);
+
+        Integrity.DamageKit.AssertDetectedExactly(report, damage);
+        Assert.That(report.Findings.Single(f => f.Code == Internals.SegmentChecks.DirectoryTraversal).Severity, Is.EqualTo(IntegritySeverity.Fatal));
+    }
 }

@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import type { CatalogPlan, MessagePlan } from '../protocol/catalog.js';
 import { writeCommands, type CommandInput } from '../protocol/commands.js';
 import { writeSection, type FieldValues } from '../protocol/field-codec.js';
@@ -77,9 +78,13 @@ export class CommandQueue {
 
   constructor(options: CommandQueueOptions) {
     this.plan = options.plan;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.maxMessageBytes = options.maxMessageBytes ?? options.plan.catalog.limits.clientMessageBytes;
     this.seq = (options.firstSeq ?? 1) & 0xffff;
+    const commands = this.plan.catalog.commands;
+    for (let i = 0; i < commands.length; i++) {
+      this.positionByIdx.set(commands[i]!.idx, i);
+    }
   }
 
   /** Commands waiting for the next {@link flush}. */
@@ -163,30 +168,39 @@ export class CommandQueue {
 
     let messages = 0;
     let from = 0;
-    while (from < pending.length) {
-      let bytes = this.headerBytes(1);
-      let to = from;
-      while (to < pending.length && bytes + pending[to]!.bytes <= this.maxMessageBytes) {
-        bytes += pending[to]!.bytes;
-        to++;
-        // One more command may widen the count's varint.
-        bytes += this.headerBytes(to - from) - this.headerBytes(to - from - 1);
-      }
+    // Emptied however the flush ends: a send that throws midway must not leave the batch to go out a second time, with seqs the server
+    // already executed.
+    try {
+      while (from < pending.length) {
+        let bytes = this.headerBytes(1);
+        let to = from;
+        // One more command may also widen the count's varint (1 B to 2 B at 128): the widening is part of what must fit.
+        while (to < pending.length) {
+          const next = pending[to]!.bytes + this.headerBytes(to - from + 1) - this.headerBytes(to - from);
+          if (bytes + next > this.maxMessageBytes) {
+            break;
+          }
 
-      const batch: CommandInput[] = [];
-      for (let i = from; i < to; i++) {
-        const entry = pending[i]!;
-        batch.push({ type: entry.type, seq: entry.seq, values: entry.values });
-      }
+          bytes += next;
+          to++;
+        }
 
-      this.writer.reset();
-      writeCommands(this.writer, clientTick, batch, frame);
-      send(this.writer.written());
-      messages++;
-      from = to;
+        const batch: CommandInput[] = [];
+        for (let i = from; i < to; i++) {
+          const entry = pending[i]!;
+          batch.push({ type: entry.type, seq: entry.seq, values: entry.values });
+        }
+
+        this.writer.reset();
+        writeCommands(this.writer, clientTick, batch, frame);
+        send(this.writer.written());
+        messages++;
+        from = to;
+      }
+    } finally {
+      pending.length = 0;
     }
 
-    pending.length = 0;
     return messages;
   }
 
@@ -224,8 +238,18 @@ export class CommandQueue {
     return varuSize(type.idx) + 2 + this.measuring.position;
   }
 
+  /**
+   * Where a command sits in the catalog, by its `idx`.
+   *
+   * A map rather than the `findIndex` this was: `commandPosition` is called twice for every `enqueue` — once by `take`
+   * for the rate bucket and once for the delivery mode — so a catalog of C commands cost 2·C·N scans per frame of N
+   * commands, on the input path, to answer a question whose answer never changes.
+   */
+  /** Catalog position by command `idx`, built once — see {@link commandPosition}. */
+  private readonly positionByIdx = new Map<number, number>();
+
   private commandPosition(type: MessagePlan): number {
-    return this.plan.catalog.commands.findIndex((c) => c.idx === type.idx);
+    return this.positionByIdx.get(type.idx) ?? -1;
   }
 
   private take(type: MessagePlan): boolean {

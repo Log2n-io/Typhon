@@ -1,41 +1,81 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 
 namespace SwgTatooine;
 
 internal static class Program
 {
-    /// <summary>The port <c>--serve</c> names, or 0 when it is absent.</summary>
+    /// <summary>
+    /// Parses the command line, then runs whichever of the three modes it named.
+    /// </summary>
     /// <param name="args">The command line.</param>
-    /// <returns>The port.</returns>
-    /// <remarks>Read here rather than in <see cref="CommandLine"/> because it selects a mode rather than configuring the simulation.</remarks>
-    private static int PortArgument(string[] args)
+    /// <returns>0 on success, 2 when the command line is wrong.</returns>
+    /// <remarks>
+    /// <b>A wrong command line exits 2 and names the token (SWG-07).</b> It used to fall back to the default for anything it could not read, so a typo in a
+    /// sweep script produced a complete, plausible report of the wrong configuration. Exiting non-zero is what lets a script notice; naming the token is what
+    /// lets a person fix it. Only <see cref="ArgumentException"/> is caught, and only around the parse: a failure inside the simulation is a crash and should
+    /// look like one.
+    /// </remarks>
+    private static int Main(string[] args)
     {
-        var at = Array.IndexOf(args, "--serve");
-        if (at < 0)
+        SimConfig config;
+        try
         {
+            config = CommandLine.Parse(args);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"SwgTatooine: {ex.Message}");
+            return 2;
+        }
+
+        if (config.HelpText != null)
+        {
+            Console.Write(config.HelpText);
             return 0;
         }
 
-        return at + 1 < args.Length && int.TryParse(args[at + 1], out var port) && port is > 0 and <= 65535 ? port : 8080;
-    }
-
-    private static int Main(string[] args)
-    {
-        var config = CommandLine.Parse(args);
-        if (Array.IndexOf(args, "--sweep") >= 0)
+        if (config.RunSweep)
         {
-            return Sweep.Run(config, args);
+            return Sweep.Run(config);
         }
 
         Console.WriteLine($"── SWG Tatooine — {config.Label} ──────────────");
 
-        var sw = Stopwatch.StartNew();
+        // The whole measured run, guarded (P-3). A fault anywhere in it — the world build, a tick, the summary, the report — leaves an artefact beside the
+        // database instead of a console line on a box nobody is watching. An ABORTED TICK is caught inside the runtime and writes its own artefact from the
+        // abort handler, which sees the failing system by name; this catches everything that is not a tick.
         using var sim = new TatooineSim(config);
+        try
+        {
+            return Measured(sim, config);
+        }
+        catch (Exception ex)
+        {
+            // Only when the tick loop has not already done it: a tick that aborted wrote the better artefact, naming the system, and a second one for the
+            // exception that unwound out of Run would describe the consequence rather than the cause.
+            if (sim.CrashArtefactPath == null)
+            {
+                sim.WriteCrashArtefact($"unhandled {ex.GetType().Name} outside the tick loop", ex);
+            }
+
+            Console.Error.WriteLine($"SwgTatooine: {ex}");
+            return 3;
+        }
+    }
+
+    /// <summary>One measured run, from the world build to the last report line.</summary>
+    /// <remarks>
+    /// Extracted from <c>Main</c> so the whole of it sits inside one guard (P-3). The body is unchanged; what is new is that a fault in it is reported to
+    /// disk rather than only to a console.
+    /// </remarks>
+    private static int Measured(TatooineSim sim, SimConfig config)
+    {
+        var sw = Stopwatch.StartNew();
         sim.Initialize();
         sw.Stop();
 
-        Console.WriteLine($"  world built in {sw.Elapsed.TotalSeconds:F1}s");
+        Console.WriteLine($"  world {(sim.Reopened ? "reopened" : "built")} in {sw.Elapsed.TotalSeconds:F1}s");
 
         // After the build, before any tick: what the world and its realms hold (Realms G1d compares runs with and without --interiors against README § 11).
         // The page cache is a fixed native block of --cache-mib, the same in every run, so it cancels in a difference.
@@ -49,13 +89,25 @@ internal static class Program
         // `--serve <port>` turns the benchmark into a server: the same world and the same systems, ticking forever behind a WebSocket, with the browser
         // client served beside it. It returns from here rather than falling through to the measurement report, which has nothing to say about a run with no
         // end.
-        var servePort = PortArgument(args);
-        if (servePort > 0)
+        if (config.ServePort > 0)
         {
-            sim.ServeAsync(servePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
+            sim.ServeAsync(config.ServePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");
+        if (sim.Reopened)
+        {
+            // Said out loud, because a reopened run and a fresh one are different measurements and a census that matches cannot tell them apart (P-2).
+            Console.WriteLine("  the index was rebuilt from the entities on disk, not from the generator");
+        }
+
+        // The composition, not just the size: two runs with the same creature count and different template mixes are not the same workload (S0-5).
+        var composition = sim.Census.Composition();
+        if (composition.Length > 0)
+        {
+            Console.WriteLine($"  creatures: {composition}");
+        }
+
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system
         // once the runtime is up rather than here.
         var perAxis = (int)(config.WorldEdgeM / config.ResolveCellSize());
@@ -77,9 +129,24 @@ internal static class Program
         Console.WriteLine($"  per tick: {s.AwarenessQueries / (double)Math.Max(1, result.TicksMeasured):F0} awareness queries "
             + $"({s.HitsPerAwarenessQuery:F1} hits each), {s.AggroQueries / (double)Math.Max(1, result.TicksMeasured):F0} aggro queries, "
             + $"{s.EconomyTicks / (double)Math.Max(1, result.TicksMeasured):F1} economy updates");
-        Console.WriteLine($"  combat: {s.PlayersEngaged} attacks, {s.CreaturesKilled} creatures killed, "
-            + $"{s.CreaturesRespawned} revived over {result.TicksMeasured} ticks");
-        Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsCompleted} completed");
+        Console.WriteLine($"  combat over {result.TicksMeasured} ticks: {s.PlayerShots} player shots, {s.CreatureAttacks} creature attacks, "
+            + $"{s.DamageApplied} hits applied, {s.CreaturesKilled} creatures killed, {s.CreaturesRespawned} revived, "
+            + $"{s.PlayersIncapacitated} players cloned");
+
+        // Every one of these is a refusal, and each is printed because the claim it supports is about what does NOT happen: a player that is not fighting does
+        // no damage, a shot beyond weapon range does no damage, a chase past 75 m is abandoned. A silent zero cannot tell those apart from a system that never
+        // ran. `stale` is the exception — it is expected to be zero, and a non-zero value means an assumption has stopped holding.
+        Console.WriteLine($"  combat refusals: {s.ShotsSkippedNotFighting} player-ticks not fighting, {s.ShotsRefusedRange} shots out of range, "
+            + $"{s.ShotsWithoutTarget} with nothing in range, {s.CreaturesLostTarget} chases dropped, {s.ChaseGivenUp} chases given up past "
+            + $"{TatooineData.MaxChaseRangeM * config.ContentScale:F0} m, {s.EventsStale} stale events");
+        Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsAssigned} assigned, {s.MissionsCompleted} completed, {s.MissionRewards} paid; {s.LairHits} lair hits");
+        Console.WriteLine($"  durability wait: {result.DurabilityMedianMs:F3} ms median, {result.DurabilityP99Ms:F3} p99, {result.DurabilityMaxMs:F3} max; "
+            + $"{result.TicksWithDurabilityWait} of {result.TicksMeasured} ticks over {RunResult.DurabilityWaitFloorMs:F1} ms "
+            + $"({result.DurabilityShareOfMedianPct:F1} % of the median tick)");
+
+        // The watermark, which is the evidence that the loot and the rewards reached the WAL rather than only a component: UowFlushMs above is a few
+        // microseconds even on a tick that persisted nothing, because it times the flush call.
+        Console.WriteLine($"  wal watermark: advanced on {sim.WalAdvances} of {result.TicksMeasured} measured ticks, {sim.WalLsnGained} LSNs gained");
         var gc = sim.LastGc;
         Console.WriteLine($"  gc while ticking: {gc.Gen0} gen0, {gc.Gen1} gen1, {gc.Gen2} gen2 collections, {gc.PauseMs:F1} ms paused "
             + $"({100 * gc.PauseMs / Math.Max(1d, gc.ElapsedMs):F2} % of {gc.ElapsedMs / 1000:F1} s), {gc.AllocatedBytes / 1048576.0:F1} MB allocated");

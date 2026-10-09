@@ -250,6 +250,53 @@ export function toggleViewSpatialMaintenance(): void {
 }
 
 /**
+ * Add the Subscriptions panel (#WB-02). Anchored `within` the Detail group, for the same reason as Spatial: a
+ * no-position addPanel joins whatever group happens to be active.
+ */
+function addSubscriptionsPanel(api: DockviewApi): void {
+  const detail = api.getPanel('detail');
+  api.addPanel(
+    detail
+      ? { id: 'subscriptions', component: 'Subscriptions', title: 'Subscriptions', position: { referencePanel: detail.id, direction: 'within' } }
+      : { id: 'subscriptions', component: 'Subscriptions', title: 'Subscriptions' },
+  );
+}
+
+/**
+ * Openable in any profiler session so the cold state is reachable, like Spatial and Engine Health. Its records need a
+ * live engine AND the `Subscriptions:ServerTelemetry` gate, and the panel names both in its own cold states — which is
+ * the point of letting it open: "the gate is closed" has to be reachable, or it reads as an idle server.
+ */
+function canOpenSubscriptions(): boolean {
+  return isViewActive('Subscriptions') && sessionHasCapability(useSessionStore.getState(), 'profiler');
+}
+
+/** Open (or focus) the Subscriptions panel. */
+export function openViewSubscriptions(): void {
+  const api = registeredApi;
+  if (!api || !canOpenSubscriptions()) return;
+  const existing = api.getPanel('subscriptions');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  addSubscriptionsPanel(api);
+}
+
+/** Toggle (close-when-open) variant for the palette / View menu. */
+export function toggleViewSubscriptions(): void {
+  const api = registeredApi;
+  if (!api) return;
+  const existing = api.getPanel('subscriptions');
+  if (existing) {
+    api.removePanel(existing);
+    return;
+  }
+  if (!canOpenSubscriptions()) return;
+  addSubscriptionsPanel(api);
+}
+
+/**
  * Reveal a specific query in the analyzer: open/focus the panel, focus the query in the unified store,
  * and write the bus `query` leaf (so the Inspector + nav history follow). The cross-panel entry point —
  * used by the Systems & Queries navigator and the Inspector's query card.
@@ -393,6 +440,7 @@ export function buildProfilerPaletteCommands(): CommandItem[] {
     { id: 'toggle-view-critical-path', label: 'Toggle View Critical Path', keywords: 'critical path tape timeline cp wall-clock tick', action: toggleViewCriticalPath, viewId: 'CriticalPath' },
     { id: 'toggle-view-query-analyzer', label: 'Toggle View Query Analyzer', keywords: 'query analyzer catalog plan executions profiler cost ranking selectivity workload', action: toggleViewQueryAnalyzer, viewId: 'QueryAnalyzer' },
     { id: 'toggle-view-spatial-maintenance', label: 'Toggle View Spatial Maintenance', keywords: 'spatial maintenance cluster migration relocation repair drift tightness packing bound cell grid partition fence observe', action: toggleViewSpatialMaintenance, viewId: 'SpatialMaintenance' },
+    { id: 'toggle-view-subscriptions', label: 'Toggle View Subscriptions', keywords: 'subscriptions replication push sessions clients bytes bandwidth net out frames skipped degrade frame pool realm operator observe', action: toggleViewSubscriptions, viewId: 'Subscriptions' },
     { id: 'toggle-view-engine-health', label: 'Toggle View Engine Health', keywords: 'engine health live attach gauges anomaly tick rate jitter overload reconnect capture analyse observe', action: toggleViewEngineLiveHealth, viewId: 'EngineLiveHealth' },
     { id: 'toggle-view-top-spans',   label: 'Toggle View Top Spans', keywords: 'profiler top spans table slow expensive sortable', action: toggleViewTopSpans, viewId: 'TopSpans' },
     { id: 'profiler-save-replay',    label: 'Save Session as .typhon-replay…', keywords: 'save replay export attach session', action: openSaveReplayDialog },

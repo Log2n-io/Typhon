@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace SwgTatooine;
 
@@ -39,15 +40,47 @@ public sealed partial class SimBridge
 
     private long _telemetryTicks;
 
+    // The durability watermark, sampled once per measured tick in the Report phase (SWG-02). It is the evidence for AC-2 that the loot and the reward reach the
+    // WAL rather than merely reaching a component: TickTelemetry.UowFlushMs is a few microseconds even on a tick that wrote nothing, because it times the flush
+    // CALL, so it cannot distinguish a tick that persisted something from one that did not.
+    //
+    // Sampled in Report, which runs BEFORE this tick's fence and flush, so an advance observed on tick T is the publication of tick T-1's records. That one-tick
+    // skew is why the assertion is over a window rather than per tick.
+    private long _walLsnLast = -1;
+    private long _walAdvances;
+    private long _walLsnGained;
+
+    /// <summary>Measured ticks on which the durable LSN moved — how often the WAL was genuinely in the loop.</summary>
+    public long WalAdvances => Interlocked.Read(ref _walAdvances);
+
+    /// <summary>Total LSNs the durability watermark gained across the measured window.</summary>
+    public long WalLsnGained => Interlocked.Read(ref _walLsnGained);
+
     /// <summary>Report phase, every tick past warm-up: fold the previous fence's per-archetype counters.</summary>
     public void SpatialTelemetryTick(TickContext ctx)
     {
+        // The induced fault (P-3), first because it must not depend on anything below it having run. Here rather than in a system of its own: this one runs every
+        // tick, on the worker pool, and owns no state a half-finished tick would corrupt — so the abort is a clean abort of a real tick rather than a torn write.
+        if (_config.FaultAtTick > 0 && ctx.TickNumber == _config.FaultAtTick)
+        {
+            throw new InvalidOperationException($"--fault-at-tick {_config.FaultAtTick}: deliberate fault to exercise the crash artefact (P-3).");
+        }
+
         // Measured ticks only. The run polls for its last tick and shuts down after it, and the ticks started in between (always one or two when unpaced)
         // used to land in a trailing window of their own, which every reader took for the last window.
         if (ctx.TickNumber < _config.WarmTicks || ctx.TickNumber >= _config.WarmTicks + _config.MeasuredTicks)
         {
             return;
         }
+
+        var lsn = Dbe.DurableLsn;
+        if (_walLsnLast >= 0 && lsn > _walLsnLast)
+        {
+            _walAdvances++;
+            _walLsnGained += lsn - _walLsnLast;
+        }
+
+        _walLsnLast = lsn;
 
         _telemetryIds ??=
         [

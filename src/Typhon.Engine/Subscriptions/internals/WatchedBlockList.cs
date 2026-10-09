@@ -193,6 +193,7 @@ internal sealed unsafe class WatchedBlockList : IDisposable
 
         // Realloc rather than alloc-copy-free: the old contents are dead here (the count is about to be reset), but Realloc is the one call that cannot leave
         // both blocks live if it throws.
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
         _blocks = (nint*)NativeMemory.Realloc(_blocks, (nuint)capacity * (nuint)sizeof(nint));
         _capacity = capacity;
     }

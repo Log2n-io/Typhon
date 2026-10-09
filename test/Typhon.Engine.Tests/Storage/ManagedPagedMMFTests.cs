@@ -701,7 +701,7 @@ Here come the drones!";
             _logger.LogInformation("Save segment of {Size} in {Elapsed} ms", (s0.Length * PagedMMF.PageSize).FriendlySize(), sw.ElapsedMilliseconds);
             
             // Grow the segment to trigger the occupancy map grow
-            s0.Grow(s0.Length + 10, true, cs);
+            s0.Grow(s0.Length + 10, cs);
             cs.SaveChanges();
 
             segmentPages = s0.Pages;
@@ -740,10 +740,10 @@ Here come the drones!";
             var cs = pmmf.CreateChangeSet();
 
             var s0 = pmmf.AllocateSegment(PageBlockType.None, initialSize, cs);
-            s0.Grow(firstGrowSize, true, cs);
+            s0.Grow(firstGrowSize, cs);
             cs.SaveChanges();
             
-            s0.Grow(secondGrowSize, true, cs);
+            s0.Grow(secondGrowSize, cs);
             cs.SaveChanges();
         }
 

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -773,6 +772,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // Refused, and LEFT IN THE QUEUE. Step 12 discarded the nomination here, so a cell the budget could not afford was forgotten rather than
                 // deferred and only came back if it happened to be written again. Ageing now carries it to the head instead (AC-11.3).
                 LastTickRepairUnitsRefused++;
+                RealmFold.Bump(rs, ref rs.Counters.F.RepairUnitsRefused);
                 return 0;
             }
 
@@ -860,12 +860,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (valveFired)
         {
             LastTickRepairValveFires++;
+            RealmFold.Bump(rs, ref rs.Counters.F.RepairValveFires);
         }
 
         // Debited even when the valve overshot, so ReclusterBudgetUsedMs reports what was actually committed rather than what fitted. `remainingNs` goes
         // negative in that case and every later candidate is refused, which is precisely the "at most one unit over" bound AC-11.1 asks for.
         remainingNs -= projectedNs;
         LastTickRepairUnitCount++;
+        RealmFold.Bump(rs, ref rs.Counters.F.RepairUnitCount);
+        // The archetype-wide twin is assigned once, from the caller's `totalMoved`, which is the sum of these returns — so summing the per-realm shares
+        // reproduces it exactly.
+        RealmFold.Bump(rs, ref rs.Counters.F.RepairedEntityCount, moved);
 
         // Out of the queue AND cooling (RP-07): re-packing this cell again before the cooldown ends would buy back what the next ticks' motion undoes.
         RepairQueue?.MarkRepaired(queueKey, tickNumber);

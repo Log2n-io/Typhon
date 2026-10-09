@@ -34,6 +34,12 @@ export const ProtocolConstants = {
   /** The widest `bits` field: a shift of at most 7 plus the width fits one 32-bit read (W12). */
   maxPackedBits: 24,
   maxListCount: 255,
+  /** The largest `maxCount` a `coll` may declare (W34). */
+  maxCollCount: 65535,
+  /** The most values one `count` field carries (W33). */
+  maxCount: 16,
+  /** The longest `shape` hint, in UTF-8 bytes (W33). */
+  shapeMaxBytes: 32,
   /** The most cells a grid may have: its cell index fits comfortably in 32 bits, and its counts in memory. */
   maxGridCells: 1 << 24,
   /** The largest event, command or metric index: wire indices are dense from their reserved base (W27). */

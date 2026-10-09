@@ -231,7 +231,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             .Fraction(SwgPlayer.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals")
             .Owner(o => o
                 .Field(SwgPlayer.Inventory, i => i.Credits, Codec.VarUInt.Saturate())
-                .Field(SwgPlayer.Inventory, i => i.ItemCount, Codec.VarUInt)));
+                .Field(SwgPlayer.Inventory, i => i.ItemCount, Codec.VarUInt.Saturate())));
 
         subs.Profile("god-world", p => p.World()
             .Of<SwgCreature>().Of<SwgCityNpc>().Of<SwgPlayer>().Of<SwgCreatureLair>());
@@ -354,7 +354,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             Assert.That(player.OwnerFields[0].Name, Is.EqualTo("Credits"));
             Assert.That(player.OwnerFields[0].Codec.Saturating, Is.True);
             Assert.That(player.OwnerFields[0].Owner, Is.True);
-            Assert.That(player.OwnerFields[1].Codec, Is.EqualTo(Codec.VarUInt));
+            Assert.That(player.OwnerFields[1].Codec, Is.EqualTo(Codec.VarUInt.Saturate()));
             Assert.That(player.OwnerGroups, Is.EqualTo(new[] { ArchetypeProjection.DefaultOwnerGroup }));
             Assert.That(player.Fields, Has.Count.EqualTo(3), "owner fields live in their own section, not among the public ones");
         });

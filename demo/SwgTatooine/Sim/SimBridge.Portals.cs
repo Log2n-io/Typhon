@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
@@ -171,6 +171,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void TeleportTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         if (_teleports.IsEmpty)
         {
             return;
@@ -195,7 +202,9 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(PlayerPlacement);
-                nb.SetAt(r.X, r.Z, r.HalfExtent);
+                // The DESTINATION realm decides the altitude: a crossing into a building lands on its flat floor, and one
+                // back out lands on the planet's relief at the door.
+                nb.SetAt(r.X, r.Z, GroundAt(dest, r.X, r.Z), r.HalfExtent);
                 tx.Teleport(r.Id, Player.Bounds, dest, in nb);
                 _appliedCrossings.Add(r);
                 switch (r.Kind)

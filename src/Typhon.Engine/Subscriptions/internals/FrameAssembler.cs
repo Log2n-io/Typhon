@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Protocol;
@@ -251,6 +252,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
                 capacity *= 2;
             }
 
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             _bytes = (byte*)NativeMemory.Realloc(_bytes, (nuint)capacity);
             _byteCapacity = capacity;
         }
@@ -286,6 +288,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         if (list.Count == list.Capacity)
         {
             var capacity = list.Capacity == 0 ? 64 : list.Capacity * 2;
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             list.Items = (FrameRecord*)NativeMemory.Realloc(list.Items, (nuint)capacity * (nuint)sizeof(FrameRecord));
             list.Capacity = capacity;
         }
@@ -306,6 +309,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
             capacity *= 2;
         }
 
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
         _sortScratch = (FrameRecord*)NativeMemory.Realloc(_sortScratch, (nuint)capacity * (nuint)sizeof(FrameRecord));
         _sortCapacity = capacity;
     }
@@ -396,6 +400,16 @@ internal sealed class SessionFrameState
     /// <summary><see cref="BytesPublished"/> as of that block, so the next one reports the window rather than the session's whole life.</summary>
     public long StatsBytesMark { get; set; }
 
+    /// <summary>
+    /// <see cref="BytesPublished"/> as of the last operator-telemetry emission (#WB-02) — a separate mark from <see cref="StatsBytesMark"/>, deliberately.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="StatsBytesMark"/> is advanced only when a client-facing <c>STATS</c> block is written, which needs the application to have declared metrics
+    /// and the session to hold the Stats capability. The operator emission runs regardless of both — that independence is its whole point — so sharing the mark
+    /// meant that on a server with no metric catalog it never moved, and every emission divided the session's lifetime byte total by one window.
+    /// </remarks>
+    public long OperatorStatsBytesMark { get; set; }
+
     /// <summary>Rebinds the slot to a new session: every per-session number starts again.</summary>
     /// <param name="generation">The new session's generation.</param>
     /// <param name="tick">
@@ -421,6 +435,8 @@ internal sealed class SessionFrameState
         BytesPublished = 0;
         StatsTick = tick;
         StatsBytesMark = 0;
+        // Reset with the rest: a reused slot must not report the previous session's bytes as this one's first window.
+        OperatorStatsBytesMark = 0;
         SelfEntity = EntityId.Null;
         CommittedProfile = -1;
         SelfNetId = 0;
@@ -481,6 +497,22 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly ArchetypeEncodePlan[] _encodePlans;
     private readonly SessionTable _sessions;
     private readonly SessionFrameState[] _states;
+
+    /// <summary>
+    /// Cap on <c>SubscriptionsSessionTelemetry</c> (trace kind 69) rows per emission (#WB-02).
+    /// </summary>
+    /// <remarks>
+    /// 64 is chosen against what a panel can show rather than what the engine can hold: a table of a few dozen sessions is readable, and the server record
+    /// reports the population so an operator sees that the list is a sample. The alternative — one row per session at the 8192-session limit — would put
+    /// half a megabyte of trace on the wire every second for rows nobody scrolls to.
+    /// </remarks>
+    private const int OperatorSessionRowCap = 64;
+
+    /// <summary>Tick of the last operator-telemetry emission, -1 before the first. Its own window, independent of the encoder's — see <c>EmitOperatorTelemetry</c>.</summary>
+    private long _operatorEmissionTick = -1;
+
+    /// <summary>The send pump's byte count at that emission, so the next one reports its window rather than the process's whole life.</summary>
+    private long _operatorSentBytesMark;
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
 
@@ -511,8 +543,31 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly int _closeBoundTicks;
     private readonly int _degradeBoundTicks;
 
-    private PinnedMemoryBlock _sendBlock;
-    private SessionSendState* _sendStates;
+    /// <summary>
+    /// The per-session send states, as a pinned managed array indexed from <see cref="_sendStatesOffset"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Managed, and deliberately so (#1006).</b> This was a native <c>AllocatePinned</c> block addressed through a <c>SessionSendState*</c>, and the only
+    /// thing that bought was a 64-byte base alignment — which a pinned array gives too, once the slack is taken in bytes. What it charged for that was C-style
+    /// lifetime management on memory a send pump can still be holding after the runtime is torn down: the block was freed while a pump was inside a send, and
+    /// the pump's completion then wrote through a stale address. A reference keeps this alive as long as the assembler, so there is nothing to free and a late
+    /// completion writes into live memory that nobody reads again — harmless by construction rather than by a guard.
+    /// </para>
+    /// <para>
+    /// <b>Why it is not an array of <see cref="SessionSendState"/>.</b> The element stride is 192 bytes, a multiple of 64, so every element shares the base's
+    /// alignment and skipping whole elements can never fix a misaligned base. The slack has to be in bytes, so the array is bytes and the states are a cast
+    /// span over it.
+    /// </para>
+    /// <para>
+    /// <b>What it gives up.</b> The resource-tree accounting, telemetry id and leak diagnostics that <c>AllocatePinned</c> attaches. That is a real loss, and
+    /// a fair price for a structure touched once per session per tick rather than once per entity.
+    /// </para>
+    /// </remarks>
+    private readonly byte[] _sendStates;
+
+    /// <summary>Bytes to skip in <see cref="_sendStates"/> so slot 0 starts on a cache-line boundary.</summary>
+    private readonly int _sendStatesOffset;
     private FrameWorkerScratch[] _workers = [];
     private long _tick;
     private StatsEncoder _stats;
@@ -536,6 +591,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
     /// <summary>Timestamp ticks the single-threaded prologue spent, and the sweep half of it.</summary>
     private long _prologueTicks;
+
+    // Ticks _prologueTicks accrued on. NOT _busyTicks: that one counts ticks whose CHUNKS reported busy time, folded a tick late, so a tick with sessions whose
+    // chunks measured nothing adds to the numerator and not to the denominator — and the ratio then overstates the prologue, the wrong direction for a figure
+    // meant to bound a per-realm cost (Realms D-7).
+    private long _prologueTickCount;
     private long _sweepTicks2;
     private long _prepareTicks;
 
@@ -606,8 +666,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _maxFrameBytes = Math.Min(options.FrameBytes, FramePool.LargestClassBytes);
 
         Pool = new FramePool($"{id}.Pool", parent, allocator, options);
-        _sendBlock = allocator.AllocatePinned($"{id}.SendStates", parent, options.MaxSessions * SessionSendState.Bytes, true, 64);
-        _sendStates = (SessionSendState*)_sendBlock.DataAsPointer;
+        // 63 bytes of slack for the alignment, pinned so the address that decides the offset cannot change afterwards. See the field's remarks.
+        _sendStates = GC.AllocateArray<byte>((options.MaxSessions * SessionSendState.Bytes) + CacheLineBytes - 1, pinned: true);
+        _sendStatesOffset = CacheLinePadding(_sendStates);
     }
 
     /// <summary>The frame pool every published frame's bytes come from.</summary>
@@ -671,7 +732,24 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// <summary>The per-slot hand-off state, which a send pump claims frames through.</summary>
     /// <param name="slot">The session table row.</param>
     /// <returns>The state.</returns>
-    public SessionSendState* SendStateOf(int slot) => (SessionSendState*)((byte*)_sendStates + ((long)slot * SessionSendState.Bytes));
+    public ref SessionSendState SendStateOf(int slot) => ref MemoryMarshal.Cast<byte, SessionSendState>(_sendStates.AsSpan(_sendStatesOffset))[slot];
+
+    /// <summary>A cache line, the granularity <see cref="SessionSendState"/>'s layout is built around.</summary>
+    private const int CacheLineBytes = 64;
+
+    /// <summary>
+    /// How many bytes to skip in <paramref name="pinned"/> for a cache-line-aligned start.
+    /// </summary>
+    /// <param name="pinned">A pinned array, so the answer stays true for its lifetime.</param>
+    /// <remarks>
+    /// One address read, to compute a constant; the pointer is not retained. Holding a pointer over GC memory is what the engine's rule forbids — a buffer
+    /// reachable only through one can be freed under it — and a number derived from an address is not a way to reach memory.
+    /// </remarks>
+    private static int CacheLinePadding(byte[] pinned)
+    {
+        var misalignment = (int)((nuint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(pinned)) % CacheLineBytes);
+        return misalignment == 0 ? 0 : CacheLineBytes - misalignment;
+    }
 
     /// <summary>One session's frame state, or <see langword="null"/> when the slot has never produced a frame.</summary>
     /// <param name="session">The session.</param>
@@ -796,6 +874,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         if (prologueFrom != 0L)
         {
             _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
+            _prologueTickCount++;
         }
 
         var chunks = Math.Min(workers, _pushSessionCount + _eventSessionCount);
@@ -811,13 +890,22 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     }
 
     /// <summary>
-    /// The frame stage's parallel efficiency: CPU summed over chunks against the slowest chunk, averaged over the ticks measured.
+    /// The prologue's total single-threaded time in milliseconds, and the ticks it was measured over: <b>cumulative</b>, so two readings difference into the
+    /// prologue cost of the ticks between them.
     /// </summary>
     /// <remarks>
-    /// <b>Effective workers = sum / max, and efficiency = that over the chunk count.</b> A stage whose sessions cost the same would sit near 1; one whose
-    /// slowest chunk does ten times the median sits near 0.1, and every worker but that one is idle for nine tenths of the stage. Zero unless phase timing
-    /// is enabled.
+    /// <para>
+    /// <see cref="PrologueMs"/> divides by its own tick count, which makes it a mean over the whole run and useless to a measurement that needs one figure per
+    /// configuration. This is the same two numbers before the division. Both are zero unless phase timing is on.
+    /// </para>
+    /// <para>
+    /// <b>The tick count is the prologue's own, not <c>_busyTicks</c>.</b> The two accrue over different populations: <c>_busyTicks</c> advances only for a
+    /// tick whose chunks reported busy time, and it is folded a tick late, while the prologue time accrues for every tick that got past the no-session return.
+    /// Dividing one by the other overstates the prologue — the wrong direction for a figure meant to bound a per-realm cost.
+    /// </para>
     /// </remarks>
+    public (double Ms, long Ticks) PrologueTotal => (Volatile.Read(ref _prologueTicks) * 1000d / Stopwatch.Frequency, Volatile.Read(ref _prologueTickCount));
+
     /// <summary>The single-threaded prologue's cost per tick, and the two halves of it, in ms.</summary>
     public (double Prologue, double Sweep, double Prepare) PrologueMs
     {
@@ -829,6 +917,14 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         }
     }
 
+    /// <summary>
+    /// The frame stage's parallel efficiency: CPU summed over chunks against the slowest chunk, averaged over the ticks measured.
+    /// </summary>
+    /// <remarks>
+    /// <b>Effective workers = sum / max, and efficiency = that over the chunk count.</b> A stage whose sessions cost the same would sit near 1; one whose
+    /// slowest chunk does ten times the median sits near 0.1, and every worker but that one is idle for nine tenths of the stage. Zero unless phase timing
+    /// is enabled.
+    /// </remarks>
     public (double Effective, double Efficiency, long Ticks) ChunkBalance
     {
         get
@@ -973,7 +1069,21 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose()
+    public void Dispose() => Dispose(pumpsStillRunning: false);
+
+    /// <summary>
+    /// Tears the assembler down, leaving the frame pool's slabs allocated when <paramref name="pumpsStillRunning"/> says a send may still be reading out of one.
+    /// </summary>
+    /// <param name="pumpsStillRunning">
+    /// <see cref="SendPump.PumpsStillRunningAtDispose"/> was non-zero: a pump was still inside a send when the quiesce deadline passed.
+    /// </param>
+    /// <remarks>
+    /// The send states need nothing here — they are a managed array this object references (#1006). The frame BYTES are different: they are native by
+    /// necessity, because they exist to reach a socket without a copy, and a pointer into them is held across the send's await. See
+    /// <see cref="FramePool.KeepSlabsForOutstandingSends"/>.
+    /// </remarks>
+    internal void Dispose(bool pumpsStillRunning)
+
     {
         if (_disposed)
         {
@@ -992,19 +1102,162 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         // The counters and the slots go FIRST, and nothing here reads them. Their buffer is a child of the resource parent, which may already have been
         // torn down by the time this runs; and a block still sitting in a slot needs no return, because the pool is about to free the slabs it was carved
         // from. Walking the slots to hand them back would be bookkeeping paid for with a read of memory that may no longer exist.
-        _sendStates = null;
-        _sendBlock?.Dispose();
-        _sendBlock = null;
-
+        // The send states are a managed array held by a field, so there is nothing to free here: the GC keeps them alive while this object is, and a send pump
+        // that outlives the quiesce can complete into them without writing through a freed address (#1006).
 
         for (var slot = 0; slot < _states.Length; slot++)
         {
             _states[slot] = null;
         }
 
+        if (pumpsStillRunning)
+        {
+            Pool.KeepSlabsForOutstandingSends();
+        }
+
         Pool.Dispose();
     }
 
+
+    /// <summary>
+    /// Emits the push-replication operator records (#WB-02, kinds 68 and 69) once per stats period.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Called from the end of <c>SubscriptionsContext.Reset</c>, not from this class's own <c>BeginTick</c>.</b> An operator needs "0 sessions, 0 bytes/s"
+    /// to arrive as a reading — a server whose clients have all left must not look like an engine that stopped reporting. `BeginTick` cannot provide that at
+    /// any position inside it: the frames track is not dispatched at all when no session is served, so the method is never entered. `Reset` runs
+    /// unconditionally on the tick driver ahead of the fence, which is the only per-tick single-threaded point that is always reached. It is called LAST in
+    /// that method, after every per-tick field is reset, because a throw from here propagates out of <c>OnTickEndInternal</c> — see the comment at the call.
+    ///
+    /// <b>Nothing reached here may throw, and that is not a style preference.</b> The first version asked <see cref="StatsEncoder"/> for a durability
+    /// percentile as a call argument, and on tick 0 that pass indexed a tick-telemetry ring holding nothing and threw. C# evaluates arguments before entering
+    /// the gated method, so the throw happened whether or not the record was wanted; because the ring is written at the END of a tick, the throw stopped the
+    /// recording that would have made the next tick's call legal, and the condition sustained itself. The symptom was not an exception anywhere visible — it
+    /// was 508 ticks, 2 337 trace records and not one record of kind 68, with the gate true and every null check passing. The window passes tolerate an empty
+    /// ring now; a new argument here is a new obligation to check.
+    ///
+    /// <b>Independent of <see cref="StatsEncoder"/>, and on its own window.</b> The encoder's <c>BeginTick</c> returns before collecting anything
+    /// when the application declared no metrics, because with an empty catalog there is no client-facing <c>STATS</c> block to encode. An operator's view of
+    /// replication must not be silenceable that way — an app that declares no metrics is exactly an app whose replication nobody has looked at. So this runs
+    /// unconditionally at the same cadence, keeps its own <see cref="_operatorEmissionTick"/> / <see cref="_operatorSentBytesMark"/> pair, and reads the
+    /// encoder's figures on demand instead of borrowing values indexed by the app's plan.
+    /// </para>
+    /// <para>
+    /// <b>Cost when the gates are off is two flag reads</b> — but only because they are read HERE, before anything else. The generator puts each gate check
+    /// inside its <c>Emit</c>, and C# evaluates arguments before the call, so passing a percentile as an argument would compute it whether or not the record is
+    /// wanted. Reading both flags up front is what makes the claim true; it was not, in the first version of this method.
+    /// </para>
+    /// <para>
+    /// <b>The row emission is capped</b> at <see cref="OperatorSessionRowCap"/>. Volume scales with the session count, not with the engine, so a server at its
+    /// 8192-session limit would otherwise spend the trace on rows nobody reads; the server record's <c>ReportedSessions</c> against its <c>Sessions</c> says
+    /// what was left out, and a consumer is required to render that difference rather than treat the rows as the whole population.
+    /// </para>
+    /// </remarks>
+    internal void EmitOperatorTelemetry(long tickNumber)
+    {
+        var stats = Stats;
+        if (stats == null)
+        {
+            return;
+        }
+
+        // Gate FIRST, and here rather than relying on the generated Emit. The generator puts `if (!TelemetryConfig.<Gate>) return;` INSIDE the emit method
+        // (TraceEventGenerator.cs:1273/1428/1446), and C# evaluates a call's arguments before entering it — so passing `stats.TrackP99Ms(...)` and
+        // `stats.DurabilityWaitP99Ms(...)` as arguments ran two window passes and two Array.Sorts every second with both gates off, and mutated the encoder's
+        // own `_samples` scratch while doing it. `DatabaseEngine.TickFence.cs` uses this same shape for the same reason.
+        var wantServer = TelemetryConfig.SubscriptionsServerTelemetryActive;
+        var wantSessions = TelemetryConfig.SubscriptionsSessionTelemetryActive;
+        if (!wantServer && !wantSessions)
+        {
+            return;
+        }
+
+        var period = stats.EmissionPeriodTicksForTest > 0 ? stats.EmissionPeriodTicksForTest : stats.EmissionPeriodTicks;
+        if (tickNumber % period != 0)
+        {
+            return;
+        }
+
+        // The window is this emission's own, in ticks, and never zero — the first emission would otherwise divide by the absolute tick number.
+        var window = _operatorEmissionTick < 0 ? period : (int)Math.Min(period, Math.Max(1, tickNumber - _operatorEmissionTick));
+        // Volatile.Read, pairing with SetTickState's Volatile.Write, exactly as the two readers in FrameAssembler.Push.cs do. The runtime publishes the live
+        // period from the tick's start and this runs on the tick driver, so the ordering is real; on x64 the acquire is a plain mov, so the pairing is free.
+        var seconds = window * Volatile.Read(ref _tickSeconds);
+        var sent = stats.SentBytes;
+        var outBytesPerSec = seconds <= 0 ? 0 : Math.Max(0, sent - _operatorSentBytesMark) / seconds;
+
+        // One pass over the open sessions, for the per-session rows. The server record's skip total is NOT summed here: `FramesSkipped` is a process-wide
+        // counter that only ever rises, whereas a sum over currently-open sessions FALLS when one closes — so a consumer told to differentiate it, which is
+        // what kind 68 documents, would get a negative rate from an ordinary disconnect. The monotonic counter is what that field describes.
+        var reported = 0;
+        {
+            var sessions = _sessions.GetEnumerator();
+            while (sessions.MoveNext())
+            {
+                var session = sessions.Current;
+                var slot = session.Slot;
+                if (slot >= (uint)_states.Length)
+                {
+                    continue;
+                }
+
+                var state = _states[slot];
+                if (state == null)
+                {
+                    continue;
+                }
+
+                // Our own mark, never `StatsBytesMark`: that one is written only by `StatsEncoder.WriteSessionSegment`, which runs only when the
+                // application declared metrics AND the session holds the Stats capability. With no metric catalog — the very case this emission exists to
+                // cover — it stays 0 for the session's life, so subtracting it divided a lifetime byte total by a one-second window and reported a figure
+                // that climbed for ever.
+                //
+                // Advanced for EVERY session walked, before the cap and the gate are consulted, because the mark is a window boundary and not a property of
+                // being reported. Advancing it only for reported rows reproduced the very defect the separate mark exists to prevent: a session past the cap
+                // kept a stale mark, and the first period it did fit in divided every skipped period's bytes by ONE window. The gate being off for a while
+                // did the same. The loop already visits every session, so this costs one store.
+                var bytes = Math.Max(0, state.BytesPublished - state.OperatorStatsBytesMark);
+                state.OperatorStatsBytesMark = state.BytesPublished;
+
+                if (!wantSessions || reported >= OperatorSessionRowCap)
+                {
+                    continue;
+                }
+
+                TyphonEvent.EmitSubscriptionsSessionTelemetry(
+                    sessionId: session.Value,
+                    // -1 before the session's first RESET, widened to the wire's unsigned field so a consumer can tell that from realm 0.
+                    realmId: state.CommittedRealm < 0 ? ushort.MaxValue : (ushort)state.CommittedRealm,
+                    bytesPerSec: seconds <= 0 ? 0f : (float)(bytes / seconds),
+                    framesSkipped: state.FramesSkipped,
+                    degradeLevel: state.DegradeLevel);
+                reported++;
+            }
+        }
+
+        if (!wantServer)
+        {
+            _operatorEmissionTick = tickNumber;
+            _operatorSentBytesMark = sent;
+            return;
+        }
+
+        var pool = Pool;
+        TyphonEvent.EmitSubscriptionsServerTelemetry(
+            sessions: stats.OpenSessions,
+            netOutBytesPerSec: (float)outBytesPerSec,
+            trackP99Ms: (float)stats.TrackP99Ms(tickNumber, window),
+            durabilityWaitP99Ms: (float)stats.DurabilityWaitP99Ms(tickNumber, window),
+            framesSkipped: FramesSkipped,
+            framePoolRented: pool?.RentedCount ?? 0,
+            framePoolBlocks: pool?.BlockCount ?? 0,
+            framePoolBudgetSkips: pool?.BudgetSkipCount ?? 0,
+            reportedSessions: reported);
+
+        _operatorEmissionTick = tickNumber;
+        _operatorSentBytesMark = sent;
+    }
 
     // ── The prologue ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1034,12 +1287,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             }
 
             var state = BindSlot(slot, session);
-            var send = SendStateOf(slot);
+            ref var send = ref SendStateOf(slot);
 
             // Silence first: a client that has stopped talking is gone whatever its skip run says, and 4001 tells its SDK to reconnect rather than to back off
             // as 1013 would.
             // The stamp is the tick plus one, so zero is "this slot was never bound" and every real tick — tick zero included — is a mark the sweep can use.
-            var heardFrom = send->PingStamp;
+            var heardFrom = send.PingStamp;
             if (heardFrom > 0 && _tick - (heardFrom - 1) > _silenceBoundTicks)
             {
                 _sessions.RequestClose(session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement);
@@ -1047,7 +1300,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 continue;
             }
 
-            var skipRun = send->SkipRun;
+            var skipRun = send.SkipRun;
 
             // The high-water mark, read where every session's run is already in hand. One compare per open session per tick, on the prologue rather than on
             // the encode path, and it is what turns the close bound from a number somebody chose into one the deployment's own behaviour argues for.
@@ -1234,21 +1487,17 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
             var groups = new ArchetypeEncodePlan.SectionWalk[plan.Groups.Length];
             var tickSlots = new int[plan.Groups.Length];
-            var at = 0;
             for (var g = 0; g < plan.Groups.Length; g++)
             {
-                groups[g] = Walk(plan.Fields, plan.Groups[g].Section, at);
+                groups[g] = Walk(plan.Fields, plan.Groups[g].Section);
                 tickSlots[g] = plan.Groups[g].TickSlot;
-                at += plan.Groups[g].Section.MaxBodyBytes;
             }
 
             var ownerGroups = new ArchetypeEncodePlan.SectionWalk[plan.OwnerGroups.Length];
-            var ownerAt = 0;
             var ownerAll = 0;
             for (var g = 0; g < plan.OwnerGroups.Length; g++)
             {
-                ownerGroups[g] = Walk(plan.OwnerFields, plan.OwnerGroups[g].Section, ownerAt);
-                ownerAt += plan.OwnerGroups[g].Section.MaxBodyBytes;
+                ownerGroups[g] = Walk(plan.OwnerFields, plan.OwnerGroups[g].Section);
                 ownerAll |= 1 << g;
             }
 
@@ -1263,12 +1512,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 GroupCount = plan.Groups.Length,
                 GroupTickSlot = tickSlots,
                 MotionTickSlot = moving ? 0 : -1,
-                OnEnter = Walk(plan.Fields, plan.OnEnter, 0),
+                OnEnter = Walk(plan.Fields, plan.OnEnter),
                 Groups = groups,
                 OwnerGroups = ownerGroups,
                 OwnerAllMask = (byte)ownerAll,
-                MaxSelfBytes = 24 + ownerAt,
-                MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + layout.EnterBodyBytes + plan.MaxStateBodyBytes,
+                MaxSelfBytes = 24 + plan.MaxOwnerBodyBytes,
+                MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + plan.OnEnter.MaxBodyBytes + plan.MaxStateBodyBytes,
                 MaxSegmentBytes = EntitiesEncoder.MaxGapBytes + layout.SegmentBytes,
                 MaxStateBytes = EntitiesEncoder.MaxGapBytes + 1 + plan.MaxStateBodyBytes,
             };
@@ -1303,7 +1552,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         return fallback;
     }
 
-    private static ArchetypeEncodePlan.SectionWalk Walk(CompiledField[] fields, in CompiledSection section, int offset)
+    private static ArchetypeEncodePlan.SectionWalk Walk(CompiledField[] fields, in CompiledSection section)
     {
         var aligned = section.FieldCount - section.PackedCount;
         var widths = new int[aligned];
@@ -1312,7 +1561,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         for (var i = 0; i < aligned; i++)
         {
             ref readonly var field = ref fields[section.FirstField + section.PackedCount + i];
-            var width = field.CodecKind is CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef ? 0 : field.MaxBodyBytes;
+            var width = field.CodecKind is CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef or CodecKind.Varu64 or CodecKind.Vari64 ? 0 : field.MaxBodyBytes;
             widths[i] = width;
             variable |= width == 0;
             fixedBytes += width;
@@ -1323,8 +1572,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             FixedBytes = variable ? -1 : fixedBytes,
             PackBytes = section.PackBytes,
             FieldBytes = widths,
-            Offset = offset,
+            Offset = section.StoredOffset,
             MaxBytes = section.MaxBodyBytes,
+            Wide = section.Wide,
         };
     }
 }

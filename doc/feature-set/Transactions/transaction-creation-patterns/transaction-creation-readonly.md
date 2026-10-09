@@ -41,7 +41,7 @@ using var rtx = dbe.CreateReadOnlyTransaction();
 
 if (rtx.TryOpen(unitId, out EntityRef e))
 {
-    ref readonly Position pos = ref e.Read(Unit.Pos);
+    Position pos = e.Read(Unit.Pos);
     Console.WriteLine($"{pos.X}, {pos.Y}, {pos.Z}");
 }
 

@@ -37,6 +37,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     // Per worker, this tick's events.
     private TEvent[][] _events = [];
+
+    // Per worker, how many: worker w's count at w × CountStride, one cache line each. Every projected event bumps its worker's count, and with the counts
+    // packed four bytes apart every worker wrote the same two lines on every event — measured at ~260 ns an event.
+    private const int CountStride = 16;
     private int[] _eventCount = [];
 
     // The index: events bucketed by cell, primaries first, then the secondaries (leave-only views of a mover filed under the cell it left). It is the current
@@ -889,13 +893,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         if (_events.Length < workers)
         {
             Array.Resize(ref _events, workers);
-            Array.Resize(ref _eventCount, workers);
+            Array.Resize(ref _eventCount, workers * CountStride);
         }
 
         for (var w = 0; w < _events.Length; w++)
         {
             _events[w] ??= new TEvent[1024];
-            _eventCount[w] = 0;
+            _eventCount[w * CountStride] = 0;
         }
 
         EnsureRuns(_events.Length + 1);
@@ -947,7 +951,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
 
         var list = _events[worker];
-        var n = _eventCount[worker];
+        var n = _eventCount[worker * CountStride];
         if (n == list.Length)
         {
             Array.Resize(ref _events[worker], n * 2);
@@ -969,7 +973,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         e.Groups = (byte)groups;
         e.OldKey = CellKey(ox, oy, oz);
         e.NewKey = CellKey(nx, ny, nz);
-        _eventCount[worker] = n + 1;
+        _eventCount[worker * CountStride] = n + 1;
     }
 
     public override void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause)
@@ -1045,6 +1049,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     // Per merge chunk, the aggregate deltas of the tick (09 § 8): the archetype, +1 or −1, and the point — applied serially at the index's finish.
     private AggregateDelta[][] _chunkAggDeltas = [];
+    // Per merge chunk, its aggregate deltas' count at chunk × CountStride: bumped per delta by chunks running side by side, so a line each.
     private int[] _chunkAggCount = [];
 
     private struct AggregateDelta
@@ -1064,7 +1069,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        SortRun(worker, _events[worker], _eventCount[worker]);
+        SortRun(worker, _events[worker], _eventCount[worker * CountStride]);
     }
 
     public override int BeginParallelIndex()
@@ -1180,7 +1185,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 for (var c = 0; c < _mergeChunks; c++)
                 {
                     var list = _chunkAggDeltas[c];
-                    for (var i = 0; i < _chunkAggCount[c]; i++)
+                    for (var i = 0; i < _chunkAggCount[c * CountStride]; i++)
                     {
                         ref var d = ref list[i];
                         foreach (var grid in Aggregates)
@@ -1352,7 +1357,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         {
             if (_runSortedTick[r] != _tick)
             {
-                SortRun(r, _events[r], _eventCount[r]);
+                SortRun(r, _events[r], _eventCount[r * CountStride]);
             }
 
             total += _runLen[r];
@@ -1363,7 +1368,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         var events = _orphanRunCount;
         for (var r = 0; r < workers; r++)
         {
-            events += _eventCount[r];
+            events += _eventCount[r * CountStride];
         }
 
         Events += events;
@@ -1420,7 +1425,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             Array.Resize(ref _chunkDeltas, k);
             Array.Resize(ref _chunkDeltaCount, k);
             Array.Resize(ref _chunkAggDeltas, k);
-            Array.Resize(ref _chunkAggCount, k);
+            Array.Resize(ref _chunkAggCount, k * CountStride);
         }
 
         if (_mergeKeyA.Length < k)
@@ -1441,7 +1446,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             _chunkAggDeltas[c] ??= new AggregateDelta[16];
             _chunkCellCount[c] = 0;
             _chunkDeltaCount[c] = 0;
-            _chunkAggCount[c] = 0;
+            _chunkAggCount[c * CountStride] = 0;
         }
 
         _mergeChunks = k;
@@ -1451,14 +1456,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     private void NoteAggregate(int chunk, int archetype, int delta, ulong key, float x, float y, float z)
     {
-        var count = _chunkAggCount[chunk];
+        var count = _chunkAggCount[chunk * CountStride];
         if (count == _chunkAggDeltas[chunk].Length)
         {
             Array.Resize(ref _chunkAggDeltas[chunk], count * 2);
         }
 
         _chunkAggDeltas[chunk][count] = new AggregateDelta { Key = key, Archetype = archetype, Delta = delta, X = x, Y = y, Z = z };
-        _chunkAggCount[chunk] = count + 1;
+        _chunkAggCount[chunk * CountStride] = count + 1;
     }
 
     private void NoteDelta(int chunk, ulong key, int delta, ref int count)
@@ -1643,7 +1648,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         for (var w = 0; w <= _events.Length; w++)
         {
             var list = w < _events.Length ? _events[w] : _orphanEvents;
-            var count = w < _events.Length ? _eventCount[w] : _orphanRunCount;
+            var count = w < _events.Length ? _eventCount[w * CountStride] : _orphanRunCount;
             for (var i = 0; i < count; i++)
             {
                 ref var e = ref list[i];

@@ -105,8 +105,9 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var eref = tx.OpenMut(id);
-        ref var pos = ref eref.Write(SpTelUnit.Pos);
+        var pos = eref.Read(SpTelUnit.Pos);
         pos.Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y };
+        eref.Set(SpTelUnit.Pos, pos);
         tx.Commit();
     }
 
@@ -1120,7 +1121,9 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
             foreach (var (id, x) in new[] { (b[0], 150f), (b[1], 150f), (b[2], -300f) })
             {
                 var eref = tx.OpenMut(id);
-                eref.Write(SpTelUnitB.Pos).Bounds = PointB(x, 50f).Bounds;
+                var posCopy = eref.Read(SpTelUnitB.Pos);
+                posCopy.Bounds = PointB(x, 50f).Bounds;
+                eref.Set(SpTelUnitB.Pos, posCopy);
             }
 
             tx.Commit();

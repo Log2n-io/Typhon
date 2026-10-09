@@ -259,6 +259,21 @@ public class WebSocketEndpointTests
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
     }
 
+    /// <summary>The stats endpoint answers 503 rather than an empty body when no runtime is registered (#ENG-07).</summary>
+    /// <remarks>
+    /// Thin on purpose: what this fixture owns is the HTTP half, and it deliberately has no <c>TyphonRuntime</c>. That the route is mapped and that its
+    /// no-runtime answer is a status rather than an empty 200 is exactly the part a caller cannot distinguish otherwise — an empty body would read as "this
+    /// engine has no numbers". The CONTENT is covered where the numbers live, by <c>TyphonRuntimeTests.ReadStats_*</c> and <c>StatsBlockTests</c>.
+    /// </remarks>
+    [Test]
+    public async Task TheStatsEndpointIsUnavailableWithoutARuntime()
+    {
+        using var host = await StartAsync(new RecordingAcceptor()).ConfigureAwait(false);
+        var response = await host.GetTestClient().GetAsync("/typhon/stats.json").ConfigureAwait(false);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static async Task<IHost> StartAsync(RecordingAcceptor acceptor, Action<TyphonSubscriptionsOptions> configure = null)
@@ -279,6 +294,7 @@ public class WebSocketEndpointTests
                     {
                         endpoints.MapTyphonSubscriptions("/ws");
                         endpoints.MapTyphonCatalog("/typhon/catalog.json");
+                        endpoints.MapTyphonStats("/typhon/stats.json");
                     });
                 }))
             .StartAsync()

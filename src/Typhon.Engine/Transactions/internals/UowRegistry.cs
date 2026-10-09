@@ -730,7 +730,7 @@ internal unsafe class UowRegistry : IDisposable
 
         if (pagesNeeded > _segment.Length)
         {
-            _segment.Grow(pagesNeeded, true);
+            _segment.Grow(pagesNeeded);
         }
 
         _currentCapacity = ComputeCapacity(_segment.Length);

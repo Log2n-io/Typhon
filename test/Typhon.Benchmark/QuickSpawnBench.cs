@@ -85,7 +85,9 @@ static class QuickSpawnBench
             for (int i = 0; i < entitiesPerIter; i++)
             {
                 var mut = t.OpenMut(ids[i]);
-                mut.Write(BenchArch.Data).Value = i + 10000;
+                var dataCopy = mut.Read(BenchArch.Data);
+                dataCopy.Value = i + 10000;
+                mut.Set(BenchArch.Data, dataCopy);
             }
             t.Commit();
         });
@@ -99,7 +101,9 @@ static class QuickSpawnBench
             var entity = t.Open(id);
             _ = entity.Read(BenchArch.Data);
             var mut = t.OpenMut(id);
-            mut.Write(BenchArch.Data).Value = 999;
+            var data = mut.Read(BenchArch.Data);
+            data.Value = 999;
+            mut.Set(BenchArch.Data, data);
             t.Commit();
         });
 

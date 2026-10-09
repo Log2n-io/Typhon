@@ -158,7 +158,7 @@ internal unsafe abstract class BlockAllocatorBase : ResourceNode, IMemoryResourc
     }
 
     /// <inheritdoc />
-    public int EstimatedMemorySize => 64 + (_pages?.Length ?? 0) * IntPtr.Size;
+    public long EstimatedMemorySize => 64 + (_pages?.Length ?? 0) * IntPtr.Size;
 
     protected override void Dispose(bool disposing)
     {

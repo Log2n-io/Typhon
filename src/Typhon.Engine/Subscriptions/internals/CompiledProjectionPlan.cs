@@ -37,10 +37,10 @@ internal enum ProjectionSourceType : byte
     /// <summary>An unsigned 32-bit integer.</summary>
     UInt32,
 
-    /// <summary>A signed 64-bit integer. It never reaches the wire as 64 bits; the codec narrows it and the registry made that narrowing explicit.</summary>
+    /// <summary>A signed 64-bit integer: exact in <c>i64</c> / <c>vari64</c> (W32), or through a declared narrowing.</summary>
     Int64,
 
-    /// <summary>An unsigned 64-bit integer, narrowed the same way.</summary>
+    /// <summary>An unsigned 64-bit integer: exact in <c>u64</c> / <c>varu64</c>, or narrowed the same way.</summary>
     UInt64,
 
     /// <summary>An IEEE single.</summary>
@@ -48,6 +48,53 @@ internal enum ProjectionSourceType : byte
 
     /// <summary>An IEEE double.</summary>
     Double,
+
+    /// <summary>
+    /// Text: a <c>String64</c>, <c>String1024</c> or <c>Variant</c>, UTF-8 up to its first zero byte (13 § 2.1). Read by the section encoder.
+    /// </summary>
+    Text,
+
+    /// <summary>An entity reference: an <see cref="EntityId"/> or an <c>EntityLink&lt;T&gt;</c>, eight bytes resolved to a netId (13 § 5).</summary>
+    Reference,
+
+    /// <summary>A <c>ComponentCollection&lt;T&gt;</c>: a buffer id, its elements read from the collection's buffer segment (13 § 6.5).</summary>
+    Collection,
+}
+
+/// <summary>
+/// A collection field's element (W34, 13 § 6.5), resolved: the element's fields at their offsets in <c>T</c>, in wire order, and the bounds its section
+/// is sized from.
+/// </summary>
+/// <remarks>
+/// An element field is a <see cref="CompiledField"/> whose "column" is the element buffer: <see cref="CompiledField.ComponentSize"/> is the element's size,
+/// <see cref="CompiledField.FieldOffsetInComponent"/> its offset in <c>T</c>, and the cluster offset 0 — so the column walk reads a run of elements exactly
+/// as it reads a cluster's slots.
+/// </remarks>
+internal sealed class CompiledCollection
+{
+    /// <summary>The element type <c>T</c>.</summary>
+    public Type ElementType { get; init; }
+
+    /// <summary>Bytes of one element in the buffer: <c>sizeof(T)</c>.</summary>
+    public int ElementSize { get; init; }
+
+    /// <summary>The most elements sent.</summary>
+    public int MaxCount { get; init; }
+
+    /// <summary>The element's fields in wire order — packed first, then by ordinal name — with a count field's sub-fields consecutive.</summary>
+    public CompiledField[] Fields { get; init; }
+
+    /// <summary>The element as one section: its pack, then its byte-aligned fields.</summary>
+    public CompiledSection Section { get; init; }
+
+    /// <summary>Whether an element field is a reference: the collection's netIds are counted in the reverse index per occurrence (13 § 5).</summary>
+    public bool HasReferences { get; init; }
+
+    /// <summary>The collection's index among the archetype's (<see cref="CompiledProjectionPlan.Collections"/>), which names its buffer segment.</summary>
+    public int Index { get; internal set; }
+
+    /// <summary>The field's row in the code scratch and the clamp counters: a truncation and an element's clamp count there.</summary>
+    public int Row { get; internal set; }
 }
 
 /// <summary>
@@ -109,16 +156,20 @@ internal readonly struct CompiledField
     public Type EnumType { get; init; }
 
     /// <summary>
-    /// Whether the declaration marked this integer codec saturating — <c>Codec.Saturate()</c>, required of any 64-bit source, and exported as the codec's
-    /// <c>!</c> in the catalog. Dropping it here would build a catalog whose <c>varu</c> no longer says the narrowing was explicit.
+    /// Whether the declaration marked this integer codec saturating — <c>Codec.Saturate()</c>, required of any integer narrowing (13 § 2.3). It is
+    /// what made <see cref="Path"/> a <see cref="ColumnPath.NarrowingInteger"/> for a source the codec cannot hold; the codec's text shows it as
+    /// <c>!</c>.
     /// </summary>
     public bool Saturating { get; init; }
 
-    /// <summary>Lowest code an integer kind accepts; the clamp is the codec's range, not the source's.</summary>
-    public double CodeMin { get; init; }
+    /// <summary>How the column turns values into codes, decided by the pairing table (<see cref="CodecPairing"/>, 13 § 4).</summary>
+    public ColumnPath Path { get; init; }
 
-    /// <summary>Highest code an integer kind accepts.</summary>
-    public double CodeMax { get; init; }
+    /// <summary>Lowest code a <see cref="ColumnPath.NarrowingInteger"/> column clamps to: the codec's range, not the source's.</summary>
+    public long IntMin { get; init; }
+
+    /// <summary>Highest code a <see cref="ColumnPath.NarrowingInteger"/> column clamps to.</summary>
+    public long IntMax { get; init; }
 
     /// <summary>Lower bound of a <c>quant</c> codec, inclusive.</summary>
     public double QuantMin { get; init; }
@@ -156,6 +207,40 @@ internal readonly struct CompiledField
     /// <summary>Whether the field belongs to the archetype's owner section, which has its own bit space (W17).</summary>
     public bool Owner { get; init; }
 
+    /// <summary>A <c>vec2</c> / <c>vec3</c> codec's step, for a point field's per-axis code; 0 otherwise.</summary>
+    public double VectorScale { get; init; }
+
+    /// <summary>The catalog's <c>shape</c> hint (W33), or <see langword="null"/>.</summary>
+    public string Shape { get; init; }
+
+    /// <summary>
+    /// For a field of a fixed shape travelling as a count (W33): this sub-field's component, 0-based. A count field compiles to one sub-field per
+    /// component, consecutive, each its own code row (13 § 4); the catalog names the field once, at component 0.
+    /// </summary>
+    public int Component { get; init; }
+
+    /// <summary>How many sub-fields this field compiled to: its count, or 1.</summary>
+    public int ComponentCount { get; init; }
+
+    /// <summary>For a <c>quat3</c> field, its four components' byte offsets inside the component, in wire order; <see langword="null"/> otherwise.</summary>
+    public int[] ShapeOffsets { get; init; }
+
+    /// <summary>For a text field, its inline buffer's bytes (64 or 1 024); 0 otherwise. Its text is at most one byte less.</summary>
+    public int TextCapacity { get; init; }
+
+    /// <summary>
+    /// For a reference field, its index among the archetype's reference fields — public then owner — which is where the netId it last resolved to is kept
+    /// in the cold entry (<see cref="ReplicationBlockLayout.ReferenceOffsetInColdEntry"/>). Read only when <see cref="Path"/> is
+    /// <see cref="ColumnPath.EntityRef"/>.
+    /// </summary>
+    public int ReferenceSlot { get; init; }
+
+    /// <summary>For an <c>EntityLink&lt;T&gt;</c> field, <c>T</c>; <see langword="null"/> for an untyped <see cref="EntityId"/> and any other field.</summary>
+    public Type ReferenceTarget { get; init; }
+
+    /// <summary>For a collection field (<see cref="ColumnPath.Collection"/>), its element; <see langword="null"/> otherwise.</summary>
+    public CompiledCollection Collection { get; init; }
+
     /// <inheritdoc/>
     public override string ToString() => $"{Name} @ +{ComponentOffsetInCluster}/{ComponentSize}+{FieldOffsetInComponent} as {Codec?.Type}";
 }
@@ -183,6 +268,24 @@ internal readonly struct CompiledSection
 
     /// <summary>The section's body size in bytes: its pack plus every byte-aligned field, an upper bound where a codec is variable-length.</summary>
     public int MaxBodyBytes { get; init; }
+
+    /// <summary>
+    /// Whether the section holds a <c>str</c> field (13 § 6.1): its body is stored out of line in the archetype's <see cref="WideBodyArena"/>, and the entry
+    /// keeps a reference to it. A scalar section is never wide, so a scalar archetype's layout is what it always was (E-9).
+    /// </summary>
+    public bool Wide { get; init; }
+
+    /// <summary>
+    /// The bytes the section takes in its entry region: <see cref="MaxBodyBytes"/>, zero-padded, for an inline section; <see cref="WideRefBytes"/> — a
+    /// <c>u32</c> handle and a <c>u32</c> length — for a wide one.
+    /// </summary>
+    public int StoredBytes => Wide ? WideRefBytes : MaxBodyBytes;
+
+    /// <summary>Where the section's stored bytes begin inside its region: the hot entry's state, the owner entry, or the cold entry's enter body.</summary>
+    public int StoredOffset { get; init; }
+
+    /// <summary>A wide section's reference: a <c>u32</c> arena handle, then the body's <c>u32</c> length.</summary>
+    public const int WideRefBytes = 8;
 }
 
 /// <summary>
@@ -374,9 +477,30 @@ internal sealed class CompiledProjectionPlan
     public int OwnerEntrySize { get; init; }
 
     /// <summary>
-    /// The widest state body the public groups can produce, which is what <see cref="ReplicationHotEntry.PackedState"/> has to hold.
+    /// The widest state body the public groups can produce on the wire — the bound a state record's frame space and the encode scratch are sized from. What
+    /// the hot entry reserves is smaller when a group is wide: <see cref="ReplicationBlockLayout.PackedStateBytes"/>.
     /// </summary>
     public int MaxStateBodyBytes { get; init; }
+
+    /// <summary>
+    /// The widest body the owner groups can produce on the wire, for the encode scratch; the owner entry reserves <see cref="OwnerEntrySize"/>.
+    /// </summary>
+    public int MaxOwnerBodyBytes { get; init; }
+
+    /// <summary>Whether any section of the archetype is wide, so its replication state holds a <see cref="WideBodyArena"/>.</summary>
+    public bool HasWideSections { get; init; }
+
+    /// <summary>The archetype's collections (W34), public fields' then owner fields', each knowing its <see cref="CompiledCollection.Index"/>.</summary>
+    public CompiledCollection[] Collections { get; init; } = [];
+
+    /// <summary>Whether the projection resolves references: a reference field, or a collection whose element holds one (13 § 5).</summary>
+    public bool ResolvesReferences { get; init; }
+
+    /// <summary>
+    /// How many reference fields the archetype projects, public and owner: each keeps the netId it last resolved to in the cold entry, which is what the
+    /// reverse index is fed from (13 § 5). Zero for an archetype with none, whose layout is what it always was.
+    /// </summary>
+    public int ReferenceCount { get; init; }
 
     /// <summary>How many of the four <see cref="ReplicationHotEntry.GroupTicks"/> slots this archetype uses, the motion segment's included.</summary>
     public int TickSlotCount { get; init; }

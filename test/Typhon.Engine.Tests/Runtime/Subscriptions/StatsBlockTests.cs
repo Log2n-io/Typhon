@@ -148,8 +148,63 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             Assert.That(Scalar(client, AppMetric), Is.EqualTo(AppMetricValue), "an application metric's source is read and its value travels");
             Assert.That(Scalar(client, "typhon.tick.p50"), Is.GreaterThan(0), "a ticking runtime has a tick duration");
             Assert.That(Scalar(client, "typhon.tick.p99"), Is.GreaterThanOrEqualTo(Scalar(client, "typhon.tick.p50")));
-            Assert.That(Scalar(client, "typhon.durability.wait.p99"), Is.Zero,
-                "the runtime times its flush only through the profiler's phase wrapper, so this built-in is unsourced and must say zero rather than invent");
+            // #CLI-04 inverted this assertion. It used to require ZERO, because the runtime timed its flush only through the profiler's phase wrapper and
+            // the built-in was unsourced. TickTelemetry.UowFlushMs is now stamped on every tick, so a ticking WAL engine must report a real wait — and a
+            // zero here would mean the stamp is not reaching the ring, which is exactly what the old assertion could not distinguish from "not implemented".
+            Assert.That(Scalar(client, "typhon.durability.wait.p99"), Is.GreaterThan(0),
+                "a ticking engine flushes its UoW every tick and waits for the WAL writer; the built-in is sourced from that wait since #CLI-04");
+        });
+    }
+
+    /// <summary>
+    /// #ENG-07 — the HTTP reader answers the same world the <c>STATS</c> block describes: identical for every INSTANTANEOUS figure, and reading the same
+    /// sources for the windowed ones.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The percentiles are deliberately NOT compared, and that is a finding rather than a gap.</b> The two doors sample different windows at different
+    /// moments: the block's window is <c>min(emissionPeriod, ticksSinceLastEmission)</c> — one tick in this fixture, and captured at the tick it was emitted
+    /// on, which early in a run is a JIT-warm outlier — while <c>ReadStats</c> takes a second's worth as of the call. A first attempt at this test asserted
+    /// they matched and measured 32.5 ms against 0.206 ms. Asserting agreement would have been asserting that two different measurements of two different
+    /// windows coincide, which is a flake, not an invariant.
+    /// </para>
+    /// <para>
+    /// What IS shared is the definition: both call <see cref="TelemetryPercentile.NearestRank"/> over the same ring field, so they cannot disagree about what
+    /// "p99" means — a rank apart would be invisible in either figure alone. That definition has its own tests; here the claim is the rest of the snapshot.
+    /// </para>
+    /// <para>
+    /// The instantaneous figures must match EXACTLY. Session count and entities per archetype are levels read straight from the session table and the engine,
+    /// with no window and no percentile between them: a difference there is a bug in one of the two readers, not sampling.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TheHttpReaderDescribesTheSameWorldAsTheWireBlock()
+    {
+        using var world = new StatsWorld(SetupEngine());
+        var client = world.Connect(Capabilities.Stats);
+        Assert.That(client.AwaitBlock(), Is.True, "no frame carrying a STATS block reached the client");
+
+        var stats = world.Runtime.ReadStats();
+        var wireSessions = Scalar(client, "typhon.sessions");
+        var wireArchetypes = Row(client, BuiltInMetrics.ArchetypeEntities);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(stats.Sessions, Is.EqualTo((int)wireSessions), "one session is connected, and both doors read the same table");
+            Assert.That(stats.Sessions, Is.EqualTo(1));
+
+            // Both read the engine's live count for the replicated archetype — no codec, no window, so exactness is the whole point.
+            var creatures = Array.Find(stats.Archetypes, a => a.Entities == CreatureCount);
+            Assert.That(creatures.Entities, Is.EqualTo((long)wireArchetypes[0]),
+                "the replicated archetype's live count must be identical through both doors");
+            Assert.That(creatures.Name, Is.Not.Null.And.Not.Empty, "the reader names the archetype; the wire's labels do too");
+
+            Assert.That(stats.ReplicatedArchetypes, Is.GreaterThan(0), "this world declares a replicated archetype");
+            Assert.That(stats.ReplicationTrackP99Ms, Is.GreaterThanOrEqualTo(0), "the replication track ran, so its cost is a number");
+            Assert.That(stats.NetOutBytesTotal, Is.GreaterThan(0), "frames reached the client, so bytes left the pump");
+
+            // #CLI-04 through the other door: the same stamp the wire metric now reports.
+            Assert.That(stats.DurabilityWaitP99Ms, Is.GreaterThan(0), "a ticking WAL engine waits for durability every tick");
         });
     }
 
@@ -387,6 +442,9 @@ class StatsBlockTests : TestBase<StatsBlockTests>
         }
 
         public SubscriptionsRuntime Subscriptions { get; }
+
+        /// <summary>The runtime, so a test can read the same figures through <c>ReadStats</c> and compare them with the wire's (#ENG-07).</summary>
+        public TyphonRuntime Runtime => _runtime;
 
         public StatsClient Connect(Capabilities caps)
         {

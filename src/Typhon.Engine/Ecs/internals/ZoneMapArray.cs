@@ -12,7 +12,8 @@ namespace Typhon.Engine.Internals;
 /// Maintains min/max bounds per cluster; allows queries to skip clusters entirely when the query range doesn't overlap the cluster's [min, max] interval.
 /// </summary>
 /// <remarks>
-/// <para>Zone maps are NOT persisted — rebuilt from cluster data on reopen/recovery.</para>
+/// <para>Zone maps are NOT persisted, and an open does not rebuild them: it marks every cluster holding entities <see cref="Unknown"/>, never pruned
+/// until the tick fence recomputes it (#1151).</para>
 /// <para>Maintenance: lazy full recompute at tick fence for dirty clusters; eager widen on spawn.</para>
 /// <para>Staleness: between tick fences, bounds may be wider than actual data (destroyed boundary entity lingers).
 /// False positives acceptable (cluster checked but no match).</para>
@@ -47,17 +48,37 @@ internal sealed unsafe class ZoneMapArray
     {
         internal readonly long[] Mins;      // [clusterChunkId] → min value (ordered long, sign-flipped for float/unsigned ordering)
         internal readonly long[] Maxs;      // [clusterChunkId] → max value (ordered long, sign-flipped for float/unsigned ordering)
-        internal readonly bool[] Valid;     // [clusterChunkId] → true if min/max are initialized
+        // [clusterChunkId] → Unset / Bounded / Unknown. Also the flag that publishes a cluster's bounds to the lock-free readers (MayContain, TryGetBounds):
+        // a writer stores Mins/Maxs first and Bounded last with release, a reader acquires State before it reads them. Plain stores would let an arm64
+        // reader see Bounded over bounds not yet written — [0, 0] for a cluster leaving Unknown — and prune a cluster that matches.
+        internal readonly byte[] State;
         internal readonly int Capacity;
 
-        internal Store(long[] mins, long[] maxs, bool[] valid, int capacity)
+        internal Store(long[] mins, long[] maxs, byte[] state, int capacity)
         {
             Mins = mins;
             Maxs = maxs;
-            Valid = valid;
+            State = state;
             Capacity = capacity;
         }
     }
+
+    // ── Per-cluster state ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // "No bounds recorded" used to be one boolean, and it meant two different things (#1151). A cluster that is new, or that a recompute found empty, holds
+    // nothing that was not widened in, so its first widen may START the bounds. A cluster whose contents this map has never seen — every cluster that
+    // already held entities when the database was opened, since nothing persists zone maps or rebuilds them at open — may hold values that were never
+    // widened in, and a widen that started its bounds there recorded [v, v] over a cluster holding other values: MayContain then pruned the cluster for
+    // every one of them, and the rows vanished from scans until a fence recomputed it. Without a runtime, never. Hence the third state, which widening
+    // cannot leave: only a recompute, which reads every occupied slot, can bound an Unknown cluster.
+
+    /// <summary>No bounds recorded, and nothing in the cluster that was not widened in: the next widen starts the bounds. A new or emptied cluster.</summary>
+    internal const byte Unset = 0;
+
+    /// <summary><see cref="Store.Mins"/> / <see cref="Store.Maxs"/> cover every value in the cluster.</summary>
+    internal const byte Bounded = 1;
+
+    /// <summary>The cluster may hold values this map never saw. Widening leaves it Unknown; only a recompute bounds it. <see cref="MayContain"/> says yes.</summary>
+    internal const byte Unknown = 2;
 
     private Store _store;
 
@@ -95,7 +116,7 @@ internal sealed unsafe class ZoneMapArray
     internal ZoneMapArray(int initialCapacity, int fieldSize, bool isFloat, bool isDouble, bool isUnsigned = false)
     {
         var capacity = Math.Max(16, initialCapacity);
-        _store = new Store(new long[capacity], new long[capacity], new bool[capacity], capacity);
+        _store = new Store(new long[capacity], new long[capacity], new byte[capacity], capacity);
         _fieldSize = fieldSize;
         _isFloat = isFloat;
         _isDouble = isDouble;
@@ -129,7 +150,7 @@ internal sealed unsafe class ZoneMapArray
             var empty = AcquireForWrite(clusterChunkId);
             try
             {
-                empty.Valid[clusterChunkId] = false;
+                empty.State[clusterChunkId] = Unset;
             }
             finally
             {
@@ -167,7 +188,7 @@ internal sealed unsafe class ZoneMapArray
         {
             store.Mins[clusterChunkId] = min;
             store.Maxs[clusterChunkId] = max;
-            store.Valid[clusterChunkId] = true;
+            Volatile.Write(ref store.State[clusterChunkId], Bounded);   // release: publishes the bounds above (see State)
         }
         finally
         {
@@ -222,11 +243,17 @@ internal sealed unsafe class ZoneMapArray
         var store = AcquireForWrite(clusterChunkId);
         try
         {
-            if (!store.Valid[clusterChunkId])
+            var state = store.State[clusterChunkId];
+            if (state == Unknown)
+            {
+                return;   // a widen cannot bound what it has not seen (#1151)
+            }
+
+            if (state == Unset)
             {
                 store.Mins[clusterChunkId] = min;
                 store.Maxs[clusterChunkId] = max;
-                store.Valid[clusterChunkId] = true;
+                Volatile.Write(ref store.State[clusterChunkId], Bounded);
                 return;
             }
 
@@ -258,11 +285,17 @@ internal sealed unsafe class ZoneMapArray
         var store = AcquireForWrite(clusterChunkId);
         try
         {
-            if (!store.Valid[clusterChunkId])
+            var state = store.State[clusterChunkId];
+            if (state == Unknown)
+            {
+                return;   // a widen cannot bound what it has not seen (#1151)
+            }
+
+            if (state == Unset)
             {
                 store.Mins[clusterChunkId] = val;
                 store.Maxs[clusterChunkId] = val;
-                store.Valid[clusterChunkId] = true;
+                Volatile.Write(ref store.State[clusterChunkId], Bounded);
                 return;
             }
 
@@ -291,9 +324,9 @@ internal sealed unsafe class ZoneMapArray
         // One acquire load for the whole check. The capacity and the three arrays come from the same generation by construction, so the bounds check below
         // cannot be validated against one generation and then indexed into another.
         var store = Volatile.Read(ref _store);
-        if ((uint)clusterChunkId >= (uint)store.Capacity || !store.Valid[clusterChunkId])
+        if ((uint)clusterChunkId >= (uint)store.Capacity || Volatile.Read(ref store.State[clusterChunkId]) != Bounded)
         {
-            return true; // Unknown → don't skip (conservative)
+            return true; // no bounds, or bounds this map cannot vouch for → don't skip (conservative)
         }
 
         // Standard interval overlap: !(clusterMax < queryMin || clusterMin > queryMax)
@@ -302,7 +335,8 @@ internal sealed unsafe class ZoneMapArray
 
     /// <summary>
     /// Read a cluster's recorded bounds, in the ordered-long encoding <see cref="MayContain"/> compares against. Returns <see langword="false"/> when the
-    /// cluster has no bounds recorded — either past the current capacity, or invalidated and not yet re-widened.
+    /// cluster has no bounds this map vouches for — past the current capacity, <see cref="Unset"/> (new, emptied, or invalidated and not yet re-widened),
+    /// or <see cref="Unknown"/> (holding values the map never saw).
     /// </summary>
     /// <remarks>
     /// The only way to observe a zone map's WIDTH rather than its verdict on one query. <see cref="MayContain"/> answers "could this cluster match", which
@@ -313,7 +347,7 @@ internal sealed unsafe class ZoneMapArray
     internal bool TryGetBounds(int clusterChunkId, out long min, out long max)
     {
         var store = Volatile.Read(ref _store);
-        if ((uint)clusterChunkId >= (uint)store.Capacity || !store.Valid[clusterChunkId])
+        if ((uint)clusterChunkId >= (uint)store.Capacity || Volatile.Read(ref store.State[clusterChunkId]) != Bounded)
         {
             min = 0;
             max = 0;
@@ -326,7 +360,8 @@ internal sealed unsafe class ZoneMapArray
     }
 
     /// <summary>
-    /// Invalidate a cluster's zone map (e.g., when cluster is freed).
+    /// Invalidate a cluster's zone map (e.g., when cluster is freed). Resets it to <see cref="Unset"/>, so the caller must know the cluster holds nothing
+    /// the map will not see widened in — an empty one: <see cref="Unset"/> over a populated cluster lets the next widen bound it to one value (IXS-08).
     /// </summary>
     /// <remarks>
     /// <b>Had no caller at all until #872 step 12.</b> Nothing frees a zone map when its cluster is freed, so a recycled chunk id inherits the min/max of
@@ -344,13 +379,51 @@ internal sealed unsafe class ZoneMapArray
             var store = _store;
             if ((uint)clusterChunkId < (uint)store.Capacity)
             {
-                store.Valid[clusterChunkId] = false;
+                store.State[clusterChunkId] = Unset;
             }
         }
         finally
         {
             _growLatch.Lock.ExitSharedAccess();
         }
+    }
+
+    /// <summary>
+    /// Marks <paramref name="clusterChunkIds"/> as holding values this map has never seen: they stay unbounded — never pruned — until a recompute reads
+    /// them, whatever is widened in meanwhile (#1151). Called for the clusters that hold entities at the end of an open.
+    /// </summary>
+    internal void MarkUnknown(ReadOnlySpan<int> clusterChunkIds)
+    {
+        if (clusterChunkIds.IsEmpty)
+        {
+            return;
+        }
+
+        var max = 0;
+        foreach (var id in clusterChunkIds)
+        {
+            max = Math.Max(max, id);
+        }
+
+        var store = AcquireForWrite(max);
+        try
+        {
+            foreach (var id in clusterChunkIds)
+            {
+                store.State[id] = Unknown;
+            }
+        }
+        finally
+        {
+            ReleaseAfterWrite();
+        }
+    }
+
+    /// <summary>The recorded state of one cluster: <see cref="Unset"/>, <see cref="Bounded"/> or <see cref="Unknown"/>. Test and diagnostic use.</summary>
+    internal byte StateOf(int clusterChunkId)
+    {
+        var store = Volatile.Read(ref _store);
+        return (uint)clusterChunkId < (uint)store.Capacity ? store.State[clusterChunkId] : Unset;
     }
 
     /// <summary>
@@ -601,7 +674,7 @@ internal sealed unsafe class ZoneMapArray
         var occupancy = *(ulong*)primaryBase;
         if (occupancy == 0)
         {
-            store.Valid[clusterChunkId] = false;
+            store.State[clusterChunkId] = Unset;
             return;
         }
 
@@ -628,7 +701,7 @@ internal sealed unsafe class ZoneMapArray
 
         store.Mins[clusterChunkId] = min;
         store.Maxs[clusterChunkId] = max;
-        store.Valid[clusterChunkId] = true;
+        Volatile.Write(ref store.State[clusterChunkId], Bounded);
     }
 
     /// <summary>
@@ -652,12 +725,18 @@ internal sealed unsafe class ZoneMapArray
             return false;
         }
 
+        var state = store.State[clusterChunkId];
+        if (state == Unknown)
+        {
+            return true;   // handled: a widen cannot bound what it has not seen (#1151)
+        }
+
         long val = ReadFieldAsOrderedLong(fieldPtr);
-        if (!store.Valid[clusterChunkId])
+        if (state == Unset)
         {
             store.Mins[clusterChunkId] = val;
             store.Maxs[clusterChunkId] = val;
-            store.Valid[clusterChunkId] = true;
+            Volatile.Write(ref store.State[clusterChunkId], Bounded);
             return true;
         }
 
@@ -677,9 +756,11 @@ internal sealed unsafe class ZoneMapArray
     /// <summary>The batch form of <see cref="WidenMasked"/>.</summary>
     internal void WidenMaskedInto(Store store, int clusterChunkId, ulong slotMask, byte* dataBase, ArchetypeClusterInfo layout, int compSlot, int fieldOffset)
     {
-        if (slotMask == 0)
+        // Checked before the decode: the caller holds the latch, so the state cannot move, and an Unknown cluster would throw the decoded values away.
+        var state = store.State[clusterChunkId];
+        if (slotMask == 0 || state == Unknown)
         {
-            return;
+            return;   // Unknown: a widen cannot bound what it has not seen (#1151)
         }
 
         var compSize = layout.ComponentSize(compSlot);
@@ -703,11 +784,11 @@ internal sealed unsafe class ZoneMapArray
             }
         }
 
-        if (!store.Valid[clusterChunkId])
+        if (state == Unset)
         {
             store.Mins[clusterChunkId] = min;
             store.Maxs[clusterChunkId] = max;
-            store.Valid[clusterChunkId] = true;
+            Volatile.Write(ref store.State[clusterChunkId], Bounded);
             return;
         }
 
@@ -770,14 +851,14 @@ internal sealed unsafe class ZoneMapArray
             var newCap = Math.Max(store.Capacity * 2, index + 1);
             var mins = new long[newCap];
             var maxs = new long[newCap];
-            var valid = new bool[newCap];
+            var state = new byte[newCap];
             Array.Copy(store.Mins, mins, store.Capacity);
             Array.Copy(store.Maxs, maxs, store.Capacity);
-            Array.Copy(store.Valid, valid, store.Capacity);
+            Array.Copy(store.State, state, store.Capacity);
 
             // Release: a reader acquires this reference without the latch, so it must not be able to observe the object before its arrays are copied — it
             // would read a default 0 as a real bound and prune a cluster that matches.
-            Volatile.Write(ref _store, new Store(mins, maxs, valid, newCap));
+            Volatile.Write(ref _store, new Store(mins, maxs, state, newCap));
         }
         finally
         {

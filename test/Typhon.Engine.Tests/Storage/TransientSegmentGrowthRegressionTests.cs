@@ -15,7 +15,7 @@ namespace Typhon.Engine.Tests;
 /// array when growth exceeds the current length (first at <c>PagesPerBlock * 4</c> pages). <see cref="ChunkAccessor{TStore}"/>
 /// holds a by-value copy of the store, so a copy taken before a grow referenced the OLD, now-undersized array; indexing a
 /// freshly-grown page then threw <see cref="IndexOutOfRangeException"/>. The exact trigger is <c>AllocateChunk(true)</c>:
-/// it snapshots the store into a local accessor, grows the segment when the free list is empty, then clears the new chunk
+/// it snapshots the store into a local accessor, grows the segment when no page has room, then clears the new chunk
 /// through that stale snapshot. The fix routes the accessor's page-address resolution through the live <c>_segment.Store</c>.
 /// </para>
 /// <para>
@@ -74,7 +74,7 @@ public sealed class TransientSegmentGrowthRegressionTests
             store.AllocatePages(ref initialPages, 0, null);
 
             var segment = new ChunkBasedSegment<TransientStore>(_epochManager, store, stride);
-            segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, initialPages, false);
+            segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, initialPages);
 
             // AllocateChunk(true) is the faulting path: snapshot store → grow segment → ClearChunk the new page via the
             // snapshot. Pre-fix, the allocation that crossed page 4 threw IndexOutOfRange inside ClearChunk.

@@ -249,7 +249,13 @@ public class StorageModeCompareBenchmarks : IDisposable
     private void WriteBatch_V()
     {
         using var t = _dbe.CreateQuickTransaction();
-        for (int i = 0; i < 100; i++) { t.OpenMut(_vIds[i]).Write(SmVersionedArch.Data).Value = i; }
+        for (int i = 0; i < 100; i++)
+        {
+            var entity = t.OpenMut(_vIds[i]);
+            var data = entity.Read(SmVersionedArch.Data);
+            data.Value = i;
+            entity.Set(SmVersionedArch.Data, data);
+        }
         t.Commit();
     }
 
@@ -257,7 +263,13 @@ public class StorageModeCompareBenchmarks : IDisposable
     private void WriteBatch_SV()
     {
         using var t = _dbe.CreateQuickTransaction();
-        for (int i = 0; i < 100; i++) { t.OpenMut(_svIds[i]).Write(SmSingleVersionArch.Data).Value = i; }
+        for (int i = 0; i < 100; i++)
+        {
+            var entity = t.OpenMut(_svIds[i]);
+            var data = entity.Read(SmSingleVersionArch.Data);
+            data.Value = i;
+            entity.Set(SmSingleVersionArch.Data, data);
+        }
         t.Commit();
     }
 
@@ -265,7 +277,13 @@ public class StorageModeCompareBenchmarks : IDisposable
     private void WriteBatch_T()
     {
         using var t = _dbe.CreateQuickTransaction();
-        for (int i = 0; i < 100; i++) { t.OpenMut(_tIds[i]).Write(SmTransientArch.Data).Value = i; }
+        for (int i = 0; i < 100; i++)
+        {
+            var entity = t.OpenMut(_tIds[i]);
+            var data = entity.Read(SmTransientArch.Data);
+            data.Value = i;
+            entity.Set(SmTransientArch.Data, data);
+        }
         t.Commit();
     }
 

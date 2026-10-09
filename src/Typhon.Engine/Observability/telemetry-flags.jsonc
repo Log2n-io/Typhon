@@ -655,6 +655,18 @@
                   "kind": "subtreeResolved",
                   "field": "SpatialArchetypeTelemetryActive",
                   "desc": "Combined gate for the Spatial:ClusterMigration:ArchetypeTelemetry instant (kind 66: the per-archetype per-tick counter snapshot the Workbench Spatial panel reads)."
+                },
+                {
+                  "name": "RealmTelemetry",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRealmTelemetryActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:RealmTelemetry instant (kind 67: one row per RUNNABLE realm per spatial archetype, carrying that realm's partition shape). Separate from ArchetypeTelemetry because its volume scales with the realm count, not the archetype count: a galaxy of thousands of interiors can afford the one archetype record and not the thousands of realm rows."
+                },
+                {
+                  "name": "RealmRates",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRealmRatesActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:RealmRates instant (kind 70: one row per realm the fence TOUCHED per spatial archetype, carrying that realm's per-tick maintenance rates). Separate from RealmTelemetry because the row sets differ — 67 is emitted for runnable realms whether or not they worked, 70 for realms that worked whether or not they are runnable — and because this row is three times the size, so a galaxy that can afford the shape rows may not want the rate rows."
                 }
               ]
             },
@@ -1379,6 +1391,28 @@
                   ]
                 }
               ]
+            }
+          ]
+        },
+        {
+          // The PUSH-replication subsystem (src/Typhon.Engine/Subscriptions), not the ECS change-subscription
+          // delivery spans — those are Runtime:Subscription, singular, and are a different thing entirely.
+          "name": "Subscriptions",
+          "kind": "subtreeResolved",
+          "field": "SubscriptionsActive",
+          "desc": "Combined gate for the Subscriptions tracing subtree — the push-replication subsystem's operator telemetry. Distinct from Runtime:Subscription, which gates ECS change-subscription delivery spans.",
+          "children": [
+            {
+              "name": "ServerTelemetry",
+              "kind": "subtreeResolved",
+              "field": "SubscriptionsServerTelemetryActive",
+              "desc": "Combined gate for the Subscriptions:ServerTelemetry instant (kind 68: one record per stats emission carrying the server-wide replication figures — sessions, outbound bytes/s, track p99, frame-pool occupancy — that the STATS block already computes for game clients)."
+            },
+            {
+              "name": "SessionTelemetry",
+              "kind": "subtreeResolved",
+              "field": "SubscriptionsSessionTelemetryActive",
+              "desc": "Combined gate for the Subscriptions:SessionTelemetry instant (kind 69: one row per connected session, carrying its bytes/s, skipped frames and degrade level). Separate from ServerTelemetry because its volume scales with the session count, not with the engine: a server at its 8192-session limit can afford the one server record and not the rows, so the emission is capped and the server record states how many sessions it is not showing."
             }
           ]
         },

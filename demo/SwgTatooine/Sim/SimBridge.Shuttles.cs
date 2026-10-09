@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -39,7 +39,16 @@ public sealed partial class SimBridge
     private long _shuttleBoardings;
     private long _probeCursor;
     private long _probeHits;
-    private readonly List<int> _arrivalBursts = [];
+    // The arrival report as five running counters rather than one entry per port-tick (SWG-07). The list this replaced grew forever — one `int` per port that
+    // saw an arrival, every tick, for the life of the process — and the report it fed needs a total, a count, a maximum and two thresholds, none of which
+    // needs the samples kept. In a measured run that was a bounded leak nobody noticed; under `--serve`, which never ends, it was unbounded. Subtracting the
+    // list is strictly better than capping it: the report is identical, and there is nothing left to bound.
+    private long _arrivalTotal;
+    private long _arrivalPortTicks;
+    private int _arrivalLargest;
+    private long _arrivalAtLeast16;
+    private long _arrivalAtLeast64;
+
     private readonly List<double> _probeSteadyNs = [];
     private readonly List<double>[] _probePostNs = NewBuckets(ProbeWindowTicks + 1);
     private readonly List<double> _probeSteadyHits = [];
@@ -54,6 +63,14 @@ public sealed partial class SimBridge
     /// <summary>One probe of one port: the queries timed cold and re-run warm, and the work the engine's traversal does for them — all per query.</summary>
     private readonly record struct ProbeSample(double Ns, double WarmNs, double Hits, double Cells, double Scanned, double Overlapping, double Tested,
         double Pages, bool First);
+
+    /// <summary>What <see cref="PrintShuttleReport"/> reports about arrivals — the whole of it, in five numbers.</summary>
+    /// <remarks>
+    /// Exposed so a check can assert the counters that replaced the per-port-tick list. The bound is structural rather than asserted: five scalars cannot
+    /// grow, which is a stronger statement than any cap a test could measure.
+    /// </remarks>
+    public (long Total, long PortTicks, int Largest, long AtLeast16, long AtLeast64) ArrivalSummary
+        => (_arrivalTotal, _arrivalPortTicks, _arrivalLargest, _arrivalAtLeast16, _arrivalAtLeast64);
 
     private int ShuttleIntervalTicks => Math.Max(1, (int)(_config.ShuttleIntervalS * _config.TickRateHz));
 
@@ -157,6 +174,13 @@ public sealed partial class SimBridge
     /// </summary>
     public void ShuttleTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         if (!ShuttlesActive)
         {
             return;
@@ -185,10 +209,15 @@ public sealed partial class SimBridge
             // find out would be work the fence pays for.
             var queued = 0UL;
             var peek = cluster.GetReadOnlySpan(Player.State);
+
+            // A possessed player is never boarded (SWG-01). It cannot newly become AwaitingShuttle — PlayerThink is what sets that and it skips possessed
+            // players — but one possessed WHILE already queued would otherwise be flown away, and with several planets flown to another realm, by a system
+            // its client cannot see. `PossessPlayers` normalises the activity on claim so the state is not merely ignored; this is the second half of that.
+            var control = cluster.GetReadOnlySpan(Player.Control);
             for (var bits = bits0; bits != 0; bits &= bits - 1)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
-                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle)
+                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle && control[idx].Kind == ControllerKind.InProcess)
                 {
                     queued |= 1UL << idx;
                 }
@@ -202,7 +231,6 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
             var places = cluster.GetReadOnlySpan(Player.Bounds);
-            var chunk = cluster.ChunkId;
             var planet = cluster.Realm.Value;
             var planetPorts = PortsOf(planet);
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: a divided planet's cluster is seen once in k ticks
@@ -232,29 +260,33 @@ public sealed partial class SimBridge
                 // over what remains and certain on the last tick, so nobody queued before the window closes misses the shuttle.
                 // At divisor k a visit stands for k ticks: the landing tick falls inside it when phase < k, and a trickle boarding is k times as likely
                 // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
+                var key = cluster.GetEntityId(idx).EntityKey;
                 var board = _config.ShuttleBurst
                     ? phase < k
-                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < k;
+                    : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k;
                 if (!board)
                 {
                     continue;
                 }
 
                 var h = places[idx].HalfExtent;
-                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare;
+                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, key, 0x0B4E1A37u)) < _config.InterPlanetShare;
                 if (interPlanet)
                 {
                     // Bound for another planet: a realm change, applied by TeleportSystem after this system.
-                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, chunk, idx, 0x5D2A0C8Fu));
+                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, key, 0x5D2A0C8Fu));
                 }
                 else
                 {
                     var (portX, portZ) = planetPorts[dest];
-                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
-                    var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
+                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, key, 0x2F9B1D63u)));
+                    var a = Hash01(Salt(tick, key, 0x6C8E9CF5u)) * MathF.PI * 2f;
                     var nb = default(PlayerPlacement);
-                    nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h),
-                        h);
+                    var ax = Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h);
+                    var az = Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h);
+                    // A local hop stays on the planet it left, so that planet's ground is the one that applies. Naming
+                    // RealmId.Default worked only because every planet currently shares one field.
+                    nb.SetAt(ax, az, GroundAt(cluster.Realm, ax, az), h);
                     cluster.WriteSpatial(Player.Bounds, idx, nb);
                 }
 
@@ -262,7 +294,7 @@ public sealed partial class SimBridge
                 move.VelX = 0f;
                 move.VelZ = 0f;
                 state.Activity = PlayerActivity.Idle;
-                state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, chunk, idx, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
+                state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, key, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
                 TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
 
@@ -290,6 +322,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void ShuttleProbeTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var ports = _index.Shuttleports;
         if (ports.Count == 0)
         {
@@ -303,7 +342,11 @@ public sealed partial class SimBridge
             if (n > 0)
             {
                 _lastArrivalTick[p] = tick;
-                _arrivalBursts.Add(n);
+                _arrivalTotal += n;
+                _arrivalPortTicks++;
+                _arrivalLargest = Math.Max(_arrivalLargest, n);
+                _arrivalAtLeast16 += n >= 16 ? 1 : 0;
+                _arrivalAtLeast64 += n >= 64 ? 1 : 0;
             }
         }
 
@@ -513,22 +556,10 @@ public sealed partial class SimBridge
             return;
         }
 
-        long arrivals = 0;
-        var largest = 0;
-        var atLeast16 = 0;
-        var atLeast64 = 0;
-        foreach (var n in _arrivalBursts)
-        {
-            arrivals += n;
-            largest = Math.Max(largest, n);
-            atLeast16 += n >= 16 ? 1 : 0;
-            atLeast64 += n >= 64 ? 1 : 0;
-        }
-
         Console.WriteLine();
         Console.WriteLine($"  shuttles ({(_config.ShuttleBurst ? "burst" : "trickle")}, every {_config.ShuttleIntervalS:G} s, {_config.BoardingWindowS:G} s window, "
-            + $"share {_config.ShuttleShare:G}): {arrivals:N0} arrivals in {_arrivalBursts.Count:N0} port-ticks; largest {largest} in one port-tick, "
-            + $">= 16 in {atLeast16}, >= 64 in {atLeast64}");
+            + $"share {_config.ShuttleShare:G}): {_arrivalTotal:N0} arrivals in {_arrivalPortTicks:N0} port-ticks; largest {_arrivalLargest} in one "
+            + $"port-tick, >= 16 in {_arrivalAtLeast16}, >= 64 in {_arrivalAtLeast64}");
         if (!_config.Probe)
         {
             return;

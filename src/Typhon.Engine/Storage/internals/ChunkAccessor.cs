@@ -27,6 +27,12 @@ namespace Typhon.Engine.Internals;
 /// <para>Pages are protected from eviction by their epoch tag, not by ref-counting.
 /// Dirty tracking uses a bitmask flushed to <see cref="ChangeSet"/> via
 /// <see cref="ChangeSet.AddByMemPageIndex"/>.</para>
+/// <para><b>Scan mode</b> (<see cref="ChunkBasedSegment{TStore}.CreateScanAccessor"/>, EP-02): a read-only accessor for a scan whose length grows with
+/// the data. It pins the pages in its window by <c>SlotRefCount</c> only and never tags them with the caller's epoch, so a page that leaves the window
+/// is evictable at once: the scan holds at most <see cref="Capacity"/> pages, where an epoch-tagged one holds every page it ever touched until the
+/// caller's scope ends. The price is the pointer contract: an address it returns stays valid only until this accessor's next window miss, not for the
+/// whole epoch scope. The clock hand may reclaim any slot but the most recently used one, so one miss can release the page of any earlier address: use
+/// an address before the next access through the same accessor, or resolve it again by chunk id.</para>
 /// </remarks>
 [NoCopy(Reason = "struct with mutable SIMD cache and epoch-pinned pages")]
 [StructLayout(LayoutKind.Sequential)]
@@ -43,6 +49,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private byte _clockHand;                   // 1 byte — eviction cursor
     private byte _mruSlot;                     // 1 byte — most recently used slot
     private byte _usedSlots;                   // 1 byte — high water mark (0-32)
+    private bool _scan;                        // 1 byte — scan mode: window pins only, no epoch tag (EP-02)
 
     // === Cached hot-path values ===
     private int _stride;                       // 4 bytes — chunk size in bytes
@@ -54,6 +61,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private ChangeSet _changeSet;
     private TStore _store;
     private EpochManager _epochManager;
+    private ResolveGeneration _generation;     // bumped when a slot lets go of its page (#1199); null unless a handle resolves through this accessor
 
     // === Base address for computing memPageIndex on-demand (saves 64 bytes vs storing _memPageIndices[16]) ===
     private byte* _memPagesBaseAddr;           // 8 bytes
@@ -71,6 +79,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     public ChunkBasedSegment<TStore> Segment => _segment;
 
     /// <summary>
+    /// Report every page this accessor lets go of to <paramref name="generation"/>: a handle that cached a pointer resolved here then knows to
+    /// re-resolve it (#1199).
+    /// </summary>
+    internal void TrackGeneration(ResolveGeneration generation) => _generation = generation;
+
+    /// <summary>
     /// The ChangeSet used for dirty page tracking. Internal setter allows BTree's warm accessor to switch ChangeSets between operations without full
     /// re-initialization.
     /// </summary>
@@ -79,7 +93,11 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => _changeSet;
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        set => _changeSet = value;
+        set
+        {
+            Debug.Assert(!_scan || value == null, "a scan accessor is read-only: it never carries a ChangeSet");
+            _changeSet = value;
+        }
     }
 
     /// <summary>
@@ -89,17 +107,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetMemPageIndexFromSlot(int slot) =>
-        // _baseAddresses[slot] points to raw data (after PageHeaderSize)
-        // memPageIndex = (rawDataAddr - PageHeaderSize - _memPagesBaseAddr) / PageSize
-        (int)(((byte*)_baseAddresses[slot] - PagedMMF.PageHeaderSize - _memPagesBaseAddr) >> PagedMMF.PageSizePow2);
+        // _baseAddresses[slot] points to raw data (after PageHeaderSize). Exact because the cache is one contiguous block (PS-13).
+        PagedMMF.MemPageIndexOfRawData((byte*)_baseAddresses[slot], _memPagesBaseAddr);
 
     /// <summary>
     /// Create a new ChunkAccessor. All storage is stack-allocated — zero heap allocations.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ChunkAccessor(ChunkBasedSegment<TStore> segment, TStore store, EpochManager epochManager, ChangeSet changeSet = null)
+    internal ChunkAccessor(ChunkBasedSegment<TStore> segment, TStore store, EpochManager epochManager, ChangeSet changeSet = null, bool scan = false)
     {
         Debug.Assert(epochManager.IsCurrentThreadInScope, "ChunkAccessor must be created inside an epoch scope");
+        Debug.Assert(!scan || changeSet == null, "a scan accessor only reads");
+        _scan = scan;
         _segment = segment;
         _store = store;
         _epochManager = epochManager;
@@ -150,6 +169,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void MarkSlotDirty(int slot)
     {
+        Debug.Assert(!_scan, "a scan accessor only reads: a write through it would outlive the window's pin");
         var mask = 1u << slot;
         if ((_dirtyFlags & mask) == 0)
         {
@@ -189,14 +209,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// <summary>
     /// Get mutable reference to chunk. The returned ref is valid for the lifetime of the
     /// enclosing <see cref="EpochGuard"/> — epoch protection prevents page eviction regardless
-    /// of slot eviction within this accessor.
+    /// of slot eviction within this accessor. On a scan accessor it is valid only until the next window miss (see the type's remarks).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public ref T GetChunk<T>(int chunkId, bool dirty = false) where T : unmanaged
         => ref Unsafe.AsRef<T>(GetChunkAddress(chunkId, dirty));
 
     /// <summary>
-    /// Get read-only reference to chunk. Safe for the lifetime of the enclosing <see cref="EpochGuard"/>.
+    /// Get read-only reference to chunk. Safe for the lifetime of the enclosing <see cref="EpochGuard"/>; on a scan accessor, only until the next window miss.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
     public ref readonly T GetChunkReadOnly<T>(int chunkId) where T : unmanaged => ref GetChunk<T>(chunkId);
@@ -488,6 +508,11 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             return;
         }
 
+        if (_generation != null)
+        {
+            _generation.Value++;
+        }
+
         var memPageIndex = GetMemPageIndexFromSlot(slot);
         var mask = 1u << slot;
 
@@ -513,7 +538,15 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
                 _store.DecrementActiveChunkWriters(memPageIndex);
                 _dirtyFlags &= ~mask;
             }
-            _store.DecrementSlotRefCount(memPageIndex);
+
+            if (_scan)
+            {
+                _store.ReleasePageForRead(memPageIndex);   // nothing else holds it for this accessor: evictable from here on
+            }
+            else
+            {
+                _store.DecrementSlotRefCount(memPageIndex);
+            }
         }
 
         _pageIndices[slot] = InvalidPageIndex;
@@ -542,6 +575,17 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         // (pinned transient blocks never move on grow) keep the hot path snapshot-free.
         ref var liveStore = ref _segment.Store;
 
+        if (_scan)
+        {
+            // EP-02: the window's pin is the only one, taken under the slot's lock (PS-15). Warm, because a query scan is one the application repeats: its
+            // pages age as they would through the epoch path, which this changes only in what holds them.
+            var acquired = liveStore.AcquirePageForRead(filePageIndex, out var scanMemPageIndex, warm: true);
+            Debug.Assert(acquired);
+            _pageIndices[slot] = pageIndex;
+            _baseAddresses[slot] = (long)liveStore.GetMemPageRawDataAddress(scanMemPageIndex);
+            return;
+        }
+
         var result = liveStore.RequestPageEpoch(filePageIndex, _epochManager.GlobalEpoch, out var memPageIndex);
         Debug.Assert(result);
 
@@ -567,6 +611,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             return;
         }
 
+        if (_generation != null)
+        {
+            _generation.Value++;
+            _generation = null;
+        }
+
         // Guard against stale ThreadStatic warm cache: if the PagedMMF has been disposed
         // (e.g., previous test run on the same thread), the page cache no longer exists.
         // Skip all cleanup — SlotRefCount, ACW, dirty flags are meaningless for a disposed page cache.
@@ -587,7 +637,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             if (_pageIndices[i] != InvalidPageIndex)
             {
                 var memPageIndex = GetMemPageIndexFromSlot(i);
-                _store.DecrementSlotRefCount(memPageIndex);
+                if (_scan)
+                {
+                    _store.ReleasePageForRead(memPageIndex);
+                }
+                else
+                {
+                    _store.DecrementSlotRefCount(memPageIndex);
+                }
             }
         }
 

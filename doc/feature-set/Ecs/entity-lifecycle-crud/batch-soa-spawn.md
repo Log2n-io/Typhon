@@ -23,9 +23,11 @@ per entity.
 `SpawnBatch<TArch>` reserves N entity keys in a single atomic `Interlocked.Add` and applies the same shared
 `ComponentValue`s to every entity in the batch. For per-entity data supplied as parallel SoA spans, the source
 generator emits a `SpawnBatch(tx, span1, span2, ...)` overload on `partial` archetype classes, built from two
-lower-level `Transaction` primitives: `SpawnBatchAllocate<TArch>` allocates N entities (`EnabledBits = 0`), pre-allocating chunks for
-`SingleVersion`/`Transient` slots; `Versioned` slots receive no chunk at this stage — `SpawnBatchWriteAll`
-allocates each chunk lazily on first write, so a component never written stays genuinely absent. `SpawnBatchWriteAll` writes one parallel `ReadOnlySpan<T>` across the whole allocated range — resolving the
+lower-level `Transaction` primitives: `SpawnBatchAllocate<TArch>` allocates N entities (`EnabledBits = 0`) with
+no component chunk. A `SingleVersion`/`Transient` slot stages in the transaction's spawn arena, since its bytes
+belong in the entity's cluster slot; a `Versioned` slot gets nothing until `SpawnBatchWriteAll` first writes it
+and allocates its content chunk and revision chain, so a component never written stays genuinely absent.
+`SpawnBatchWriteAll` writes one parallel `ReadOnlySpan<T>` across the whole allocated range — resolving the
 slot, table, and accessor once, then looping with zero dictionary lookups per entity and setting that
 component's enabled bit as it writes.
 

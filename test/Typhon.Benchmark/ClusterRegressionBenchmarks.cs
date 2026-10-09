@@ -298,8 +298,9 @@ public class ClusterRegressionBenchmarks : IDisposable
         for (int i = 0; i < _randomAccessIds.Length; i++)
         {
             var entity = accessor.OpenMut(_randomAccessIds[i]);
-            ref var h = ref entity.Write(AaBenchMixedCluster.Health);
+            var h = entity.Read(AaBenchMixedCluster.Health);
             h.Current -= 1;
+            entity.Set(AaBenchMixedCluster.Health, h);
         }
         accessor.Dispose();
         tx.Commit();
@@ -322,9 +323,10 @@ public class ClusterRegressionBenchmarks : IDisposable
         for (int i = 0; i < _idxVersionedIds.Length; i++)
         {
             var entity = accessor.OpenMut(_idxVersionedIds[i]);
-            ref var r = ref entity.Write(AaBenchIdxVersionedCluster.Ranked);
+            var r = entity.Read(AaBenchIdxVersionedCluster.Ranked);
             r.Tier = (r.Tier + 1) & 7;   // the indexed field moves — real B+Tree work
             r.Score++;
+            entity.Set(AaBenchIdxVersionedCluster.Ranked, r);
         }
         accessor.Dispose();
         tx.Commit();
@@ -339,8 +341,9 @@ public class ClusterRegressionBenchmarks : IDisposable
         for (int i = 0; i < _idxVersionedIds.Length; i++)
         {
             var entity = accessor.OpenMut(_idxVersionedIds[i]);
-            ref var r = ref entity.Write(AaBenchIdxVersionedCluster.Ranked);
-            r.Score++;                   // Tier untouched — the guard must make this free of index work
+            var r = entity.Read(AaBenchIdxVersionedCluster.Ranked);
+            r.Score++;
+            entity.Set(AaBenchIdxVersionedCluster.Ranked, r);                   // Tier untouched — the guard must make this free of index work
         }
         accessor.Dispose();
         tx.Commit();

@@ -76,7 +76,10 @@ class ParallelChangeFilterEpochTests : TestBase<ParallelChangeFilterEpochTests>
                 var dag = schedule.PublicTrack.DeclareDag("Test");
                 dag.CallbackSystem("Write", ctx =>
                 {
-                    ctx.Transaction.OpenMut(ids[0]).Write(CfEpochUnit.Score).Value++;
+                    var target = ctx.Transaction.OpenMut(ids[0]);
+                    var score = target.Read(CfEpochUnit.Score);
+                    score.Value++;
+                    target.Set(CfEpochUnit.Score, score);
                     Interlocked.Increment(ref ticks);
                 });
                 dag.QuerySystem("Reactive", ctx =>

@@ -89,3 +89,31 @@ public abstract class ChunkedCallbackSystem<TContext> : ChunkedCallbackSystem wh
     /// <summary>Configure via the typed builder.</summary>
     protected abstract void Configure(SystemBuilder<TContext> b);
 }
+
+/// <summary>
+/// A <see cref="ChunkedCallbackSystem{TContext}"/> whose chunks each receive a typed record, <typeparamref name="TChunk"/>, written for them by the
+/// system's prepare step: the chunk claiming index <c>i</c> runs with record <c>i</c>, instead of re-deriving what <c>i</c> means from the index.
+/// </summary>
+/// <remarks>
+/// <para><see cref="Prepare(TContext, ChunkTable{TChunk})"/> sizes the table with <see cref="ChunkTable{T}.Reset"/>, fills it, and returns the chunk
+/// count (0 skips, -1 keeps the static <see cref="SystemBuilder.ChunkedParallel"/> count — the table must still hold that many records). It replaces
+/// <see cref="ChunkedCallbackSystem{TContext}.Prepare(TContext)"/> and the typed builder's <c>Prepare</c> lambda, which this class does not call.</para>
+/// <para>Configure must still declare <c>b.ChunkedParallel(N)</c>: that is what makes the system chunked.</para>
+/// </remarks>
+[PublicAPI]
+public abstract class ChunkedCallbackSystem<TContext, TChunk> : ChunkedCallbackSystem<TContext> where TContext : class where TChunk : unmanaged
+{
+    private readonly ChunkTable<TChunk> _plan = new();
+
+    /// <summary>Builds this dispatch's plan: one record per chunk in <paramref name="plan"/>, and the chunk count.</summary>
+    protected abstract int Prepare(TContext ctx, ChunkTable<TChunk> plan);
+
+    /// <summary>Runs one chunk with the record prepare wrote for it — by <c>ref</c>, so no member call on it copies it (see <see cref="ChunkTable{T}"/>).</summary>
+    protected abstract void Execute(TickContext tick, ref TChunk chunk);
+
+    /// <inheritdoc />
+    protected sealed override int Prepare(TContext ctx) => ChunkPlans.Checked(Prepare(ctx, _plan), _plan.Count);
+
+    /// <inheritdoc />
+    protected sealed override void Execute(TickContext ctx) => Execute(ctx, ref _plan[ctx.ChunkIndex]);
+}

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { budgetForSession } from '@/libs/profiler/cache/chunkCache';
 import {
   acquireSessionCache,
   releaseSessionCache,
@@ -302,5 +303,54 @@ describe('profilerCacheRegistry — #4b bumpEntriesVersionImmediate cache-versio
     subscribeSessionCache(entry, listener);
     _bumpImmediateForTest(entry);
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('profilerCacheRegistry — a live session retains far less than a replay scrub', () => {
+  // The bug this guards: a live attach ran under DEFAULT_BUDGET, so its working set settled at ~500 MB and the
+  // collector then owned the main thread. Measured against the SWG demo at 50 Hz with only the default telemetry
+  // gates on — 5 chunks/s × ~7 600 events — with a `longtask` PerformanceObserver in the page: 81 % of wall clock
+  // blocked by t=35 s, 95 % by t=40 s, and single tasks of 2.0-2.3 s from t=50 s, at which point the window no
+  // longer answers a menu click. Under LIVE_BUDGET the resident set caps at ~26 chunks, the multi-second tasks
+  // disappear and the worst case stops growing with session age.
+
+  it('builds a live cache under the live budget, not the replay one', () => {
+    const live = acquireSessionCache('sess-live', true);
+    const replay = acquireSessionCache('sess-replay', false);
+
+    expect(live.cache.budgetBytes).toBe(budgetForSession(true));
+    expect(replay.cache.budgetBytes).toBe(budgetForSession(false));
+    expect(live.cache.budgetBytes).toBeLessThan(replay.cache.budgetBytes);
+  });
+
+  it('carries the budget across the replay→live upgrade', () => {
+    // `acquireSessionCache` upgrades an existing replay entry when a later consumer asks for live mode. A budget
+    // applied only at construction would leave that session on the replay number for the rest of its life — which
+    // is the whole session, since nothing else ever re-points it.
+    const entry = acquireSessionCache('sess-A', false);
+    expect(entry.cache.budgetBytes).toBe(budgetForSession(false));
+
+    const upgraded = acquireSessionCache('sess-A', true);
+    expect(upgraded).toBe(entry);
+    expect(entry.isLive).toBe(true);
+    expect(entry.cache.budgetBytes).toBe(budgetForSession(true));
+  });
+
+  it('reclaims immediately on the upgrade rather than waiting for the next load', () => {
+    // setCacheBudget runs an eviction pass, so a session that had already filled the replay budget does not keep
+    // holding it until some future ensureRangeLoaded happens to notice.
+    const entry = acquireSessionCache('sess-A', false);
+    for (let i = 0; i < 40; i++) {
+      entry.cache.entries.set(i, {
+        chunkIdx: i, fromTick: i * 10, toTick: (i + 1) * 10, tickData: [], byteSize: 8 * 1024 * 1024, lastAccessTick: i,
+      });
+      entry.cache.totalBytes += 8 * 1024 * 1024;
+    }
+    expect(entry.cache.totalBytes).toBeGreaterThan(budgetForSession(true));
+
+    acquireSessionCache('sess-A', true);
+
+    expect(entry.cache.totalBytes).toBeLessThanOrEqual(budgetForSession(true));
+    expect(entry.cache.entries.size).toBeLessThan(40);
   });
 });

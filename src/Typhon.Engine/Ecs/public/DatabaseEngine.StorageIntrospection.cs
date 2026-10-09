@@ -98,6 +98,23 @@ public partial class DatabaseEngine
     public long GetWalTotalBytes() => WalManager?.SegmentManager?.TotalWalBytes ?? 0L;
 
     /// <summary>
+    /// The highest LSN the WAL writer has made durable — the watermark every commit's durability wait is measured against. Zero when there is no WAL.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Public because "has my write reached the disk yet?" is an application question, and until now there was no way to ask it.</b>
+    /// <see cref="GetWalTotalBytes"/> is public for the same class of reason, but it answers in segment-sized steps, so it cannot say whether a particular
+    /// tick's records were persisted — a preallocated segment absorbs thousands of records without changing size.
+    /// </para>
+    /// <para>
+    /// <b>It advances asynchronously, from the writer thread.</b> Read it twice and the second value may be higher for reasons that have nothing to do with the
+    /// caller. The guarantee worth relying on is directional: once a commit's wait has returned, this is at or above that commit's LSN, and it never goes
+    /// backwards.
+    /// </para>
+    /// </remarks>
+    public long DurableLsn => WalManager?.DurableLsn ?? 0L;
+
+    /// <summary>
     /// The schema-assembly manifest persisted in this database: the identity of every .NET assembly that declares a stored component or archetype. Read from the
     /// <see cref="AssemblyR1"/> catalog, which is loaded on every open (including schemaless), so this is available without any user schema DLL. The core engine
     /// assembly is intentionally excluded — it is always loaded. Consumed by tooling (the Workbench) to locate and load the schema assemblies a file depends on.
@@ -523,19 +540,17 @@ public partial class DatabaseEngine
 
     /// <summary>
     /// Resolves the linear-hash (entity-map) layout for the segment whose root page is <paramref name="entityMapSegmentRootPage"/>: the key / value widths, the
-    /// per-bucket capacity (<c>(stride − 12) / (keyWidth + valueWidth)</c>), and the set of <b>non-data</b> chunk ids (the meta chunk plus every directory and
-    /// overflow-dir-index chunk). Used by the Database File Map (Module 15, A6) to colour bucket / overflow chunks by their fill and to hatch the structural
-    /// (meta / directory) chunks rather than mis-reading their headerless bytes as a bucket. Every <i>data</i> chunk (a bucket or its overflow) self-identifies
-    /// from its own header — a primary bucket carries a non-zero <c>OlcVersion</c>, an overflow chunk carries <c>OlcVersion == 0</c> — so only the small
-    /// meta / directory set needs a walk here (O(directory chunks), no bucket-chain traversal). Returns <see langword="false"/> when no live archetype owns that
-    /// segment. Read-only; the chunk walk reads the resident page cache under an epoch guard (zero data-page I/O).
+    /// per-bucket capacity (<c>(stride − 12) / (keyWidth + valueWidth)</c>), and the bucket count. Used by the Database File Map (Module 15, A6) to colour
+    /// bucket / overflow chunks by their fill and to tell them apart: chunk 0 is the meta, bucket <c>b</c> is chunk <c>b + 1</c>, and every chunk past the
+    /// bucket count is an overflow chunk — the map keeps no directory (#1205). Returns <see langword="false"/> when no live archetype owns that segment.
+    /// Read-only, no I/O.
     /// </summary>
-    internal bool TryGetHashMapLayout(int entityMapSegmentRootPage, out int keyWidth, out int valueWidth, out int bucketCapacity, out int[] nonDataChunkIds)
+    internal bool TryGetHashMapLayout(int entityMapSegmentRootPage, out int keyWidth, out int valueWidth, out int bucketCapacity, out long bucketCount)
     {
         keyWidth = 0;
         valueWidth = 0;
         bucketCapacity = 0;
-        nonDataChunkIds = [];
+        bucketCount = 0;
 
         var states = _archetypeStates;
         if (states == null)
@@ -554,61 +569,11 @@ public partial class DatabaseEngine
             keyWidth = sizeof(long); // EntityKey is a long.
             valueWidth = map.ValueSize;
             bucketCapacity = map.BucketCapacity;
-
-            using var guard = EpochGuard.Enter(EpochManager);
-            var accessor = map.Segment.CreateChunkAccessor();
-            try
-            {
-                nonDataChunkIds = CollectHashMapNonDataChunks(ref accessor);
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
+            bucketCount = map.BucketCount;
             return true;
         }
 
         return false;
-    }
-
-    /// <summary>
-    /// Collects the structural (non-data) chunk ids of a linear-hash segment: the meta chunk (0), every directory chunk (the first
-    /// <see cref="PagedHashMapMeta.MaxInlineDirectoryChunks"/> inline in the meta, the rest reached through the overflow dir-index chain), and the overflow
-    /// dir-index chunks themselves. Mirrors <c>PagedHashMapBase.GetDirectoryChunkId</c>'s addressing. Cost is O(directory chunks) — no bucket-chain walk.
-    /// </summary>
-    private static unsafe int[] CollectHashMapNonDataChunks(ref ChunkAccessor<PersistentStore> accessor)
-    {
-        ref readonly var meta = ref accessor.GetChunkReadOnly<PagedHashMapMeta>(0);
-        var dirCount = meta.DirectoryChunkCount;
-        var overflowHead = meta.OverflowDirIndexChunkId;
-
-        var ids = new List<int>(1 + dirCount + 4) { 0 }; // chunk 0 is always the meta chunk.
-
-        var inline = Math.Min((int)dirCount, PagedHashMapMeta.MaxInlineDirectoryChunks);
-        for (var i = 0; i < inline; i++)
-        {
-            ids.Add(meta.DirectoryChunkIds[i]);
-        }
-
-        if (dirCount > PagedHashMapMeta.MaxInlineDirectoryChunks)
-        {
-            var remaining = dirCount - PagedHashMapMeta.MaxInlineDirectoryChunks;
-            var ovId = overflowHead;
-            while (ovId != -1 && remaining > 0)
-            {
-                ids.Add(ovId); // the overflow dir-index chunk is itself structural.
-                ref readonly var ov = ref accessor.GetChunkReadOnly<OverflowDirIndex>(ovId);
-                var take = Math.Min(remaining, OverflowDirIndex.EntriesPerChunk);
-                for (var j = 0; j < take; j++)
-                {
-                    ids.Add(ov.DirectoryChunkIds[j]);
-                }
-                remaining -= take;
-                ovId = ov.NextOverflowChunkId;
-            }
-        }
-
-        return ids.ToArray();
     }
 
     /// <summary>Number of chunks an index segment reserves for its B-tree directory (chunks 0..3); mirrors <c>BTree.DirectoryChunkCount</c>.</summary>
@@ -1126,7 +1091,7 @@ public partial class DatabaseEngine
     /// plus the reserved root pages (0..InitialReservedPageCount-1), plus the occupancy-reserve pages (data, map-extension, and the map-extension twin) held by
     /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
     /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
-    /// <c>ChunkCapacity</c>. Desync indicates the segment's chunk free-list drifted from its on-page chunk bitmaps.</item>
+    /// <c>ChunkCapacity</c>. Desync indicates the segment's allocated count drifted from its on-page chunk bitmaps.</item>
     /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBornTsn</c> / <c>ClusterMaxDiedTsn</c> pair, recomputed from the archetype's
     /// EntityMap and compared against the maintained one. A summary that claims more visibility than its entities justify makes the SoA scan skip its
     /// per-entity probe and emit a phantom; see <see cref="StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound"/>.</item>
@@ -1222,8 +1187,8 @@ public partial class DatabaseEngine
                     }
                 }
                 if (ls == null) continue;
-                var chainCount = ls.WalkForwardChainPageCount(chainGuard.Epoch);
-                var dirCount = ls.VerifyDirectoryAgainst(chainGuard.Epoch, seg.Pages);
+                var chainCount = ls.WalkForwardChainPageCount();
+                var dirCount = ls.VerifyDirectoryAgainst(seg.Pages);
                 if (chainCount != seg.Pages.Length || dirCount != seg.Pages.Length)
                 {
                     issues.Add(new StorageIntegrityIssue(

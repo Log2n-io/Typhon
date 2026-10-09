@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildBaseCommands } from '../commands/baseCommands';
 import { sessionCapabilitiesForKind } from '@/stores/sessionCapabilitiesForKind';
-import { useSessionStore, type SessionKind } from '@/stores/useSessionStore';
+import { useSessionStore, type SessionCapability, type SessionKind } from '@/stores/useSessionStore';
+import { ZONE_D_VIEW_ACTIVE } from '../viewRegistry';
 
 // IA §5.1 — the command palette shows a view-toggle only in the session kind that can open it, mirroring the View
 // menu (both derive from viewRegistry.VIEW_SESSION_SCOPE). A view-toggle the current session can't open is ABSENT
@@ -28,6 +29,8 @@ const OPEN_VIEW_CMDS = [
 
 // Profiler-session (trace/attach) view-toggle command ids — incl. the Profiler-view interaction commands.
 const PROFILER_VIEW_CMDS = [
+  'toggle-view-spatial-maintenance',
+  'toggle-view-subscriptions',
   'toggle-view-profiler',
   'toggle-view-top-spans',
   'toggle-view-call-tree',
@@ -90,6 +93,44 @@ describe('command palette — session-kind view gating (IA §5.1)', () => {
     for (const kind of ['open', 'attach', 'none'] as SessionKind[]) {
       const ids = idsFor(kind);
       for (const id of ALWAYS_CMDS) expect(ids.has(id), `${kind}: "${id}" should be present`).toBe(true);
+    }
+  });
+
+  // Derived from the registry, not from a list above, and that is the point. Every list in this file is hand-kept, so
+  // a new panel that nobody added to one is not caught by any of them: #WB-02's Subscriptions panel was registered as a
+  // component, marked active and given a session scope, and shipped with NO palette command and no View-menu item — a
+  // panel that existed and could not be opened. `toggle-view-spatial-maintenance` is likewise absent from
+  // PROFILER_VIEW_CMDS, so the omission was already two panels old. This asserts the one property that matters and
+  // cannot be satisfied by forgetting: an active view has a way in.
+  it('every active zone-D view is openable from the palette in some session', () => {
+    const reachable = new Set<string>();
+    const probes: Array<{ kind: SessionKind; capabilities: SessionCapability[] }> = [
+      { kind: 'open', capabilities: sessionCapabilitiesForKind('open') },
+      { kind: 'attach', capabilities: sessionCapabilitiesForKind('attach') },
+      { kind: 'none', capabilities: sessionCapabilitiesForKind('none') },
+      // <b>A session holding every capability, because a capability is not a property of a KIND.</b>
+      // sessionCapabilitiesForKind answers what a PLAIN session of each kind has, and its own doc names the gap twice:
+      // an open database with a capture attached also has `profiler`, and an attach session acquires `schema` from its
+      // first Init frame. #1083 adds a third — `realms` belongs to a database that holds realms, which no kind implies.
+      // Without this probe the guard silently stops covering every capability-scoped view, which is the exact failure
+      // mode it was written to catch.
+      { kind: 'open', capabilities: ['database', 'schema', 'profiler', 'realms'] },
+    ];
+
+    for (const probe of probes) {
+      useSessionStore.setState({ kind: probe.kind, sessionId: probe.kind === 'none' ? null : 'sid', capabilities: probe.capabilities });
+      for (const c of buildBaseCommands()) {
+        if (c.viewId !== undefined) {
+          reachable.add(c.viewId);
+        }
+      }
+    }
+
+    for (const [viewId, active] of Object.entries(ZONE_D_VIEW_ACTIVE)) {
+      if (!active) {
+        continue;
+      }
+      expect(reachable.has(viewId), `"${viewId}" is active but no palette command names it — it cannot be opened`).toBe(true);
     }
   });
 

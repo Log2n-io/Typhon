@@ -16,6 +16,12 @@ namespace Typhon.Workbench.Tests.Sessions;
 /// partial chunk survives) and AC-20 (retention over the captures directory).
 /// </summary>
 [TestFixture]
+// [NonParallelizable] because SetUp redirects the captures directory through TYPHON_WORKBENCH_CAPTURES_DIR, a PROCESS-wide environment
+// variable, and restores it in TearDown. The assembly is [Parallelizable(ParallelScope.Fixtures)] with four workers, and three fixtures here
+// redirect the same variable — so a sibling's SetUp could overwrite it mid-test and this fixture then pruned the sibling's directory instead of
+// its own, leaving its own files in place. That is how ApplyRetention_EvictsOldestFirst_UntilWithinBudget failed in the gate while passing every
+// time in isolation: the file it asserts was evicted had never been looked at.
+[NonParallelizable]
 public sealed class CaptureRestartTests
 {
     private static CancellationToken Timeout15s => new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token;

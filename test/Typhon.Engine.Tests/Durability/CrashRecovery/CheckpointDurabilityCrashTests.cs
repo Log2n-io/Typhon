@@ -384,11 +384,17 @@ internal sealed class CheckpointDurabilityCrashTests
         {
             if (checkpointArchetype)
             {
-                tx.OpenMut(ids[i]).Write(CkptCrashCkptArch.Data).Value = valueBase + i;
+                var target = tx.OpenMut(ids[i]);
+                var dataCopy = target.Read(CkptCrashCkptArch.Data);
+                dataCopy.Value = valueBase + i;
+                target.Set(CkptCrashCkptArch.Data, dataCopy);
             }
             else
             {
-                tx.OpenMut(ids[i]).Write(CkptCrashWalledArch.Data).Value = valueBase + i;
+                var opened = tx.OpenMut(ids[i]);
+                var data = opened.Read(CkptCrashWalledArch.Data);
+                data.Value = valueBase + i;
+                opened.Set(CkptCrashWalledArch.Data, data);
             }
         }
 

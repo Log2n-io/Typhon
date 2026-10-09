@@ -83,9 +83,9 @@ public static class C3Runner
         {
             using var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit);
             var e = tx.OpenMut(ids[k]);
-            e.Write(TripArch.A).V = val;
-            e.Write(TripArch.B).V = val;
-            e.Write(TripArch.C).V = val;
+            e.Set(TripArch.A, new T1 { V = val });
+            e.Set(TripArch.B, new T2 { V = val });
+            e.Set(TripArch.C, new T3 { V = val });
             tx.Commit();
             val++;
             if (++k >= count) k = 0;

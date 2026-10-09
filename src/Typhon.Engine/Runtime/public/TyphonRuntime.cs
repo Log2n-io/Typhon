@@ -65,6 +65,15 @@ public sealed partial class TyphonRuntime : IDisposable
     // not here and not on the tick context — see SubscriptionsRuntime's remarks.
     private SubscriptionsRuntime _subscriptionsRuntime;
 
+    /// <summary>
+    /// This tick's deferred entity commands (#1099), or null when the runtime has no database engine — a standalone scheduler, which has nothing to spawn
+    /// into. Bound to the resolved worker count in the constructor and cleared at tick start.
+    /// </summary>
+    private readonly EntityCommandBuffer _entityCommands;
+
+    /// <summary>Applies <see cref="_entityCommands"/> once per tick, just before the fence. Null when there is no engine to spawn into.</summary>
+    private readonly EntityCommandDrain _entityCommandDrain;
+
     /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
     internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
 
@@ -128,6 +137,9 @@ public sealed partial class TyphonRuntime : IDisposable
     // length, never the live pair (CD-02).
     private readonly int[][] _dispatchClusterIds;
     private readonly int[] _dispatchClusterCount;
+    // Each parallel QuerySystem dispatch's per-chunk plan: what chunk i walks, written once by PlanQueryChunks on the preparing thread (CD-02, CD-03).
+    // [sysIdx], allocated on the system's first dispatch.
+    private readonly ChunkTable<QueryChunk>[] _queryPlans;
     // Issue #234: checkerboard two-phase dispatch. Phase tracking + Red/Black cluster buffers per system.
     // _checkerboardPhase: 0 = not checkerboard or reset, 1 = Red (phase A active), 2 = Black (phase B active).
     private readonly int[] _checkerboardPhase;
@@ -169,6 +181,20 @@ public sealed partial class TyphonRuntime : IDisposable
 
     /// <summary>The underlying database engine.</summary>
     public DatabaseEngine Engine { get; }
+
+    /// <summary>
+    /// This tick's deferred entity commands (#1099) — what <c>ctx.Commands</c> queues into. Null for a runtime with no database engine.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for telemetry and for tests: <see cref="EntityCommandBuffer.Count"/>, <see cref="EntityCommandBuffer.PendingEntities"/>,
+    /// <see cref="EntityCommandBuffer.OverflowCount"/> and <see cref="EntityCommandBuffer.RejectedCount"/> are the numbers that say whether a tick lost
+    /// anything. Systems must queue through <c>ctx.Commands</c>, which binds the handle to their own worker slot.
+    /// </remarks>
+    public EntityCommandBuffer EntityCommands => _entityCommands;
+
+    /// <summary>Entities and commands the most recent drain applied — zero on a tick that queued nothing. Diagnostics and tests.</summary>
+    internal (int Entities, int Commands) LastEntityCommandsApplied =>
+        _entityCommandDrain == null ? (0, 0) : (_entityCommandDrain.LastAppliedEntities, _entityCommandDrain.LastAppliedCommands);
 
     /// <summary>The DAG scheduler driving tick execution.</summary>
     public DagScheduler Scheduler { get; }
@@ -305,6 +331,16 @@ public sealed partial class TyphonRuntime : IDisposable
         var closeBoundTicks = SkipPolicy.CloseBoundTicks(options.Subscriptions, SubscriptionsRuntime.NominalTickPeriodUsFor(options.BaseTickRate));
         _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, closeBoundTicks) + 1);
         _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
+
+        // The key-block stride is derived from the worker count, which is first known here — the same moment DagScheduler binds the event queues, and for
+        // the same reason. No engine means nothing to spawn into, so the buffer stays null and `ctx.Commands` reports invalid rather than throwing.
+        if (engine != null)
+        {
+            _entityCommands = new EntityCommandBuffer(engine, options.EntityCommandsPerTick);
+            _entityCommands.BindWorkerSlots(scheduler.WorkerSlotCount, scheduler.WorkerCount);
+            _entityCommands.Logger = logger;
+            _entityCommandDrain = new EntityCommandDrain(engine);
+        }
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -324,6 +360,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _chunkTicksPerEntity = new double[scheduler.AllSystemCount];
         _dispatchClusterIds = new int[scheduler.AllSystemCount][];
         _dispatchClusterCount = new int[scheduler.AllSystemCount];
+        _queryPlans = new ChunkTable<QueryChunk>[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _systemRunCount = new long[scheduler.AllSystemCount];
         _systemStrided = new bool[scheduler.AllSystemCount];
@@ -463,6 +500,237 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.Start();
     }
 
+    /// <summary>
+    /// Reads the numbers an operator watches: tick percentiles against the target, overruns, the durability wait, per-system cost, entities per archetype,
+    /// and the session figures when replication is running.
+    /// </summary>
+    /// <param name="windowTicks">
+    /// How many recorded ticks to compute the percentiles over. <c>0</c> (the default) means one second's worth at the configured tick rate, which is the
+    /// window the <c>STATS</c> wire block uses — so a caller comparing the two reads the same thing. Clamped to what the ring still holds.
+    /// </param>
+    /// <returns>A snapshot. Never null; every figure is zero on an engine that has not ticked.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the read the <c>STATS</c> block could not be.</b> Those values are computed once a second inside the subscriptions runtime, held in a
+    /// private array, and written into a game client's frame — so nothing else could see one of them, and an engine with replication off, or whose
+    /// application declared no metrics, computed none at all. This reads the ring and the engine directly: it answers on any running engine, with or without
+    /// replication, whatever the application declared.
+    /// </para>
+    /// <para>
+    /// <b>Not for the tick path.</b> It allocates a snapshot and two arrays and walks the window. Call it from an HTTP endpoint, a CLI verb or a log timer,
+    /// at human rate. It takes no lock and blocks no tick: the ring is a single-writer diagnostic structure, so a sample read while the driver is writing it
+    /// may be torn, perturbing one sample in a percentile — the same trade the encoder makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    public RuntimeStatsSnapshot ReadStats(int windowTicks = 0)
+    {
+        var ring = Telemetry;
+        var targetMs = Options.BaseTickRate > 0 ? 1000.0 / Options.BaseTickRate : 0.0;
+        var window = windowTicks > 0
+            ? windowTicks
+            : Math.Max(1, (int)Math.Round((double)Options.BaseTickRate, MidpointRounding.AwayFromZero));
+
+        var newest = ring?.NewestTick ?? -1;
+        if (ring == null || newest < 0)
+        {
+            // An engine that has not ticked has no percentiles, and saying so with zeros beats inventing a window over no samples. The archetype counts are
+            // still real — they come from the engine, not the ring — so they are read anyway.
+            return new RuntimeStatsSnapshot
+            {
+                Tick = newest,
+                TargetTickMs = targetMs,
+                // 1 rather than the default 0: a runtime that has not ticked is not modulating, and 0 is not a multiplier any tick ever runs under.
+                TickMultiplier = 1,
+                Archetypes = ReadArchetypeStats(),
+                Realms = ReadRealmStats(),
+                RealmPassSteps = ReadRealmPassSteps(_subscriptionsRuntime),
+                RealmPolicyEvaluations = ReadPolicyEvaluations(),
+                ReplicationPrologueMsTotal = _subscriptionsRuntime?.Frames?.PrologueTotal.Ms ?? 0.0,
+                ReplicationPrologueTicks = _subscriptionsRuntime?.Frames?.PrologueTotal.Ticks ?? 0L,
+                ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
+            };
+        }
+
+        // One spelling of the clamp, shared with the STATS path, rather than two that have to agree. Re-reading `newest` from it also makes the pair
+        // self-consistent: the tick driver can advance between the read above and this one, and a window whose ends came from different reads is not a window.
+        // A false return needs `window < 1`, which the old form turned into a zero-tick window; keep that rather than inventing a different answer.
+        var spanTicks = ring.TryGetRange(newest - window + 1, out var oldest, out newest) ? (int)(newest - oldest + 1) : 0;
+        var durations = new double[spanTicks];
+        var waits = new double[spanTicks];
+        var systemSums = new double[Scheduler.AllSystemCount];
+        var overruns = 0;
+        var multiplier = 1;
+
+        // How many ticks were actually READ, which is not the width of the range resolved above. The tick driver writes this ring concurrently, so a resolved
+        // range is not a promise that every tick in it still exists when the loop reaches it: with `windowTicks` as wide as the ring — it is caller-supplied
+        // and unbounded — `oldest` clamps exactly to OldestAvailableTick, and one tick recorded in between evicts it. GetTick would throw out of this public
+        // method, failing an operator's stats call rather than returning a window one sample short, so both reads go through the Try peers and a tick that has
+        // gone is skipped. That is the tearing this method's remarks already accept.
+        //
+        // Both reads are taken BEFORE anything is recorded, so a tick contributes to every figure or to none. Incrementing on the first and continuing on the
+        // second would leave the per-system means dividing by a count that includes ticks whose metrics were never summed.
+        var ticks = 0;
+        for (var t = oldest; t <= newest; t++)
+        {
+            if (!ring.TryGetTick(t, out var tick) || !ring.TryGetSystemMetrics(t, out var systems))
+            {
+                continue;
+            }
+
+            durations[ticks] = tick.ActualDurationMs;
+            waits[ticks] = tick.UowFlushMs;
+            // The newest tick's, so it ends up holding the last one the loop sees. Published beside Overruns because that count is measured against the 1×
+            // target and a modulated tick legitimately exceeds it — see RuntimeStatsSnapshot.Overruns.
+            multiplier = tick.TickMultiplier;
+            ticks++;
+            if (targetMs > 0 && tick.ActualDurationMs > targetMs)
+            {
+                overruns++;
+            }
+
+            var upTo = Math.Min(systems.Length, systemSums.Length);
+            for (var sys = 0; sys < upTo; sys++)
+            {
+                systemSums[sys] += systems[sys].DurationUs;
+            }
+        }
+
+        var systemStats = new SystemStat[systemSums.Length];
+        for (var sys = 0; sys < systemStats.Length; sys++)
+        {
+            systemStats[sys] = new SystemStat(Scheduler.Systems[sys]?.Name ?? string.Empty, ticks > 0 ? systemSums[sys] / ticks : 0.0);
+        }
+
+        var subscriptions = _subscriptionsRuntime;
+        return new RuntimeStatsSnapshot
+        {
+            Tick = newest,
+            TicksInWindow = ticks,
+            TargetTickMs = targetMs,
+            // The same nearest-rank definition the STATS block uses, from the same helper, so the HTTP figure and the wire figure cannot drift apart on the
+            // meaning of "p99" while both look plausible.
+            TickP50Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.50),
+            TickP99Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.99),
+            Overruns = overruns,
+            TickMultiplier = multiplier,
+            DurabilityWaitP99Ms = TelemetryPercentile.NearestRank(waits, ticks, 0.99),
+            Systems = systemStats,
+            Archetypes = ReadArchetypeStats(),
+            Realms = ReadRealmStats(),
+            RealmPassSteps = ReadRealmPassSteps(subscriptions),
+            RealmPolicyEvaluations = ReadPolicyEvaluations(),
+            ReplicationPrologueMsTotal = subscriptions?.Frames?.PrologueTotal.Ms ?? 0.0,
+            ReplicationPrologueTicks = subscriptions?.Frames?.PrologueTotal.Ticks ?? 0L,
+            ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
+            Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
+            NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
+            ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
+        };
+    }
+
+    /// <summary>
+    /// The hub's cumulative serial per-realm pass count, read with an acquire load.
+    /// </summary>
+    /// <remarks>
+    /// <b>Volatile, although nothing is published alongside it.</b> This is the first counter of the hub's read from off the tick thread — its neighbours
+    /// (<c>PrepareTicks</c>, <c>SlotsPushed</c>) are only ever read on the tick thread — so there is no established local convention to lean on, and the
+    /// project's ordering rule asks for the acquire whenever a load crosses threads. It is a plain <c>mov</c> on x64 and one <c>ldar</c> on arm64, read at
+    /// human rate.
+    /// </remarks>
+    private static long ReadRealmPassSteps(SubscriptionsRuntime subscriptions)
+    {
+        var hub = subscriptions?.Hub;
+        return hub == null ? 0L : System.Threading.Volatile.Read(ref hub.RealmPassSteps);
+    }
+
+    /// <summary>The realm table's cumulative policy-evaluation count, read with an acquire load for the reason above.</summary>
+    private long ReadPolicyEvaluations()
+    {
+        var table = Engine?.RealmTable;
+        return table?.EvaluationCountVolatile ?? 0L;
+    }
+
+    /// <summary>
+    /// One row per registered realm: what it is, what it is doing, and the replication work its sessions have been served.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The realm table is walked, not the hub's served list</b>, because the absence of a served realm is the fact worth reporting (see
+    /// <see cref="RuntimeStatsSnapshot.Realms"/>). The table hands back one consistent snapshot — count and array in one reference — so a realm registered or
+    /// removed while this runs makes the row list one longer or shorter, never torn.
+    /// </para>
+    /// <para>
+    /// <b>Empty for a single-realm engine.</b> Every figure on the snapshot already describes that realm, and a one-row array saying the same thing again would
+    /// invite a reader to add the two together. At scale this is O(registered realms) with a handful of loads each, off the tick, at human rate.
+    /// </para>
+    /// <para>
+    /// <b>Read off the tick thread, and the staleness is accepted</b> — the same trade the rest of this snapshot makes and for the same reason (see
+    /// <see cref="RuntimeStatsSnapshot"/>'s remarks on the telemetry ring). <b>Staleness is all that is accepted, though:</b> the hub's per-realm table is
+    /// reached through <c>SnapshotFor</c> rather than <c>For</c>, because the latter reads its array field twice and the tick can replace that array between
+    /// the two — a race that throws rather than returning an old number. A realm can appear or disappear between rows; no row can be torn. A figure one tick
+    /// old is the right answer for a stats endpoint and the wrong price to pay a publication protocol on the tick path for.
+    /// </para>
+    /// <para>
+    /// <b>The state read cannot throw.</b> <c>Realms.StateOf</c> raises for a realm that is not registered, and a realm removed between the snapshot and the
+    /// read is exactly that — which would turn an operator's stats call into a 500 once a dungeon closed under it. The realm's own <c>Closing</c> flag is the
+    /// answer in that case, and it is the last thing that was true of it.
+    /// </para>
+    /// </remarks>
+    private RealmStat[] ReadRealmStats()
+    {
+        var table = Engine?.RealmTable;
+        if (table == null || table.MaxRealms <= 1)
+        {
+            return [];
+        }
+
+        var hub = _subscriptionsRuntime?.Hub;
+        var registered = table.Registered;
+        var stats = new RealmStat[registered.Length];
+        for (var i = 0; i < registered.Length; i++)
+        {
+            var realm = registered[i];
+            var id = realm.Id.Value;
+            var replication = hub?.SnapshotFor(id);
+            stats[i] = new RealmStat(
+                id,
+                Engine.Realms.GenerationOf(realm.Id),
+                realm.Config?.Replication?.Kind ?? string.Empty,
+                realm.Closing ? RealmRunState.Closing : table.StateOfRow(id),
+                replication != null,
+                table.DivisorOf(id),
+
+                // Clamped: SessionsHere is a subtraction of two counters the tick moves independently, so an off-tick read can land between them and see a
+                // negative. A session count below zero is not a fact about any realm and would only ever be read as one.
+                Math.Max(0, replication?.SessionsHere ?? 0),
+                replication?.Enters ?? 0,
+                replication?.Updates ?? 0,
+                replication?.Leaves ?? 0,
+                replication?.CellsDelivered ?? 0,
+                replication?.Resets ?? 0,
+                replication?.Events ?? 0);
+        }
+
+        return stats;
+    }
+
+    /// <summary>Live entity count per registered archetype, named. Read from the engine, so it is meaningful before the first tick.</summary>
+    private ArchetypeStat[] ReadArchetypeStats()
+    {
+        var stats = new List<ArchetypeStat>();
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (meta == null)
+            {
+                continue;
+            }
+
+            stats.Add(new ArchetypeStat(meta.Name, Engine.GetArchetypeEntityCount(meta.ArchetypeId)));
+        }
+
+        return stats.ToArray();
+    }
+
     /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
     private string[] SystemNames()
     {
@@ -493,9 +761,27 @@ public sealed partial class TyphonRuntime : IDisposable
     internal FenceEntityMapUpdateExecSystem FenceEntityMapUpdateExec => _fenceEntityMapUpdateExec;
 
     /// <summary>
-    /// Gracefully shuts down the runtime. Stops the subscription server, fires <see cref="OnShutdown"/>, then stops the scheduler.
+    /// Gracefully shuts down the runtime. Stops starting ticks and waits for the one in flight to finish — its systems, its fence, its flush — then stops the
+    /// subscription server, fires <see cref="OnShutdown"/>, and stops the scheduler.
     /// </summary>
-    public void Shutdown() => StopInternal(true);
+    /// <remarks>
+    /// The wait is what makes the world read after this a fenced one. Without it a stop landing between a tick's systems and its fence left their writes
+    /// committed and unfenced — moves the spatial index had not caught up with, realm changes not migrated — until a later fence or a reopen fixed them.
+    /// Called on the tick thread (an <see cref="OnTickAborted"/> handler) it cannot wait for the tick it is part of; a tick that hangs past
+    /// <see cref="ShutdownDrainTimeout"/> is logged and abandoned, as before.
+    /// </remarks>
+    public void Shutdown()
+    {
+        if (Scheduler.StopTicksAndDrain(ShutdownDrainTimeout) == DagScheduler.DrainOutcome.TimedOut)
+        {
+            LogShutdownDrainTimedOut(ShutdownDrainTimeout.TotalSeconds);
+        }
+
+        StopInternal(true);
+    }
+
+    /// <summary>How long <see cref="Shutdown"/> waits for the tick in flight. A tick is milliseconds; this only bounds a tick that hangs.</summary>
+    private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Stops the runtime **without** running the <see cref="OnShutdown"/> hook — the fatal path, for a host reacting to <see cref="OnTickAborted"/> (issue #567).
@@ -506,9 +792,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// writes on top of it would persist state derived from a tick that never finished. Everything else — subscription server, profiler, scheduler — is
     /// torn down exactly as in <see cref="Shutdown"/>.
     /// <para>
-    /// <b>Neither this nor <see cref="Shutdown"/> is a quiescence point.</b> Both stop new ticks; neither waits for the tick in flight. The expected caller
-    /// is an <see cref="OnTickAborted"/> handler, which runs on the tick thread — so this typically returns into the very tick it is stopping, which then
-    /// finishes and posts its accounting. Dispose the runtime when you need "nothing is running": <see cref="Dispose"/> joins the tick thread.
+    /// <b>This is not a quiescence point.</b> It stops new ticks and does not wait for the tick in flight, which <see cref="Shutdown"/> does when called off
+    /// the tick thread. The expected caller is an <see cref="OnTickAborted"/> handler, which runs on the tick thread — so this typically returns into the very
+    /// tick it is stopping, which then finishes and posts its accounting. Dispose the runtime when you need "nothing is running": <see cref="Dispose"/> joins
+    /// the tick thread.
     /// </para>
     /// </remarks>
     public void FatalStop() => StopInternal(false);
@@ -536,6 +823,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
+                CommandBuffer = _entityCommands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -1759,7 +2047,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var epochs = Engine?.EpochManager;
         if (epochs == null || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
         {
-            return OnParallelQueryPrepareCore(sysIdx);
+            return PlanQueryChunks(sysIdx, OnParallelQueryPrepareCore(sysIdx));
         }
 
         // The prepare reads cluster pages — the change filter's dirty scan, the tier, sleep and descendant materializations — so it holds an epoch, as
@@ -1767,8 +2055,45 @@ public sealed partial class TyphonRuntime : IDisposable
         // inside another scope this is one atomic pair.
         using (EpochGuard.Enter(epochs))
         {
-            return OnParallelQueryPrepareCore(sysIdx);
+            return PlanQueryChunks(sysIdx, OnParallelQueryPrepareCore(sysIdx));
         }
+    }
+
+    /// <summary>
+    /// Writes what each of a parallel QuerySystem's <paramref name="chunks"/> walks into its plan, once, on the preparing thread: the one place a query
+    /// chunk's ranges are decided (CD-02, CD-03). A chunked callback has no entity context and no plan here.
+    /// </summary>
+    private int PlanQueryChunks(int sysIdx, int chunks)
+    {
+        if (chunks <= 0 || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
+        {
+            return chunks;
+        }
+
+        // The lengths Prepare counted (CD-02): the cluster list it captured, and the entity list it materialized — empty on the paths that have none.
+        var clusters = _dispatchClusterCount[sysIdx];
+        var entities = _parallelEntityLists[sysIdx].Count;
+        var plan = _queryPlans[sysIdx] ??= new ChunkTable<QueryChunk>();
+        var records = plan.Reset(chunks);
+        for (var c = 0; c < chunks; c++)
+        {
+            ref var r = ref records[c];
+            (r.ClusterStart, r.ClusterEnd) = EqualShare(clusters, chunks, c);
+            var (entityStart, entityEnd) = EqualShare(entities, chunks, c);
+            r.EntityStart = entityStart;
+            r.EntityCount = entityEnd - entityStart;
+        }
+
+        return chunks;
+    }
+
+    /// <summary>Share <paramref name="index"/> of an equal split of <paramref name="length"/> into <paramref name="parts"/>, the first (length mod parts) one larger.</summary>
+    private static (int Start, int End) EqualShare(int length, int parts, int index)
+    {
+        var size = length / parts;
+        var remainder = length % parts;
+        var start = index * size + Math.Min(index, remainder);
+        return (start, start + size + (index < remainder ? 1 : 0));
     }
 
     private int OnParallelQueryPrepareCore(int sysIdx)
@@ -2104,19 +2429,6 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// The cluster range chunk <paramref name="chunkIndex"/> of <paramref name="totalChunks"/> walks: its share of an equal split of the list its dispatch
-    /// counted in Prepare, the first <c>clusters % totalChunks</c> chunks taking one cluster more. The ranges tile that list (CD-02).
-    /// </summary>
-    private void ChunkClusterRange(int sysIdx, int chunkIndex, int totalChunks, out int start, out int end)
-    {
-        var clusters = _dispatchClusterCount[sysIdx];
-        var size = clusters / totalChunks;
-        var remainder = clusters % totalChunks;
-        start = chunkIndex * size + Math.Min(chunkIndex, remainder);
-        end = start + size + (chunkIndex < remainder ? 1 : 0);
-    }
-
-    /// <summary>
     /// Chunk execution: dispatches to the appropriate path based on WritesVersioned.
     /// Non-Versioned: uses shared PointInTimeAccessor (no per-chunk Transaction).
     /// Versioned: creates a per-chunk Transaction (original fallback path).
@@ -2160,6 +2472,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            CommandBuffer = _entityCommands,
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
@@ -2196,6 +2509,7 @@ public sealed partial class TyphonRuntime : IDisposable
         IReadOnlyCollection<EntityId> entities;
         int clusterStart = 0, clusterEnd = 0;
         int[] clusterIdArray = null;
+        ref var plan = ref _queryPlans[sysIdx][chunkIndex];
 
         // Change filter MUST take precedence over tier filter for the entities source.
         //   - Change-filtered: ctx.Entities = sliced materialized list (already tier-scoped upstream).
@@ -2207,26 +2521,20 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             // Path 2 with optional tier scoping. The materialized list already contains only tier-scoped dirty entities
             // (tier scoping happens in BuildFilteredSingleTable → ScanClusterDirtyEntities).
-            var fullList = _parallelEntityLists[sysIdx];
-            var totalEntities = fullList.Count;
-            var baseSize = totalEntities / totalChunks;
-            var remainder = totalEntities % totalChunks;
-            var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-            var count = baseSize + (chunkIndex < remainder ? 1 : 0);
-            entities = new PooledEntitySlice(fullList.BackingArray, start, count);
+            entities = new PooledEntitySlice(_parallelEntityLists[sysIdx].BackingArray, plan.EntityStart, plan.EntityCount);
 
             // ClusterIds: the list Prepare captured — the tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) still get the correct cluster set.
             clusterIdArray = _dispatchClusterIds[sysIdx];
             if (clusterIdArray != null)
             {
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
         }
         else if (tierIds != null)
         {
             // Tier-filtered, no change filter: walk the tier's clusters via ClusterRangeEntityView.
-            ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+            (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             clusterIdArray = tierIds;
 
             var cs = _systemClusterStates[sysIdx];
@@ -2243,13 +2551,7 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 // Pure-Transient fallback: entity list was pre-materialized in PrepareFullNonVersioned (single-threaded) to avoid
                 // per-worker pool leak. Each worker slices the shared list by its chunk partition.
-                var entityList = _parallelEntityLists[sysIdx];
-                var totalEntities = entityList.Count;
-                var baseSize = totalEntities / totalChunks;
-                var remainder = totalEntities % totalChunks;
-                var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-                var count = baseSize + (chunkIndex < remainder ? 1 : 0);
-                entities = new PooledEntitySlice(entityList.BackingArray, start, count);
+                entities = new PooledEntitySlice(_parallelEntityLists[sysIdx].BackingArray, plan.EntityStart, plan.EntityCount);
             }
         }
         else
@@ -2268,7 +2570,7 @@ public sealed partial class TyphonRuntime : IDisposable
             if (cs != null)
             {
                 clusterIdArray = _dispatchClusterIds[sysIdx];
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
         }
 
@@ -2293,6 +2595,7 @@ public sealed partial class TyphonRuntime : IDisposable
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+            CommandBuffer = _entityCommands,
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -2410,22 +2713,17 @@ public sealed partial class TyphonRuntime : IDisposable
     private void ExecuteChunkWithTransaction(int sysIdx, int chunkIndex, int totalChunks, int workerId)
     {
         var fullList = _parallelEntityLists[sysIdx];
-        var totalEntities = fullList.Count;
-
-        // Balanced partitioning: first `remainder` chunks get one extra entity
-        var baseSize = totalEntities / totalChunks;
-        var remainder = totalEntities % totalChunks;
-        var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-        var count = baseSize + (chunkIndex < remainder ? 1 : 0);
+        ref var plan = ref _queryPlans[sysIdx][chunkIndex];
 
         TickContext.DebugValidateWorkerSlot(workerId, Scheduler.WorkerSlotCount, Scheduler.Systems[sysIdx].Name);
 
-        // Create per-chunk Transaction on THIS worker thread (respects thread affinity)
-        var tx = _currentUow.CreateTransaction();
+        // Create per-chunk Transaction on THIS worker thread (respects thread affinity), with a ChangeSet of its own: the chunks of this dispatch run
+        // concurrently, and the UoW's shared ChangeSet is single-thread-affine (#1116).
+        var tx = _currentUow.CreateConcurrentTransaction();
         var success = true;
         try
         {
-            var slice = new PooledEntitySlice(fullList.BackingArray, start, count);
+            var slice = new PooledEntitySlice(fullList.BackingArray, plan.EntityStart, plan.EntityCount);
             var sys = Scheduler.Systems[sysIdx];
             float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
 
@@ -2436,7 +2734,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var clusterIdArray = _dispatchClusterIds[sysIdx];
             if (clusterIdArray != null)
             {
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
 
             var ctx = new TickContext
@@ -2455,6 +2753,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+                CommandBuffer = _entityCommands,
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -2520,6 +2819,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
     private void OnTickStartInternal(DagScheduler scheduler)
     {
+        // Before any system body runs, so a command queued this tick cannot be cleared by it. O(1) on a tick that queued nothing.
+        _entityCommands?.Reset();
+
         var now = Stopwatch.GetTimestamp();
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
@@ -2565,6 +2867,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
+                CommandBuffer = _entityCommands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -2786,6 +3089,20 @@ public sealed partial class TyphonRuntime : IDisposable
         // land the leave on the entity that just entered. Once per tick, on the driver thread, before the track dispatches.
         _netIds.DrainQuarantine();
 
+        // Apply this tick's deferred entity commands (#1102). HERE, and the position is three separate decisions.
+        //
+        // Before the fence, because an entity queued this tick has to be cluster-slotted and index-visible by the time the fence's own phases run — the AABB
+        // refresh, the index merge, the spatial maintenance — or it is a tick late to all of them. Before FenceWindow.Open() specifically, so this is ordinary
+        // engine code holding an ordinary transaction: no licence taken, no invariant suspended, nothing to argue about under EW-01.
+        //
+        // On the tick driver rather than in the fence DAG, because the DAG has two arms. A drain inside it would have to be built into FenceExecBundle AND
+        // duplicated for hosts running with EnableParallelFence off; here one call serves both.
+        //
+        // Serially, which is a retreat from the ENG-01 design and is priced: about 1 us a spawn plus 0.2 us an indexed field, measured over a hundred
+        // 3 000-entity bursts, so the realistic mass-death burst is ~3 ms. Worth removing from the tick eventually, not worth new concurrency inside the
+        // B+Tree and the EntityMap to remove today.
+        _entityCommandDrain?.Apply(_entityCommands);
+
         try
         {
             if (_parallelFenceEnabled)
@@ -2835,31 +3152,46 @@ public sealed partial class TyphonRuntime : IDisposable
         // Flush the UoW to make all Deferred writes (including the tick fence publishes above) durable, then dispose. UoW.Flush in WAL mode calls
         // WalManager.RequestFlush + WaitForDurable(currentLsn), where currentLsn is captured at the moment of the call — so it includes every publish made
         // in WriteTickFence.
-        InspectorPhase(TickPhase.UowFlush, () =>
+        //
+        // Timed unconditionally (#CLI-04). The InspectorPhase span below measures the same thing but exists only while the profiler records, so with the
+        // profiler off there was no durability number at all and typhon.durability.wait.p99 emitted a hard zero. One Stopwatch pair per tick, on the path
+        // that just waited for an fsync, is not a cost worth gating — and a gated measurement is how the metric came to be unsourced in the first place.
+        var flushStart = Stopwatch.GetTimestamp();
+        try
         {
-            try
+            InspectorPhase(TickPhase.UowFlush, () =>
             {
-                _currentUow?.Flush();
-            }
-            catch (Exception)
-            {
-                // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
-                // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
-                _subscriptionsRuntime?.DiscardFrames();
-                throw;
-            }
-            finally
-            {
-                _currentUow?.Dispose();
-                _currentUow = null;
-                TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
+                try
+                {
+                    _currentUow?.Flush();
+                }
+                catch (Exception)
+                {
+                    // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
+                    // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
+                    _subscriptionsRuntime?.DiscardFrames();
+                    throw;
+                }
+                finally
+                {
+                    _currentUow?.Dispose();
+                    _currentUow = null;
+                    TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
 
-                // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
-                // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
-                // clients — and a verifier for it needs to see that the flush was reached at all.
-                _subscriptionsContext.NoteFlush();
-            }
-        });
+                    // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
+                    // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
+                    // clients — and a verifier for it needs to see that the flush was reached at all.
+                    _subscriptionsContext.NoteFlush();
+                }
+            });
+        }
+        finally
+        {
+            // In a `finally` for the same reason the stamp above is: a flush that THREW still waited, and it is the slowest durability event the engine can
+            // have. A tick reporting zero because its flush failed would hide exactly the outlier the percentile exists to show. A field write on the tick
+            // driver's own thread cannot itself throw, so this cannot displace the flush's exception.
+            scheduler.NoteUowFlushMs((float)Stopwatch.GetElapsedTime(flushStart).TotalMilliseconds);
+        }
 
         // Issue #234: compute per-tier budget metrics from this tick's system telemetry, for the next tick's TickContext.
         ComputeTierBudgetMetrics();
@@ -3302,6 +3634,7 @@ public sealed partial class TyphonRuntime : IDisposable
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+            CommandBuffer = _entityCommands,
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

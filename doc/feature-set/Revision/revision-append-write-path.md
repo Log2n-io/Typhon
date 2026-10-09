@@ -14,12 +14,12 @@ description: 'Every write to a Versioned component creates a new immutable revis
 Snapshot isolation requires that a transaction reading a `Versioned` component keeps seeing the value as of its
 own snapshot, even while other transactions concurrently write newer values. Overwriting a component in place
 would tear those reads and destroy the history that conflict detection and AS-OF / point-in-time queries depend
-on. Every `Spawn`, `Write<T>()`, and `Destroy` on a `Versioned` component therefore produces a brand-new,
+on. Every `Spawn`, `Set<T>()`, and `Destroy` on a `Versioned` component therefore produces a brand-new,
 immutable revision instead of mutating the previous one — older readers keep a valid, untouched value to read.
 
 ## ⚙️ How it works (in brief)
 
-`Spawn` allocates an entity's first revision directly. Every subsequent `Write<T>()` is copy-on-write: it
+`Spawn` allocates an entity's first revision directly. Every subsequent `Set<T>()` is copy-on-write: it
 appends a new revision to that component's per-entity chain — a small circular buffer that grows into 64-byte
 overflow chunks automatically once it fills, with no size limit you need to plan for up front. `Destroy` appends
 a tombstone revision (no payload) rather than deleting anything immediately. Each new revision is stamped with
@@ -49,8 +49,10 @@ for (var i = 0; i < 5; i++)
 {
     using var hitUow = dbe.CreateUnitOfWork();
     using var hitTx = hitUow.CreateTransaction();
-    ref var stats = ref hitTx.OpenMut(id).Write(Hero.Stats);   // copy-on-write: new revision appended
-    stats.Hp -= 10;                                            // chain grows into an overflow chunk past 3 entries
+    var target = hitTx.OpenMut(id);
+    var stats = target.Read(Hero.Stats);   // a copy of the visible revision
+    stats.Hp -= 10;
+    target.Set(Hero.Stats, stats);         // copy-on-write: new revision appended; the chain grows into an overflow chunk past 3 entries
     hitTx.Commit();
 }
 
@@ -85,7 +87,7 @@ deathTx.Commit();
 ## 🔗 Related
 
 - Related feature: [Revision Chain Storage](./revision-chain-storage.md) (the layout this populates), [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md), [Write-Conflict Baseline Tracking](./optimistic-conflict-baseline.md) (Prev/Cur are first set here), [Revision Garbage Collection & Compaction](./revision-gc-compaction.md)
-- Source: [`ComponentRevisionManager.AddCompRev`/`AllocCompRevStorage`/`GrowChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.Spawn`/`Transaction.Destroy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs), [`EntityRefMut.Write`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRefMut.cs)
+- Source: [`ComponentRevisionManager.AddCompRev`/`AllocCompRevStorage`/`GrowChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.Spawn`/`Transaction.Destroy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs), [`EntityRefMut.Set`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRefMut.cs)
 
 <!-- Deep dive: claude/design/Revision/01-revision-chain-storage.md, claude/design/Revision/README.md -->
 <!-- ADR: claude/adr/003-mvcc-snapshot-isolation.md -->

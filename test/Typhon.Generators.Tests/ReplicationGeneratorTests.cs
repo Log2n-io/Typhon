@@ -29,6 +29,7 @@ namespace Typhon.Engine
     using Typhon.Protocol;
     public struct Comp<T> { }
     public struct EntityId { }
+    public readonly struct EntityLink<T> where T : class { }
     public abstract class Archetype<TSelf> where TSelf : Archetype<TSelf> { protected static Comp<T> Register<T>() => default; }
     public abstract class Archetype<TSelf, TParent> : Archetype<TSelf> where TSelf : Archetype<TSelf, TParent> where TParent : class { }
     public readonly struct Codec
@@ -250,12 +251,46 @@ public partial class Outer
         });
     }
 
+    /// <summary>A 64-bit integer, a double and a fixed shape have an exact wire form (13 § 2.1, W32, W33), so a bare <c>[Replicate]</c> means exact.</summary>
     [Test]
-    public void AWideTypeWithNoCodecIsRefused()
+    public void AWideTypeOrAShapeWithNoCodecTravelsExact()
         => Assert.That(Ids(@"
-[Component(""C"", 1)] public struct C { [Field, Replicate] public long Big; [Field, Replicate] public double Real; }
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public long Big; [Field, Replicate] public ulong Bigger; [Field, Replicate] public double Real;
+    [Field, Replicate] public Typhon.Schema.Definition.Point3F Spot;
+}
 [Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
-    Is.EqualTo(new[] { "TPH1104", "TPH1104" }));
+    Is.Empty);
+
+    /// <summary>An inline string's exact form is its text (13 § 2.1), so a bare <c>[Replicate]</c> on one is accepted too.</summary>
+    [Test]
+    public void AnInlineStringWithNoCodecTravelsAsItsText()
+        => Assert.That(Ids(@"
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public Typhon.Schema.Definition.String64 Name; [Field, Replicate] public Typhon.Schema.Definition.String1024 Bio;
+}
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.Empty);
+
+    [Test]
+    public void AnEntityReferenceWithNoCodecTravelsAsEntityRef()
+        => Assert.That(Ids(@"
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public EntityId Other; [Field, Replicate] public EntityLink<A> Target;
+}
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.Empty);
+
+    [Test]
+    public void AStructThatIsNoShapeWithNoCodecIsRefused()
+        => Assert.That(Ids(@"
+public struct Pair { public float A; public float B; }
+[Component(""C"", 1)] public struct C { [Field, Replicate] public Pair P; }
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.EqualTo(new[] { "TPH1104" }));
 
     [TestCase("[Field, Fraction(\"Nope\", Name = \"hp\")] public int Value; [Field] public int Max;", TestName = "AFractionOfAMissingFieldIsRefused")]
     [TestCase("[Field, Fraction(nameof(Max), Name = \"hp\")] public float Value; [Field] public int Max;", TestName = "AFractionOfAnotherTypeIsRefused")]

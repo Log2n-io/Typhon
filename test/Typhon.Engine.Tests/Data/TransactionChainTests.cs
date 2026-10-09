@@ -184,8 +184,10 @@ class TransactionChainTests : TestBase<TransactionChainTests>
         // Update after snapshot was taken
         using (var wt2 = dbe.CreateQuickTransaction())
         {
-            ref var w = ref wt2.OpenMut(entityId).Write(CompAArch.A);
+            var target = wt2.OpenMut(entityId);
+            var w = target.Read(CompAArch.A);
             w = new CompA(99);
+            target.Set(CompAArch.A, w);
             wt2.Commit();
         }
 

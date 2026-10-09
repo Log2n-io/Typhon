@@ -152,16 +152,16 @@ internal sealed class FenceWorkPlan
     }
 
     private FenceWorkItem[] _items = new FenceWorkItem[InitialItemCapacity];
-    private int[] _chunkStart = new int[16];
-    private int[] _chunkItemCnt = new int[16];
+    // Chunk k runs Items[ItemStart, ItemStart + ItemCount): its record, written by Build on the tick driver before the phase's chunks are claimed (CD-03).
+    private readonly ChunkTable<FenceChunk> _chunks = new();
 
     private readonly PriorityQueue<int, float> _heap = new();
 
     public FenceWorkItem[] Items => _items;
     public int ItemCount { get; private set; }
-    public int[] ChunkStart => _chunkStart;
-    public int[] ChunkItemCnt => _chunkItemCnt;
-    public int ChunkCount { get; private set; }
+    /// <summary>Each chunk's run of <see cref="Items"/>: <see cref="ChunkCount"/> records.</summary>
+    public ChunkTable<FenceChunk> Chunks => _chunks;
+    public int ChunkCount => _chunks.Count;
 
     /// <summary>
     /// Build this phase's work plan. Single-threaded — called from TickDriver between user DAG completion and the per-phase parallel dispatch.
@@ -181,7 +181,7 @@ internal sealed class FenceWorkPlan
         }
 
         ItemCount = 0;
-        ChunkCount = 0;
+        _chunks.Reset(0);
 
         switch (phase)
         {
@@ -769,7 +769,7 @@ internal sealed class FenceWorkPlan
     internal int PackSyntheticForTest(float[] costs, int workerCount, int chunkOversubscription)
     {
         ItemCount = 0;
-        ChunkCount = 0;
+        _chunks.Reset(0);
         for (var i = 0; i < costs.Length; i++)
         {
             AppendItem(new FenceWorkItem { Kind = FenceWorkKind.MigrationApply, Cost = costs[i] });
@@ -818,13 +818,8 @@ internal sealed class FenceWorkPlan
             chunkCount = ItemCount;
         }
 
-        EnsureChunkArrays(chunkCount);
-        for (var k = 0; k < chunkCount; k++)
-        {
-            _chunkStart[k] = 0;
-            _chunkItemCnt[k] = 0;
-        }
-        ChunkCount = chunkCount;
+        // Zeroed: the item counts accumulate into it below, then become starts.
+        var chunks = _chunks.Reset(chunkCount);
 
         Array.Sort(_items, 0, ItemCount, FenceWorkItemCostDescComparer.Instance);
 
@@ -849,7 +844,7 @@ internal sealed class FenceWorkPlan
             {
                 var k = _heap.Dequeue();
                 assignment[i] = k;
-                _chunkItemCnt[k]++;
+                chunks[k].ItemCount++;
                 _chunkLoadAcc[k] += _items[i].Cost;
                 _heap.Enqueue(k, _chunkLoadAcc[k]);
             }
@@ -857,9 +852,9 @@ internal sealed class FenceWorkPlan
             var running = 0;
             for (var k = 0; k < chunkCount; k++)
             {
-                _chunkStart[k] = running;
-                running += _chunkItemCnt[k];
-                _chunkItemCnt[k] = 0;
+                chunks[k].ItemStart = running;
+                running += chunks[k].ItemCount;
+                chunks[k].ItemCount = 0;
             }
 
             var sortedCopy = ArrayPool<FenceWorkItem>.Shared.Rent(ItemCount);
@@ -869,7 +864,7 @@ internal sealed class FenceWorkPlan
                 for (var i = 0; i < ItemCount; i++)
                 {
                     var k = assignment[i];
-                    var writeIdx = _chunkStart[k] + _chunkItemCnt[k]++;
+                    var writeIdx = chunks[k].ItemStart + chunks[k].ItemCount++;
                     _items[writeIdx] = sortedCopy[i];
                 }
             }
@@ -905,20 +900,18 @@ internal sealed class FenceWorkPlan
         _items[ItemCount++] = item;
     }
 
-    private void EnsureChunkArrays(int chunkCount)
-    {
-        if (_chunkStart.Length < chunkCount)
-        {
-            _chunkStart = new int[Math.Max(chunkCount, _chunkStart.Length * 2)];
-            _chunkItemCnt = new int[_chunkStart.Length];
-        }
-    }
-
     private sealed class FenceWorkItemCostDescComparer : IComparer<FenceWorkItem>
     {
         public static readonly FenceWorkItemCostDescComparer Instance = new();
         public int Compare(FenceWorkItem x, FenceWorkItem y) => y.Cost.CompareTo(x.Cost);
     }
+}
+
+/// <summary>One fence chunk's run of its plan's items: <c>Items[ItemStart, ItemStart + ItemCount)</c>.</summary>
+internal struct FenceChunk
+{
+    public int ItemStart;
+    public int ItemCount;
 }
 
 /// <summary>Phase discriminator for <see cref="FenceWorkPlan.Build"/>.</summary>

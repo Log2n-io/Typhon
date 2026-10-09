@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -122,6 +123,27 @@ public ref struct WireWriter
     /// <param name="value">The value.</param>
     public void WriteU64(ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(Take(8), value);
 
+    /// <summary>Writes a little-endian two's-complement <c>i64</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteI64(long value) => BinaryPrimitives.WriteInt64LittleEndian(Take(8), value);
+
+    /// <summary>Writes a <c>varu64</c> (W32): minimal unsigned LEB128 of a 64-bit value, 1–10 bytes.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteVaru64(ulong value)
+    {
+        while (value >= 0x80)
+        {
+            WriteU8((byte)(value | 0x80));
+            value >>= 7;
+        }
+
+        WriteU8((byte)value);
+    }
+
+    /// <summary>Writes a <c>vari64</c> (W32): <c>zigzag64(v) = (v &lt;&lt; 1) ^ (v &gt;&gt; 63)</c>, then <c>varu64</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteVari64(long value) => WriteVaru64((ulong)((value << 1) ^ (value >> 63)));
+
     /// <summary>Writes a little-endian IEEE double; NaN as <c>0x7FF8000000000000</c>.</summary>
     /// <param name="value">The value.</param>
     public void WriteF64(double value) => BinaryPrimitives.WriteDoubleLittleEndian(Take(8), WireMath.CanonicalizeNaN(value));
@@ -152,6 +174,26 @@ public ref struct WireWriter
 
         WriteVaru((uint)bytes.Length);
         WriteBytes(bytes);
+    }
+
+    /// <summary>Writes UTF-8 bytes as a <c>str</c>: <c>varu</c> length, then the bytes.</summary>
+    /// <param name="utf8">The bytes. Validity is the caller's to guarantee; a wire READER validates what it decodes.</param>
+    /// <param name="maxBytes">The field's cap.</param>
+    /// <exception cref="ArgumentException">It is longer than <paramref name="maxBytes"/>.</exception>
+    /// <remarks>
+    /// The span overload exists for a caller that already holds UTF-8 — an inline <c>Utf8Text</c> inside a message struct —
+    /// where the <see cref="WriteStr(string, int)"/> overload would decode to a string and re-encode it, per event, per
+    /// session.
+    /// </remarks>
+    public void WriteStr(ReadOnlySpan<byte> utf8, int maxBytes)
+    {
+        if (utf8.Length > maxBytes)
+        {
+            throw new ArgumentException($"string of {utf8.Length} UTF-8 bytes exceeds its cap of {maxBytes}", nameof(utf8));
+        }
+
+        WriteVaru((uint)utf8.Length);
+        utf8.CopyTo(Take(utf8.Length));
     }
 
     /// <summary>Writes a <c>str</c>: a <c>varu</c> byte length, then the UTF-8 bytes.</summary>
@@ -218,6 +260,11 @@ public ref struct WireWriter
         < 1u << 28 => 4,
         _ => 5,
     };
+
+    /// <summary>The number of bytes <see cref="WriteVaru64"/> writes for <paramref name="value"/>.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>1 to 10.</returns>
+    public static int Varu64Size(ulong value) => value == 0 ? 1 : (70 - BitOperations.LeadingZeroCount(value)) / 7;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Span<byte> Take(int count)

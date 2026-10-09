@@ -118,6 +118,8 @@ public partial class Player : Archetype<Player>
     public static readonly Comp<PlayerMotion> Move = Register<PlayerMotion>();
     public static readonly Comp<PlayerVitals> Vitals = Register<PlayerVitals>();
     public static readonly Comp<PlayerState> State = Register<PlayerState>();
+    public static readonly Comp<PlayerControl> Control = Register<PlayerControl>();
+    public static readonly Comp<PlayerSession> Session = Register<PlayerSession>();
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();
     public static readonly Comp<PlayerRealm> Realm = Register<PlayerRealm>();
 }

@@ -1,0 +1,30 @@
+{
+  "description": "f64 \u00D7 6 \u2014 an aabb3 (W33): minX minY minZ maxX maxY maxZ, 48 bytes.",
+  "codec": {
+    "t": "f64",
+    "count": 6
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "fe37e43c8800759c",
+        "bfe0000000000000",
+        "0000000000000001",
+        "7e37e43c8800759c",
+        "3fe0000000000000",
+        "7fefffffffffffff"
+      ],
+      "offset": 0,
+      "length": 48,
+      "decoded": [
+        "fe37e43c8800759c",
+        "bfe0000000000000",
+        "0000000000000001",
+        "7e37e43c8800759c",
+        "3fe0000000000000",
+        "7fefffffffffffff"
+      ]
+    }
+  ]
+}

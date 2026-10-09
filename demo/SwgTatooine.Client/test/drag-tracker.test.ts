@@ -90,4 +90,59 @@ describe('DragTracker', () => {
     expect(t.move(MOUSE, LEFT_BIT, 50, 50)).toBe(false);
     expect(t.up(MOUSE, 0)).toBe(false);
   });
+
+  /**
+   * The defect a user hit: a press that wandered four pixels selected nothing, because the PAN threshold was also the
+   * click threshold. Measured through synthetic pointer events against the live client, 0-3 px selected 12 of 12 and 4 px
+   * selected 0 of 12 — "it works sometimes, on the same object".
+   */
+  describe('a click survives a shaky hand', () => {
+    const release = (travel: number): boolean => {
+      const t = new DragTracker();
+      t.down(MOUSE, LEFT, 100, 100);
+      t.move(MOUSE, LEFT_BIT, 100 + travel, 100);
+      return t.up(MOUSE, 0);
+    };
+
+    it('still selects at the pan threshold and beyond it', () => {
+      for (const travel of [0, 1, 3, 4, 5, 8, 10]) {
+        expect(release(travel), `${travel} px`).toBe(true);
+      }
+    });
+
+    it('is a drag, not a click, once the pointer really travelled', () => {
+      for (const travel of [11, 20, 200]) {
+        expect(release(travel), `${travel} px`).toBe(false);
+      }
+    });
+
+    it('judges the FARTHEST the pointer got, not where it ended', () => {
+      // Wandering out and coming back is a drag: the camera panned, and selecting as well would be a second action the
+      // user did not ask for.
+      const t = new DragTracker();
+      t.down(MOUSE, LEFT, 100, 100);
+      t.move(MOUSE, LEFT_BIT, 300, 100);
+      t.move(MOUSE, LEFT_BIT, 100, 100);
+      expect(t.maxMoved).toBe(200);
+      expect(t.up(MOUSE, 0)).toBe(false);
+    });
+
+    it('starts panning well before it stops being a click, so a drag never feels late', () => {
+      const t = new DragTracker();
+      t.down(MOUSE, LEFT, 0, 0);
+      expect(t.move(MOUSE, LEFT_BIT, 3, 0), 'under the pan threshold').toBe(false);
+      expect(t.move(MOUSE, LEFT_BIT, 6, 0), 'past the pan threshold').toBe(true);
+      expect(t.up(MOUSE, 0), 'and still within the click slop').toBe(true);
+    });
+
+    it('forgets the travel between presses', () => {
+      const t = new DragTracker();
+      t.down(MOUSE, LEFT, 0, 0);
+      t.move(MOUSE, LEFT_BIT, 500, 0);
+      t.up(MOUSE, 0);
+      t.down(MOUSE, LEFT, 0, 0);
+      expect(t.maxMoved).toBe(0);
+      expect(t.up(MOUSE, 0)).toBe(true);
+    });
+  });
 });

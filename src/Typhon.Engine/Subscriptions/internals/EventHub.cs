@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -9,7 +9,15 @@ namespace Typhon.Engine.Internals;
 /// <summary>Where one wire field of an event is read from inside the event struct, resolved once at <c>Start</c> (09 § 11).</summary>
 internal readonly struct EventFieldBinding
 {
-    public EventFieldBinding(FieldPlan field, int offset, int components, CommandFieldElement element, int elementSize, bool entity)
+    public EventFieldBinding(
+        FieldPlan field,
+        int offset,
+        int components,
+        CommandFieldElement element,
+        int elementSize,
+        bool entity,
+        int textCapacity = 0,
+        int textWireCap = 0)
     {
         Field = field;
         Offset = offset;
@@ -17,7 +25,104 @@ internal readonly struct EventFieldBinding
         Element = element;
         ElementSize = elementSize;
         Entity = entity;
+        TextCapacity = textCapacity;
+        TextWireCap = textWireCap;
     }
+
+    private readonly IntegerRange _clamp;
+    private readonly double _clampMin;
+    private readonly double _clampMax;
+
+    /// <summary>
+    /// Whether the declaration narrowed this integer field with <c>Codec.Saturate()</c> (13 § 2.3): the value is clamped to <see cref="Clamp"/> before it
+    /// is encoded, as an archetype field's is, rather than refused by the encoder and the whole event dropped.
+    /// </summary>
+    public bool Saturating { get; init; }
+
+    /// <summary>The codec's codes, for a saturating field — exact for a 64-bit codec too. Its bounds as doubles are taken here, once.</summary>
+    public IntegerRange Clamp
+    {
+        get => _clamp;
+        init
+        {
+            _clamp = value;
+            _clampMin = value.Min;
+            _clampMax = value.Max;
+        }
+    }
+
+    /// <summary>
+    /// Each component's byte offset from <see cref="Offset"/>, for a fixed shape (W33) whose wire order is its members' names, not their places; null for
+    /// a field whose components are contiguous in order.
+    /// </summary>
+    public int[] ComponentOffsets { get; init; }
+
+    /// <summary>Applies the declared narrowing to loaded values; a no-op unless <see cref="Saturating"/>.</summary>
+    /// <param name="values">The values <see cref="Load"/> produced.</param>
+    public void Narrow(Span<double> values)
+    {
+        if (!Saturating)
+        {
+            return;
+        }
+
+        for (var i = 0; i < values.Length; i++)
+        {
+            values[i] = Math.Clamp(values[i], _clampMin, _clampMax);
+        }
+    }
+
+    /// <summary>
+    /// Reads the stored integers of a 64-bit field (W32) as wire bit patterns — exactly, never through a double. A declared narrowing clamps here, a
+    /// signed source against both bounds and an unsigned one against the top alone, so a <see cref="ulong"/> into an <c>i64</c> clamps rather than wraps.
+    /// </summary>
+    public void LoadInteger64(ReadOnlySpan<byte> payload, Span<ulong> into)
+    {
+        for (var i = 0; i < Components; i++)
+        {
+            var slot = payload.Slice(Offset + ComponentOffset(i), ElementSize);
+            switch (Element)
+            {
+                case CommandFieldElement.I8:
+                case CommandFieldElement.I16:
+                case CommandFieldElement.I32:
+                case CommandFieldElement.I64:
+                {
+                    long value = Element switch
+                    {
+                        CommandFieldElement.I8 => (sbyte)slot[0],
+                        CommandFieldElement.I16 => MemoryMarshal.Read<short>(slot),
+                        CommandFieldElement.I32 => MemoryMarshal.Read<int>(slot),
+                        _ => MemoryMarshal.Read<long>(slot),
+                    };
+
+                    if (Saturating)
+                    {
+                        value = value < _clamp.Min ? _clamp.Min : value > _clamp.SignedMax ? _clamp.SignedMax : value;
+                    }
+
+                    into[i] = unchecked((ulong)value);
+                    break;
+                }
+                default:
+                {
+                    ulong value = Element switch
+                    {
+                        CommandFieldElement.U8 => slot[0],
+                        CommandFieldElement.U16 => MemoryMarshal.Read<ushort>(slot),
+                        CommandFieldElement.U32 => MemoryMarshal.Read<uint>(slot),
+                        _ => MemoryMarshal.Read<ulong>(slot),
+                    };
+
+                    // An unsigned value is never below a range that contains 0: only the top can bind.
+                    into[i] = Saturating && value > _clamp.Max ? _clamp.Max : value;
+                    break;
+                }
+            }
+        }
+    }
+
+    private int ComponentOffset(int i) => ComponentOffsets?[i] ?? i * ElementSize;
 
     /// <summary>The wire field, in the catalog's wire order.</summary>
     public FieldPlan Field { get; }
@@ -37,13 +142,63 @@ internal readonly struct EventFieldBinding
     /// <summary>An <see cref="EntityId"/>: it travels as the entity's netId, 0 when it has none.</summary>
     public bool Entity { get; }
 
+    /// <summary>An inline <c>Utf8Text</c>'s capacity, or 0 when the field is not text.</summary>
+    /// <remarks>
+    /// The layout is the type's: a <see cref="ushort"/> length at <see cref="Offset"/>, then that many UTF-8 bytes. It is
+    /// read out of the raw payload rather than through the type, because the payload in the arena is bytes and the encoder
+    /// never reconstitutes the struct.
+    /// </remarks>
+    public int TextCapacity { get; }
+
+    /// <summary>
+    /// The bytes this field may actually put on the wire — its codec's cap, which may be <b>smaller</b> than the struct's.
+    /// </summary>
+    /// <remarks>
+    /// The binder deliberately admits a struct larger than the cap, so that a 24-byte name field does not have to admit
+    /// 256 bytes from every client on every message. What it did not do is honour the cap: the text was clamped to the
+    /// STRUCT's capacity and then handed to <c>WireWriter.WriteStr</c> with the codec's, which throws — and the throw was
+    /// caught around the whole encode, so a single over-long string discarded the <b>entire event</b>, every other field
+    /// included, and no session ever saw it. <see cref="LoadText"/> honours this bound instead.
+    /// </remarks>
+    public int TextWireCap { get; }
+
+    /// <summary>Whether this field carries text rather than numbers.</summary>
+    public bool IsText => TextCapacity > 0;
+
+    /// <summary>The UTF-8 bytes of a text field, aliasing the payload.</summary>
+    public ReadOnlySpan<byte> LoadText(ReadOnlySpan<byte> payload)
+    {
+        var length = MemoryMarshal.Read<ushort>(payload[Offset..]);
+
+        // Clamped rather than trusted: the payload came from an application's struct, and a length past the capacity would
+        // read a neighbouring field onto the wire. The setter refuses it; this is the second line.
+        var bytes = payload.Slice(Offset + sizeof(ushort), Math.Min(length, TextCapacity));
+        if (bytes.Length <= TextWireCap)
+        {
+            return bytes;
+        }
+
+        // Past the codec's cap. Shortened here rather than left for WriteStr to refuse, because that refusal is an
+        // exception caught around the whole encode and it takes the event with it — a chat line one byte too long
+        // silently deleting its speaker, its sequence number and every other field of the message.
+        //
+        // Cut on a CODEPOINT boundary, never on a byte: a continuation byte left at the end is invalid UTF-8, which a
+        // strict reader is right to reject, and that would put the drop back one layer down.
+        var cut = TextWireCap;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80)
+        {
+            cut--;
+        }
+
+        return bytes[..cut];
+    }
+
     /// <summary>Reads the stored numbers.</summary>
     public void Load(ReadOnlySpan<byte> payload, Span<double> into)
     {
-        var source = payload.Slice(Offset, Components * ElementSize);
         for (var i = 0; i < Components; i++)
         {
-            var slot = source.Slice(i * ElementSize, ElementSize);
+            var slot = payload.Slice(Offset + ComponentOffset(i), ElementSize);
             into[i] = Element switch
             {
                 CommandFieldElement.I8 => (sbyte)slot[0],
@@ -58,6 +213,10 @@ internal readonly struct EventFieldBinding
                 _ => MemoryMarshal.Read<double>(slot),
             };
         }
+
+        // Here rather than at each encode site, so the packed and the byte-aligned writers both see the clamped value: the encoder refuses an
+        // out-of-range integer, which would drop the whole event for a narrowing the declaration asked for.
+        Narrow(into[..Components]);
     }
 }
 
@@ -147,7 +306,10 @@ internal sealed class EventTypeInfo
         var max = 5 + body.PackBytes + 8;
         foreach (var b in bindings)
         {
-            max += b.Field.Packed ? 0 : 5 * Math.Max(1, b.Components);
+            // A str is a varu length and up to its WIRE cap in bytes — not the struct's, which may be far larger and is
+            // never what reaches the frame; a number is at most five bytes, or ten for a 64-bit one (W32).
+            var perNumber = b.Field.ValueKind == FieldValueKind.Integer64 || b.Field.Kind == CodecKind.F64 ? 10 : 5;
+            max += b.IsText ? 5 + b.TextWireCap : b.Field.Packed ? 0 : perNumber * Math.Max(1, b.Components);
         }
 
         MaxBytes = max;
@@ -368,19 +530,21 @@ internal sealed class EventHub
 
     private static EventFieldBinding Bind(EventDeclaration declaration, Type type, FieldPlan field)
     {
-        if (field.ValueKind != FieldValueKind.Number)
+        if (field.ValueKind is not (FieldValueKind.Number or FieldValueKind.Integer64 or FieldValueKind.Text))
         {
             throw new InvalidOperationException(
-                $"Event '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and an event is an unmanaged struct, which holds no text, no " +
-                "blob and no list.");
+                $"Event '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and an event is an unmanaged struct: it carries numbers and " +
+                "an inline Utf8Text, but no blob and no list.");
         }
 
         var sourceName = field.Name;
+        var saturating = false;
         foreach (var declared in declaration.Fields)
         {
             if (string.Equals(declared.Name, field.Name, StringComparison.Ordinal))
             {
                 sourceName = declared.SourceFieldName;
+                saturating = declared.Codec.Saturating;
                 break;
             }
         }
@@ -388,12 +552,44 @@ internal sealed class EventHub
         var member = type.GetField(sourceName, BindingFlags.Public | BindingFlags.Instance)
                      ?? throw new InvalidOperationException($"Event '{declaration.Name}' carries '{field.Name}', and '{type.Name}' has no field '{sourceName}'.");
         var offset = (int)Marshal.OffsetOf(type, sourceName);
-        if (member.FieldType == typeof(EntityId))
+        if (field.ValueKind == FieldValueKind.Text)
+        {
+            var capacity = MessageText.CapacityOf(member.FieldType)
+                           ?? throw new InvalidOperationException(
+                               $"Event '{declaration.Name}' field '{field.Name}' travels as a str, and '{type.Name}.{sourceName}' is a " +
+                               $"'{member.FieldType.Name}'. A str field is an inline text type — {MessageText.KnownTypes} — " +
+                               "because an event struct owns its bytes.");
+            // Only a capacity SMALLER than the wire cap is unsafe — then the wire admits more bytes than the struct can
+            // hold and the surplus is truncated silently. A capacity LARGER is allowed: the wire cap is then the tighter
+            // of the two, and `EventFieldBinding.LoadText` is what applies it. Demanding equality made one storage size
+            // the engine's ingress policy, since a 24-byte name field then had to admit 256 bytes from every client on
+            // every message — and the wire design names per-field `maxBytes` as exactly that knob.
+            if (capacity < field.Codec.MaxBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Event '{declaration.Name}' field '{field.Name}' declares Codec.Str({field.Codec.MaxBytes}) and " +
+                    $"'{type.Name}.{sourceName}' holds only {capacity}. The struct must be able to carry the cap the wire " +
+                    "enforces, or the surplus is truncated without a word.");
+            }
+
+            return new EventFieldBinding(
+                field,
+                offset,
+                1,
+                CommandFieldElement.U8,
+                sizeof(byte),
+                entity: false,
+                textCapacity: capacity,
+                textWireCap: field.Codec.MaxBytes);
+        }
+
+        // An EntityLink<T> is the same eight bytes as the EntityId it wraps.
+        if (CodecPairing.IsReference(member.FieldType))
         {
             return new EventFieldBinding(field, offset, 1, CommandFieldElement.U64, sizeof(ulong), entity: true);
         }
 
-        var (element, elementSize) = CommandRegistry.ElementOf(member.FieldType, declaration.Name, field.Name);
+        var (element, elementSize) = CommandRegistry.ElementOf(member.FieldType, declaration.Name, field.Name, field.Components);
         var fieldSize = Marshal.SizeOf(member.FieldType.IsEnum ? Enum.GetUnderlyingType(member.FieldType) : member.FieldType);
         if (fieldSize != field.Components * elementSize)
         {
@@ -402,7 +598,19 @@ internal sealed class EventHub
                 $"is {fieldSize} bytes.");
         }
 
-        return new EventFieldBinding(field, offset, field.Components, element, elementSize, entity: false);
+        if (field.ValueKind == FieldValueKind.Integer64 && element is CommandFieldElement.F32 or CommandFieldElement.F64)
+        {
+            throw new InvalidOperationException(
+                $"Event '{declaration.Name}' field '{field.Name}' travels as {field.Codec.Type}, a 64-bit integer, and '{type.Name}.{sourceName}' is a " +
+                $"'{member.FieldType.Name}'.");
+        }
+
+        return new EventFieldBinding(field, offset, field.Components, element, elementSize, entity: false)
+        {
+            Saturating = saturating && CodecPairing.IsIntegerCodec(field.Codec.Kind),
+            Clamp = CodecPairing.CodeRange(field.Codec),
+            ComponentOffsets = FieldShape.Of(member.FieldType)?.Offsets,
+        };
     }
 
     // ══ Emission (any worker) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -532,7 +740,7 @@ internal sealed class EventHub
             _departed.Clear();
             push.Realm0.CollectDeparted(_departed);
             Array.Clear(_memo);
-            Span<double> one = stackalloc double[4];
+            Span<double> one = stackalloc double[ProtocolConstants.MaxCount];
             Span<byte> pack = stackalloc byte[64];
             foreach (var segment in _segments)
             {
@@ -723,6 +931,8 @@ internal sealed class EventHub
         scoped Span<byte> pack) where TEntities : IEventEntities, allows ref struct
     {
         slot.EnsureArena(info.MaxBytes);
+        // A field is either numbers or 64-bit integers, each written before the next is loaded: the caller's buffer serves both, not zeroed per event.
+        var wide = MemoryMarshal.Cast<double, ulong>(one);
         var w = new WireWriter(slot.Arena.AsSpan(slot.ArenaLength, info.MaxBytes));
         try
         {
@@ -746,6 +956,19 @@ internal sealed class EventHub
             for (var i = body.PackedCount; i < bindings.Length; i++)
             {
                 var f = bindings[i];
+                if (f.IsText)
+                {
+                    w.WriteStr(f.LoadText(payload), f.Field.Codec.MaxBytes);
+                    continue;
+                }
+
+                if (f.Field.ValueKind == FieldValueKind.Integer64)
+                {
+                    f.LoadInteger64(payload, wide);
+                    FieldCodec.WriteInteger64(ref w, f.Field, wide[..f.Components]);
+                    continue;
+                }
+
                 if (f.Entity)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[f.Offset..]));

@@ -29,6 +29,7 @@ import {
 } from '@/shell/commands/openDbMap';
 import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
 import { CaptureDetailCard } from '@/panels/Profiles/CaptureDetailCard';
+import { RealmLeafCard } from '@/panels/Realms/RealmLeafCard';
 import type { Profile } from '@/hooks/profiles/useProfileList';
 import { isViewActive } from '@/shell/viewRegistry';
 import type { ComponentSchema, Field } from '@/hooks/schema/types';
@@ -159,6 +160,8 @@ function LeafCard({ leaf }: { leaf: SelectionLeaf }): React.JSX.Element {
       return <QueryLeafCard ref0={leaf.ref} />;
     case 'capture':
       return <CaptureDetailCard profile={leaf.ref as Profile} />;
+    case 'realm':
+      return <RealmLeafCard id={Number(leaf.ref)} />;
     default:
       return <ObjectSummaryCard icon={<Binary className="h-4 w-4 text-muted-foreground" />} kind={leaf.type} title={String(leaf.ref)} />;
   }

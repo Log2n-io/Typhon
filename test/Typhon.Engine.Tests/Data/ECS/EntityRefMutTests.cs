@@ -63,6 +63,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
     /// <summary>The compile-time guarantee, projected as an assertion: the read-only handle has no member that mutates.</summary>
     [Test]
     [VerifiesRule("ACCESS-01")]
+    [VerifiesRule("EP-03")]
     public void EntityRef_ExposesNoWriteMember_EntityRefMutDoes()
     {
         var roMembers = typeof(EntityRef).GetMembers(BindingFlags.Public | BindingFlags.Instance)
@@ -74,11 +75,27 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         string[] readSurface =
         [
             "Id", "get_Id", "ArchetypeId", "get_ArchetypeId", "IsValid", "get_IsValid", "ComponentCount", "get_ComponentCount", "Read", "TryRead",
-            "IsEnabled", "GetComponentName", "ReadRaw", "Equals", "GetHashCode", "ToString", "GetType", "Realm", "get_Realm",
+            "IsEnabled", "GetComponentName", "GetComponentSize", "ReadRaw", "Equals", "GetHashCode", "ToString", "GetType", "Realm", "get_Realm",
         ];
         Assert.That(roMembers.Except(readSurface), Is.Empty, "EntityRef's public surface is read-only; review any new member here first");
-        Assert.That(mutMembers, Is.SupersetOf(new[] { "Write", "Enable", "Disable" }));
+        Assert.That(mutMembers, Is.SupersetOf(new[] { "Set", "Enable", "Disable" }));
         Assert.That(mutMembers, Does.Not.Contain("IsWritable"));
+
+        // #1199: the point-access handles hand out values, never a reference into a page — one could outlive the page it addresses.
+        var byRef = typeof(EntityRef).GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Concat(typeof(EntityRefMut).GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            .Where(m => m.ReturnType.IsByRef)
+            .Select(m => $"{m.DeclaringType?.Name}.{m.Name}");
+        Assert.That(byRef, Is.Empty, "a public member returns a reference");
+
+        // Nor a span or other ref-like value that could address a page. The one allowed is ReadRaw(int), whose span is over a fresh array.
+        var byRefLike = typeof(EntityRef).GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Concat(typeof(EntityRefMut).GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            .Where(m => m.ReturnType.IsByRefLike && m.Name != nameof(EntityRef.ReadRaw)
+                        && m.Name != nameof(EntityRefMut.CreateComponentCollectionAccessor))
+            .Select(m => $"{m.DeclaringType?.Name}.{m.Name}");
+        Assert.That(byRefLike, Is.Empty, "a public member returns a ref-like value that may point into a page");
+        Assert.That(mutMembers, Does.Not.Contain("Write"), "Write returned a reference into the page; Set copies the value in");
 
         // An EntityRefMut comes only from a writable open: no public constructor, and no conversion INTO it from EntityRef.
         Assert.That(typeof(EntityRefMut).GetConstructors(BindingFlags.Public | BindingFlags.Instance), Is.Empty);
@@ -103,7 +120,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var mut = tx.OpenMut(id);
-        mut.Write(SvUnit.Position).X = 42;
+        var position = mut.Read(SvUnit.Position);
+        position.X = 42;
+        mut.Set(SvUnit.Position, position);
         EntityRef ro = mut;
 
         Assert.That(ro.IsValid, Is.True);
@@ -123,7 +142,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
     [VerifiesRule("ACCESS-01")]
     public void EveryNonWritingMember_IsReadonly()
     {
-        string[] mutators = ["Write", "Enable", "Disable"];
+        string[] mutators = ["Set", "Enable", "Disable", "CreateComponentCollectionAccessor"];
         string[] objectMembers = ["Equals", "GetHashCode", "ToString", "GetType"];
         foreach (var type in new[] { typeof(EntityRef), typeof(EntityRefMut) })
         {
@@ -162,7 +181,10 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         }
         Assert.That(seen, Is.EqualTo(33));
 
-        tx.OpenMut(a).Write(VUnit.Stats).Health = 99;
+        var opened = tx.OpenMut(a);
+        var stats = opened.Read(VUnit.Stats);
+        stats.Health = 99;
+        opened.Set(VUnit.Stats, stats);
         var ro = tx.Open(a);
         Assert.That(ReadHealth(in ro), Is.EqualTo(99), "read-your-own-write through an `in` receiver");
         Assert.That(ReadHealth(in ro), Is.EqualTo(99));
@@ -226,7 +248,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         {
             Assert.That(tx.TryOpenMut(id, out var entity), Is.True);
             Assert.That(entity.IsValid, Is.True);
-            entity.Write(SvUnit.Position).X = 7;
+            var position = entity.Read(SvUnit.Position);
+            position.X = 7;
+            entity.Set(SvUnit.Position, position);
             tx.Commit();
         }
 
@@ -261,7 +285,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         var vel = new SvVelocity(0, 0);
         var spawned = tx.Spawn<SvUnit>(SvUnit.Position.Set(in pos), SvUnit.Velocity.Set(in vel));
         Assert.That(tx.TryOpenMut(spawned, out var own), Is.True, "an own spawn is writable before commit");
-        own.Write(SvUnit.Position).X = 6;
+        var positionCopy = own.Read(SvUnit.Position);
+        positionCopy.X = 6;
+        own.Set(SvUnit.Position, positionCopy);
 
         tx.Destroy(committed);
         Assert.That(tx.TryOpenMut(committed, out _), Is.False, "a pending destroy is not openable");
@@ -293,8 +319,12 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             Assert.That(tx.TryOpenMut(id, out var e), Is.True);
-            e.Write(MixedUnit.Position).X = 5;
-            e.Write(MixedUnit.Data).Score = 20;
+            var position = e.Read(MixedUnit.Position);
+            position.X = 5;
+            e.Set(MixedUnit.Position, position);
+            var dataCopy = e.Read(MixedUnit.Data);
+            dataCopy.Score = 20;
+            e.Set(MixedUnit.Data, dataCopy);
             tx.Commit();
         }
 
@@ -313,7 +343,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             Assert.That(tx.TryOpenMut(id, out var entity), Is.True);
-            entity.Write(VUnit.Stats).Health = 33;
+            var stats = entity.Read(VUnit.Stats);
+            stats.Health = 33;
+            entity.Set(VUnit.Stats, stats);
             Assert.That(entity.Read(VUnit.Stats).Health, Is.EqualTo(33), "read-your-own-write through the same handle");
             tx.Commit();
         }
@@ -352,7 +384,10 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         using (var done = dbe.CreateQuickTransaction())
         {
             // A write first: Commit() on an EMPTY transaction returns true but leaves it in Created, still usable.
-            done.OpenMut(id).Write(SvUnit.Position).X = 2;
+            var target = done.OpenMut(id);
+            var position = target.Read(SvUnit.Position);
+            position.X = 2;
+            target.Set(SvUnit.Position, position);
             done.Commit();
             Assert.Throws<InvalidOperationException>(() => done.TryOpenMut(id, out _));
             Assert.Throws<InvalidOperationException>(() => done.OpenMut(id));
@@ -529,7 +564,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
             {
                 Assert.That(accessor.IsAlive(id), Is.True);
                 Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
-                entity.Write(SvUnit.Position).X = 9;
+                var position = entity.Read(SvUnit.Position);
+                position.X = 9;
+                entity.Set(SvUnit.Position, position);
                 Assert.That(accessor.TryOpen(id, out var ro), Is.True);
                 Assert.That(ro.Read(SvUnit.Position).X, Is.EqualTo(9f));
             }
@@ -636,7 +673,9 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
             try
             {
                 Assert.That(accessor.TryOpenMut(id, out var entity), Is.True);
-                entity.Write(VUnit.Stats).Health = 44;
+                var statsCopy = entity.Read(VUnit.Stats);
+                statsCopy.Health = 44;
+                entity.Set(VUnit.Stats, statsCopy);
                 Assert.That(entity.Read(VUnit.Stats).Health, Is.EqualTo(44));
             }
             finally

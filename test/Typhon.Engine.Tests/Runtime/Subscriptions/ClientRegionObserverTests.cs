@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -604,4 +604,73 @@ unsafe class ClientRegionObserverTests : TestBase<ClientRegionObserverTests>
 
         return byEntity;
     }
+
+    /// <summary>
+    /// A near-routed event reaches a session whose observer is a <c>ClientRegion</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Nothing covered the two together.</b> <c>RouteNear</c> is tested against <c>Sphere</c> sessions and
+    /// <c>ClientRegion</c> is tested for what it replicates, and a spectator with a region — which is what a map client
+    /// is — gets its events through the intersection of the two. The SWG demo's spatial chat is exactly this shape, and
+    /// it heard nothing at all, which is what sent someone looking for this case and not finding it.
+    /// </para>
+    /// <para>
+    /// The point is put inside the hull AND within the view radius of the hull's centroid, which is the anchor a region
+    /// session's near-routing is measured from — so a delivery is required, and a silence is a defect.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ANearRoutedEventReachesAClientRegionSession()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Populate(dbe);
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            subs.Profile("god", p => p.ClientRegion(MaxEdgeM).Of<ProjCreature>());
+            subs.Event<ProjBoom>(e => e.RouteNear(b => new Vector3D(b.X, b.Y, 0d), _ => RealmId.Default, NearRadius));
+        }, nameof(ANearRoutedEventReachesAClientRegionSession), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 16,
+            EnterBudgetPerFrame = 4096,
+            ReplicationCellM = CellM,
+        });
+
+        harness.RunFence = true;
+        _tick = 0;
+        var session = harness.OpenSessions(1, "god")[0];
+
+        // A square region centred on (200, 200), so the hull's centroid — the anchor near-routing measures from — is
+        // exactly there.
+        var polygon = Polygon(200, 200, 150, 4, 0);
+        Assert.That(harness.Subscriptions.Ingress.SetRegionForTest(session, polygon, 2), Is.True);
+        Run(harness, session, 4);
+        Assert.That(Held(harness, session), Is.Not.Empty, "precondition: the region holds entities, so its cells are delivered");
+
+        // Settled: the region is unchanged for many ticks, which is the steady state a real client sits in between
+        // camera moves. A session that only hears while its region is being re-gathered would pass the 4-tick version of
+        // this case and be deaf in practice.
+        Run(harness, session, 30);
+
+        var before = harness.Replica(session).Events.Received.Count;
+
+        // Inside the hull and 10 m from its centroid: unambiguously within earshot.
+        harness.Subscriptions.Commands.Emit(new ProjBoom { X = 210f, Y = 200f, Seq = 1 });
+
+        // Inside the hull but far outside the radius: the negative half, so a pass cannot come from delivering everything.
+        harness.Subscriptions.Commands.Emit(new ProjBoom { X = 200f + ((float)NearRadius * 2f), Y = 200f, Seq = 2 });
+        Run(harness, session, 3);
+
+        var received = harness.Replica(session).Events.Received;
+        Assert.That(
+            received,
+            Has.Count.EqualTo(before + 1),
+            "a ClientRegion session heard nothing of an event emitted 10 m from its own region's centroid");
+        Assert.That(received[^1].Fields["Seq"], Is.EqualTo(1), "the one it heard is the near one, not the far one");
+    }
+
+    /// <summary>The view radius the near-routed case uses; small against the region so the two halves are unambiguous.</summary>
+    private const double NearRadius = 50d;
 }

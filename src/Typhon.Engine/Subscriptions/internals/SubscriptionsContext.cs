@@ -157,6 +157,17 @@ internal sealed class SubscriptionsContext
     public bool Faulted => Volatile.Read(ref _faulted) != 0;
 
     /// <summary>
+    /// Times the operator-telemetry emission (#WB-02) threw and was caught in <see cref="Reset"/>. Process-lifetime total; non-zero means a defect.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Faulted"/> on purpose. That flag suppresses the tick's publication, which is the right answer to a STAGE throwing because the
+    /// frame it was building is incomplete. This is an observation failing, which must not change what the tick publishes — so it is counted and nothing else.
+    /// </remarks>
+    internal long OperatorTelemetryFaults => Volatile.Read(ref _operatorTelemetryFaults);
+
+    private long _operatorTelemetryFaults;
+
+    /// <summary>
     /// Records that a stage threw this tick, so publication can be suppressed with the compute half.
     /// </summary>
     /// <remarks>
@@ -216,5 +227,31 @@ internal sealed class SubscriptionsContext
         Volatile.Write(ref _computeSeq, 0);
         Volatile.Write(ref _flushSeq, 0);
         Volatile.Write(ref _publishSeq, 0);
+
+        // The operator records (#WB-02, kinds 68-69) are emitted here rather than from the frames track, because the track is not dispatched when no session
+        // is served and "no sessions" is the reading an operator most needs. This method runs every tick regardless. Costs two flag reads when the gates are
+        // off — see EmitOperatorTelemetry.
+        //
+        // LAST, after every field above is reset, and CAUGHT. Both halves are load-bearing.
+        //
+        // Ordering: a throw from here propagates out of `TyphonRuntime.OnTickEndInternal` — this method is called BEFORE that method's `try` opens, so its
+        // catch does not cover it, which is the #890 failure mode named in the comment at the call site (`_currentUow` leaks, the flush and dispose never run,
+        // the outcome stays the previous tick's). Placed above the resets, a throw additionally left the context carrying the PREVIOUS tick's TickNumber with
+        // its counters un-zeroed — the state every stage then reads.
+        //
+        // Caught because the invariant "an observation must never cost a tick" cannot be left to prose. WB-02's first version asked the tick-telemetry ring
+        // for a percentile before the first tick was recorded; the throw stopped the recording that would have made the next tick's call legal, and it
+        // sustained itself for 508 consecutive ticks. That specific cause is fixed at its source, but the emission walks the session table and calls generated
+        // emitters, so the reachable set is not empty and is not closed — the enumerator's indexer and any future argument are both in it. A counter rather
+        // than silence: a non-zero reading names the defect, and the same shape is what `StatsEncoder` already uses for application callbacks and what
+        // `TyphonProfiler`'s exporter loop adopted for the same reason.
+        try
+        {
+            Subscriptions?.Frames?.EmitOperatorTelemetry(tickNumber);
+        }
+        catch (Exception)
+        {
+            Interlocked.Increment(ref _operatorTelemetryFaults);
+        }
     }
 }

@@ -100,7 +100,7 @@ struct AllDefaults
 /// <summary>A command with a 64-bit field, which has no default: the declaration has to narrow it or ignore it.</summary>
 struct HasLong
 {
-    /// <summary>The field with no default.</summary>
+    /// <summary>A 64-bit field: <c>i64</c> by default since the exact wire (13 § 2.1, W32).</summary>
     public long Credits;
 
     /// <summary>A field that defaults perfectly well.</summary>
@@ -110,8 +110,22 @@ struct HasLong
 /// <summary>A command with a double field, which has no default quantizer.</summary>
 struct HasDouble
 {
-    /// <summary>The field with no default.</summary>
+    /// <summary>A double: <c>f64</c> by default since the exact wire.</summary>
     public double Angle;
+}
+
+/// <summary>A struct the wire knows no shape of: two floats are not a point to the engine, so the field has no default.</summary>
+struct Pair
+{
+    public float A;
+    public float B;
+}
+
+/// <summary>A command with a field of a struct that is no fixed shape.</summary>
+struct HasPair
+{
+    /// <summary>The field with no default.</summary>
+    public Pair Where;
 }
 
 /// <summary>A command with a field the declaration wants left off the wire, and a property that is not a field at all.</summary>
@@ -367,7 +381,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     {
         using var harness = new Harness(static subs => subs.Command<AllDefaults>(c => c
             .Rate(10_000, 20_000)
-            .Field(m => m.Count, Codec.U8)));
+            .Field(m => m.Count, Codec.U8.Saturate())));
 
         var command = CommandNamed(harness.Export.Canonical, nameof(AllDefaults));
         Assert.Multiple(() =>
@@ -415,8 +429,8 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     // ── What has no default ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// A 64-bit field and a <see cref="double"/> field have no default, and the refusal lands on the declaring call naming the field, its type and both ways
-    /// out.
+    /// A field of a struct the wire has no shape for has no default, and the refusal lands on the declaring call naming the field, its type and both ways
+    /// out. A 64-bit field and a <see cref="double"/> used to be refused here; the exact wire gives them a default (13 § 2.1), tested below.
     /// </summary>
     /// <remarks>
     /// <b>The call, not <c>Start</c>.</b> The default set cannot be computed when the builder opens, because <c>Field</c> and <c>Ignore</c> run after it — so
@@ -426,19 +440,32 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     [Test]
     public void AFieldWithNoDefault_IsRefusedAtTheDeclaringCall()
     {
-        var longField = Assert.Throws<InvalidOperationException>(() => new SubscriptionsRegistry().Command<HasLong>(c => c.Rate(4, 8)));
-        var doubleField = Assert.Throws<InvalidOperationException>(() => new SubscriptionsRegistry().Command<HasDouble>(_ => { }));
+        var pairField = Assert.Throws<InvalidOperationException>(() => new SubscriptionsRegistry().Command<HasPair>(c => c.Rate(4, 8)));
 
         Assert.Multiple(() =>
         {
-            Assert.That(longField.Message, Does.Contain($"{nameof(HasLong)}.{nameof(HasLong.Credits)}"), "the refusal names the field");
-            Assert.That(longField.Message, Does.Contain("Int64"), "and its CLR type");
-            Assert.That(longField.Message, Does.Contain("Codec.VarUInt.Saturate()"), "and the narrowing that fixes it");
-            Assert.That(longField.Message, Does.Contain($".Ignore(x => x.{nameof(HasLong.Credits)})"), "and the other way out");
+            Assert.That(pairField.Message, Does.Contain($"{nameof(HasPair)}.{nameof(HasPair.Where)}"), "the refusal names the field");
+            Assert.That(pairField.Message, Does.Contain(nameof(Pair)), "and its CLR type");
+            Assert.That(pairField.Message, Does.Contain($".Ignore(x => x.{nameof(HasPair.Where)})"), "and the way out");
+        });
+    }
 
-            Assert.That(doubleField.Message, Does.Contain($"{nameof(HasDouble)}.{nameof(HasDouble.Angle)}"));
-            Assert.That(doubleField.Message, Does.Contain("Double"));
-            Assert.That(doubleField.Message, Does.Contain("Codec.Quant"), "a double needs a quantizer the declaration chooses");
+    /// <summary>A 64-bit field and a <see cref="double"/> default to their exact codecs (13 § 2.1, W32): <c>i64</c> and <c>f64</c>.</summary>
+    [Test]
+    public void A64BitOrDoubleField_DefaultsToItsExactCodec()
+    {
+        using var harness = new Harness(static subs =>
+        {
+            subs.Command<HasLong>(c => c.Rate(4, 8));
+            subs.Command<HasDouble>(_ => { });
+        });
+
+        var longCommand = CommandNamed(harness.Export.Canonical, nameof(HasLong));
+        var doubleCommand = CommandNamed(harness.Export.Canonical, nameof(HasDouble));
+        Assert.Multiple(() =>
+        {
+            Assert.That(Array.Find(longCommand.Fields, f => f.Name == nameof(HasLong.Credits)).Codec.Type, Is.EqualTo("i64"));
+            Assert.That(Array.Find(doubleCommand.Fields, f => f.Name == nameof(HasDouble.Angle)).Codec.Type, Is.EqualTo("f64"));
         });
     }
 
@@ -577,7 +604,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
 
         static void Declare(SubscriptionsRegistry subs)
         {
-            subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8));
+            subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8.Saturate()));
             subs.Command<HasScratch>(c => c.Ignore(s => s.Scratch));
             subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim));
         }

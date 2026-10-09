@@ -54,7 +54,7 @@ internal sealed unsafe class ParkedEntryList : IDisposable
     private bool _disposed;
 
     /// <summary>Creates a list whose entries are <paramref name="stride"/> bytes each.</summary>
-    /// <param name="stride">The hot entry's stride plus the cold entry's, which is what one parked entry occupies.</param>
+    /// <param name="stride">The hot entry's stride plus the cold entry's plus the owner entry's size: what one parked entry occupies.</param>
     public ParkedEntryList(int stride)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(stride);
@@ -73,10 +73,12 @@ internal sealed unsafe class ParkedEntryList : IDisposable
     /// <param name="hotBytes">Its stride.</param>
     /// <param name="cold">The cold entry's first byte.</param>
     /// <param name="coldBytes">Its stride.</param>
+    /// <param name="owner">The owner entry's first byte; ignored when <paramref name="ownerBytes"/> is 0.</param>
+    /// <param name="ownerBytes">The owner entry's size, 0 when the archetype has none.</param>
     /// <returns><see langword="false"/> when the entry was NOT kept, so the caller can count a drop rather than a park.</returns>
-    public bool Add(int chunkId, int slot, byte* hot, int hotBytes, byte* cold, int coldBytes)
+    public bool Add(int chunkId, int slot, byte* hot, int hotBytes, byte* cold, int coldBytes, byte* owner = null, int ownerBytes = 0)
     {
-        if (_disposed || hotBytes + coldBytes != _stride)
+        if (_disposed || hotBytes + coldBytes + ownerBytes != _stride || (ownerBytes > 0 && owner == null))
         {
             return false;
         }
@@ -87,6 +89,10 @@ internal sealed unsafe class ParkedEntryList : IDisposable
         var destination = _bytes + ((nint)_count * _stride);
         Unsafe.CopyBlockUnaligned(destination, hot, (uint)hotBytes);
         Unsafe.CopyBlockUnaligned(destination + hotBytes, cold, (uint)coldBytes);
+        if (ownerBytes > 0)
+        {
+            Unsafe.CopyBlockUnaligned(destination + hotBytes + coldBytes, owner, (uint)ownerBytes);
+        }
         _count++;
         return true;
     }
@@ -97,7 +103,7 @@ internal sealed unsafe class ParkedEntryList : IDisposable
     /// <param name="index">Its position in the list.</param>
     /// <param name="chunkId">The destination cluster.</param>
     /// <param name="slot">The destination slot.</param>
-    /// <param name="bytes">The entry's bytes: the hot entry followed by the cold one.</param>
+    /// <param name="bytes">The entry's bytes: the hot entry, the cold one, then the owner one when the archetype has one.</param>
     public void Read(int index, out int chunkId, out int slot, out byte* bytes)
     {
         if (_disposed || (uint)index >= (uint)_count)
@@ -148,6 +154,7 @@ internal sealed unsafe class ParkedEntryList : IDisposable
             capacity *= 2;
         }
 
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling, and the stride needs the 64-byte alignment
         var grown = (byte*)NativeMemory.AlignedAlloc((nuint)((nint)capacity * _stride), 64);
         if (_bytes != null)
         {

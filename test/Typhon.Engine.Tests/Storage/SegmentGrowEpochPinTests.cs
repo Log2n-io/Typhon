@@ -23,8 +23,9 @@ namespace Typhon.Engine.Tests;
 /// </para>
 /// <para>
 /// Note what that implies, because it is what makes the measurement below meaningful: the grow's write loops latch and
-/// unlatch every page they touch, so they end pinning <b>nothing</b>. The post-condition is the only thing a grow
-/// leaves pinned, and the count these tests read is entirely its doing.
+/// unlatch every page they touch, so they end pinning <b>nothing</b>. The post-condition was the only thing a grow
+/// left pinned — one page per page it grew, once bounded — and since it reads and releases each page (EP-02) a grow
+/// leaves nothing pinned at all, which is what the verifier asserts.
 /// </para>
 /// <para>
 /// The verifier <b>counts pins</b> rather than waiting for the timeout: it is the invariant itself rather than a
@@ -72,18 +73,14 @@ public sealed class SegmentGrowEpochPinTests
     private const int GrowBy = 10;
 
     /// <summary>
-    /// Pins allowed for a <see cref="GrowBy"/>-page grow: the new pages, the old tail, the directory root and its map
-    /// extensions, and the occupancy-bitmap pages the allocator touches.
+    /// Pins allowed for a <see cref="GrowBy"/>-page grow: none. Its writes latch and unlatch, which clears the epoch tag, and its two
+    /// post-conditions read and release (EP-02).
     /// </summary>
     /// <remarks>
-    /// Measured at <b>13</b> — the 10 new pages, the old tail and the directory root from the chain check, plus the
-    /// map-extension page that post-condition #2 (<c>VerifyDirectoryAgainst</c>) faults — against
-    /// <b>2410</b> before the fix — the whole segment. The headroom is deliberate: the exact figure moves with page
-    /// geometry and with how many occupancy pages an allocation happens to touch, and pinning the test to 13 would make
-    /// it a change-detector. What must not move is the ORDER, so the budget only has to stay far below
-    /// <see cref="SegmentPages"/> to mean something.
+    /// Measured at <b>0</b>; <b>13</b> when the post-conditions epoch-tagged what they read — the 10 new pages, the old tail, the directory root and its
+    /// map-extension page — and <b>2410</b> when the chain check walked the whole segment.
     /// </remarks>
-    private const int PinBudget = GrowBy + 64;
+    private const int PinBudget = 0;
 
     /// <summary>
     /// Distinctive substring of the verifier's own rejection message. <see cref="RuleMutants.AssertDetects"/> requires
@@ -122,7 +119,8 @@ public sealed class SegmentGrowEpochPinTests
 
     [Test]
     [VerifiesRule("EP-01")]
-    public void Grow_InsideCallerEpochScope_PinsOnlyTheGrownRange()
+    [VerifiesRule("EP-02")]
+    public void Grow_InsideCallerEpochScope_PinsNothing()
     {
         using var provider = CreateProvider(memPageCount: 800, "seg_grow_pin_budget");
         using var scope = provider.CreateScope();
@@ -140,9 +138,14 @@ public sealed class SegmentGrowEpochPinTests
         // No SaveChanges, unlike BuildSegment: a transaction that grows a segment mid-commit has not checkpointed either,
         // and the measurement is of EpochHeld, which dirty state does not affect.
         var changeSet = pmmf.CreateChangeSet();
-        segment.Grow(segment.Length + GrowBy, true, changeSet);
+        segment.Grow(segment.Length + GrowBy, changeSet);
 
         AssertPinBudget(pmmf, segment.Length);
+
+        // The control the zero above needs: inside the same scope, an epoch-tagged read IS counted. Without it, zero could mean RequestPageEpoch had
+        // stopped stamping AccessEpoch — a PS-01 use-after-free passing as a success.
+        pmmf.RequestPageEpoch(segment.Pages[0], guard.Epoch, out _);
+        Assert.That(pmmf.CountUnevictablePages().EpochHeld, Is.EqualTo(1), "control: a page read through RequestPageEpoch is epoch-pinned");
     }
 
     /// <summary>
@@ -169,10 +172,14 @@ public sealed class SegmentGrowEpochPinTests
 
             using var guard = EpochGuard.Enter(pmmf.EpochManager);
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(segment.Length + GrowBy, true, changeSet);
+            segment.Grow(segment.Length + GrowBy, changeSet);
 
-            // The removed post-condition, verbatim: prove a 10-page grow correct by re-reading all 1010 pages.
-            segment.WalkForwardChainPageCount(guard.Epoch);
+            // The removed post-condition: prove a 10-page grow correct by re-reading all 1010 pages, each tagged with the caller's epoch, as the
+            // exhaustive walk did before it read and released (EP-02, #1144).
+            for (var i = 0; i < segment.Length; i++)
+            {
+                segment.GetPage(i, guard.Epoch, out _);
+            }
 
             AssertPinBudget(pmmf, segment.Length);
         });
@@ -189,8 +196,8 @@ public sealed class SegmentGrowEpochPinTests
     {
         // 800 pages of cache for a 2400-page segment — three times too small to hold it. TestMode is what permits a cache
         // below the 8 MiB floor; the floor exists so production cannot be configured into this corner, and this test's
-        // whole point is to sit in it. The margin matters: since the check pins its own range, a GrowStep-page step holds
-        // roughly GrowStep+1 pages, so the cache must comfortably exceed the STEP even though it cannot hold the segment.
+        // whole point is to sit in it. The margin matters: a GrowStep-page step holds its new pages dirty until the step
+        // completes, so the cache must comfortably exceed the STEP even though it cannot hold the segment.
         using var provider = CreateProvider(memPageCount: 800, "seg_grow_backpressure");
         using var scope = provider.CreateScope();
         var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
@@ -214,7 +221,7 @@ public sealed class SegmentGrowEpochPinTests
     /// <c>LogicalSegmentNextMapPBID</c> is the field adjacent to <c>LogicalSegmentNextRawDataPBID</c> in that struct — so
     /// a wrong-field write there is exactly the bug class this post-condition exists to catch, at an index a naive
     /// <c>[growFrom-1, end]</c> bound would skip. Without this test the root branch would be covered by execution only:
-    /// <see cref="Grow_InsideCallerEpochScope_PinsOnlyTheGrownRange"/> runs it, but would stay green if it checked nothing.
+    /// <see cref="Grow_InsideCallerEpochScope_PinsNothing"/> runs it, but would stay green if it checked nothing.
     /// </remarks>
     [Test]
     public void Grow_WithACorruptedRootChainPointer_IsRejectedByThePostCondition()
@@ -239,7 +246,7 @@ public sealed class SegmentGrowEpochPinTests
         {
             using var guard = EpochGuard.Enter(pmmf.EpochManager);
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(segment.Length + GrowBy, true, changeSet);
+            segment.Grow(segment.Length + GrowBy, changeSet);
         });
 
         Assert.That(error.Message, Does.Contain("page[0]"),
@@ -261,14 +268,6 @@ public sealed class SegmentGrowEpochPinTests
     private static void AssertPinBudget(ManagedPagedMMF pmmf, int segmentLength)
     {
         var counts = pmmf.CountUnevictablePages();
-
-        // Lower bound first, and it is not ceremony: the post-condition is the only thing a grow leaves pinned, so ZERO
-        // pins would mean RequestPageEpoch had stopped stamping AccessEpoch — a PS-01 use-after-free, which would make
-        // the upper bound below pass for the worst possible reason.
-        Assert.That(counts.EpochHeld, Is.GreaterThan(0),
-            "the grow's chain check must pin the pages it reads; zero would mean RequestPageEpoch stopped stamping "
-            + "AccessEpoch, which is a PS-01 use-after-free, not a success");
-
         Assert.That(counts.EpochHeld, Is.LessThanOrEqualTo(PinBudget),
             $"{Ep01Marker}: a {GrowBy}-page grow on a {segmentLength}-page segment left {counts.EpochHeld} pages "
             + $"epoch-pinned (budget {PinBudget}). RequestPageEpoch raises AccessEpoch by CAS-max and only "
@@ -303,7 +302,7 @@ public sealed class SegmentGrowEpochPinTests
             using (EpochGuard.Enter(pmmf.EpochManager))
             {
                 var changeSet = pmmf.CreateChangeSet();
-                segment.Grow(Math.Min(segment.Length + GrowStep, targetPages), true, changeSet);
+                segment.Grow(Math.Min(segment.Length + GrowStep, targetPages), changeSet);
                 changeSet.SaveChanges();
             }
         }

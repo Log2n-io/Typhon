@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -295,7 +296,7 @@ public unsafe partial class Transaction
     /// and persisted as <c>ArchetypeR1.RoutingId</c>). No subtree / polymorphic expansion.</param>
     /// <returns>
     /// Entity ids in entity-map iteration order — deterministic for a given snapshot. Empty when the routing id is unknown or has no engine state. Pair each
-    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw"/> to decode component values without a compile-time type.
+    /// id with <see cref="EntityAccessor.Open"/> + <see cref="EntityRef.ReadRaw(int, Span{byte})"/> to decode component values without a compile-time type.
     /// </returns>
     public List<EntityId> EnumerateArchetypeEntities(ushort routingId)
     {
@@ -367,6 +368,54 @@ public unsafe partial class Transaction
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// Guard: this archetype can be spawned into — it has metadata, and this database has per-archetype state for it.
+    /// Unconditional, not strict-mode gated (#1095).
+    /// </summary>
+    /// <typeparam name="TArch">The archetype the caller named.</typeparam>
+    /// <param name="meta">Its metadata, as already loaded by the caller.</param>
+    /// <exception cref="InvalidOperationException">The archetype has no metadata, or this database was never initialized for it.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is not behind <see cref="CheckConfig.Enabled"/>.</b> That gate's bargain is "a diagnostic when strict mode is on, silence when it is
+    /// off", and it holds for a check whose failure is harmless. Both subjects here are dereferenced immediately after — <c>meta!.ArchetypeId</c> on the
+    /// next line, and the engine state inside <c>SpawnInternal</c> — so with the checks folded away the caller got a
+    /// <see cref="NullReferenceException"/> from engine internals for the most ordinary mistake there is: never calling
+    /// <see cref="DatabaseEngine.InitializeArchetypes"/>. That reads as an engine bug and gets filed as one. Same defect as the four fluent spatial
+    /// predicates in #897.
+    /// </para>
+    /// <para>
+    /// <b>The second condition is the one that fires, and the first is near-unreachable.</b> Worth writing down, because the obvious reading is backwards:
+    /// <c>Archetype&lt;TArch&gt;.Metadata</c> is <c>_metadata ?? EnsureFinalized()</c>, and <c>EnsureFinalized</c> registers the archetype in the process
+    /// catalog on read — so merely asking for it makes it non-null. A declared archetype therefore has metadata whether or not anyone registered its
+    /// components. What "forgot to register" actually looks like is metadata present and this database's <c>_archetypeStates</c> slot empty, which is the
+    /// <c>EntityMap</c> condition. The null-metadata branch stays as a belt-and-braces guard against an engine-side registry failure, not a user mistake.
+    /// </para>
+    /// <para>
+    /// <b>And it is free on a per-entity path, which is why the cost note that used to sit here does not apply.</b> That note said the gate had to
+    /// short-circuit before the array index because the index itself can throw and so cannot be folded. True, but the index is paid regardless: the very
+    /// next call, <c>SpawnInternal</c>, opens with <c>_dbe._archetypeStates[meta.ArchetypeId]</c>, and so do the batch paths. The check adds one field
+    /// load and one compare ahead of a B+Tree insert and an MVCC write.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RequireSpawnable<TArch>(ArchetypeMetadata meta) where TArch : Archetype<TArch>
+    {
+        if (meta == null || _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
+        {
+            ThrowNotSpawnable<TArch>();
+        }
+    }
+
+    /// <summary>Out of line, so the message is not built into every inlined spawn.</summary>
+    /// <typeparam name="TArch">The archetype the caller named.</typeparam>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNotSpawnable<TArch>() =>
+        throw new InvalidOperationException(
+            $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into. Register its components with "
+            + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning.");
+
+    /// <summary>
     /// Spawns a new entity of archetype <typeparamref name="TArch"/> with the supplied initial component values.
     /// Components not covered by <paramref name="values"/> are zero-initialized and disabled.
     /// The entity is stored in a pending map and inserted into the LinearHash at commit with BornTSN = TSN.
@@ -377,13 +426,7 @@ public unsafe partial class Transaction
     public EntityId Spawn<TArch>(params ReadOnlySpan<ComponentValue> values) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        // Inline-guard (not Require): the array-indexed condition can throw IndexOutOfRange, so the JIT can't DCE it — the
-        // folded gate must short-circuit before it, keeping this per-entity Spawn path zero-cost when strict mode is off.
-        if (CheckConfig.Enabled && _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap == null)
-        {
-            ThrowHelper.ThrowInvalidOp($"Archetype {typeof(TArch).Name} EntityMap not initialized — call DatabaseEngine.InitializeArchetypes first");
-        }
+        RequireSpawnable<TArch>(meta);
 
         var scope = TyphonEvent.BeginEcsSpawn(meta!.ArchetypeId);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. SpawnInternal is engine-internal (allocation + B+Tree insert + MVCC).
@@ -404,9 +447,7 @@ public unsafe partial class Transaction
     public void SpawnBatch<TArch>(Span<EntityId> ids, params ComponentValue[] sharedValues) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
-            $"Archetype {typeof(TArch).Name} EntityMap not initialized");
+        RequireSpawnable<TArch>(meta);
 
         EnsureMutable();
         State = TransactionState.InProgress;
@@ -517,9 +558,7 @@ public unsafe partial class Transaction
     public int SpawnBatchAllocate<TArch>(int count, Span<EntityId> ids) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
-            $"Archetype {typeof(TArch).Name} EntityMap not initialized");
+        RequireSpawnable<TArch>(meta);
         CheckConfig.Require(CheckConfig.Enabled, ids.Length >= count, $"ids span must be at least count elements");
 
         if (count == 0)
@@ -631,6 +670,153 @@ public unsafe partial class Transaction
             Unsafe.AsRef<T>(ptr + overhead) = values[i];
             entry.EnabledBits |= bitMask;
         }
+    }
+
+    /// <summary>
+    /// <see cref="SpawnBatchAllocate{TArch}"/> with the entity keys supplied by the caller rather than allocated here, and without the generic parameter
+    /// (#1102).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the keys come in.</b> <c>ctx.Commands.Spawn</c> hands the caller a final <see cref="EntityId"/> at the moment it is called, from a per-chunk
+    /// key block (#1099), so by the time the fence drains the buffer the keys are already issued and already in the caller's components. Allocating fresh
+    /// ones here would hand out a second identity for the same entity and break every reference the producing system stored.
+    /// </para>
+    /// <para>
+    /// <b>Why a span of keys and not a base plus a count.</b> The blocks are per (archetype, chunk), so one archetype's drained keys are contiguous within
+    /// a chunk's run and jump between runs. <c>baseKey + n</c> is true of <see cref="SpawnBatchAllocate{TArch}"/>'s own allocation and false of this one.
+    /// </para>
+    /// <para>
+    /// <b>Why non-generic.</b> The drain is type-erased — it holds <see cref="ComponentValue"/>, which carries a component type id, not a <c>T</c> — so it
+    /// cannot name <c>TArch</c>. The metadata it has is enough: this method uses nothing from the generic parameter that <paramref name="meta"/> does not
+    /// already carry.
+    /// </para>
+    /// <para>
+    /// Deliberately a sibling rather than a refactor: <see cref="SpawnBatchAllocate{TArch}"/> carries the #839 and #845 reasoning for what a Versioned slot
+    /// gets at allocation time, and the two bodies have to stay readable against each other.
+    /// </para>
+    /// </remarks>
+    /// <param name="meta">The archetype being spawned into. Must be registered with this database.</param>
+    /// <param name="entityKeys">The already-issued entity keys, one per entity.</param>
+    /// <param name="ids">Receives the entity ids. Must hold at least <paramref name="entityKeys"/>.Length.</param>
+    /// <returns>The base index into the spawn list, for <see cref="SpawnWriteValueRaw"/>.</returns>
+    internal int SpawnBatchAllocateRaw(ArchetypeMetadata meta, ReadOnlySpan<long> entityKeys, Span<EntityId> ids)
+    {
+        var count = entityKeys.Length;
+        if (count == 0)
+        {
+            return _spawnedEntities?.Count ?? 0;
+        }
+
+        EnsureMutable();
+        State = TransactionState.InProgress;
+        AssertThreadAffinity();
+
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        var routingId = _dbe.RoutingIdOf(meta);
+
+        // No EmitEcsSpawnBatch range record here: the keys are not a range. The producing side already emitted per-command telemetry when the id was issued,
+        // which is also where a trace reader wants it — at the call that caused the spawn, not at the fence that applied it.
+        _spawnedEntities ??= new List<SpawnEntry>(count);
+        if (_spawnedEntities.Capacity < _spawnedEntities.Count + count)
+        {
+            _spawnedEntities.EnsureCapacity(_spawnedEntities.Count + count);
+        }
+
+        _spawnedEntityIndexStale = true;
+
+        var baseIndex = _spawnedEntities.Count;
+        CollectionsMarshal.SetCount(_spawnedEntities, baseIndex + count);
+        var writeSpan = CollectionsMarshal.AsSpan(_spawnedEntities).Slice(baseIndex);
+
+        for (var n = 0; n < count; n++)
+        {
+            var entityId = new EntityId(entityKeys[n], routingId);
+            ids[n] = entityId;
+
+            ref var entry = ref writeSpan[n];
+            entry.Id = entityId;
+            entry.EnabledBits = 0;
+
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = engineState.SlotToComponentTable[slot];
+                var isVersioned = table.StorageMode == StorageMode.Versioned;
+
+                // #839 / #845, as SpawnBatchAllocate: a Versioned slot gets no content chunk until something writes it, so a batch that writes two of five
+                // components allocates two chunks per entity rather than five.
+                entry.VerLoc[slot] = 0;
+                entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
+            }
+
+            if ((n & 127) == 127)
+            {
+                _epochManager.RefreshScope();
+            }
+        }
+
+        CheckEpochRefresh();
+        return baseIndex;
+    }
+
+    /// <summary>
+    /// Writes one <see cref="ComponentValue"/> into one already-allocated spawn entry (#1102) — the type-erased counterpart of
+    /// <see cref="SpawnBatchWriteAll{T}"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One value at a time, where the generic version writes one component across N entities.</b> That is the shape the drain has: a command carries its
+    /// own value set, so the buffer is array-of-structures per entity, not structure-of-arrays per component. Transposing it to feed the striding version
+    /// would cost a pass over the payloads and a scratch buffer to save a per-call resolve — which is worth doing when this shows up in a profile and not
+    /// before.
+    /// </para>
+    /// <para>
+    /// <b>The copy is span to pointer, and the direction matters.</b> The destination is a page-cache chunk or the transaction's native spawn arena, both
+    /// engine-owned. The source is a <see cref="ComponentValue"/> living in a managed array, read through a <c>ref</c>. No pointer is ever taken over the
+    /// managed side — the project rule with the <c>0x80131506</c> crash behind it.
+    /// </para>
+    /// </remarks>
+    /// <param name="entryIndex">Index into the spawn list, from <see cref="SpawnBatchAllocateRaw"/>.</param>
+    /// <param name="value">The component value to write. Its component type id selects the slot.</param>
+    internal void SpawnWriteValueRaw(int entryIndex, in ComponentValue value)
+    {
+        var span = CollectionsMarshal.AsSpan(_spawnedEntities);
+        ref var entry = ref span[entryIndex];
+        var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
+        if (!meta.TryGetSlot(value.ComponentTypeId, out var slot))
+        {
+            // A value for a component this archetype does not have. Refused at the write rather than ignored: the producing side validated the archetype,
+            // so a stray component id here means the buffer or the drain disagreed about which archetype a command belonged to.
+            ThrowHelper.ThrowInvalidOp(
+                $"Component type {value.ComponentTypeId} is not part of archetype '{meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString()}', so a "
+                + "deferred spawn's value cannot be written to it.");
+        }
+
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        var table = engineState.SlotToComponentTable[slot];
+        var isVersioned = table.StorageMode == StorageMode.Versioned;
+
+        // #845: the first write to a Versioned slot is what creates its content, exactly as in SpawnBatchWriteAll.
+        if (isVersioned && entry.VerLoc[slot] == 0)
+        {
+            entry.VerLoc[slot] = AllocateVersionedSlotContent(meta, table, slot, entry.Id, out var compRevChunkId);
+            entry.Rev[slot] = compRevChunkId;
+        }
+
+        byte* ptr;
+        if (isVersioned)
+        {
+            var info = GetComponentInfo(meta._slotToComponentType[slot]);
+            ptr = info.CompContentAccessor.GetChunkAddress(entry.VerLoc[slot], true);
+        }
+        else
+        {
+            ptr = SpawnArena.Resolve(entry.Stage[slot]);
+        }
+
+        var size = Math.Min(value.DataSize, table.ComponentStorageSize);
+        value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
+        entry.EnabledBits |= (ushort)(1 << slot);
     }
 
     /// <summary>
@@ -1118,6 +1304,7 @@ public unsafe partial class Transaction
     private protected override EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
         AssertThreadAffinity();
+        NoteEntityOpen();   // #1189: every 128 opens the transaction moves its epoch forward, read-only included
 
 
         if (id.IsNull)
@@ -1245,48 +1432,7 @@ public unsafe partial class Transaction
                 int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
                 byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
-                // Reuse the cluster cache accessor — keyed by archetype
-                if (!_hasClusterCache || _clusterCacheArchId != id.ArchetypeId)
-                {
-                    if (_hasClusterCache)
-                    {
-                        _clusterCacheAccessor.Dispose();
-                    }
-                    if (_hasTransientClusterCache)
-                    {
-                        _transientClusterCacheAccessor.Dispose();
-                        _hasTransientClusterCache = false;
-                    }
-
-                    if (es.ClusterState.ClusterSegment != null)
-                    {
-                        _clusterCacheAccessor = es.ClusterState.ClusterSegment.CreateChunkAccessor();
-                    }
-                    if (es.ClusterState.TransientSegment != null)
-                    {
-                        _transientClusterCacheAccessor = es.ClusterState.TransientSegment.CreateChunkAccessor();
-                        _hasTransientClusterCache = true;
-                    }
-                    _clusterCacheArchId = id.ArchetypeId;
-                    _hasClusterCache = true;
-                }
-
-                // Primary base: PersistentStore for mixed/SV, TransientStore for pure-Transient
-                if (es.ClusterState.ClusterSegment != null)
-                {
-                    result._clusterBase = _clusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-                else
-                {
-                    result._clusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
-                // Mixed archetype: also set TransientStore base for Transient component reads
-                if (_hasTransientClusterCache && es.ClusterState.ClusterSegment != null)
-                {
-                    result._transientClusterBase = _transientClusterCacheAccessor.GetChunkAddress(clusterChunkId, writable);
-                }
-
+                ResolveClusterBases(es, id.ArchetypeId, clusterChunkId, writable, ref result);
                 result._clusterSlotIndex = slotIndex;
                 result._clusterChunkId = clusterChunkId;
                 result._clusterLayout = es.ClusterState.Layout;
@@ -1945,7 +2091,7 @@ public unsafe partial class Transaction
                 var es = _dbe._stateByRouting[archId];
                 if (es?.EntityMap != null)
                 {
-                    es.EntityMap.EnsureCapacity((int)es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
+                    es.EntityMap.EnsureCapacity(es.EntityMap.EntryCount + _spawnedEntities.Count, _changeSet);
                 }
             }
         }
@@ -2542,7 +2688,7 @@ public unsafe partial class Transaction
 
                             if (orderGrid == null)
                             {
-                                realm = orderClusterState.SpawnFallbackRealm(entry.SpawnRealm);
+                                realm = orderClusterState!.SpawnFallbackRealm(entry.SpawnRealm);
                                 grid = _dbe.RealmTable.Get(realm).Grid;
                             }
                             else
@@ -2552,7 +2698,7 @@ public unsafe partial class Transaction
                         }
 
                         SpatialGrid.ReadSpatialCenter3D(row + fieldOffset, fieldType, out var x, out var y, out var z);
-                        cellKey = grid.WorldToCellKey(x, y, z);
+                        cellKey = grid!.WorldToCellKey(x, y, z);
                         grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
                         mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz),
                             (float)grid.Config.InverseCellSize);
@@ -3329,10 +3475,27 @@ public unsafe partial class Transaction
                 return;
             }
 
-            // Free chunk allocated by Spawn/Write in same tx
-            if (cri.CurCompContentChunkId != 0)
+            // Free the chunk a Spawn or Write in this transaction allocated — and only that one. An entry that was only READ holds the COMMITTED
+            // revision's content chunk, which the chain owns: older snapshots still read it, and the revision GC frees it once the tombstone below makes
+            // it unreachable. Freeing it here as well freed it twice. The first free let a spawn reuse it at once, and the GC's free then took it from
+            // under that new entity, so the next spawn got the same chunk and two live entities shared one payload: a consume-and-craft market storm read
+            // another item's data within a few thousand operations, and 100 destroy-then-respawn rounds on 2,000 entities were enough to show it.
+            if (cri.CurCompContentChunkId != 0 && (cri.Operations & (ComponentInfo.OperationType.Created | ComponentInfo.OperationType.Updated)) != 0)
             {
-                info.CompContentSegment.FreeChunk(cri.CurCompContentChunkId);
+                // This transaction's revision — a write's, or a component enabled in it — becomes the tombstone, element first: freed while its element
+                // still named it, the chunk stayed listed by a committed revision, a dangling reference in a chain that could never reduce to its
+                // tombstone. Not found, the chunk is left allocated: a leak, never a free under an element that still names it.
+                if (ComponentRevisionManager.MakeOwnRevisionTombstone(info, ref cri, cri.CurCompContentChunkId))
+                {
+                    // CC-aware: a copy-on-write took a reference on every collection buffer it shares with the committed revision.
+                    DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
+                }
+                else
+                {
+                    System.Diagnostics.Debug.Fail(
+                        $"REAP-02: no uncommitted revision names chunk {cri.CurCompContentChunkId}; left allocated rather than freed under it");
+                }
+
                 cri.CurCompContentChunkId = 0;
             }
         }
@@ -3350,8 +3513,11 @@ public unsafe partial class Transaction
 
         cri.Operations |= ComponentInfo.OperationType.Deleted;
 
-        // Create tombstone revision only on first mutation (same guard as UpdateComponent)
-        if (!cached || (cri.Operations & ComponentInfo.OperationType.Read) != 0)
+        // Create the tombstone revision only on the first mutation — UpdateComponent's guard, which this used to paraphrase as "was read". An entry that
+        // was read and then WRITTEN carries both bits: it already has this transaction's revision, which the cleared chunk id above turns into the
+        // tombstone. Adding a second one left that first revision isolated for ever, its chunk freed above, so neither the GC nor the entity cleanup could
+        // reduce the chain to its tombstone: every write-then-destroy leaked the chain and the committed content it still listed.
+        if (!cached || (cri.Operations & (ComponentInfo.OperationType.Created | ComponentInfo.OperationType.Updated)) == 0)
         {
             ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, true);
         }
@@ -3714,7 +3880,15 @@ public unsafe partial class Transaction
 
                     if (table.StorageMode == StorageMode.Versioned)
                     {
-                        // Versioned: free componentChunkId from SpawnEntry + compRev chain from SingleCache
+                        // Versioned: the spawn's content chunk and chain — unless the rollback already freed them. RollbackComponent frees both for every
+                        // Created entry and then drops it from the cache, so an entry still cached is one it never processed. Freeing them here regardless
+                        // freed the content chunk twice (REAP-02).
+                        var compType = meta._slotToComponentType[slot];
+                        if (!_componentInfos.TryGetValue(compType, out var info) || !info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                        {
+                            continue;
+                        }
+
                         int chunkId = entry.VerLoc[slot];
                         if (chunkId > 0)
                         {
@@ -3722,13 +3896,9 @@ public unsafe partial class Transaction
                             DeferredCleanupManager.FreeContentChunk(table, chunkId);
                         }
 
-                        var compType = meta._slotToComponentType[slot];
-                        if (_componentInfos.TryGetValue(compType, out var info) && info.SingleCache.TryGetValue((long)entry.Id.RawValue, out var cri))
+                        if (cri.CompRevTableFirstChunkId > 0)
                         {
-                            if (cri.CompRevTableFirstChunkId > 0)
-                            {
-                                table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
-                            }
+                            table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
                         }
                     }
                     else

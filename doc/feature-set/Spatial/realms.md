@@ -111,8 +111,8 @@ dag.QuerySystem("BarOrders", ctx => { /* … */ }, input: () => patrons, changeF
 - **Isolation.** A spatial query answers in exactly one realm (SQ-08); the narrowphase returns only that realm's entities (RM-04). A cluster holds
   entities of one realm.
 - **Realm changes.** A realm change is a mandatory crossing (RM-03). An invalid key — an unregistered or closing realm, or one the archetype is
-  incompatible with (an f32 archetype in a realm that needs f64 coordinates) — throws at `Spawn` / `Teleport`, in application code; a raw write of a
-  bad key is reverted at the fence, never thrown there (RM-05).
+  incompatible with (an f32 archetype in a realm that needs f64 coordinates) — throws at `Spawn` / `Teleport` / `Set`, in application code; a raw
+  write of a bad key (a cluster span) is reverted at the fence, never thrown there (RM-05).
 - **Durability.** Every realm's identity (bounds, cell size, hysteresis) is written to the database's realm catalog at its first registration; on
   every later open a registration that differs from it is refused, a catalogued realm the application does not register is rebuilt from it (a
   generic opener such as the Workbench sees every realm), and a cluster naming a realm nobody knows refuses the open rather than being filed

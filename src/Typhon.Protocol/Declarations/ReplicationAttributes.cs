@@ -67,7 +67,7 @@ public abstract class CodecDeclarationAttribute : Attribute
     /// <summary>The step of a <c>Vec2/3</c> codec.</summary>
     public double Scale { get; set; }
 
-    /// <summary>The cap of a <c>Str</c> or <c>Blob</c>, or the length of <c>Bytes</c>.</summary>
+    /// <summary>The cap of a <c>Str</c>.</summary>
     public int MaxBytes { get; set; }
 
     /// <summary>The field's wire name; the builder's default (its own name) when unset.</summary>
@@ -224,7 +224,7 @@ public sealed class EntityRefAttribute : CodecDeclarationAttribute
 /// <param name="Min">A <c>Quant</c>'s lower bound.</param>
 /// <param name="Max">A <c>Quant</c>'s upper bound.</param>
 /// <param name="Scale">A <c>Vec2/3</c>'s step.</param>
-/// <param name="MaxBytes">A <c>Str</c> or <c>Blob</c>'s cap, or the length of <c>Bytes</c>.</param>
+/// <param name="MaxBytes">A <c>Str</c>'s cap.</param>
 /// <param name="Name">The wire name, or <see langword="null"/> for the field's own.</param>
 /// <param name="Saturate">Whether a value past the codec's range is clamped to it.</param>
 public readonly record struct MessageFieldDeclaration(

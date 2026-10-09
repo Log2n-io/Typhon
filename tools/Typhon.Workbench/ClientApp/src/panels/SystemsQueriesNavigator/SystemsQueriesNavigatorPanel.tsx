@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, GitBranch, Info, ListTree, Network, Workflow
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useProfilerMetadata } from '@/hooks/profiler/useProfilerMetadata';
+import type { SystemDefinitionDto } from '@/api/generated/model';
 import { useQueryDefinitions } from '@/panels/QueryAnalyzer/useQueryDefinitions';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { revealQueryInAnalyzer } from '@/shell/commands/profilerCommands';
@@ -16,24 +17,34 @@ import { revealSystemInCriticalPath, revealSystemInDag, revealSystemInDataFlow, 
  * leaf so the right-rail Inspector re-targets (Stage 1 load-a-file slice). Deep profiler/query views
  * return in Stages 3-4; this navigator is shell, always present in a profiler session.
  */
+/** Stable empty fallback — a fresh `[]` per render would defeat the narrow selector above for a session with no systems. */
+const EMPTY_SYSTEMS: SystemDefinitionDto[] = [];
+
 export default function SystemsQueriesNavigatorPanel() {
   const sessionId = useSessionStore((s) => s.sessionId);
   // Trigger + hydrate the metadata fetch (the navigator is the owner now that the Profiler panel is gated).
   const metaQuery = useProfilerMetadata(sessionId);
-  const metadata = useProfilerSessionStore((s) => s.metadata);
+  // Select the two things this panel actually reads, NOT the metadata DTO.
+  //
+  // `metadata`'s object identity flips on every `applyLiveBatch` — once per animation frame while a live session ingests —
+  // because the appended `tickSummaries` / `chunkManifest` / `globalMetrics` live on that same DTO. Subscribing to the whole
+  // thing re-rendered this entire tree at the batch rate for data it never looks at. Measured against the SWG demo at 50 Hz
+  // over 55 s: 37 532 `VerbButton` renders (682/s), 10 017 `SystemNavRow`, ~21 500 for the radix roving-focus primitives —
+  // about two thirds of every component render in the app. `systems` and the null-ness are stable across live batches, so
+  // reading them directly leaves this panel re-rendering only when the trace it describes actually changes.
+  const systems = useProfilerSessionStore((s) => s.metadata?.systems) ?? EMPTY_SYSTEMS;
+  const hasMetadata = useProfilerSessionStore((s) => s.metadata !== null);
   const buildError = useProfilerSessionStore((s) => s.buildError);
   const { definitions, isError: queriesError } = useQueryDefinitions();
   const leaf = useSelectionStore((s) => s.leaf);
   const select = useSelectionStore((s) => s.select);
   const setSystem = useSelectionStore((s) => s.setSystem);
 
-  const systems = metadata?.systems ?? [];
-
   if (buildError) {
     return <NavMessage tone="error">{buildError}</NavMessage>;
   }
   // 202 build-in-progress: metadata not yet hydrated and no terminal error.
-  if (!metadata && metaQuery.isLoading) {
+  if (!hasMetadata && metaQuery.isLoading) {
     return <NavMessage tone="muted">Building trace index…</NavMessage>;
   }
   if (systems.length === 0 && definitions.length === 0) {

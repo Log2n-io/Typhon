@@ -397,6 +397,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Whether <see cref="Shutdown"/> or <see cref="Dispose(bool)"/> has asked the workers to stop. For tests that must hold a tick open across it.</summary>
     internal bool IsShutdownRequested => Volatile.Read(ref _workerShutdown) != 0;
 
+    // The graceful half of a stop (StopTicksAndDrain): _ticksStopped closes the tick entry, _tickExecuting is held by the timer thread for a tick it entered.
+    // Each side writes its own flag with a full fence before reading the other's, so a tick either sees the stop at its entry or is seen by the drain.
+    private int _ticksStopped;
+    private int _tickExecuting;
+
+    /// <summary>Whether <see cref="StopTicksAndDrain"/> has closed the tick entry. For tests that must order a release after it.</summary>
+    internal bool AreTicksStopped => Volatile.Read(ref _ticksStopped) != 0;
+
     /// <summary>
     /// How long the tick-completion barrier tolerates a STALL — no system completing at all — after shutdown has been requested, before abandoning the tick.
     /// Not a cap on tick duration: the timer resets on every completion, so an actively-progressing tick is never cut short however slow its systems are.
@@ -584,7 +592,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <inheritdoc />
     protected override long GetNextTick()
     {
-        if (Volatile.Read(ref _workerShutdown) != 0)
+        if (Volatile.Read(ref _workerShutdown) != 0 || Volatile.Read(ref _ticksStopped) != 0)
         {
             return long.MaxValue;
         }
@@ -606,6 +614,69 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return;
         }
 
+        // Entered before the stop is read, with a full fence between: StopTicksAndDrain writes its flag and then reads this one, so one of the two sees the
+        // other. A tick that sees the stop never starts; a tick the drain sees runs to its end, fence included, before the drain returns.
+        Interlocked.Exchange(ref _tickExecuting, 1);
+        try
+        {
+            if (Volatile.Read(ref _ticksStopped) != 0)
+            {
+                return;
+            }
+
+            ExecuteEnteredTick(actualTick);
+        }
+        finally
+        {
+            Volatile.Write(ref _tickExecuting, 0);
+        }
+    }
+
+    /// <summary>
+    /// Stops starting ticks and waits for the one in flight to finish — its systems, its fence, its flush — so the world a caller reads afterwards is a
+    /// fenced one. The graceful half of a stop: <see cref="Shutdown"/> alone abandons a tick in flight.
+    /// </summary>
+    /// <param name="timeout">How long to wait for the tick in flight; a tick that hangs longer is left to <see cref="Shutdown"/>.</param>
+    /// <returns>Whether the tick in flight, if any, finished; <see cref="DrainOutcome.OnTickThread"/> on the timer thread, which is that tick and cannot wait
+    /// for itself.</returns>
+    internal DrainOutcome StopTicksAndDrain(TimeSpan timeout)
+    {
+        Interlocked.Exchange(ref _ticksStopped, 1);
+        if (IsOnTimerThread)
+        {
+            return DrainOutcome.OnTickThread;
+        }
+
+        var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _tickExecuting) != 0)
+        {
+            if (Stopwatch.GetTimestamp() > deadline)
+            {
+                return DrainOutcome.TimedOut;
+            }
+
+            spin.SpinOnce();
+        }
+
+        return DrainOutcome.Drained;
+    }
+
+    /// <summary>What <see cref="StopTicksAndDrain"/> found.</summary>
+    internal enum DrainOutcome
+    {
+        /// <summary>No tick is in flight: the last one finished, fence and flush included.</summary>
+        Drained,
+
+        /// <summary>Called on the timer thread — from inside the tick in flight, which finishes after the caller returns.</summary>
+        OnTickThread,
+
+        /// <summary>The tick in flight did not finish within the timeout.</summary>
+        TimedOut,
+    }
+
+    private void ExecuteEnteredTick(long actualTick)
+    {
         // Terminal tick-abort (#567). AbortTickAndStop leaves the simulation logically incomplete — some systems ran, some never did — so the runtime must
         // not silently resume on top of it. The host is expected to have stopped us from its OnTickAborted handler; this is the backstop for the ticks that
         // fire before it gets there.
@@ -628,6 +699,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // no other net; the multi-threaded path's worker exceptions are already netted in WorkerLoop, but its coordination code runs here too. Mirror
         // the WorkerLoop net: log loudly, surface via the hook, drop this tick. (A persistently-throwing tick keeps being surfaced every tick rather
         // than silently — the hook can escalate to graceful shutdown.)
+        // Clear the staged flush duration HERE, before the tick runs, not when telemetry consumes it. `NoteUowFlushMs` is stamped in the runtime's `finally`
+        // so a flush that threw still reports its wait — but the throw propagates out of `TickEndCallback`, which this method's own catch below turns into
+        // "log it and drop the tick", so `ComputeAndRecordTelemetry` never runs and never consumes the value. The next successful tick then reported the
+        // FAILED tick's wait, which is precisely what `DagScheduler.Telemetry.cs`'s "a tick that did not flush reports 0 rather than the previous tick's wait"
+        // promises cannot happen. Clearing at the start makes that promise true on every path out of the tick.
+        _uowFlushMs = 0f;
+
         try
         {
             if (_workerCount == 1)
@@ -1003,6 +1081,32 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     /// <summary>Telemetry ring buffer for diagnostic inspection.</summary>
     public TickTelemetryRing Telemetry => _telemetryRing;
+
+    /// <summary>
+    /// This tick's Unit-of-Work flush duration in milliseconds, staged between the flush and the telemetry record
+    /// (#CLI-04). Both live on the TICK DRIVER thread — the flush runs inside <c>TickEndCallback</c>, the record in
+    /// <c>ComputeAndRecordTelemetry</c> immediately after — so a plain field is the whole protocol; nothing else reads it.
+    /// </summary>
+    private float _uowFlushMs;
+
+    /// <summary>
+    /// Records how long the Unit-of-Work flush took, for this tick's <see cref="TickTelemetry.UowFlushMs"/>.
+    /// </summary>
+    /// <param name="milliseconds">Wall-clock duration of the flush phase.</param>
+    /// <remarks>
+    /// Called once per tick from the runtime's flush phase, including when the flush THREW: a failed flush still waited,
+    /// and a tick that reported zero because its flush failed would hide the slowest durability event the engine can have.
+    /// </remarks>
+    internal void NoteUowFlushMs(float milliseconds) => _uowFlushMs = milliseconds;
+
+    /// <summary>Takes this tick's staged flush duration and clears it, so the next tick cannot inherit it.</summary>
+    /// <returns>The duration in milliseconds, or 0 when this tick did not flush.</returns>
+    private float ConsumeUowFlushMs()
+    {
+        var ms = _uowFlushMs;
+        _uowFlushMs = 0f;
+        return ms;
+    }
 
     /// <summary>Returns a ref to the current tick's SystemTelemetry for the given system index. Used by TyphonRuntime to write entity counts.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

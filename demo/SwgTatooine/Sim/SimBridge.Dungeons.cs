@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -49,9 +49,67 @@ public sealed partial class SimBridge
 
     private bool IsDungeonRealm(ushort realm) => _config.Dungeons > 0 && realm >= FirstDungeonRealm && realm < FirstDungeonRealm + _config.Dungeons;
 
+    /// <summary>Whether the slots a previous run left behind have been accounted for. See <see cref="SkipSlotsHeldFromAPreviousRun"/>.</summary>
+    private bool _staleSlotsResolved;
+
+    /// <summary>
+    /// Step the slot counter past every dungeon id a previous run left registered, once, before the first open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A dungeon realm is registered at run time and persisted like any other, so a run that ends with one open leaves its catalog row Live.</b> The next
+    /// open restores it registered — RLM-06: a Closing realm is resolved at open, a Live one is simply live again — and the slot counter, which is process
+    /// state, restarts at zero and walks straight into it. <c>Register</c> then throws <i>"Realm N is already registered"</i> from inside the Dungeon system,
+    /// which aborts the tick. It aborts every following tick too, so the world never advances: with <c>--serve</c> the process stays up, answers HTTP and
+    /// accepts profiler attachments while sitting at tick 0 forever, which reads as a hang rather than as a crash. Reproduced in two runs of
+    /// <c>--persist --planets 1 --dungeons 1</c>, and it does not need a kill — a measured run that simply ends with a dungeon open is enough.
+    /// </para>
+    /// <para>
+    /// <b>The slots are skipped, not reclaimed, and that is deliberate.</b> Reclaiming means unregistering them, which under RLM-06 needs their contents gone
+    /// before the realm can leave — and their contents include the previous party's <i>players</i>, real persisted entities that must be sent home rather than
+    /// destroyed. That is a recovery path with its own design (find the stranded players, teleport them to realm 0, destroy the mobs, let the fence retire the
+    /// realm), not a line in an opener. Skipping is the part that is unambiguously right: it costs this run the slots a previous run used, which the class
+    /// already documents as the rule within a session, and it leaves nothing in a worse state than it found.
+    /// </para>
+    /// </remarks>
+    private void SkipSlotsHeldFromAPreviousRun()
+    {
+        _staleSlotsResolved = true;
+        if (_config.Dungeons <= 0 || Dbe == null)
+        {
+            return;
+        }
+
+        // Only a prefix can be skipped: the counter is a cursor, not a set, and a hole would be re-entered by the next open anyway.
+        while (_nextDungeonSlot < _config.Dungeons
+            && Dbe.Realms.IsRegistered(new RealmId((ushort)(FirstDungeonRealm + _nextDungeonSlot))))
+        {
+            _nextDungeonSlot++;
+            _staleDungeonSlots++;
+        }
+    }
+
+    /// <summary>Dungeon slots this run inherited already registered, and therefore never used. Reported so a short run does not read as "dungeons are broken".</summary>
+    public int StaleDungeonSlots => _staleDungeonSlots;
+
+    private int _staleDungeonSlots;
+
     /// <summary>Close the dungeons whose stay is over, then open the next one when it is due. Serial.</summary>
     public void DungeonTick(TickContext ctx)
     {
+        // Before anything else, and once: the first open must not collide with a slot a previous run left registered.
+        if (!_staleSlotsResolved)
+        {
+            SkipSlotsHeldFromAPreviousRun();
+        }
+
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         _closedThisTick.Clear();
         for (var i = _openDungeons.Count - 1; i >= 0; i--)
@@ -84,7 +142,7 @@ public sealed partial class SimBridge
             UnobservedTickDivisor = 1,
             SleepAfterTicks = Math.Max(1, _config.TickRateHz),
             Parent = RealmId.Default,
-            Replication = TatooineSim.InteriorReplication,
+            Replication = TatooineSim.DungeonReplication(_nextDungeonSlot - 1),
         });
 
         var dungeon = new Dungeon
@@ -103,12 +161,15 @@ public sealed partial class SimBridge
             var c = edge * 0.5f;
             for (var m = 0; m < _config.DungeonMobs; m++)
             {
-                var a = Hash01(Salt(tick, realm, m, 0x3E1F7A93u)) * MathF.PI * 2f;
-                var r = edge * 0.25f * MathF.Sqrt(Hash01(Salt(tick, realm, m, 0x71C5B2D1u)));
+                // Not an entity draw — the mob does not exist yet. The realm and the member index are the logical identity, and both are stable.
+                var mobKey = ((long)realm << 32) | (uint)m;
+                var a = Hash01(Salt(tick, mobKey, 0x3E1F7A93u)) * MathF.PI * 2f;
+                var r = edge * 0.25f * MathF.Sqrt(Hash01(Salt(tick, mobKey, 0x71C5B2D1u)));
                 var x = c + (MathF.Cos(a) * r);
                 var z = c + (MathF.Sin(a) * r);
                 var bounds = default(NpcPlacement);
-                bounds.SetAt(x, z, 0.5f);
+                // Inside a dungeon: its own realm, its own flat floor.
+                bounds.SetAt(x, z, 0f, 0.5f);
                 var ai = new NpcBrain { Mode = AiMode.Wander, HomeX = x, HomeZ = z, LeashRadius = 6f };
                 var timers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = tick + 1 + m };
                 var move = new NpcMotion { SpeedMps = 1.2f };
@@ -119,11 +180,16 @@ public sealed partial class SimBridge
 
             // The party: idle players on planet 0, from a rotating start so every dungeon draws different ones.
             var players = _index.Players;
-            var offset = (int)(Hash01(Salt(tick, realm, 0, 0x5F3759DFu)) * Math.Max(1, players.Count));
+            var offset = (int)(Hash01(Salt(tick, realm, 0x5F3759DFu)) * Math.Max(1, players.Count));
             for (var i = 0; i < players.Count && party.Count < _config.DungeonParty; i++)
             {
                 var id = players[(offset + i) % players.Count];
+
+                // A possessed player is never drawn (SWG-01). Without this, a client that had connected and not yet sent an intent was still Idle, so a
+                // dungeon took it, teleported it into another realm and pinned ActivityTicks at int.MaxValue / 2 — a pin PlayerThink respects and which
+                // therefore survived the client disconnecting, leaving a player parked in a dungeon for the life of the process.
                 if (_interiorPins.ContainsKey(id) || _closedThisTick.Contains(id) || !tx.TryOpen(id, out var candidate)
+                    || candidate.Read(Player.Control).Kind != ControllerKind.InProcess
                     || candidate.Read(Player.Realm).Value != 0 || candidate.Read(Player.State).Activity != PlayerActivity.Idle)
                 {
                     continue;   // read-only first: a rejected candidate's page is not dirtied
@@ -134,14 +200,16 @@ public sealed partial class SimBridge
                 var p = player.Read(Player.Bounds);
                 home.Add((p.X, p.Z));
                 party.Add(id);
-                ref var state = ref player.Write(Player.State);
+                var state = player.Read(Player.State);
                 state.Activity = PlayerActivity.Inside;
-                state.ActivityTicks = int.MaxValue / 2;   // PlayerThink leaves a dungeon party alone; Close sends it home
-                ref var motion = ref player.Write(Player.Move);
+                state.ActivityTicks = int.MaxValue / 2;
+                player.Set(Player.State, state);   // PlayerThink leaves a dungeon party alone; Close sends it home
+                var motion = player.Read(Player.Move);
                 motion.VelX = 0f;
                 motion.VelZ = 0f;
+                player.Set(Player.Move, motion);
                 var at = default(PlayerPlacement);
-                at.SetAt(c + ((party.Count % 5) - 2) * 2f, 6f, p.HalfExtent);
+                at.SetAt(c + ((party.Count % 5) - 2) * 2f, 6f, 0f, p.HalfExtent);
                 tx.Teleport(id, Player.Bounds, new RealmId(realm), in at);
             }
 
@@ -171,11 +239,14 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                ref var state = ref player.Write(Player.State);
+                var state = player.Read(Player.State);
                 state.Activity = PlayerActivity.Idle;
                 state.ActivityTicks = 10 * _config.TickRateHz;
+                player.Set(Player.State, state);
                 var at = default(PlayerPlacement);
-                at.SetAt(dungeon.Home[i].X, dungeon.Home[i].Z, player.Read(Player.Bounds).HalfExtent);
+                // Home is on the planet — the teleport below names RealmId.Default — so the ground is the planet's.
+                var home = dungeon.Home[i];
+                at.SetAt(home.X, home.Z, GroundAt(RealmId.Default, home.X, home.Z), player.Read(Player.Bounds).HalfExtent);
                 tx.Teleport(id, Player.Bounds, RealmId.Default, in at);
             }
 

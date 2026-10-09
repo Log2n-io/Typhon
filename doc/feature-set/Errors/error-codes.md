@@ -24,7 +24,9 @@ try
 {
     using var tx = dbe.CreateQuickTransaction();
     var e = tx.OpenMut(soldier);
-    e.Write(Unit.Health).Current -= 25;
+    var health = e.Read(Unit.Health);
+    health.Current -= 25;
+    e.Set(Unit.Health, health);
     tx.Commit();
 }
 catch (TyphonException ex)
@@ -40,7 +42,7 @@ catch (TyphonException ex)
 | Range | Subsystem | Example codes |
 |---|---|---|
 | 1xxx | Transaction | `TransactionTimeout` (1002) |
-| 2xxx | Storage | `DataCorruption` (2003), `PageChecksumMismatch` (2005), `DatabaseLocked` (2007) |
+| 2xxx | Storage | `DataCorruption` (2003), `PageChecksumMismatch` (2005), `DatabaseLocked` (2007), `PageCacheAllocationFailed` (2009) |
 | 3xxx | Component / Schema | `SchemaValidation` (3001), `SchemaMigration` (3002) |
 | 4xxx | Index | `UniqueConstraintViolation` (4001) |
 | 6xxx | Resource | `ResourceExhausted` (6001), `LockTimeout` (6003) |

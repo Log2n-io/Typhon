@@ -5,6 +5,7 @@ import { useSelectedResourceStore } from './useSelectedResourceStore';
 import { useSchemaInspectorStore } from './useSchemaInspectorStore';
 import { useDataBrowserStore } from './useDataBrowserStore';
 import { useQueryCatalogStore } from '@/panels/QueryAnalyzer/useQueryCatalogStore';
+import { useRealmScopeStore } from './useRealmScopeStore';
 
 /**
  * Clear every session-scoped selection store so switching sessions (or closing one) leaves no stale
@@ -22,6 +23,9 @@ export function resetSessionScopedState(): void {
   // ids are trace-specific so they'd point nowhere in a new session. Sort is a PC-1 preference and survives the wipe
   // (AC3.16); `clearFilters` honours that split.
   useQueryCatalogStore.getState().clearFilters();
+  // The realm scope is a coordinate INTO a database, so it means nothing in the next one — and carrying realm 7 across
+  // a session switch would silently narrow the new session's panels to a realm that may not exist there.
+  useRealmScopeStore.getState().clear();
 }
 
 /**

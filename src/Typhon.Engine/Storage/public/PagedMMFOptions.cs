@@ -48,19 +48,18 @@ public class PagedMMFOptions
     public const ulong DefaultCacheSizeBytes = PagedMMF.DefaultDatabaseCacheSize;
 
     /// <summary>
-    /// The maximum permitted <see cref="DatabaseCacheSize"/> in bytes: 2 GiB minus one page, the largest page multiple an <c>int</c> holds, because the
-    /// cache is one allocation whose size is an <c>int</c>. Values above this fail validation.
-    /// </summary>
-    public const ulong MaximumCacheSizeBytes = PagedMMF.MaximumCacheSize;
-
-    /// <summary>
-    /// Page-cache size, in bytes. Must be a multiple of <see cref="PageSizeBytes"/>, at least <see cref="MinimumCacheSizeBytes"/>,
-    /// and at most <see cref="MaximumCacheSizeBytes"/> (2 GiB minus one page). Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB).
+    /// Page-cache size, in bytes. Must be a multiple of <see cref="PageSizeBytes"/> and at least <see cref="MinimumCacheSizeBytes"/>; at most
+    /// 2³¹ − 1 pages (about 16 TiB). No other ceiling (#945): past what the host grants, the allocation is refused at startup with a
+    /// <see cref="StorageException"/> (<see cref="TyphonErrorCode.PageCacheAllocationFailed"/>) — on Windows the commit limit (RAM plus page file),
+    /// on Linux the kernel's overcommit policy. Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB).
     /// The cache is one native allocation, so size it for one primary engine per process; a workload whose transaction working set exceeds the cache hits
     /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>
     public ulong DatabaseCacheSize { get; set; } = DefaultCacheSizeBytes;
-    /// <summary>When <c>true</c>, fills newly-allocated pages with a recognizable debug pattern (development/testing). Default <c>false</c>.</summary>
+    /// <summary>
+    /// When <c>true</c>, fills a page-cache slot with a recognizable debug pattern when it is assigned. Default <c>false</c>. No longer observable
+    /// (PS-14, #1126): a page not read from disk is cleared right after, and a page read from disk is overwritten by the read.
+    /// </summary>
     public bool PagesDebugPattern { get; set; }
 
     /// <summary>
@@ -196,11 +195,10 @@ public class PagedMMFOptions
             success = false;
         }
 
-        // The cache is one native allocation whose size travels as an int (IMemoryAllocator.AllocatePinned, the page I/O's Memory<byte> slices). This
-        // check used to allow 4 GiB, and every size from 2 GiB then threw at startup instead of here.
-        if (dcs > PagedMMF.MaximumCacheSize)
+        // No ceiling but the slot index (#945): past what the host grants, the allocation itself refuses, at startup and by name.
+        if (dcs / (ulong)PagedMMF.PageSize > (ulong)PagedMMF.MaximumMemPageCount)
         {
-            sb.AppendLine($"Database Cache Size must be at most {PagedMMF.MaximumCacheSize} bytes (2 GiB minus one page): one allocation, sized in an int.");
+            sb.AppendLine($"Database Cache Size must be at most {PagedMMF.MaximumMemPageCount} pages (about 16 TiB): a slot index is an int.");
             success = false;
         }
 

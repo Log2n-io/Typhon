@@ -87,7 +87,7 @@ System.Exception
    ├─ SchemaValidationException             (Diff: SchemaDiff)
    ├─ SchemaMigrationException              (ComponentName, IReadOnlyList<MigrationFailure>)
    ├─ SchemaDowngradeException              (ComponentName, PersistedRevision, RuntimeRevision)
-   └─ InvalidAccessException                (sealed; DEBUG-only declared-access enforcement)
+   └─ InvalidAccessException                (sealed; opt-in declared-access enforcement)
 ```
 
 ### Base — `TyphonException`
@@ -169,7 +169,7 @@ Three exceptions, all direct subclasses of `TyphonException`:
 
 [`Errors/public/InvalidAccessException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/InvalidAccessException.cs)
 
-`sealed class`. Thrown when a system tries to mutate a component it didn't declare via `SystemBuilder.Writes<T>()` / `SideWrites<T>()`. **DEBUG builds only** — the `SystemAccessValidator` compiles out in `RELEASE`. Indicates declaration drift; fix by adding the missing `Writes<T>` call. See [10-runtime](10-runtime.md) for the access-declaration model.
+`sealed class`. Thrown when a system tries to mutate a component it didn't declare via `SystemBuilder.Writes<T>()` / `SideWrites<T>()`. **Opt-in** — the `SystemAccessValidator` is compiled in all builds but gated by `Typhon:Checks:Enabled` **and** `Typhon:Checks:DeclaredAccess` (both default `false`); the JIT folds the gate away when disabled, so there is zero overhead on the `Set` path in production. Indicates declaration drift; fix by adding the missing `Writes<T>` call. See [10-runtime](10-runtime.md) for the access-declaration model.
 
 ---
 
@@ -183,7 +183,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 |---|---|---|
 | 0 | Unspecified | `Unspecified = 0` |
 | 1xxx | Transaction | `TransactionTimeout = 1002`, `SnapshotExpired = 1003` |
-| 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007` |
+| 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007`, `InvalidDatabaseBundle = 2008`, `PageCacheAllocationFailed = 2009` |
 | 3xxx | Schema / Component | `SchemaValidation = 3001`, `SchemaMigration = 3002` |
 | 4xxx | Index | `UniqueConstraintViolation = 4001` |
 | 5xxx | Query | (reserved) |

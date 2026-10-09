@@ -658,6 +658,81 @@ internal static class DamageKit
         return false;
     }
 
+    /// <summary>
+    /// Shortens one segment's forward data-page chain by a page: its second-to-last page now links to 0, so the chain stops one page short of the
+    /// directory — the shape a grow leaves when its chain pointer did not reach the disk (CHK-SEG-05, #382).
+    /// </summary>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="segmentRoot">Receives the damaged segment's root page.</param>
+    /// <param name="kind">Only a segment of this kind; <c>null</c> for the first segment long enough.</param>
+    /// <param name="root">Only the segment rooted at this page; 0 for any.</param>
+    internal static DamageRecord ShortenForwardChain(string bundlePath, out int segmentRoot, StorageSegmentKind? kind = null, int root = 0)
+    {
+        var (seg, damagedPage) = FindChainToDamage(bundlePath, kind, root);
+        segmentRoot = seg;
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, ((long)damagedPage * IntegrityConstants.PageSize) + PageImage.NextRawDataPageOffset, 0) };
+        ranges.AddRange(RestampPage(bundlePath, damagedPage));
+
+        return new DamageRecord(
+            "D-chain(shortened)",
+            $"the segment rooted at page {segmentRoot} now ends its forward chain one page before its directory does",
+            ranges,
+            [SegmentChecks.DirectoryChain],
+            IntegrityVerdict.Divergent,
+            RepairIsLossless: true);
+    }
+
+    /// <summary>
+    /// Closes one segment's forward chain on itself: its last page now links back to the root, so the chain never ends — the shape an engine walking it
+    /// would loop on forever (CHK-SEG-06, fatal).
+    /// </summary>
+    internal static DamageRecord LoopForwardChain(string bundlePath, out int segmentRoot)
+    {
+        int last;
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            (segmentRoot, _) = FindChainToDamage(source, null, 0);
+            last = new SegmentWalker(source).WalkSegment(segmentRoot).Pages[^1];
+        }
+
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, ((long)last * IntegrityConstants.PageSize) + PageImage.NextRawDataPageOffset, segmentRoot) };
+        ranges.AddRange(RestampPage(bundlePath, last));
+
+        return new DamageRecord(
+            "D-chain(loop)",
+            $"the segment rooted at page {segmentRoot} now links its last page back to its root",
+            ranges,
+            [SegmentChecks.DirectoryTraversal],
+            IntegrityVerdict.Unopenable,
+            RepairIsLossless: false);
+    }
+
+    private static (int Root, int SecondToLastPage) FindChainToDamage(string bundlePath, StorageSegmentKind? kind, int root)
+    {
+        using var source = new OfflineBundlePageSource(bundlePath);
+        return FindChainToDamage(source, kind, root);
+    }
+
+    private static (int Root, int SecondToLastPage) FindChainToDamage(IPageSource source, StorageSegmentKind? kind, int root)
+    {
+        var walker = new SegmentWalker(source);
+        foreach (var r in SweepRoots(source))
+        {
+            if (root != 0 && r != root)
+            {
+                continue;
+            }
+
+            var seg = walker.WalkSegment(r);
+            if (seg.DirectoryComplete && seg.Pages.Count >= 3 && (kind == null || seg.Kind == kind))
+            {
+                return (r, seg.Pages[^2]);
+            }
+        }
+
+        throw new InvalidOperationException($"no {kind?.ToString() ?? "any"} segment of three pages or more{(root != 0 ? $" at page {root}" : "")}");
+    }
+
     /// <summary>Every segment root the physical sweep finds — the list every pointer is validated against.</summary>
     private static List<int> SweepRoots(IPageSource source)
     {
@@ -860,20 +935,19 @@ internal static class DamageKit
     }
 
     /// <summary>
-    /// <b>D6</b> — points an EntityMap directory slot at a chunk id outside its own segment.
+    /// <b>D6</b> — points an EntityMap bucket's overflow pointer at a chunk id outside its own segment.
     /// </summary>
     /// <remarks>
-    /// The shape RB-01 warns about in the sharpest terms: a hash directory holds chunk-id POINTERS, and trusting a torn
-    /// one "dereferences garbage into a hard process crash before any loud-fail can fire". The target is deliberately far
-    /// past the segment's capacity rather than merely free — an in-range-but-free id is a state linear hashing produces
-    /// legitimately mid-split, so it is caveated rather than reported, while an id the segment cannot contain at all is
-    /// unambiguously damage.
+    /// The shape RB-01 warns about in the sharpest terms: a bucket chain holds chunk-id POINTERS, and trusting a torn one
+    /// "dereferences garbage into a hard process crash before any loud-fail can fire". The target is deliberately far past
+    /// the segment's capacity rather than merely free, so the finding is unambiguous damage. Bucket 0 is the one damaged: it
+    /// is chunk 1 of every map, the map's buckets being addressed by position (#1205) — there is no directory left to aim at.
     /// </remarks>
     /// <param name="bundlePath">The bundle to damage.</param>
-    internal static DamageRecord RedirectEntityMapDirectorySlot(string bundlePath)
+    internal static DamageRecord RedirectEntityMapOverflowPointer(string bundlePath)
     {
         int filePage;
-        long slotFileOffset;
+        long pointerFileOffset;
         int bogus;
         string archetypeName;
 
@@ -889,7 +963,6 @@ internal static class DamageKit
             ArchetypeView target = null;
             SegmentView segment = null;
             var geometry = default(ChunkGeometry);
-            var directoryChunkId = -1;
 
             foreach (var a in manifest.Archetypes.Values)
             {
@@ -904,51 +977,292 @@ internal static class DamageKit
                     continue;
                 }
 
-                var seg = walker.WalkSegment(a.EntityMapRoot);
-
-                // The meta record is chunk 0; its first inline directory id names the chunk to redirect.
-                g.TryLocate(0, out var metaOrd, out var metaInPage);
-                if (metaOrd >= seg.Pages.Count || !source.TryReadPage(seg.Pages[metaOrd], page))
-                {
-                    continue;
-                }
-
-                var metaAt = g.OffsetInPage(metaOrd, metaInPage);
-                var firstDir = MemoryMarshal.Read<int>(new ReadOnlySpan<byte>(page, metaAt + 28, sizeof(int)));
-                if (firstDir <= 0)
-                {
-                    continue;
-                }
-
                 target = a;
-                segment = seg;
+                segment = walker.WalkSegment(a.EntityMapRoot);
                 geometry = g;
-                directoryChunkId = firstDir;
                 break;
             }
 
-            if (directoryChunkId < 0)
+            if (target == null)
             {
-                throw new InvalidOperationException("no EntityMap with an inline directory chunk was found");
+                throw new InvalidOperationException("no EntityMap was found");
             }
 
-            geometry.TryLocate(directoryChunkId, out var ord, out var inPage);
+            const int bucketZeroChunk = 1;
+            const int overflowPointerOffset = 8;   // PagedHashMapBucketHeader.OverflowChunkId
+            geometry.TryLocate(bucketZeroChunk, out var ord, out var inPage);
             filePage = segment.Pages[ord];
-            slotFileOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ord, inPage);
+            pointerFileOffset = ((long)filePage * IntegrityConstants.PageSize) + geometry.OffsetInPage(ord, inPage) + overflowPointerOffset;
             bogus = geometry.Capacity(segment.Pages.Count) + 100_000;
             archetypeName = target.Name;
         }
 
-        var ranges = new List<ByteRange> { WriteInt(bundlePath, slotFileOffset, bogus) };
+        var ranges = new List<ByteRange> { WriteInt(bundlePath, pointerFileOffset, bogus) };
         ranges.AddRange(RestampPage(bundlePath, filePage));
 
         return new DamageRecord(
-            "D6(map-directory)",
-            $"the EntityMap for '{archetypeName}' now names bucket chunk {bogus}, which its segment cannot contain",
+            "D6(map-overflow-pointer)",
+            $"the EntityMap for '{archetypeName}' now links bucket 0 to overflow chunk {bogus}, which its segment cannot contain",
             ranges,
             [EntityMapChecks.PointersResolve],
             IntegrityVerdict.Divergent,
             RepairIsLossless: true);
+    }
+
+    /// <summary>The shapes <see cref="BreakEntityMap"/> gives an EntityMap, each one EMAP-01 rules out.</summary>
+    internal enum EntityMapBreak
+    {
+        /// <summary>The meta's format word is not this format's.</summary>
+        MetaFormat,
+
+        /// <summary>The meta's N0 is not the one every EntityMap is created with.</summary>
+        MetaN0,
+
+        /// <summary>A chainless bucket links to chunk 0, the meta.</summary>
+        LinkToMeta,
+
+        /// <summary>A chainless bucket links to −7, before the chunk area.</summary>
+        LinkBeforeTheChunks,
+
+        /// <summary>A chainless bucket links to another bucket's primary, whose latch word is rewritten to read as the right owner tag.</summary>
+        LinkIntoTheBuckets,
+
+        /// <summary>An overflow chunk names another bucket as its owner. Needs a map with an overflow chain.</summary>
+        MisownedOverflow,
+
+        /// <summary>A free chunk past the buckets is marked allocated and linked by no chain.</summary>
+        LeakedChunk,
+
+        /// <summary>The meta counts one entry more than the chains hold.</summary>
+        EntryCount,
+
+        /// <summary>An empty, chainless bucket's chunk is marked free.</summary>
+        FreeBucket,
+
+        /// <summary>A chainless bucket links to a chunk past the buckets, made an overflow chunk of that bucket that links to itself: a cycle.</summary>
+        Cycle,
+
+        /// <summary>An empty, chainless bucket whose key slots are all zero claims one entry more than a chunk holds.</summary>
+        OverfullBucket,
+    }
+
+    /// <summary>The first EntityMap's shape, read off the file: its bucket count, its entry count, and how many buckets chain.</summary>
+    internal static (int BucketCount, long EntryCount, int ChainedBuckets) EntityMapShape(string bundlePath)
+    {
+        using var source = new OfflineBundlePageSource(bundlePath);
+        var (_, segment, geometry) = LocateEntityMap(source);
+        var meta = ReadChunk(source, segment, geometry, 0);
+        var bucketCount = (int)BitConverter.ToInt64(meta, 8);
+        var chained = 0;
+        for (var b = 0; b < bucketCount; b++)
+        {
+            if (BitConverter.ToInt32(ReadChunk(source, segment, geometry, b + 1), 8) != -1)
+            {
+                chained++;
+            }
+        }
+
+        return (bucketCount, BitConverter.ToInt64(meta, 16), chained);
+    }
+
+    /// <summary>
+    /// <b>D6</b> — gives the first EntityMap one of the structural faults EMAP-01 rules out (<see cref="EntityMapBreak"/>).
+    /// </summary>
+    /// <remarks>
+    /// Each shape is chosen so the damage is the only thing wrong: a link is rewritten only on a bucket with no chain, so
+    /// nothing becomes unreachable behind it, and a bucket is freed only when it is empty, so no entity goes missing — the
+    /// one finding expected is the structural one.
+    /// </remarks>
+    /// <param name="bundlePath">The bundle to damage.</param>
+    /// <param name="how">The fault.</param>
+    internal static DamageRecord BreakEntityMap(string bundlePath, EntityMapBreak how)
+    {
+        const int metaN0At = 0, metaFormatAt = 4, metaEntryCountAt = 16;
+        const int ownerAt = 0, entryCountAt = 4, linkAt = 8;
+        var intWrites = new List<(long Offset, int Value)>();
+        var longWrites = new List<(long Offset, long Value)>();
+        var pages = new HashSet<int>();
+        string archetypeName;
+        string description;
+
+        using (var source = new OfflineBundlePageSource(bundlePath))
+        {
+            var (archetype, segment, geometry) = LocateEntityMap(source);
+            archetypeName = archetype.Name;
+            var meta = ReadChunk(source, segment, geometry, 0);
+            var bucketCount = (int)BitConverter.ToInt64(meta, 8);
+
+            long At(int chunkId, int field)
+            {
+                geometry.TryLocate(chunkId, out var ordinal, out var inPage);
+                pages.Add(segment.Pages[ordinal]);
+                return ((long)segment.Pages[ordinal] * IntegrityConstants.PageSize) + geometry.OffsetInPage(ordinal, inPage) + field;
+            }
+
+            int FindBucket(Func<byte[], bool> wanted, int skip = -1)
+            {
+                for (var b = 0; b < bucketCount; b++)
+                {
+                    if (b != skip && wanted(ReadChunk(source, segment, geometry, b + 1)))
+                    {
+                        return b;
+                    }
+                }
+
+                Assert.Fail($"premise: no bucket of the EntityMap for '{archetype.Name}' has the shape {how} needs");
+                return -1;
+            }
+
+            bool Chainless(byte[] chunk) => BitConverter.ToInt32(chunk, linkAt) == -1;
+
+            // Flips chunk chunkId's allocation bit to the value given, as a whole bitmap word.
+            void SetAllocated(int chunkId, bool allocated)
+            {
+                geometry.TryLocate(chunkId, out var ordinal, out var inPage);
+                var filePage = segment.Pages[ordinal];
+                var page = new byte[IntegrityConstants.PageSize];
+                Assert.That(source.TryReadPage(filePage, page), Is.True);
+                Assert.That(geometry.IsChunkAllocated(page, ordinal == 0, inPage), Is.Not.EqualTo(allocated), $"premise: chunk {chunkId}'s bit");
+                var wordAt = ChunkGeometry.MetadataOffset + ((inPage >> 6) * sizeof(long));
+                var word = BitConverter.ToInt64(page, wordAt);
+                var bit = 1L << (inPage & 63);
+                longWrites.Add((((long)filePage * IntegrityConstants.PageSize) + wordAt, allocated ? word | bit : word & ~bit));
+                pages.Add(filePage);
+            }
+
+            switch (how)
+            {
+                case EntityMapBreak.MetaFormat:
+                    intWrites.Add((At(0, metaFormatAt), 0x0BADF00D));
+                    description = "the meta's format word is not this format's";
+                    break;
+                case EntityMapBreak.MetaN0:
+                    intWrites.Add((At(0, metaN0At), 3));
+                    description = "the meta's N0 is 3";
+                    break;
+                case EntityMapBreak.LinkToMeta:
+                {
+                    var b = FindBucket(Chainless);
+                    intWrites.Add((At(b + 1, linkAt), 0));
+                    description = $"bucket {b} links to chunk 0, the meta";
+                    break;
+                }
+                case EntityMapBreak.LinkBeforeTheChunks:
+                {
+                    var b = FindBucket(Chainless);
+                    intWrites.Add((At(b + 1, linkAt), -7));
+                    description = $"bucket {b} links to -7";
+                    break;
+                }
+                case EntityMapBreak.LinkIntoTheBuckets:
+                {
+                    var b = FindBucket(Chainless);
+                    var target = FindBucket(_ => true, skip: b);
+                    intWrites.Add((At(b + 1, linkAt), target + 1));
+                    intWrites.Add((At(target + 1, ownerAt), b + 1));   // reads as the owner tag the chain's walk expects
+                    description = $"bucket {b} links to bucket {target}'s primary";
+                    break;
+                }
+                case EntityMapBreak.MisownedOverflow:
+                {
+                    var b = FindBucket(chunk => BitConverter.ToInt32(chunk, linkAt) > bucketCount);
+                    var overflow = BitConverter.ToInt32(ReadChunk(source, segment, geometry, b + 1), linkAt);
+                    intWrites.Add((At(overflow, ownerAt), b + 2));
+                    description = $"bucket {b}'s overflow chunk {overflow} names bucket {b + 1} as its owner";
+                    break;
+                }
+                case EntityMapBreak.LeakedChunk:
+                {
+                    var leaked = bucketCount + 1;
+                    SetAllocated(leaked, true);
+                    description = $"chunk {leaked}, past the buckets and linked by no chain, is marked allocated";
+                    break;
+                }
+                case EntityMapBreak.EntryCount:
+                    longWrites.Add((At(0, metaEntryCountAt), BitConverter.ToInt64(meta, metaEntryCountAt) + 1));
+                    description = "the meta counts one entry more than the chains hold";
+                    break;
+                case EntityMapBreak.FreeBucket:
+                {
+                    var b = FindBucket(chunk => Chainless(chunk) && chunk[entryCountAt] == 0);
+                    SetAllocated(b + 1, false);
+                    description = $"empty bucket {b}'s chunk is marked free";
+                    break;
+                }
+                case EntityMapBreak.Cycle:
+                {
+                    var b = FindBucket(Chainless);
+                    var loop = bucketCount + 1;   // the runway past the frontier: free in a healthy map
+                    SetAllocated(loop, true);
+                    intWrites.Add((At(b + 1, linkAt), loop));
+                    intWrites.Add((At(loop, ownerAt), b + 1));
+                    intWrites.Add((At(loop, entryCountAt), 0));
+                    intWrites.Add((At(loop, linkAt), loop));
+                    description = $"bucket {b} links to chunk {loop}, which links to itself";
+                    break;
+                }
+                case EntityMapBreak.OverfullBucket:
+                {
+                    var capacity = (geometry.Stride - 12) / (sizeof(long) + archetype.EntityRecordSize);
+                    var b = FindBucket(chunk => Chainless(chunk) && chunk[entryCountAt] == 0
+                        && chunk.AsSpan(12, capacity * sizeof(long)).IndexOfAnyExcept((byte)0) < 0);
+                    var countWord = BitConverter.ToInt32(ReadChunk(source, segment, geometry, b + 1), entryCountAt);
+                    intWrites.Add((At(b + 1, entryCountAt), (countWord & ~0xFF) | (capacity + 1)));
+                    description = $"empty bucket {b} claims {capacity + 1} entries, one more than a chunk holds";
+                    break;
+                }
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(how), how, null);
+            }
+        }
+
+        var ranges = new List<ByteRange>();
+        foreach (var (offset, value) in intWrites)
+        {
+            ranges.Add(WriteInt(bundlePath, offset, value));
+        }
+
+        foreach (var (offset, value) in longWrites)
+        {
+            ranges.Add(WriteLong(bundlePath, offset, value));
+        }
+
+        foreach (var filePage in pages)
+        {
+            ranges.AddRange(RestampPage(bundlePath, filePage));
+        }
+
+        var code = how is EntityMapBreak.LeakedChunk or EntityMapBreak.EntryCount or EntityMapBreak.FreeBucket or EntityMapBreak.Cycle
+            or EntityMapBreak.OverfullBucket
+            ? EntityMapChecks.StructureHolds
+            : EntityMapChecks.PointersResolve;
+        return new DamageRecord($"D6(map-{how})", $"the EntityMap for '{archetypeName}': {description}", ranges, [code],
+            IntegrityVerdict.Divergent, RepairIsLossless: true);
+    }
+
+    /// <summary>The first archetype's EntityMap: its archetype, segment and chunk geometry.</summary>
+    private static (ArchetypeView Archetype, SegmentView Segment, ChunkGeometry Geometry) LocateEntityMap(OfflineBundlePageSource source)
+    {
+        var roots = SweepRoots(source);
+        var manifest = new SchemaCatalogReader(source, roots);
+        manifest.Read(BootstrapReader.Read(source));
+        var walker = new SegmentWalker(source);
+        var page = new byte[IntegrityConstants.PageSize];
+        foreach (var a in manifest.Archetypes.Values)
+        {
+            if (a.EntityMapRoot == 0 || !source.TryReadPage(a.EntityMapRoot, page))
+            {
+                continue;
+            }
+
+            var geometry = ChunkGeometry.FromPage(page);
+            if (geometry.IsUsable)
+            {
+                return (a, walker.WalkSegment(a.EntityMapRoot), geometry);
+            }
+        }
+
+        throw new InvalidOperationException("no EntityMap was found");
     }
 
     /// <summary>
@@ -998,22 +1312,16 @@ internal static class DamageKit
             var capacity = (geometry.Stride - 12) / (sizeof(long) + recordSize);
             var valuesAt = 12 + (capacity * sizeof(long));
 
-            // The meta's first inline directory slot names a directory chunk; its first populated slot names a bucket.
+            // Bucket b is chunk b + 1 (#1205); the meta's bucket count (offset 8) bounds the walk.
             var meta = ReadChunk(source, segment, geometry, 0);
-            var directoryId = MemoryMarshal.Read<int>(meta.AsSpan(28));
-            var directory = ReadChunk(source, segment, geometry, directoryId);
+            var bucketCount = (int)MemoryMarshal.Read<long>(meta.AsSpan(8));
 
             var found = -1;
             byte[] bucket = null;
             var entryIndex = -1;
-            for (var slot = 0; slot < 64 && found < 0; slot++)
+            for (var b = 0; b < bucketCount && found < 0; b++)
             {
-                var bucketId = MemoryMarshal.Read<int>(directory.AsSpan(slot * sizeof(int)));
-                if (bucketId <= 0)
-                {
-                    continue;
-                }
-
+                var bucketId = b + 1;
                 var candidate = ReadChunk(source, segment, geometry, bucketId);
                 if (candidate[4] == 0)
                 {

@@ -15,7 +15,7 @@ Typhon's hot paths hold raw pointers into engine-owned memory for microseconds a
 
 ## ⚙️ How it works (in brief)
 
-A `MemoryAllocator` hands out two flavors of block: unmanaged ones backed by `NativeMemory.AlignedAlloc` (no GC interaction at all, optional power-of-2 alignment) and managed ones backed by a regular managed byte array (GC-allocated on the normal movable heap — *not* the Pinned Object Heap — and pinned on demand via `GCHandle` when a raw pointer is needed). Every block is created with an explicit owning resource and is registered as that owner's child in the engine's resource tree, not the allocator's — so a leaked block shows up under the subsystem that requested it, not lost in a flat pool. Higher-level allocators (`BlockAllocator` for fixed-stride slots, `ChainedBlockAllocator` for linked chains, `StructAllocator<T>` for typed slots) all draw their backing storage from a `MemoryAllocator` and add their own allocation/free semantics on top.
+A `MemoryAllocator` hands out two flavors of block: unmanaged ones backed by `NativeMemory.AlignedAlloc` (no GC interaction at all, optional power-of-2 alignment, and safe to address by raw pointer) and managed ones backed by a regular managed byte array (GC-allocated on the normal movable heap — *not* the Pinned Object Heap — and never addressable by a raw pointer; anything needing a stable `T*` must use `IMemoryAllocator.AllocatePinned`). Every block is created with an explicit owning resource and is registered as that owner's child in the engine's resource tree, not the allocator's — so a leaked block shows up under the subsystem that requested it, not lost in a flat pool. Higher-level allocators (`BlockAllocator` for fixed-stride slots, `ChainedBlockAllocator` for linked chains, `StructAllocator<T>` for typed slots) all draw their backing storage from a `MemoryAllocator` and add their own allocation/free semantics on top.
 
 ## 💻 Usage
 
@@ -43,7 +43,7 @@ internal sealed class MyCache : IMemoryResource
 
 ## ⚠️ Guarantees & limits
 
-- **Stable addresses** — unmanaged blocks never move for their lifetime; managed blocks only move while unpinned, and pinning is ref-counted so concurrent pinners are safe.
+- **Stable addresses** — unmanaged blocks (`AllocatePinned`) never move for their lifetime and can be addressed by raw pointer; managed blocks may be moved by the GC and cannot be addressed by pointer.
 - **Leak visibility, not leak prevention** — every block is a child resource of its caller, so an undisposed block is visible in the resource tree (and via `MemoryAllocator`'s `PinnedBytes` / `PinnedLiveBlocks` metrics) rather than silently invisible; nothing reclaims it automatically.
 - **Resource tree is organized by owner, not by allocator** — a block's parent is the subsystem that requested it (e.g. a hash map or chained allocator), so diagnostics group memory by what's using it.
 - **Alignment is caller's choice, not free** — unmanaged allocation accepts a power-of-2 alignment; requesting one larger than the natural size wastes the padding (tracked via the `Memory:AlignmentWaste` profiler event when alignment-waste tracing is on).

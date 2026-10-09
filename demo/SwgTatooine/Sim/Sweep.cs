@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -18,11 +18,18 @@ namespace SwgTatooine;
 public static class Sweep
 {
     /// <summary>Run the matrix and write a markdown report beside the executable.</summary>
-    public static int Run(SimConfig template, string[] args)
+    /// <param name="template">The configuration every point starts from; its three sweep axes say what the matrix is.</param>
+    /// <returns>The process exit code.</returns>
+    /// <remarks>
+    /// The axes arrive on the configuration rather than being re-parsed from <c>args</c> here. Parsing them twice meant the strict parser could not account
+    /// for them, and a mistyped <c>--sweep-cells</c> silently swept the default five sizes while the report named the run as the operator intended it.
+    /// </remarks>
+    public static int Run(SimConfig template)
     {
-        var worlds = Floats(args, "--sweep-worlds", [TatooineData.PlanetEdgeM / 1000f, 64f, 128f]);
-        var pops = Floats(args, "--sweep-pops", [1f, 4f, 16f]);
-        var cells = Floats(args, "--sweep-cells", [64f, 128f, 256f, 512f, 1024f]);
+        ArgumentNullException.ThrowIfNull(template);
+        var worlds = template.SweepWorlds;
+        var pops = template.SweepPops;
+        var cells = template.SweepCells;
         var rows = new List<SweepRow>();
 
         Console.WriteLine($"── Sweep: {worlds.Length} worlds x {pops.Length} populations x {cells.Length} cell sizes "
@@ -92,7 +99,15 @@ public static class Sweep
 
     private static string WriteReport(List<SweepRow> rows, SimConfig template)
     {
-        var dir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "claude", "scratch"));
+        // `claude/` is a separate private repo, so a checkout without it had the report written into a directory that does not exist there (#947). Prefer it
+        // when it is present, fall back to beside the binary, and let --report-dir override both.
+        var dir = template.ReportDirectory;
+        if (string.IsNullOrEmpty(dir))
+        {
+            var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "claude", "scratch"));
+            dir = Directory.Exists(Path.GetDirectoryName(docs)) ? docs : AppContext.BaseDirectory;
+        }
+
         Directory.CreateDirectory(dir);
         var path = Path.Combine(dir, $"swg-tatooine-sweep-{DateTime.Now:yyyy-MM-dd}.md");
         var w = new StringBuilder();
@@ -231,34 +246,17 @@ public static class Sweep
         MeasuredTicks = c.MeasuredTicks,
         PageCacheMiB = c.PageCacheMiB,
         DatabaseDirectory = c.DatabaseDirectory,
+
+        // The name carries; Persist deliberately does NOT. Every sweep point must build its own world, and --persist with --sweep is refused at the command
+        // line anyway (CommandLine.Validate) — this is the second half of that, so a sweep called from code cannot reopen either.
+        DatabaseName = c.DatabaseName,
         Seed = c.Seed,
         ParallelFence = c.ParallelFence,
         // Not part of the workload, so not part of the label either (SimConfig.Label) — but an A/B arm set on the command line must reach every sweep arm.
         AwarenessApi = c.AwarenessApi,
-        CombatApi = c.CombatApi,
         SimdNarrowphase = c.SimdNarrowphase,
     };
 
-    private static float[] Floats(string[] args, string name, float[] fallback)
-    {
-        var i = Array.IndexOf(args, name);
-        if (i < 0 || i + 1 >= args.Length)
-        {
-            return fallback;
-        }
-
-        var parts = args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries);
-        var result = new float[parts.Length];
-        for (var k = 0; k < parts.Length; k++)
-        {
-            if (!float.TryParse(parts[k], NumberStyles.Float, CultureInfo.InvariantCulture, out result[k]))
-            {
-                return fallback;
-            }
-        }
-
-        return result;
-    }
 }
 
 /// <summary>One point of the sweep.</summary>

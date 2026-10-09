@@ -7,11 +7,13 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
@@ -23,6 +25,19 @@ using Typhon.Profiler;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>Which pages a <see cref="PagedMMF.WritePagesForCheckpoint"/> call may write (CK-16).</summary>
+internal enum CheckpointWriteFilter
+{
+    /// <summary>Every page: protected directory pages are hoisted to the front of the call.</summary>
+    All,
+
+    /// <summary>Protected directory pages only: the wave that leads a checkpoint pass, written by the checkpoint thread alone.</summary>
+    ProtectedOnly,
+
+    /// <summary>Plain pages only: the parallel waves, which must never run a protected page's file-wide fsync beside an unsettled plain write.</summary>
+    PlainOnly,
+}
+
 [PublicAPI]
 public partial class PagedMMF : ResourceNode, IMemoryResource
 {
@@ -32,6 +47,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // is smaller than any real working set; 8 MiB is the smallest sane default. A test that must stress eviction with a truly
     // tiny cache sets an explicit size under TestMode, which bypasses this floor.
     internal const int MinimumMemPageCount = 1024;
+
+    /// <summary>
+    /// Test-only: fill every page cache with <c>0xA5</c> the moment it is allocated. Set once per process, before any engine exists
+    /// (the test assembly's warm-up does it), and never changed afterwards.
+    /// </summary>
+    /// <remarks>
+    /// The cache block is not zeroed (PS-14): a page the engine does not read from disk is cleared when its slot is assigned, so the
+    /// block's initial content is undefined. A fresh multi-MiB allocation nevertheless reads zero on every supported platform, which
+    /// would hide any code that still relies on it. Poisoning makes "undefined" non-zero in every test engine, so such a dependency
+    /// fails instead of passing by accident.
+    /// </remarks>
+    internal static bool PoisonCacheForProcess;
 
     #region Events
 
@@ -95,7 +122,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     //    against a hazard that does not exist.
     internal const int DatabaseFormatRevision   = 8;
     internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;                   // 8 MiB — the hard floor (see Validate)
-    internal const ulong MaximumCacheSize       = (ulong)int.MaxValue & ~((ulong)PageSize - 1);     // 2 GiB − 8 KiB — one allocation, sized in an int
+    internal const long MaximumMemPageCount     = int.MaxValue;                                     // ≈16 TiB: slot indices are int. No other ceiling (#945)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;                          // 256 MiB — the shipped production default
     internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;                          // 64 MiB — warn below this (unless TestMode)
     internal const int WriteCachePageSize       = 1024 * 1024;
@@ -150,8 +177,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         var minActive = EpochManager?.MinActiveEpoch ?? long.MaxValue;
 
-        foreach (var pi in _memPagesInfo)
+        for (var i = 0; i < MemPagesCount; i++)
         {
+            var pi = Slot(i);
             switch (pi.PageState)
             {
                 case PageState.Free:
@@ -167,7 +195,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     exclusiveCount++;
                     break;
             }
-            if (HasWritebackDebt(pi.MemPageIndex))
+            if (HasWritebackDebt(i))
             {
                 dirtyCount++;
             }
@@ -175,7 +203,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             {
                 lockedByThreadCount++;
             }
-            if (pi.IOReadTask != null && pi.IOReadTask.IsCompleted == false)
+            if (IsReadInFlight(i, pi))
             {
                 pendingIOReadCount++;
             }
@@ -224,71 +252,137 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Single linear pass over <see cref="_memPagesInfo"/> — O(MemPagesCount). At the default 256-page cache this is a few microseconds; at a 64K-page cache
-    /// it runs in a fraction of a millisecond, well within the tick budget. Zero allocations (returns a struct by value). Branches ordered by expected
-    /// frequency: Free → Idle-clean → Idle-dirty → Exclusive/Allocating.
+    /// Visits at most <see cref="GaugeScanBudget"/> slots per call (#1127, R3). A cache that fits the budget — every cache up to 2 GiB at the
+    /// default — is scanned whole on each call, exactly as before. A larger one is split into budget-sized blocks and one block is re-scanned
+    /// per call, round-robin; the snapshot sums every block's last scan, so it lags by up to one rotation. Blocks not yet scanned count as
+    /// Free, which keeps the buckets summing to the total from the first call.
     /// </para>
     /// <para>
     /// Uses plain (non-volatile) reads on purpose — snapshots have sampling semantics and microsecond-scale staleness on concurrent state transitions is
     /// acceptable for visualization. Invariant that matters: every page contributes to exactly one of the four buckets, so the stacked-area viewer never
     /// double-counts. The epoch/IO overlay counts are tracked separately and may add on top of the bucket totals.
     /// </para>
+    /// <para>
+    /// Not thread-safe once the cache is split into blocks: the rotation state is unsynchronised, so two concurrent callers could read a block
+    /// half-written and break the bucket sum. It has one caller, the scheduler's end-of-tick hook; keep it that way.
+    /// </para>
     /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal PageCacheGaugeSnapshot GetGaugeSnapshot()
     {
-        int free = 0;
-        int cleanUsed = 0;
-        int dirtyUsed = 0;
-        int exclusive = 0;
-        int epochProtected = 0;
-        int pendingIoReads = 0;
-
-        var minActive = EpochManager?.MinActiveEpoch ?? long.MaxValue;
-        var pages = _memPagesInfo;
-        if (pages == null)
+        // Null once the store is disposed: a sample arriving after that sees an empty cache.
+        var slots = _slots;
+        if (slots == null)
         {
             return default;
         }
 
-        for (var i = 0; i < pages.Length; i++)
+        var minActive = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        var n = slots.Count;
+        var budget = Math.Max(1, GaugeScanBudget);
+        GaugeBlockCounts total;
+        if (n <= budget)
         {
-            var pi = pages[i];
+            total = ScanGaugeBlock(slots, 0, n, minActive);
+        }
+        else
+        {
+            var blocks = _gaugeBlocks;
+            if (blocks == null || _gaugeBlockSize != budget)
+            {
+                blocks = new GaugeBlockCounts[(int)(((long)n + budget - 1) / budget)];
+                for (var b = 0; b < blocks.Length; b++)
+                {
+                    blocks[b].Free = Math.Min(budget, n - b * budget);
+                }
+                _gaugeBlocks = blocks;
+                _gaugeBlockSize = budget;
+                _gaugeCursor = 0;
+            }
+
+            var cursor = _gaugeCursor;
+            var start = cursor * budget;
+            blocks[cursor] = ScanGaugeBlock(slots, start, (int)Math.Min((long)start + budget, n), minActive);
+            _gaugeCursor = cursor + 1 == blocks.Length ? 0 : cursor + 1;
+
+            total = default;
+            for (var b = 0; b < blocks.Length; b++)
+            {
+                total.Free += blocks[b].Free;
+                total.CleanUsed += blocks[b].CleanUsed;
+                total.DirtyUsed += blocks[b].DirtyUsed;
+                total.Exclusive += blocks[b].Exclusive;
+                total.EpochProtected += blocks[b].EpochProtected;
+                total.PendingIoReads += blocks[b].PendingIoReads;
+            }
+        }
+
+        return new PageCacheGaugeSnapshot(n, total.Free, total.CleanUsed, total.DirtyUsed, total.Exclusive, total.EpochProtected, total.PendingIoReads);
+    }
+
+    /// <summary>Most slots one <see cref="GetGaugeSnapshot"/> call visits: 2 GiB of cache. A test may lower it.</summary>
+    internal const int DefaultGaugeScanBudget = 262_144;
+
+    /// <inheritdoc cref="DefaultGaugeScanBudget"/>
+    internal int GaugeScanBudget = DefaultGaugeScanBudget;
+
+    /// <summary>Slots <see cref="GetGaugeSnapshot"/> has visited. Test seam: count, don't time.</summary>
+    internal long GaugeSlotVisits;
+
+    private GaugeBlockCounts[] _gaugeBlocks;
+    private int _gaugeBlockSize;
+    private int _gaugeCursor;
+
+    private struct GaugeBlockCounts
+    {
+        public int Free;
+        public int CleanUsed;
+        public int DirtyUsed;
+        public int Exclusive;
+        public int EpochProtected;
+        public int PendingIoReads;
+    }
+
+    private GaugeBlockCounts ScanGaugeBlock(PageSlotTable slots, int start, int end, long minActive)
+    {
+        GaugeBlockCounts c = default;
+        for (var i = start; i < end; i++)
+        {
+            var pi = slots[i];
             // Mutually-exclusive bucket classification — first match wins.
             switch (pi.PageState)
             {
                 case PageState.Free:
-                    free++;
+                    c.Free++;
                     break;
                 case PageState.Idle:
-                    if (HasWritebackDebt(i))
+                    if (HasDebt(pi))
                     {
-                        dirtyUsed++;
+                        c.DirtyUsed++;
                     }
                     else
                     {
-                        cleanUsed++;
+                        c.CleanUsed++;
                     }
                     break;
                 case PageState.Exclusive:
                 case PageState.Allocating:
-                    exclusive++;
+                    c.Exclusive++;
                     break;
             }
 
             // Overlay counts — independent of bucket, so a dirty page may also be epoch-protected.
             if (pi.AccessEpoch >= minActive)
             {
-                epochProtected++;
+                c.EpochProtected++;
             }
-            var ioTask = pi.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompleted)
+            if (IsReadInFlight(i, pi))
             {
-                pendingIoReads++;
+                c.PendingIoReads++;
             }
         }
 
-        return new PageCacheGaugeSnapshot(pages.Length, free, cleanUsed, dirtyUsed, exclusive, epochProtected, pendingIoReads);
+        GaugeSlotVisits += end - start;
+        return c;
     }
 
     #endregion
@@ -311,13 +405,42 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// database it ran against in terms a human recognises (#614, D-2).</summary>
     internal string DatabaseName => Options.DatabaseName;
     
-    private protected readonly PinnedMemoryBlock MemPages;
+    private protected readonly LargePinnedMemoryBlock MemPages;
     private unsafe byte* _memPagesAddr;
+
+    // The cache as 1 GiB windows (PageCacheAddressing), for the two async I/O paths: their Memory<byte> cannot address past 2 GiB from one base.
+    // Built once at open, immutable, nulled at dispose.
+    private PageCacheWindow[] _windows;
 
     protected readonly int MemPagesCount;
     private CacheLinePaddedInt _clockSweepCurrentIndex;
-    private PageInfo[] _memPagesInfo;
-    
+
+    /// <summary>Every slot's state record. Null once disposed; the callers that may arrive after that check it (see <see cref="PageSlotTable"/>).</summary>
+    private PageSlotTable _slots;
+
+    /// <summary>
+    /// Read tasks of slots whose disk read is in flight, or completed and not yet observed. Keyed by memory page index; sized by the reads in
+    /// flight, not by the cache (#1127). <see cref="PageInfo.ReadPending"/> says whether a slot may have an entry, so a hit never looks here.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, Task<int>> _readTasks = new();
+
+    /// <summary>
+    /// PS-16: one bit per slot, set whenever the slot owes a writeback. Writers set it after bumping the slot's generation; a discharge clears it
+    /// and re-checks. A superset hint — a bit may outlive its debt for a while, never the reverse — so the checkpoint can enumerate dirty slots
+    /// without visiting every slot.
+    /// </summary>
+    private long[] _debtBits;
+
+    /// <summary>
+    /// Number of set bits in <see cref="_debtBits"/>, moved only on transitions observed through Interlocked's returned word. Exact at quiescence;
+    /// may dip below the true count, even below zero, for an instant while a writer and a discharge cross.
+    /// </summary>
+    private CacheLinePaddedInt _debtPageCount;
+
+    /// <summary>The slot record of a memory page. Throws on an index outside the cache, and after dispose.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private PageInfo Slot(int memPageIndex) => _slots[memPageIndex];
+
     private SafeFileHandle _fileHandle;
     private long _fileSize;
     private string _lockFilePath;
@@ -337,6 +460,42 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Test hook: invoked with the file page index at the START of every physical page write (checkpoint / direct / async). May throw to simulate a
     /// crash mid-write; otherwise the real <c>RandomAccess.Write</c> proceeds. Null in production.</summary>
     internal Action<int> PageWriteInterceptor { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked on a cache miss with the file page index just before the claimed slot is published in the page directory.
+    /// Null in production.</summary>
+    internal Action<int> MissBeforePublishProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked by a slot's owner right after publishing it, before preparing it. Null in production.</summary>
+    internal Action<int> MissAfterPublishProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked by a slot's owner right after starting the disk read, before handing it to the slot. Null in production.</summary>
+    internal Action<int> MissAfterReadStartProbe { get; set; }
+
+    /// <summary>Test hook (PS-15): invoked when a requester starts waiting on a slot that is not ready yet. Null in production.</summary>
+    internal Action<int> SlotNotReadyWaitProbe { get; set; }
+
+    /// <summary>Test hook (PS-15, #1201): invoked with the memory page index when a reclaim's unlocked first pass has found the slot a candidate, before
+    /// it takes the slot's lock — the window in which another thread can claim the slot. Null in production.</summary>
+    internal Action<int> ReclaimBeforeLockProbe { get; set; }
+
+    /// <summary>Test hook (PS-15, #1201): invoked with the memory page index when a reclaim, under the slot's lock, has withdrawn its "ready" and fenced,
+    /// before it re-checks the slot's protections. Null in production.</summary>
+    internal Action<int> ReclaimReadyWithdrawnProbe { get; set; }
+
+    /// <summary>Whether a slot is marked ready (PS-15). Test seam.</summary>
+    internal bool IsSlotReadyForTests(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).SlotReady);
+
+    /// <summary>Test hook (#1127): replaces the task recorded for a slot's read, given the file page index — for instance with one that fails
+    /// once the real read has landed. Null in production.</summary>
+    internal Func<int, Task<int>, Task<int>> RecordedReadInterceptor { get; set; }
+
+    /// <summary>Test hook (PS-16): invoked with the memory page index when a discharge has found a slot owing nothing and is about to clear its
+    /// debt bit — the window a writer can race into. Null in production.</summary>
+    internal Action<int> DebtSettleProbe { get; set; }
+
+    /// <summary>Test hook (PS-16): invoked with the memory page index after a discharge has cleared a slot's debt bit and before it re-checks the
+    /// generations. Null in production.</summary>
+    internal Action<int> DebtReCheckProbe { get; set; }
 
     /// <summary>Test hook: invoked at each <see cref="FlushToDisk"/> fsync barrier (records the durability boundary for crash simulation). Null in production.</summary>
     internal Action FlushToDiskInterceptor { get; set; }
@@ -393,7 +552,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     public long FileSize => _fileSize;
 
-    private readonly ConcurrentDictionary<int, int> _memPageIndexByFilePageIndex;
+    // The page directory: file page -> slot (#1136, PS-17). Native, no managed node per page. Nulled at dispose; late diagnostics check it.
+    private PageDirectory _directory;
     public EpochManager EpochManager { get; private set; }
 
     // CRC verification mode — defaults to RecoveryOnly to avoid on-load checks during recovery itself.
@@ -410,6 +570,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// engine's post-apply resolution can classify each (derived → rebuilt, orphaned primary → healed, live primary → loud-fail RB-04). Concurrent because page
     /// loads may run on the background checkpoint/IO threads during recovery.</summary>
     private readonly ConcurrentDictionary<int, byte> _suspectPages = new();
+
+    /// <summary>
+    /// Whether <paramref name="filePageIndex"/> failed its CRC when it was loaded in <see cref="PageChecksumVerification.RecoverySuspect"/> mode: its bytes are
+    /// not to be trusted by anything that reads them before the suspects are resolved — the crash rebuild's snapshot of a structure it is about to discard
+    /// included. A page counts once loaded, so ask after reading it.
+    /// </summary>
+    internal bool IsSuspectPage(int filePageIndex) => _suspectPages.ContainsKey(filePageIndex);
 
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
@@ -462,21 +629,32 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             LogSmallPageCache(Logger, cacheSize / (1024UL * 1024UL), RecommendedMinimumCacheSize / (1024UL * 1024UL));
         }
 
-        MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, true, 64);
-        _memPagesAddr = MemPages.DataAsPointer;
-
-        // Create the Memory Page info table
+        // Not zeroed (PS-14): a page that is not read from disk is cleared when its slot is assigned, so nothing depends on the
+        // block's initial content, and a whole-block clear would make every page resident at startup.
+        // The slot records: zeroed memory is a table of free slots (R4, #1127), nothing to initialise. The page directory chains through them
+        // (#1136). The host's refusal of any of the three blocks is one named startup error giving the whole footprint (#945).
         MemPagesCount = (int)(cacheSize >> PageSizePow2);
         var pageCount = MemPagesCount;
-        _memPagesInfo = new PageInfo[pageCount];
-        _clockSweepCurrentIndex.Value = 0;
-
-        for (int i = 0; i < pageCount; i++)
+        try
         {
-            _memPagesInfo[i] = new PageInfo(i);
+            MemPages = AllocateCacheBlock(memoryAllocator, this, cacheSize);
+            _slots = new PageSlotTable(memoryAllocator, this, pageCount);
+            _directory = new PageDirectory(memoryAllocator, this, _slots);
         }
-        
-        _memPageIndexByFilePageIndex = new ConcurrentDictionary<int, int>();
+        catch (OutOfMemoryException e)
+        {
+            throw CacheAllocationFailed(cacheSize, e);
+        }
+
+        _memPagesAddr = MemPages.DataAsPointer;
+        if (PoisonCacheForProcess)
+        {
+            NativeMemory.Fill(_memPagesAddr, (nuint)cacheSize, 0xA5);
+        }
+
+        _windows = PageCacheWindow.Build(_memPagesAddr, pageCount);
+        _debtBits = new long[(int)(((long)pageCount + 63) >> 6)];
+        _clockSweepCurrentIndex.Value = 0;
 
         _metrics = new Metrics (this, MemPagesCount);
         _backpressureStrategy = options.BackpressureStrategyFactory();
@@ -832,8 +1010,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Verifies a bundle's structural spine before it is opened and refuses the open on a
-    /// <see cref="IntegritySeverity.Fatal"/> finding.
+    /// Verifies a bundle's structural spine before it is opened and refuses the open on a finding
+    /// <see cref="DatabaseIntegrityException.RefusesOpen"/> names: every <see cref="IntegritySeverity.Fatal"/> one, and a segment whose directory and
+    /// forward chain disagree when recovery will not rebuild it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -841,7 +1020,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// pointer that does not resolve. Opening anyway is the most harmful possible response: the engine follows those
     /// pointers into garbage. Lesser findings do <b>not</b> block the open, because a database with a divergent index is
     /// still a working database and refusing it would be the cure being worse than the disease; they are logged so the
-    /// operator learns about them.
+    /// operator learns about them. The one exception is the directory-vs-chain disagreement, which the open itself used to
+    /// refuse and no longer checks (#1143).
     /// </para>
     /// <para>
     /// The scan is skipped when the bundle cannot be read, since there is then nothing to verify — verification must never
@@ -877,16 +1057,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return;
         }
 
-        var fatal = 0;
+        var refusing = 0;
         for (var i = 0; i < report.Findings.Count; i++)
         {
-            if (report.Findings[i].Severity == IntegritySeverity.Fatal)
+            if (DatabaseIntegrityException.RefusesOpen(report.Findings[i], report.Identity.CleanShutdown))
             {
-                fatal++;
+                refusing++;
             }
         }
 
-        if (fatal > 0)
+        if (refusing > 0)
         {
             throw new DatabaseIntegrityException(report);
         }
@@ -922,8 +1102,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             ReleaseLockFile();
 
-            _memPagesInfo = null;
+            // The table itself is freed with the other child blocks below (base.Dispose); callers arriving later find null (PageSlotTable remarks).
+            _slots = null;
+            _directory = null;
             _memPagesAddr = null;
+            _windows = null;
             // Null-safe: an early ctor throw (e.g. the InvalidDatabaseBundle rejection above, raised before the strategy is
             // built) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
             _backpressureStrategy?.Dispose();
@@ -956,42 +1139,38 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 return false;
             }
 
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
+
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
 
             // Tag the page with the current epoch (atomic max — never go backward)
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            // Handle Allocating state from cache miss — transition to Idle
-            // (must come AFTER epoch tag so the page is protected before becoming evictable)
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            // Race detection: page may have been evicted between FetchPageToMemory and epoch tag
-            if (pi.FilePageIndex != filePageIndex)
+            // Race detection: the page may have been evicted, or be being reclaimed, between FetchPageToMemory and the epoch tag (PS-15). Also takes
+            // a freshly prepared slot out of Allocating.
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;  // Retry
             }
 
             // Ensure data is ready (wait for pending I/O). Defensive: assert the disk read returned the full page;
             // a short read would leave stale/zero bytes in the cache slot and Load would see truncated content.
-            var ioTask = pi.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
+            if (pi.ReadPending)
             {
-                var bytesRead = ioTask.GetAwaiter().GetResult();
-                CheckConfig.Require(CheckConfig.Enabled, bytesRead == PageSize,
-                    $"Short disk read for filePageIndex={filePageIndex}: got {bytesRead}, expected {PageSize} (corrupt/truncated file)");
-                pi.ResetIOCompletionTask();
+                CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: true);
             }
 
             pi.IncrementClockSweepCounter();
@@ -1014,34 +1193,33 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 return false;
             }
 
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
+
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
 
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            if (pi.FilePageIndex != filePageIndex)
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;
             }
 
-            var ioTask = pi.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
+            if (pi.ReadPending)
             {
-                ioTask.GetAwaiter().GetResult();
-                pi.ResetIOCompletionTask();
+                CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: false);
             }
 
             pi.IncrementClockSweepCounter();
@@ -1052,6 +1230,85 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             pi.StateSyncRoot.ExitExclusiveAccess();
             return true;
         }
+    }
+
+    /// <summary>
+    /// Read-only access to a page, for a scan that visits a whole structure (EP-02, #1144). The page is pinned by <see cref="PageInfo.SlotRefCount"/>
+    /// instead of being tagged with the caller's epoch, so <see cref="ReleasePageForRead"/> leaves it evictable at once: a scan of N pages holds one
+    /// slot at a time, not N for the rest of its scope. No latch: the caller only reads, and releases the page before it reads the next.
+    /// </summary>
+    /// <param name="filePageIndex">The page to read.</param>
+    /// <param name="memPageIndex">The cache slot holding it, pinned until <see cref="ReleasePageForRead"/>.</param>
+    /// <param name="warm">Marks the page recently used, as <see cref="RequestPageEpoch"/> does. A one-off structural scan (a load, a rebuild) leaves it
+    /// false and passes through the cache cold, without pushing out the working set; a query scan, which the application repeats, sets it so its pages
+    /// age exactly as they would through the epoch path.</param>
+    /// <remarks>
+    /// The pin is taken under the slot's lock, after checking the slot still holds the page and is ready (PS-15). <see cref="TryAcquire"/> withdraws
+    /// "ready", re-checks <see cref="PageInfo.SlotRefCount"/> and reclaims the slot under the same lock, so a pin either lands before that check, which
+    /// then backs off, or sees the slot gone and looks the page up again. A pin taken outside the lock could land between the check and the reclaim.
+    /// </remarks>
+    internal bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false)
+    {
+        while (true)
+        {
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            {
+                return false;
+            }
+
+            var pi = Slot(memPageIndex);
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
+
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            if (pi.ReadFilePageIndexVolatile() != filePageIndex || !Volatile.Read(ref pi.SlotReady))
+            {
+                pi.StateSyncRoot.ExitExclusiveAccess();
+                continue;
+            }
+
+            Interlocked.Increment(ref pi.SlotRefCount);
+            // A freshly read slot leaves Allocating only now, pinned, as ValidateTaggedSlot does after its epoch tag.
+            if (pi.PageState == PageState.Allocating)
+            {
+                pi.PageState = PageState.Idle;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            }
+
+            pi.StateSyncRoot.ExitExclusiveAccess();
+
+            try
+            {
+                if (pi.ReadPending)
+                {
+                    CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: true);
+                }
+
+                EnsurePageVerified(memPageIndex);
+            }
+            catch
+            {
+                Interlocked.Decrement(ref pi.SlotRefCount);
+                throw;
+            }
+
+            if (warm)
+            {
+                pi.IncrementClockSweepCounter();
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Releases a page taken by <see cref="AcquirePageForRead"/>; it is evictable again unless something else holds it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ReleasePageForRead(int memPageIndex)
+    {
+        var remaining = Interlocked.Decrement(ref Slot(memPageIndex).SlotRefCount);
+        Debug.Assert(remaining >= 0, "a page released for read more often than it was acquired");
     }
 
     /// <summary>
@@ -1069,34 +1326,33 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 return false;
             }
 
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
+
+            // PS-15: a slot found in the page directory may still be being prepared by the thread that claimed it. If it stops holding this page
+            // while we wait (abandoned, or reclaimed), look the page up again.
+            if (!Volatile.Read(ref pi.SlotReady) && !WaitForSlotReady(pi, filePageIndex))
+            {
+                continue;
+            }
 
             long existing;
             do
             {
-                existing = pi.AccessEpoch;
+                existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
                 if (currentEpoch <= existing)
                 {
                     break;
                 }
             } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
 
-            if (pi.PageState == PageState.Allocating)
-            {
-                pi.PageState = PageState.Idle;
-                Interlocked.Increment(ref _metrics.FreeMemPageCount);
-            }
-
-            if (pi.FilePageIndex != filePageIndex)
+            if (!ValidateTaggedSlot(pi, filePageIndex))
             {
                 continue;
             }
 
-            var ioTask = pi.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
+            if (pi.ReadPending)
             {
-                ioTask.GetAwaiter().GetResult();
-                pi.ResetIOCompletionTask();
+                CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: false);
             }
 
             // Deliberately omitted vs RequestPageEpoch / RequestPageEpochUnchecked: IncrementClockSweepCounter (the eviction heuristic must not see
@@ -1113,13 +1369,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool TryGetPageResidency(int filePageIndex, out bool resident, out bool dirty)
     {
-        if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out var memPageIndex))
+        // A diagnostic may arrive after dispose: the directory and the slot records are gone, and nothing is resident.
+        var directory = _directory;
+        if (directory != null && _slots != null && directory.TryGet(filePageIndex, out var memPageIndex))
         {
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
             if (pi.FilePageIndex == filePageIndex && pi.PageState != PageState.Free)
             {
                 resident = true;
-                dirty = HasWritebackDebt(pi.MemPageIndex);
+                dirty = HasWritebackDebt(memPageIndex);
                 return true;
             }
         }
@@ -1147,7 +1405,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // Hot path: cache hit. Kept EH-free + small so the JIT inlines this into RequestPageEpoch / RequestPageEpochUnchecked.
         // The cache-miss branch lives in FetchPageToMemoryOnMiss to keep its `using var` (try/finally) out of this method's IL —
         // see claude/scratch/jit-using.md for the EH-region-defeats-inlining mechanism.
-        if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out memPageIndex))
+        if (_directory.TryGet(filePageIndex, out memPageIndex))
         {
             // Cache-hit stat — PROFILER-GATED. This is the hottest increment in the engine (3-4× per point read, every
             // reader thread); as an always-on shared-field `++` it bounced one cache line across all cores and halved
@@ -1181,42 +1439,366 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         using var fetchScope = TyphonEvent.BeginPageCacheFetch(filePageIndex);
 
         // Page is not cached, we assign an available Memory Page to it
-        if (!AllocateMemoryPage(filePageIndex, out memPageIndex, timeout, cancellationToken))
+        if (!AllocateMemoryPage(filePageIndex, out memPageIndex, out var owner, timeout, cancellationToken))
         {
             return false;
         }
 
-        // Reset CRC verification flag — page is freshly loaded, needs re-verification
-        _memPagesInfo[memPageIndex].CrcVerified = false;
-
-        // Load the page from disk, if it's stored there already. (won't be the case for new pages)
-        // The load is async and not part of the returned task but stored in the PageInfo.
-        // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
-        var pageOffset = MapReadOffset(filePageIndex);
-        var loadPage = (pageOffset + PageSize) <= _fileSize;
-        if (loadPage)
+        // PS-15: another thread published this file page first. Its slot is its to prepare; the caller waits for it to be ready.
+        if (!owner)
         {
-            ++_metrics.ReadFromDiskCount;
+            return true;
+        }
 
-            using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
+        // We own the slot, published but not ready: nobody else uses it until SlotReady is set below, and no other miss can bring this file page
+        // into the cache meanwhile, so the read-or-clear decision below is not raced by one.
+        var pi = Slot(memPageIndex);
+        var readStarted = false;
+        var prepared = false;
+        ValueTask<int> readTask = default;
+        Task<int> readAsTask = null;
+        try
+        {
+            MissAfterPublishProbe?.Invoke(filePageIndex);
 
-            var pi = _memPagesInfo[memPageIndex];
-            var readTask = RandomAccess.ReadAsync(_fileHandle, MemPages.DataAsMemory.Slice(memPageIndex * PageSize, PageSize), pageOffset, cancellationToken);
+            // Reset CRC verification flag — page is freshly loaded, needs re-verification
+            pi.CrcVerified = false;
 
-            // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskReadCompleted). When the DiskRead kickoff span was itself
-            // suppressed (SpanId == 0), there's nothing to correlate with, so skip the wrap. When the completion kind is suppressed,
-            // skip the wrap — producer hot path stays allocation-free by default.
-            if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
+            // Load the page from disk, if it's stored there already. (won't be the case for new pages)
+            // The load is async and not part of the returned task but recorded in the read table, for the slot's requesters to wait on.
+            // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
+            var pageOffset = MapReadOffset(filePageIndex);
+            var loadPage = (pageOffset + PageSize) <= _fileSize;
+            if (loadPage)
             {
-                var state = new PageCacheReadCompletionState(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex);
-                var wrapped = readTask.AsTask().ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                pi.SetIOReadTask(new ValueTask<int>(wrapped));
+                ++_metrics.ReadFromDiskCount;
+
+                using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
+
+                readTask = RandomAccess.ReadAsync(_fileHandle, PageCacheWindow.PageMemory(_windows, memPageIndex), pageOffset,
+                    cancellationToken);
+                readStarted = true;
+                MissAfterReadStartProbe?.Invoke(filePageIndex);
+
+                // readAsTask is assigned before anything else can fail, so a failure below still knows how to wait for the read
+                // (WaitForOrphanedRead).
+                readAsTask = readTask.AsTask();
+
+                // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskReadCompleted). When the DiskRead kickoff span was itself
+                // suppressed (SpanId == 0), there's nothing to correlate with, so skip the wrap. When the completion kind is suppressed,
+                // skip the wrap.
+                var recorded = readAsTask;
+                if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
+                {
+                    var state = new PageCacheReadCompletionState(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex);
+                    recorded = readAsTask.ContinueWith(SReadCompletionHandler, state, CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                }
+
+                if (RecordedReadInterceptor != null)
+                {
+                    recorded = RecordedReadInterceptor(filePageIndex, recorded);
+                }
+
+                // The indexer overwrites a failed read a previous occupant may have left.
+                _readTasks[memPageIndex] = recorded;
+
+                // After the insert: a requester that sees the flag finds the task. SlotReady's release below publishes both.
+                pi.ReadPending = true;
+
+                // The read is recorded for the slot: from here on it is the slot's requesters' to observe, and only the trace scope's close is left.
+                prepared = true;
             }
             else
             {
-                pi.SetIOReadTask(readTask);
+                // PS-14: a page that is not read from disk reads as zero. The slot holds whatever its previous occupant left, or a never-used slot's
+                // undefined content. The seqlock counter goes to 0 with the rest, the value TryAcquire already gave it.
+                unsafe
+                {
+                    NativeMemory.Clear(GetMemPageAddress(memPageIndex), PageSize);
+                }
+
+                // TryAcquire drops only a read task that completed successfully: a faulted one left by the previous occupant would otherwise be
+                // rethrown to this new page's requesters.
+                DropReadTask(memPageIndex, pi);
+                prepared = true;
             }
+        }
+        catch when (!prepared)
+        {
+            // The slot was not prepared, so it goes back (PS-15). Once the read has started only an allocation can fail — AsTask, the trace
+            // continuation, or the read-table insert — and the flag that would let anyone else find the read is not set yet: this thread is its only
+            // observer, and must see it land before the slot is freed.
+            AbandonUnpreparedSlot(filePageIndex, memPageIndex, pi, readStarted, readTask, readAsTask);
+            throw;
+        }
+        finally
+        {
+            // PS-15: ready. A release: whoever reads true sees the reset CRC flag, the read task or the cleared bytes. Also when only the trace
+            // scope's close threw: the slot was prepared by then.
+            if (prepared)
+            {
+                Volatile.Write(ref pi.SlotReady, true);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// PS-15: undoes a published slot whose owner failed before preparing it. It is unpublished first, so a requester waiting on it sees at once that
+    /// the slot no longer holds this file page and looks the page up again, without waiting on the disk. If the owner had started a read, the slot is
+    /// freed only once that read has landed (<see cref="WaitForOrphanedRead"/>); meanwhile it stays Allocating, which <see cref="TryAcquire"/> never
+    /// takes. SlotReady is deliberately left false: once the slot is Free another thread may claim it, and a late "ready" would then mark that
+    /// thread's unprepared slot ready.
+    /// </summary>
+    private void AbandonUnpreparedSlot(int filePageIndex, int memPageIndex, PageInfo pi, bool readStarted, ValueTask<int> readTask, Task<int> readAsTask)
+    {
+        _directory.TryRemove(filePageIndex, memPageIndex);
+        pi.WriteFilePageIndexVolatile(-1);
+
+        if (readStarted)
+        {
+            WaitForOrphanedRead(readTask, readAsTask);
+        }
+
+        pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+        pi.PageState = PageState.Free;
+        // Unconditional: the insert can fail after linking its entry, and a previous occupant's faulted task may still be there.
+        DropReadTask(memPageIndex, pi, force: true);
+        pi.ResetClockSweepCounter();
+        pi.StateSyncRoot.ExitExclusiveAccess();
+        Interlocked.Increment(ref _metrics.FreeMemPageCount);
+        _metrics.TotalMemPageAllocatedCount--;
+    }
+
+    /// <summary>
+    /// PS-15: waits for a disk read whose owner failed before handing it to the slot, so the slot is not freed while the read can still write into it.
+    /// The read is observed through whichever form the owner last held: <paramref name="readAsTask"/> once it was converted (the value task is then
+    /// consumed), the value task otherwise. Unbounded, like every other wait on a page read. The read's own outcome is dropped, since the caller
+    /// rethrows the failure that got here, but the wait is never swallowed: should it throw (a host interrupting the thread), the slot stays
+    /// Allocating and unpublished — lost to the cache until restart, but never handed out under a read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void WaitForOrphanedRead(ValueTask<int> readTask, Task<int> readAsTask)
+    {
+        var waiter = new AdaptiveWaiter();
+        if (readAsTask != null)
+        {
+            while (!readAsTask.IsCompleted)
+            {
+                waiter.Wait();
+            }
+
+            try
+            {
+                // Observes a faulted read, so it is not reported again as an unobserved task exception. The property builds an AggregateException,
+                // which can fail on an exhausted heap: the read is over either way.
+                _ = readAsTask.Exception;
+            }
+            catch
+            {
+                // Nothing to do: the read has landed.
+            }
+            return;
+        }
+
+        while (true)
+        {
+            bool done;
+            try
+            {
+                done = readTask.IsCompleted;
+            }
+            catch (InvalidOperationException)
+            {
+                // A stale token: AsTask consumed the value task, which it does only once the read is complete, then failed to allocate its result.
+                return;
+            }
+
+            if (done)
+            {
+                break;
+            }
+            waiter.Wait();
+        }
+
+        try
+        {
+            // Consumes the value task, which hands a pooled read operation back to the file handle.
+            readTask.GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // The read failed, or was consumed by AsTask as above: either way it is over, and its outcome no longer matters.
+        }
+    }
+
+    // ─── Read table (#1127, R1) ──────────────────────────────────────────────────────────────────────────────────
+    // A slot's disk read is recorded in _readTasks, not in the slot: the slot record holds no managed reference. ReadPending says whether to look.
+    // Who may clear it is restricted (PageInfo.ReadPending): a thread that holds the slot against reuse, so a clear can never land on the next
+    // occupant's read.
+
+    /// <summary>
+    /// A requester's wait for the slot's read, after it has tagged and validated the slot. Waits if the read is still in flight and rethrows a
+    /// failed read — which stays recorded, so every requester gets the failure, as before. Once the read has succeeded its task is dropped, so
+    /// the table holds only reads not yet observed and later hits skip it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CompletePendingRead(int memPageIndex, PageInfo pi, int filePageIndex, bool checkShortRead)
+    {
+        ReadTableLookupsForTests++;
+        if (!_readTasks.TryGetValue(memPageIndex, out var task))
+        {
+            return;   // Another requester observed it and dropped it.
+        }
+
+        // Waits if still in flight; rethrows a failed read. A read that completed before anyone looked is checked too, so the short-read check
+        // does not depend on timing — and a short read stays recorded, so every requester gets the failure.
+        var bytesRead = task.IsCompletedSuccessfully ? task.Result : task.GetAwaiter().GetResult();
+        if (checkShortRead && bytesRead != PageSize)
+        {
+            CheckConfig.Require(CheckConfig.Enabled, false,
+                $"Short disk read for filePageIndex={filePageIndex}: got {bytesRead}, expected {PageSize} (corrupt/truncated file)");
+        }
+
+        // By value: only this read's entry goes. Whoever removes it clears the flag.
+        if (_readTasks.TryRemove(new KeyValuePair<int, Task<int>>(memPageIndex, task)))
+        {
+            pi.ReadPending = false;
+        }
+    }
+
+    /// <summary>
+    /// Waits for the slot's read without touching the record, for a writer that holds the slot by its debt rather than by an epoch tag
+    /// (<see cref="WritePagesForCheckpoint"/>, <see cref="SavePages"/>): it must not clear a flag that could by then belong to another read.
+    /// </summary>
+    private void WaitForPendingRead(int memPageIndex, PageInfo pi)
+    {
+        if (pi.ReadPending && _readTasks.TryGetValue(memPageIndex, out var task) && !task.IsCompletedSuccessfully)
+        {
+            task.GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>Whether the slot's read is still in flight. For the gauges: a lookup only when the flag is set, never the table's count.</summary>
+    private bool IsReadInFlight(int memPageIndex, PageInfo pi) =>
+        pi.ReadPending && _readTasks.TryGetValue(memPageIndex, out var task) && !task.IsCompleted;
+
+    /// <summary>
+    /// Drops the slot's read task and clears <see cref="PageInfo.ReadPending"/>. Only for a thread that holds the slot against a new read: its
+    /// owner, or <see cref="TryAcquire"/> under the slot's lock. <paramref name="force"/> looks even with the flag clear, for an owner whose insert
+    /// may have linked its entry and then failed. A dropped failed read is observed, so it is not reported again as an unobserved task exception.
+    /// </summary>
+    private void DropReadTask(int memPageIndex, PageInfo pi, bool force = false)
+    {
+        if (!pi.ReadPending && !force)
+        {
+            return;
+        }
+
+        if (_readTasks.TryRemove(memPageIndex, out var task) && task.IsFaulted)
+        {
+            _ = task.Exception;
+        }
+        pi.ReadPending = false;
+    }
+
+    /// <summary>Slot read tasks currently recorded. Test seam: the table holds only reads not yet observed.</summary>
+    internal int ReadTaskCountForTests => _readTasks.Count;
+
+    /// <summary>
+    /// Test seam: evicts every page the cache may evict right now — Idle, no slot reference, no active writer, not dirty, no writeback debt, no live
+    /// epoch tag (<see cref="TryAcquire"/>'s own rules) — and leaves the slots Free. The cache does this one page at a time under pressure; doing it all at
+    /// once makes a write that was not recorded (PS-10) disappear deterministically instead of whenever an allocation happens to take its page.
+    /// </summary>
+    /// <returns>The number of pages evicted.</returns>
+    internal int EvictEvictablePagesForTest()
+    {
+        var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        var evicted = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            var pi = Slot(i);
+            if (pi.PageState != PageState.Idle || !TryAcquire(i, minActiveEpoch))
+            {
+                continue;
+            }
+
+            // TryAcquire left it Allocating for a new owner; there is none, so hand it back as Free, as the lost-race path of AllocateMemoryPageCore does.
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            pi.PageState = PageState.Free;
+            pi.StateSyncRoot.ExitExclusiveAccess();
+            Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            evicted++;
+        }
+
+        return evicted;
+    }
+
+    /// <summary>Read-table lookups a requester has made on this thread. Test seam: a hit on an observed read makes none. Per thread, so
+    /// counting costs no shared write.</summary>
+    [ThreadStatic]
+    internal static int ReadTableLookupsForTests;
+
+    /// <summary>Whether a slot's read flag is set. Test seam.</summary>
+    internal bool IsReadPendingForTests(int memPageIndex) => Slot(memPageIndex).ReadPending;
+
+    /// <summary>
+    /// PS-15: waits until the slot a requester found in the page directory is ready (<c>true</c>), or no longer holds <paramref name="filePageIndex"/>
+    /// (<c>false</c>: its owner abandoned it, or it was evicted and reclaimed — the caller looks the page up again). The owner's preparation is a few
+    /// microseconds with no wait of its own, and an owner that fails unpublishes the slot before waiting on anything, so the bound only guards against
+    /// a defect.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool WaitForSlotReady(PageInfo pi, int filePageIndex)
+    {
+        SlotNotReadyWaitProbe?.Invoke(filePageIndex);
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.PageCacheLockTimeout);
+        var waiter = new AdaptiveWaiter();
+        while (true)
+        {
+            if (pi.ReadFilePageIndexVolatile() != filePageIndex)
+            {
+                return false;
+            }
+
+            if (Volatile.Read(ref pi.SlotReady))
+            {
+                return true;
+            }
+
+            if (!waiter.Wait(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("PageCache/SlotReady", TimeoutOptions.Current.PageCacheLockTimeout);
+            }
+        }
+    }
+
+    /// <summary>
+    /// PS-15: re-validates a slot after the caller has tagged its epoch, then lets a freshly prepared slot leave Allocating. The tag (an epoch CAS, a
+    /// full fence) and <see cref="TryAcquire"/>'s "withdraw ready, fence, re-check the epoch" make a Dekker pair: if the slot is being reclaimed, at
+    /// least one side sees the other, so either TryAcquire backs off or this returns <c>false</c> and the caller looks the page up again. The
+    /// Allocating → Idle flip happens under the slot's lock so the owner and a released waiter cannot both make it.
+    /// </summary>
+    private bool ValidateTaggedSlot(PageInfo pi, int filePageIndex)
+    {
+        if (pi.ReadFilePageIndexVolatile() != filePageIndex || !Volatile.Read(ref pi.SlotReady))
+        {
+            return false;
+        }
+
+        // Handle Allocating state from cache miss — transition to Idle. Only now: after the epoch tag, so the page is protected before it becomes
+        // evictable, and after the slot is known ready, so nobody flips an owner's unprepared slot.
+        if (pi.PageState == PageState.Allocating)
+        {
+            pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
+            if (pi.PageState == PageState.Allocating)
+            {
+                pi.PageState = PageState.Idle;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);
+            }
+            pi.StateSyncRoot.ExitExclusiveAccess();
         }
 
         return true;
@@ -1240,6 +1822,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     /// <param name="filePageIndex">The file page index to mount to memory</param>
     /// <param name="memPageIndex">The index of the memory page for the requested file page if the call is successful.</param>
+    /// <param name="owner">
+    /// <c>true</c> when this call claimed and published the slot: the caller must prepare it and mark it ready (PS-15). <c>false</c> when another
+    /// thread published the same file page first: <paramref name="memPageIndex"/> is that thread's slot, which the caller must not touch.
+    /// </param>
     /// <param name="timeout">The time (in tick) the method should wait to return successfully.</param>
     /// <param name="cancellationToken">An optional cancellation token for the user to cancel the call.</param>
     /// <returns><c>true</c> if the call succeeded, <paramref name="memPageIndex"/> will be valid. <c>false</c> if the operation was cancelled or time out
@@ -1248,15 +1834,56 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// This method will enter a wait cycle if no Memory Page is available, it will wait and loop until it finds one.
     /// Use the clock-sweep algorithm to find a free Memory Page.
     /// </remarks>
-    private bool AllocateMemoryPage(int filePageIndex, out int memPageIndex, long timeout = Timeout.Infinite, CancellationToken cancellationToken = default)
+    private bool AllocateMemoryPage(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
+        CancellationToken cancellationToken = default)
     {
         using var scope = TyphonEvent.BeginPageCacheAllocatePage(filePageIndex);
-        return AllocateMemoryPageCore(filePageIndex, out memPageIndex, timeout, cancellationToken);
+        return AllocateMemoryPageCore(filePageIndex, out memPageIndex, out owner, timeout, cancellationToken);
     }
 
-    private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, long timeout = Timeout.Infinite, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// #1137: the fewest slots an allocation round may visit in each pass. A round visits at most the larger of this and a 32nd of the cache, so
+    /// under back-pressure a round's work is bounded while pass 2 still covers the whole cache every 32 rounds or fewer. Twice today's
+    /// largest cache, so up to 2 GiB a round is exactly what it was. Lowered by tests.
+    /// </summary>
+    internal int SweepBudgetFloor = DefaultSweepBudgetFloor;
+    internal const int DefaultSweepBudgetFloor = 524_288;
+    internal const int SweepRoundsPerLap = 32;
+
+    /// <summary>Test seam: slots visited by the allocation rounds that found nothing, both passes.</summary>
+    internal long FailedSweepVisitsForTests;
+
+    /// <summary>Test seam: the buffer the async disk read of <paramref name="memPageIndex"/> goes through (its window's slice).</summary>
+    internal Memory<byte> PageIOMemoryForTests(int memPageIndex) => PageCacheWindow.PageMemory(_windows, memPageIndex);
+
+    /// <summary>Test seam: the clock hand, the next slot pass 1 visits. Set to stand in for other threads sweeping.</summary>
+    internal int ClockHandForTests
+    {
+        get => _clockSweepCurrentIndex.Value;
+        set => _clockSweepCurrentIndex.Value = value % MemPagesCount;
+    }
+
+    private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
+        CancellationToken cancellationToken = default)
     {
         var bpCtx = new BackpressureContext("Storage/PagedMMF/AllocateMemoryPage", TimeoutOptions.Current.PageCacheBackpressureTimeout);
+        owner = false;
+
+        // #1137: every round is bounded. Pass 1 (the clock) visits at most firstPassMax slots on the shared hand, pass 2 (any evictable slot)
+        // at most secondPassMax. Up to half the floor (262 144 pages, every cache the old 2 GiB ceiling admitted) they are what they always
+        // were: 2N and N.
+        var pageCount = MemPagesCount;
+        var budget = Math.Max(SweepBudgetFloor, ((long)pageCount + SweepRoundsPerLap - 1) / SweepRoundsPerLap);
+        var firstPassMax = Math.Min(2L * pageCount, budget);
+        var secondPassMax = Math.Min(pageCount, budget);
+
+        // The back-pressure episode, from the first round that found nothing. Pass 2 walks a private cursor, so it covers every slot once per
+        // lap whatever other threads do with the hand, and counts what it sees; a lap's counts are the census the log, the peak gauges and the
+        // timeout report. Up to the floor's size in pages, a round is a lap.
+        var cursor = -1;
+        long lapVisits = 0;
+        int lapDirty = 0, lapEpochHeld = 0, dirtyCount = 0, epochCount = 0;
+        long backpressureSince = 0;
 
         while (true)
         {
@@ -1266,23 +1893,31 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 return false;
             }
 
+            // A retry: another thread may have brought the page in meanwhile. Take its slot as a loser of the race would (PS-15), rather than
+            // keep waiting for a slot that would only be thrown away.
+            if (cursor >= 0 && _directory.TryGet(filePageIndex, out var published))
+            {
+                memPageIndex = published;
+                return true;
+            }
+
             // Refresh each iteration so committed transactions release their epoch protection
             var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
 
             bool found = false;
-            PageInfo pi = null;
+            PageInfo pi = default;
             memPageIndex = -1;
             int evictedFilePageIndex = -1;
 
             // If we already have a MemPage fetch for the FilePage just before the one we allocate, then we try to take the MemPage that follows
             // We request FilePage 123, there's a FilePage 122 allocated to MemPage 34, then we try to allocate 35 for 123, which will allow, if needed,
             //  one file write operation for both pages
-            if (filePageIndex > 0 && _memPageIndexByFilePageIndex.TryGetValue(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
+            if (filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
             {
                 memPageIndex = prevMemPageIndex + 1;
-                pi = _memPagesInfo[memPageIndex];
+                pi = Slot(memPageIndex);
                 evictedFilePageIndex = pi.FilePageIndex;
-                if (TryAcquire(pi, minActiveEpoch))
+                if (TryAcquire(memPageIndex, minActiveEpoch))
                 {
                     found = true;
                 }
@@ -1294,19 +1929,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // If we can't find a page fitting this conditions, we do one more loop finding the first available page
             if (found == false)
             {
-                int attempts = 0;
-                int maxAttempts = MemPagesCount * 2;
-
-                while (attempts < maxAttempts)
+                long attempts = 0;
+                while (attempts < firstPassMax)
                 {
                     memPageIndex = AdvanceClockHand();
-                    pi = _memPagesInfo[memPageIndex];
+                    pi = Slot(memPageIndex);
 
                     // If the counter is 0, the page is candidate for eviction, try to acquire it
                     if (pi.ClockSweepCounter == 0)
                     {
                         evictedFilePageIndex = pi.FilePageIndex;
-                        if (TryAcquire(pi, minActiveEpoch))
+                        if (TryAcquire(memPageIndex, minActiveEpoch))
                         {
                             found = true;
                             break;
@@ -1322,17 +1955,37 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // But if it is, loop one more time, same thing, but ignoring the ClockSweepCounter, take the first page available
                 if (found == false)
                 {
-                    attempts = 0;
-                    maxAttempts = MemPagesCount;
-
-                    while (attempts < maxAttempts)
+                    var visits = attempts;
+                    if (cursor < 0)
                     {
-                        memPageIndex = AdvanceClockHand();
-                        pi = _memPagesInfo[memPageIndex];
+                        cursor = _clockSweepCurrentIndex.Value;
+                    }
 
-                        // If the counter is 0, the page is candidate for eviction, try to acquire it
+                    // A lap is exactly N visits, so its census counts each slot once: the round that ends a lap may be shorter.
+                    attempts = 0;
+                    var passMax = Math.Min(secondPassMax, pageCount - lapVisits);
+                    while (attempts < passMax)
+                    {
+                        memPageIndex = cursor;
+                        cursor = cursor + 1 == pageCount ? 0 : cursor + 1;
+                        pi = Slot(memPageIndex);
+
+                        // Counted before the slot is tried: the lap's census.
+                        if (pi.PageState != PageState.Free)
+                        {
+                            if (HasWritebackDebt(memPageIndex))
+                            {
+                                lapDirty++;
+                            }
+
+                            if (pi.AccessEpoch >= minActiveEpoch)
+                            {
+                                lapEpochHeld++;
+                            }
+                        }
+
                         evictedFilePageIndex = pi.FilePageIndex;
-                        if (TryAcquire(pi, minActiveEpoch))
+                        if (TryAcquire(memPageIndex, minActiveEpoch))
                         {
                             found = true;
                             break;
@@ -1342,59 +1995,63 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         pi.DecrementClockSweepCounter();
                         attempts++;
                     }
+
+                    if (!found)
+                    {
+                        Interlocked.Add(ref FailedSweepVisitsForTests, visits + attempts);
+                        lapVisits += attempts;
+                    }
                 }
 
                 if (!found)
                 {
-                    // Backpressure span wraps the diagnostics collection + strategy wait. Suppressed by default alongside
-                    // the other PageCache.* kinds, so zero cost unless the user explicitly opts in for cache-pressure analysis.
+                    var lapComplete = lapVisits >= pageCount;
+                    if (lapComplete)
+                    {
+                        dirtyCount = lapDirty;
+                        epochCount = lapEpochHeld;
+                        lapVisits = 0;
+                        lapDirty = 0;
+                        lapEpochHeld = 0;
+                    }
+
+                    // Backpressure span wraps the strategy wait. Suppressed by default alongside the other PageCache.* kinds, so zero cost unless
+                    // the user explicitly opts in for cache-pressure analysis.
                     var bpScope = TyphonEvent.BeginPageCacheBackpressure();
+                    if (backpressureSince == 0)
+                    {
+                        backpressureSince = Stopwatch.GetTimestamp();
+                    }
+
                     try
                     {
-                        // Collect pressure diagnostics for the strategy
-                        var dirtyCount = 0;
-                        var epochCount = 0;
-                        for (var i = 0; i < MemPagesCount; i++)
-                        {
-                            var p = _memPagesInfo[i];
-                            if (p.PageState == PageState.Free)
-                            {
-                                continue;
-                            }
-
-                            if (HasWritebackDebt(i))
-                            {
-                                dirtyCount++;
-                            }
-
-                            if (p.AccessEpoch >= minActiveEpoch)
-                            {
-                                epochCount++;
-                            }
-                        }
-
                         bpScope.RetryCount = bpCtx.RetryCount;
                         bpScope.DirtyCount = dirtyCount;
                         bpScope.EpochCount = epochCount;
 
-                        // High-water marks, kept because this is the ONLY place the engine looks at the cache while it is
-                        // actually under pressure. Every other gauge samples between units of work, when nothing holds an
-                        // epoch and the numbers are uninformative by construction — which is exactly how a run can report
-                        // zero epoch-held pages in its census for 57,000 ticks and then die naming 17,164 of them.
-                        if (dirtyCount > PeakBackpressureDebt) { PeakBackpressureDebt = dirtyCount; }
-                        if (epochCount > PeakBackpressureEpochHeld) { PeakBackpressureEpochHeld = epochCount; }
-
                         ++_metrics.BackpressureWaitCount;
+                        if (lapComplete)
+                        {
+                            // High-water marks, kept because this is the ONLY place the engine looks at the cache while it is
+                            // actually under pressure. Every other gauge samples between units of work, when nothing holds an
+                            // epoch and the numbers are uninformative by construction — which is exactly how a run can report
+                            // zero epoch-held pages in its census for 57,000 ticks and then die naming 17,164 of them.
+                            if (dirtyCount > PeakBackpressureDebt) { PeakBackpressureDebt = dirtyCount; }
+                            if (epochCount > PeakBackpressureEpochHeld) { PeakBackpressureEpochHeld = epochCount; }
 
-                        Logger.LogWarning(
-                            "Page cache backpressure: wait#{WaitCount} dirty={DirtyCount} epoch={EpochCount} retry={RetryCount} remaining={RemainingMs}ms",
-                            _metrics.BackpressureWaitCount, dirtyCount, epochCount, bpCtx.RetryCount, bpCtx.WaitContext.Remaining.TotalMilliseconds);
+                            LogBackpressure(Logger, _metrics.BackpressureWaitCount, dirtyCount, epochCount, bpCtx.RetryCount,
+                                bpCtx.WaitContext.Remaining.TotalMilliseconds);
+                        }
 
-                        // Demand-driven flush: wake the checkpoint manager immediately so dirty pages get written to
-                        // disk → DecrementDirty → SignalPageAvailable → waiter wakes.
+                        // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
+                        // DecrementDirty → SignalPageAvailable → waiter wakes, and let go of the spatial queries' pinned pages. Not once per lap:
+                        // above 524 288 slots a lap is many rounds, and the remedies must not wait for it.
                         OnBackpressure?.Invoke();
 
-                        if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount))
+                        // The timeout is honoured only at the end of a lap (#1137): a page that stays evictable is found before the allocation
+                        // gives up, whatever the cache size or the configured timeout — so the timeout can be overrun by at most one lap. Until
+                        // then a strategy that gives up just does not wait.
+                        if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount) && lapComplete)
                         {
                             ThrowHelper.ThrowPageCacheBackpressureTimeout(
                                 dirtyCount, epochCount,
@@ -1403,14 +2060,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     }
                     finally
                     {
+                        NoteBackpressureWait(Stopwatch.GetTimestamp() - backpressureSince);
                         bpScope.Dispose();
                     }
 
                     continue;
                 }
             }
-
-            pi.FilePageIndex = filePageIndex;
 
             ++_metrics.TotalMemPageAllocatedCount;
 
@@ -1420,13 +2076,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (evictedFilePageIndex >= 0)
             {
                 // Phase 5: dirtyBit reflects whether the displaced page was dirty at eviction time (still under the lock that gates clean reuse).
-                var dirtyBit = (byte)(HasWritebackDebt(pi.MemPageIndex) ? 1 : 0);
+                var dirtyBit = (byte)(HasWritebackDebt(memPageIndex) ? 1 : 0);
                 TyphonEvent.EmitPageEvicted(evictedFilePageIndex, dirtyBit);
             }
 
             if (Options.PagesDebugPattern)
             {
-                var pageAddr = MemPages.DataAsMemory.Slice(memPageIndex * PageSize).Span.Cast<byte, int>();
+                Span<int> pageAddr;
+                unsafe
+                {
+                    pageAddr = new Span<int>(GetMemPageAddress(memPageIndex), PageSize / sizeof(int));
+                }
                 int i;
                 for (i = 0; i < PageHeaderSize >> 2; i++)
                 {
@@ -1439,8 +2099,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
             }
 
-            // There might have been a concurrent allocation for this FilePage, so we Get or Add and check which MemPage is set
-            var newMemPageIndex = _memPageIndexByFilePageIndex.GetOrAdd(filePageIndex, memPageIndex);
+            MissBeforePublishProbe?.Invoke(filePageIndex);
+
+            // The slot's key, written as late as possible: a lookup paused on this slot in its old chain can reach it, so it should carry the new
+            // key only just before it is published (the hit path validates it anyway, PS-15). The directory chains slots by this key (PS-17).
+            pi.FilePageIndex = filePageIndex;
+
+            // Publish. From here a concurrent request for the same file page finds this slot, but it is not ready (PS-15) until the caller, which
+            // owns it, has prepared it. There might have been a concurrent allocation for this FilePage, so we Get or Add and check which MemPage is set
+            var newMemPageIndex = _directory.GetOrAdd(filePageIndex, memPageIndex);
 
             // If the returned one is different, another thread beat us, we need to clean up what we did here and consider the other one
             if (newMemPageIndex != memPageIndex)
@@ -1449,20 +2116,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
                 pi.FilePageIndex = -1;
                 pi.PageState = PageState.Free;
-                pi.ResetIOCompletionTask();
+                DropReadTask(memPageIndex, pi);
                 pi.ResetClockSweepCounter();
                 pi.StateSyncRoot.ExitExclusiveAccess();
 
+                // PS-15: the winner owns that slot and prepares it. We must not read into it, reset its CRC flag or replace its read task.
                 memPageIndex = newMemPageIndex;
+                owner = false;
+                Interlocked.Increment(ref _metrics.FreeMemPageCount);   // TryAcquire took it when it claimed our slot, which is Free again
                 _metrics.TotalMemPageAllocatedCount--;
+                return true;
             }
 
+            owner = true;
             return true;
         }
     }
 
-    private bool TryAcquire(PageInfo info, long minActiveEpoch)
+    private bool TryAcquire(int memPageIndex, long minActiveEpoch)
     {
+        var info = Slot(memPageIndex);
+
         // First pass, check without locking (we won't bother to acquire the lock if the page is not in Free or Idle state)
         var state = info.PageState;
         if (state != PageState.Free && state != PageState.Idle)
@@ -1475,7 +2149,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // EBR epoch protection prevents eviction of recently-accessed pages (long-term, bounded by re-stamp).
         if (state == PageState.Idle)
         {
-            if (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasWritebackDebt(info.MemPageIndex))
+            if (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasDebt(info))
             {
                 return false;
             }
@@ -1486,6 +2160,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         // Second pass, under lock
+        ReclaimBeforeLockProbe?.Invoke(memPageIndex);
         try
         {
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.PageCacheLockTimeout);
@@ -1494,27 +2169,41 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 ThrowHelper.ThrowLockTimeout("PageCache/TryAcquire", TimeoutOptions.Current.PageCacheLockTimeout);
             }
 
-            // Reset the IOMode from read to none for a loading page if the IO read task completed successfully.
-            if (info.IOReadTask!=null && info.IOReadTask.IsCompletedSuccessfully)
-            {
-                info.ResetIOCompletionTask();
-            }
-
             // We need to check the state again, because another thread might have changed between the first and second pass
             if (info.PageState is PageState.Free or PageState.Idle)
             {
-                // Re-check all protection layers under lock (may have changed since first pass)
-                if (info.PageState == PageState.Idle &&
-                    (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasWritebackDebt(info.MemPageIndex)
-                     || info.AccessEpoch >= minActiveEpoch))
+                // Drop the slot's read task if it completed successfully. A failed one stays: the slot's next owner overwrites or drops it. Not for a
+                // slot claimed since the first pass: its read is its owner's, and its requesters complete it — short-read check included (#1201).
+                if (info.ReadPending && _readTasks.TryGetValue(memPageIndex, out var readTask) && readTask.IsCompletedSuccessfully)
                 {
+                    DropReadTask(memPageIndex, info);
+                }
+
+                // PS-15: withdraw "ready" BEFORE re-checking the epoch, with a full fence between the two. A requester tags AccessEpoch (a full-fence
+                // CAS) and then re-reads SlotReady and FilePageIndex, so one of us sees the other: either the re-check below finds the requester's tag
+                // and backs off, or the requester finds the slot not ready and looks the page up again. Without it, a tag landing between the re-check
+                // and the FilePageIndex reset below would hand the requester a slot that is being reclaimed. Restored on every back-off.
+                // Only on a slot this lock holds Free or Idle, whose "ready" no one else writes. Another thread may have claimed the slot since the
+                // first pass: it is then Allocating, and its owner sets "ready" without this lock — a withdraw and restore here would put back the
+                // value read before the owner's write and erase it, leaving the page published and never ready (#1201).
+                var wasReady = Volatile.Read(ref info.SlotReady);
+                Volatile.Write(ref info.SlotReady, false);
+                Interlocked.MemoryBarrier();
+                ReclaimReadyWithdrawnProbe?.Invoke(memPageIndex);
+
+                // Re-check all protection layers under lock (may have changed since first pass)
+                if (info.PageState == PageState.Idle && (info.SlotRefCount > 0 || info.ActiveChunkWriters > 0 || info.DirtyCounter > 0 || HasDebt(info)
+                                                         || Volatile.Read(ref info.AccessEpoch) >= minActiveEpoch))
+                {
+                    Volatile.Write(ref info.SlotReady, wasReady);
                     return false;
                 }
 
                 // Idle page is still referenced in the cache directory, so we remove it
                 if (info.PageState == PageState.Idle)
                 {
-                    _memPageIndexByFilePageIndex.TryRemove(info.FilePageIndex, out _);
+                    var unpublished = _directory.TryRemove(info.FilePageIndex, memPageIndex);
+                    Debug.Assert(unpublished, "An Idle slot is the one published for its page.");
                 }
                 // Reset the seqlock ModificationCounter to a known EVEN (quiescent) value as the slot is repurposed. The counter is per-slot memory, never
                 // reset elsewhere — TryLatch/Unlatch only increment it (parity-preserving) and the page-clear path deliberately PRESERVES it. So a slot whose
@@ -1524,17 +2213,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // grown page keeps the 0. Done under StateSyncRoot with the slot detached from any accessor (Idle/Free, ACW==0, not dirty), so no reader races.
                 unsafe
                 {
-                    ((PageBaseHeader*)(_memPagesAddr + info.MemPageIndex * (long)PageSize))->ModificationCounter = 0;
+                    ((PageBaseHeader*)(_memPagesAddr + memPageIndex * (long)PageSize))->ModificationCounter = 0;
                 }
                 info.ResetClockSweepCounter();
                 info.FilePageIndex = -1;
                 info.AccessEpoch = 0;  // Clear epoch tag on reallocation
 
-                // Clear the writeback ledger with the slot. The guards above already established that this slot owes nothing (both gens equal), so this is a
-                // normalisation, not a discard — but leaving a nonzero pair behind would make the NEXT occupant inherit a stale "already captured at gen N"
-                // claim, and the first N modifications to a freshly loaded page would then look durable when they are not.
-                Volatile.Write(ref info.WritebackGen, 0);
-                Volatile.Write(ref info.CapturedGen, 0);
+                // The writeback pair carries over to the next occupant (PS-10): the guards above proved the two equal, and the next modification bumps
+                // WritebackGen past them, so the new page is owed exactly when it should be. Resetting them to 0 is what used to let a capture published
+                // late for the previous occupant — a checkpoint's, after SavePages had already settled the page and it was evicted — set CapturedGen
+                // above the new occupant's WritebackGen: debt nothing could ever discharge, and a slot pinned for good.
+                Debug.Assert(Volatile.Read(ref info.WritebackGen) == Volatile.Read(ref info.CapturedGen), "Reclaiming a slot that owes a writeback.");
+                // PS-16: no debt, so no bit. A discharge that raced in may have left one set; clear it now rather than leave it to the checkpoint.
+                ClearDebtBit(memPageIndex);
+                // PS-15: SlotReady stays false (withdrawn above) until the new owner has prepared the slot — written before the owner publishes it,
+                // so nobody who finds it there can see an older "ready".
                 info.PageState = PageState.Allocating;
                 Interlocked.Decrement(ref _metrics.FreeMemPageCount);
                 Debug.Assert(info.ExclusiveLatchDepth == 0);
@@ -1590,7 +2283,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool TryLatchPageExclusive(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
 
         // Re-entrant fast path: already latched by this thread — skip StateSyncRoot entirely
         if (pi.PageExclusiveLatch.IsLockedByCurrentThread)
@@ -1655,7 +2348,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal void UnlatchPageExclusive(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
 
         if (pi.ExclusiveLatchDepth > 0)
         {
@@ -1704,7 +2397,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     private unsafe void EnsurePageVerified(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
 
         // Already verified this load cycle (fast path, unlocked — once set true it stays true until the slot is reloaded, where CrcVerified is reset to false).
         if (pi.CrcVerified)
@@ -1901,15 +2594,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // and only surfaced as a WalBackPressureTimeout ten minutes into a demo run.
 
     /// <summary>Live <see cref="PageInfo.ActiveChunkWriters"/> for a page. Non-zero at quiesce proves a leaked registration.</summary>
-    internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].ActiveChunkWriters);
+    internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).ActiveChunkWriters);
 
     /// <summary>Pages holding a writer registration. Must be zero at quiesce (CP-13).</summary>
     internal int CountPagesWithActiveChunkWriters()
     {
         var n = 0;
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
-            if (Volatile.Read(ref _memPagesInfo[i].ActiveChunkWriters) != 0)
+            if (Volatile.Read(ref Slot(i).ActiveChunkWriters) != 0)
             {
                 n++;
             }
@@ -1918,16 +2611,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>Live <see cref="PageInfo.DirtyCounter"/> for a page.</summary>
-    internal int DirtyCounterOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].DirtyCounter);
+    internal int DirtyCounterOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).DirtyCounter);
 
     /// <summary>Pages still dirty, the cache size, and the lowest dirty page index (-1 if none).</summary>
     internal (int Dirty, int Total, int FirstDirtyPage) CountDirtyPages()
     {
         var n = 0;
         var first = -1;
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
-            if (Volatile.Read(ref _memPagesInfo[i].DirtyCounter) > 0)
+            if (Volatile.Read(ref Slot(i).DirtyCounter) > 0)
             {
                 n++;
                 if (first < 0)
@@ -1936,7 +2629,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
             }
         }
-        return (n, _memPagesInfo.Length, first);
+        return (n, MemPagesCount, first);
     }
 
     /// <summary>
@@ -1951,8 +2644,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal void MarkPageModified(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
         Interlocked.Increment(ref pi.WritebackGen);
+        RaiseDebtBit(memPageIndex);
+    }
+
+    /// <summary>
+    /// The cache slot holding <paramref name="address"/>, a pointer into a cached page: its offset in the cache, so a hot writer that holds a pointer
+    /// records its page (<see cref="MarkPageModified"/>) without a page lookup.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal unsafe int MemPageIndexOf(byte* address)
+    {
+        var memPageIndex = (int)((address - _memPagesAddr) >> PageSizePow2);
+        Debug.Assert((uint)memPageIndex < (uint)MemPagesCount, "the address is not in the page cache");
+        return memPageIndex;
     }
 
     /// <summary>
@@ -1965,7 +2671,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal void MarkCaptured(int memPageIndex, long capturedGen)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
         SpinWait sw = default;
         while (true)
         {
@@ -1977,7 +2683,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             if (Interlocked.CompareExchange(ref pi.CapturedGen, capturedGen, current) == current)
             {
-                if (Volatile.Read(ref pi.DirtyCounter) == 0 && !HasWritebackDebt(memPageIndex))
+                if (!HasDebt(pi))
+                {
+                    SettleDebtBit(memPageIndex, pi);
+                }
+
+                if (Volatile.Read(ref pi.DirtyCounter) == 0 && !HasDebt(pi))
                 {
                     _backpressureStrategy.SignalPageAvailable();
                 }
@@ -1990,23 +2701,100 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Whether this page holds bytes that are not yet on the data file.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal bool HasWritebackDebt(int memPageIndex)
+    internal bool HasWritebackDebt(int memPageIndex) => HasDebt(Slot(memPageIndex));
+
+    /// <inheritdoc cref="HasWritebackDebt"/>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool HasDebt(PageInfo pi) => Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen);
+
+    // ─── Writeback-debt bitmap (PS-16, #1127) ────────────────────────────────────────────────────────────────────
+    // Lets the checkpoint find the slots that owe a writeback without visiting every slot. The generations stay the truth: eviction and every
+    // "is this page owed" decision read them, never the bit. The bit only has to be a superset — set whenever the slot owes — and is kept so by
+    // a store-buffer pairing: a writer bumps the generation (a full fence) then reads the bit; a discharge clears the bit (a full fence) then
+    // reads the generations. Whatever the interleaving, one of the two sees the other, so the bit ends set whenever the debt is there.
+
+    /// <summary>Sets the slot's debt bit, after the caller has bumped its generation. Reads first, so a page already owed costs a shared read.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RaiseDebtBit(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
-        return Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen);
+        ref var word = ref _debtBits[memPageIndex >> 6];
+        var mask = 1L << memPageIndex;   // The shift count is taken mod 64.
+        if ((Volatile.Read(ref word) & mask) != 0)
+        {
+            return;
+        }
+
+        if ((Interlocked.Or(ref word, mask) & mask) == 0)
+        {
+            Interlocked.Increment(ref _debtPageCount.Value);
+        }
+    }
+
+    /// <summary>Clears the slot's debt bit, counting the transition if this call made it.</summary>
+    private void ClearDebtBit(int memPageIndex)
+    {
+        ref var word = ref _debtBits[memPageIndex >> 6];
+        var mask = 1L << memPageIndex;
+        if ((Volatile.Read(ref word) & mask) == 0)
+        {
+            return;
+        }
+
+        if ((Interlocked.And(ref word, ~mask) & mask) != 0)
+        {
+            Interlocked.Decrement(ref _debtPageCount.Value);
+        }
+    }
+
+    /// <summary>
+    /// Clears the bit of a slot found owing nothing, then re-checks: a writer that bumped the generation meanwhile may have read the bit as set
+    /// and left it, so the bit goes back if the slot owes again. Two discharges crossing can leave a bit set with no debt behind it; the next
+    /// <see cref="CollectDirtyMemPageIndices"/> clears it.
+    /// </summary>
+    private void SettleDebtBit(int memPageIndex, PageInfo pi)
+    {
+        DebtSettleProbe?.Invoke(memPageIndex);
+        ClearDebtBit(memPageIndex);
+        // The full fence between the clear and the re-check. Interlocked.And is one when it ran; the barrier also covers the early-out, where it did not.
+        Interlocked.MemoryBarrier();
+        DebtReCheckProbe?.Invoke(memPageIndex);
+        if (HasDebt(pi))
+        {
+            RaiseDebtBit(memPageIndex);
+        }
+    }
+
+    /// <summary>Sets a slot's debt bit whether or not it owes anything — a bit outliving its debt, as two crossing discharges can leave. Test seam.</summary>
+    internal void RaiseDebtBitForTests(int memPageIndex) => RaiseDebtBit(memPageIndex);
+
+    /// <summary>Whether the slot's debt bit is set. Test seam.</summary>
+    internal bool IsDebtBitSetForTests(int memPageIndex) => (Volatile.Read(ref _debtBits[memPageIndex >> 6]) & (1L << memPageIndex)) != 0;
+
+    /// <summary>The maintained count of set debt bits. Test seam.</summary>
+    internal int DebtPageCountForTests => Volatile.Read(ref _debtPageCount.Value);
+
+    /// <summary>The set debt bits, counted from the bitmap. Test seam: at quiescence it equals <see cref="DebtPageCountForTests"/>.</summary>
+    internal int CountSetDebtBitsForTests()
+    {
+        var n = 0;
+        foreach (var word in _debtBits)
+        {
+            n += BitOperations.PopCount((ulong)word);
+        }
+        return n;
     }
 
     /// <summary>Live <see cref="PageInfo.WritebackGen"/> for a page. Diagnostic.</summary>
-    internal long WritebackGenOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].WritebackGen);
+    internal long WritebackGenOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).WritebackGen);
 
     /// <summary>Live <see cref="PageInfo.CapturedGen"/> for a page. Diagnostic.</summary>
-    internal long CapturedGenOf(int memPageIndex) => Volatile.Read(ref _memPagesInfo[memPageIndex].CapturedGen);
+    internal long CapturedGenOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).CapturedGen);
 
     /// <summary>Pages owing a writeback, i.e. modified since their last durable capture. Diagnostic.</summary>
     internal int CountPagesWithWritebackDebt()
     {
         var n = 0;
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
             if (HasWritebackDebt(i))
             {
@@ -2026,34 +2814,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// on a cache that is mostly empty and trigger checkpoints on a database that has barely started.
     /// </para>
     /// <para>
-    /// One linear pass, same shape and cost as <see cref="CollectDirtyMemPageIndices"/>, which already runs once per
-    /// checkpoint cycle. Called from the checkpoint thread's poll, so it is off every hot path. A maintained counter was
-    /// considered and rejected: it would have to detect the clean→owed edge inside <see cref="MarkPageModified"/> on the
-    /// commit path, and a racing counter that drifts is worse than an exact scan nobody is waiting on.
+    /// Reads the count of set debt bits (PS-16), so it costs the same at any cache size (#1127): it used to scan every slot, every 250 ms while
+    /// the dirty-page trigger is armed. The count is not a counter of modifications — it moves only when a bit flips, which is the clean→owed
+    /// edge a maintained counter could not see — so it cannot drift. It may over-count: a bit can outlive its debt until the next checkpoint
+    /// collects it. And it can dip for an instant while a writer and a discharge cross, hence the clamp.
     /// </para>
     /// </remarks>
     internal int WritebackDebtPercent()
     {
-        var pages = _memPagesInfo;
-        if (pages == null || pages.Length == 0)
+        // Reads no slot record, only the count; zero once the store is disposed.
+        if (_slots == null || MemPagesCount == 0)
         {
             return 0;
         }
 
-        // Read through the captured array, NOT via HasWritebackDebt(i) — that helper re-reads _memPagesInfo on every
-        // call, and Dispose nulls it. This runs on the checkpoint thread, which is still polling while the engine tears
-        // down, so a scan that re-read the field would NRE on a perfectly ordinary shutdown.
-        var owed = 0;
-        for (var i = 0; i < pages.Length; i++)
-        {
-            var pi = pages[i];
-            if (pi != null && Volatile.Read(ref pi.WritebackGen) != Volatile.Read(ref pi.CapturedGen))
-            {
-                owed++;
-            }
-        }
-
-        return (int)((owed * 100L) / pages.Length);
+        var owed = Math.Max(0, Volatile.Read(ref _debtPageCount.Value));
+        return (int)((owed * 100L) / MemPagesCount);
     }
 
     /// <summary>Lowest-indexed resident (non-Free) page, or -1. Test seam.</summary>
@@ -2063,9 +2839,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal int FirstResidentPage()
     {
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
-            if (_memPagesInfo[i].PageState != PageState.Free && _memPagesInfo[i].FilePageIndex > 0)
+            if (Slot(i).PageState != PageState.Free && Slot(i).FilePageIndex > 0)
             {
                 return i;
             }
@@ -2076,9 +2852,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Lowest-indexed resident page owing a writeback, or -1. Diagnostic / test seam.</summary>
     internal int FirstPageWithWritebackDebt()
     {
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
-            if (_memPagesInfo[i].PageState != PageState.Free && HasWritebackDebt(i))
+            if (Slot(i).PageState != PageState.Free && HasWritebackDebt(i))
             {
                 return i;
             }
@@ -2087,7 +2863,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>Total page-cache slots, resident or not. Diagnostic.</summary>
-    internal int PageCacheSlotCountForDiagnostics => _memPagesInfo?.Length ?? 0;
+    internal int PageCacheSlotCountForDiagnostics => _slots?.Count ?? 0;
 
     /// <summary>Highest writeback-debt page count observed while the cache was under back-pressure. Diagnostic.</summary>
     internal int PeakBackpressureDebt;
@@ -2101,6 +2877,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal int PeakBackpressureEpochHeld;
 
     /// <summary>
+    /// Longest time one allocation has waited under back-pressure so far, in <see cref="Stopwatch"/> ticks: from its first round that found no slot to the
+    /// end of its latest wait. Diagnostic: against <c>PageCacheBackpressureTimeout</c>, the margin a workload has before an allocation times out.
+    /// </summary>
+    internal long PeakBackpressureWaitTicks;
+
+    private void NoteBackpressureWait(long ticks)
+    {
+        var current = Volatile.Read(ref PeakBackpressureWaitTicks);
+        while (ticks > current)
+        {
+            var seen = Interlocked.CompareExchange(ref PeakBackpressureWaitTicks, ticks, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
+    }
+
+    /// <summary>
     /// The full unevictability breakdown, taken in ONE pass so the parts are mutually consistent.
     /// </summary>
     /// <remarks>
@@ -2112,8 +2909,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountUnevictablePages()
     {
-        var pages = _memPagesInfo;
-        if (pages == null)
+        var slots = _slots;
+        if (slots == null)
         {
             return (0, 0, 0, 0, 0, 0);
         }
@@ -2121,12 +2918,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
         int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, unevictable = 0, total = 0;
 
-        // Captured array throughout — see WritebackDebtPercent: Dispose nulls the field, and every helper that re-reads
-        // it is a shutdown NRE waiting for the right interleaving.
-        for (var i = 0; i < pages.Length; i++)
+        // Read through the local: a diagnostic (the demo's census, a test) may call this after the store is disposed, which nulls the field.
+        for (var i = 0; i < slots.Count; i++)
         {
-            var pi = pages[i];
-            if (pi == null || pi.PageState == PageState.Free)
+            var pi = slots[i];
+            if (pi.PageState == PageState.Free)
             {
                 continue;
             }
@@ -2147,13 +2943,79 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return (debt, acw, slotRef, epochHeld, unevictable, total);
     }
 
+    /// <summary>
+    /// Every reason a slot cannot be evicted, counted once per slot and per reason (a slot can have several), plus the slots none of them holds: what a
+    /// back-pressure timeout's two counts leave out. A diagnostic: one pass over the cache.
+    /// </summary>
+    internal string DescribeEvictionBlockers()
+    {
+        var slots = _slots;
+        if (slots == null)
+        {
+            return "no cache";
+        }
+
+        var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
+        int free = 0, allocating = 0, exclusive = 0, idle = 0, slotRef = 0, acw = 0, dirtyMarks = 0, debt = 0, epochHeld = 0, evictable = 0;
+        for (var i = 0; i < slots.Count; i++)
+        {
+            var pi = slots[i];
+            switch (pi.PageState)
+            {
+                case PageState.Free:
+                    free++;
+                    continue;
+                case PageState.Allocating:
+                    allocating++;
+                    continue;
+                case PageState.Exclusive:
+                    exclusive++;
+                    continue;
+            }
+
+            idle++;
+            var s = Volatile.Read(ref pi.SlotRefCount) > 0;
+            var a = Volatile.Read(ref pi.ActiveChunkWriters) > 0;
+            var m = Volatile.Read(ref pi.DirtyCounter) > 0;
+            var d = HasDebt(pi);
+            var e = Volatile.Read(ref pi.AccessEpoch) >= minActiveEpoch;
+            if (s) { slotRef++; }
+            if (a) { acw++; }
+            if (m) { dirtyMarks++; }
+            if (d) { debt++; }
+            if (e) { epochHeld++; }
+            if (!(s || a || m || d || e)) { evictable++; }
+        }
+
+        return $"slots {slots.Count:N0}: free {free:N0}, allocating {allocating:N0}, exclusive {exclusive:N0}, idle {idle:N0} — of the idle: slot-referenced "
+               + $"{slotRef:N0}, active writers {acw:N0}, dirty marks {dirtyMarks:N0}, writeback debt {debt:N0}, epoch-held {epochHeld:N0} (min active epoch "
+               + $"{minActiveEpoch}), evictable {evictable:N0}";
+    }
+
+    /// <summary>The file pages of the slots something holds a slot reference on. A diagnostic: one pass over the cache.</summary>
+    internal List<int> SlotReferencedFilePages()
+    {
+        var result = new List<int>();
+        var slots = _slots;
+        for (var i = 0; slots != null && i < slots.Count; i++)
+        {
+            var pi = slots[i];
+            if (pi.PageState != PageState.Free && Volatile.Read(ref pi.SlotRefCount) > 0)
+            {
+                result.Add(pi.FilePageIndex);
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>Pages holding outstanding mutator marks. At quiesce this must be zero — see the conservation rule.</summary>
     internal int CountPagesWithDirtyMarks()
     {
         var n = 0;
-        for (var i = 0; i < _memPagesInfo.Length; i++)
+        for (var i = 0; i < MemPagesCount; i++)
         {
-            if (Volatile.Read(ref _memPagesInfo[i].DirtyCounter) != 0)
+            if (Volatile.Read(ref Slot(i).DirtyCounter) != 0)
             {
                 n++;
             }
@@ -2170,13 +3032,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal void IncrementDirty(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
         Debug.Assert(pi.PageState is PageState.Exclusive or PageState.Idle, "We can't increment the dirty counter for a page that is not Exclusive or Idle.");
         if (DirtyTracePage == memPageIndex)
         {
             RecordDcTrace(+1);
         }
         Interlocked.Increment(ref pi.WritebackGen);
+        RaiseDebtBit(memPageIndex);
         Interlocked.Increment(ref pi.DirtyCounter);
     }
 
@@ -2186,7 +3049,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal void DecrementDirty(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
         if (DirtyTracePage == memPageIndex)
         {
             RecordDcTrace(-1);
@@ -2210,7 +3073,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             RecordAcwTrace(+1);
         }
-        ref var acw = ref _memPagesInfo[memPageIndex].ActiveChunkWriters;
+        ref var acw = ref Slot(memPageIndex).ActiveChunkWriters;
         SpinWait sw = default;
         while (true)
         {
@@ -2242,7 +3105,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             RecordAcwTrace(-1);
         }
-        Interlocked.Decrement(ref _memPagesInfo[memPageIndex].ActiveChunkWriters);
+        Interlocked.Decrement(ref Slot(memPageIndex).ActiveChunkWriters);
     }
 
     // ─── #817 ACW balance tracing ────────────────────────────────────────────────────────────────────────────────
@@ -2435,13 +3298,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // to protect, so releasing is vacuously complete. Checked here rather than at every call site because release is
         // the ONE operation that can legitimately arrive after teardown — a mark is taken while the store is alive by
         // construction, but it is returned whenever its owner happens to unwind.
-        var pages = _memPagesInfo;
-        if (pages == null)
+        var slots = _slots;
+        if (slots == null)
         {
             return;
         }
 
-        var pi = pages[memPageIndex];
+        var pi = slots[memPageIndex];
         SpinWait sw = default;
         while (true)
         {
@@ -2460,7 +3323,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 {
                     RecordDcTrace(newVal - current);
                 }
-                if (newVal == 0 && !HasWritebackDebt(memPageIndex))
+                if (newVal == 0 && !HasDebt(pi))
                 {
                     _backpressureStrategy.SignalPageAvailable();
                 }
@@ -2488,22 +3351,71 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Scans the in-memory page cache and returns the memory page indices of all dirty pages (DirtyCounter &gt; 0). The scan is approximate
-    /// (no locking) — pages dirtied concurrently may be missed, which is safe because they will be caught in the next checkpoint cycle.
+    /// Returns, in ascending order, the memory page indices of the pages that owe a writeback (PS-10). Approximate (no locking) — a page
+    /// dirtied concurrently may be missed, which is safe because it is caught in the next checkpoint cycle; a modification that has returned is
+    /// never missed.
     /// </summary>
+    /// <remarks>
+    /// Walks the debt bitmap (PS-16), not the slots: it reads one word per 64 slots and visits only the slots whose bit is set, so a large clean
+    /// cache costs little (#1127). The generations decide, as before; a bit found without debt behind it is cleared on the way.
+    /// </remarks>
     internal int[] CollectDirtyMemPageIndices()
     {
-        var dirty = new List<int>();
-        for (int i = 0; i < MemPagesCount; i++)
+        // Empty once the store is disposed. The checkpoint thread and the engine's shutdown flush both run before it is.
+        var slots = _slots;
+        if (slots == null)
         {
-            var pi = _memPagesInfo[i];
-            if (pi != null && HasWritebackDebt(i) && pi.PageState != PageState.Free && !IsExternallyPersisted(pi.FilePageIndex))
+            return [];
+        }
+
+        var bits = _debtBits;
+        var dirty = new List<int>();
+        var visits = 0;
+        for (var w = 0; w < bits.Length; w++)
+        {
+            var word = Volatile.Read(ref bits[w]);
+            while (word != 0)
             {
-                dirty.Add(i);
+                var i = (w << 6) + BitOperations.TrailingZeroCount(word);
+                word &= word - 1;
+                visits++;
+
+                var pi = slots[i];
+                if (!HasDebt(pi))
+                {
+                    SettleDebtBit(i, pi);
+                    continue;
+                }
+
+                if (pi.PageState != PageState.Free && !IsExternallyPersisted(pi.FilePageIndex))
+                {
+                    dirty.Add(i);
+                }
             }
         }
+
+        // Written once per call: these share the object with fields the hot paths read.
+        DebtScanSlotVisits += visits;
+        DebtScanWordVisits += bits.Length;
         return dirty.ToArray();
     }
+
+    /// <summary>Slots <see cref="CollectDirtyMemPageIndices"/> has visited. Test seam: count, don't time.</summary>
+    internal long DebtScanSlotVisits;
+
+    /// <summary>Bitmap words <see cref="CollectDirtyMemPageIndices"/> has read. Test seam.</summary>
+    internal long DebtScanWordVisits;
+
+    /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
+    internal long CheckpointSkipAcw;
+    internal long CheckpointSkipWriterHeld;
+    internal long CheckpointSkipStaleCounter;
+
+    /// <summary>
+    /// Pages a checkpoint wave left for the next pass because their kind — protected directory page or plain — was not the wave's: a page that
+    /// became a directory page after the pass was ordered (CK-16). Diagnostic.
+    /// </summary>
+    internal long CheckpointPagesDeferredForOrder;
 
     /// <summary>
     /// Copies a live page into a destination buffer using a seqlock read protocol.
@@ -2513,21 +3425,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <returns>True if a consistent snapshot was obtained; false if the page was skipped — either because a real exclusive writer held the modification
     /// counter odd for longer than the checkpoint skip threshold (100ms), or because the counter was odd on a page no writer holds (a stale counter, skipped
     /// immediately). Skipping is safe: the page remains dirty and will be captured in the next checkpoint cycle.</returns>
-    /// <summary>
-    /// Why the last <see cref="CopyPageWithSeqlock"/> call declined: 0 = success, 2 = writer held &gt; 100 ms,
-    /// 3 = stale odd counter. Diagnostic only (#817) — written and read on the checkpoint thread alone, so no
-    /// synchronisation is required or implied.
-    /// </summary>
-    internal int LastSeqlockSkipReason;
-
-    /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
-    internal long CheckpointSkipAcw;
-    internal long CheckpointSkipWriterHeld;
-    internal long CheckpointSkipStaleCounter;
-
     private unsafe bool CopyPageWithSeqlock(byte* pageAddr, byte* destAddr, int memPageIndex)
     {
-        LastSeqlockSkipReason = 0;
         var sw = new SpinWait();
         long oddSpinStart = 0;
         while (true)
@@ -2546,11 +3445,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // store from sinking past the odd-counter store, and the acquire load above keeps this PageState load from being hoisted above the counter
                 // snapshot. It previously rested on x64 TSO alone, so on arm64 a live writer could be misclassified as stale — bounded (the page stays dirty
                 // and is retried next cycle) but an explicit x64-only assumption in a protocol required to be arm64-correct.
-                if (_memPagesInfo[memPageIndex].PageState != PageState.Exclusive)
+                if (Slot(memPageIndex).PageState != PageState.Exclusive)
                 {
                     LogStaleSeqlockCounterSkip(Logger, memPageIndex, counter);
-                    LastSeqlockSkipReason = 3;
-                    CheckpointSkipStaleCounter++;
+                    Interlocked.Increment(ref CheckpointSkipStaleCounter);
                     return false;
                 }
 
@@ -2568,8 +3466,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // backpressure to free cache pages). Skip this page to avoid deadlock:
                         // the writer may be waiting for this checkpoint to complete DecrementDirty.
                         LogSeqlockWriterHeldSkip(Logger, (int)elapsedMs, counter);
-                        LastSeqlockSkipReason = 2;
-                        CheckpointSkipWriterHeld++;
+                        Interlocked.Increment(ref CheckpointSkipWriterHeld);
                         return false;
                     }
                 }
@@ -2610,7 +3507,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>
     /// Writes dirty pages to the data file via staging buffers WITHOUT decrementing their DirtyCounter.
     /// Each page is snapshot-copied through the seqlock protocol, then CRC-stamped on the staging copy,
-    /// and written synchronously to the data file. Called on the checkpoint thread.
+    /// and written synchronously to the data file. Called by the checkpoint thread and its wave writers, each on its own range of pages (CK-15).
     /// </summary>
     /// <param name="memPageIndices">Memory page indices of dirty pages to write. On return, the first
     /// <paramref name="writtenCount"/> entries contain the indices of pages that were actually written.
@@ -2629,7 +3526,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// not cover, which is the lost-write shape of #385.
     /// </para>
     /// </param>
-    unsafe internal void WritePagesForCheckpoint(int[] memPageIndices, StagingBufferPool stagingPool, out int writtenCount, long[] capturedGen = null)
+    /// <param name="filter">Which pages this call may write; the others are left at the back, as skipped, and counted in
+    /// <see cref="CheckpointPagesDeferredForOrder"/>. The checkpoint's waves write protected and plain pages apart (CK-16).</param>
+    unsafe internal void WritePagesForCheckpoint(
+        Span<int> memPageIndices,
+        StagingBufferPool stagingPool,
+        out int writtenCount,
+        Span<long> capturedGen = default,
+        CheckpointWriteFilter filter = CheckpointWriteFilter.All)
     {
         writtenCount = 0;
 
@@ -2637,8 +3541,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             return;
         }
-
-        Logger.LogInformation("Checkpoint: writing {PageCount} dirty pages", memPageIndices.Length);
 
         var memPageBaseAddr = _memPagesAddr;
 
@@ -2658,7 +3560,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var protectedCount = 0;
         for (int i = 0; i < memPageIndices.Length; i++)
         {
-            var probeFilePageIndex = _memPagesInfo[memPageIndices[i]].FilePageIndex;
+            var probeFilePageIndex = Slot(memPageIndices[i]).FilePageIndex;
             if (probeFilePageIndex > 0 && IsProtectedPage(probeFilePageIndex))
             {
                 (memPageIndices[protectedCount], memPageIndices[i]) = (memPageIndices[i], memPageIndices[protectedCount]);
@@ -2669,14 +3571,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (int i = 0; i < memPageIndices.Length; i++)
         {
             var memPageIndex = memPageIndices[i];
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
+
+            // A wave writes one kind of page (CK-16). A page of the other kind stays at the back, owed, for the next pass to order again.
+            if (filter != CheckpointWriteFilter.All)
+            {
+                var fp = pi.FilePageIndex;
+                if (fp > 0 && IsProtectedPage(fp) != (filter == CheckpointWriteFilter.ProtectedOnly))
+                {
+                    Interlocked.Increment(ref CheckpointPagesDeferredForOrder);
+                    continue;
+                }
+            }
 
             // Wait for any pending I/O read to complete
-            var ioTask = pi.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
-            {
-                ioTask.GetAwaiter().GetResult();
-            }
+            WaitForPendingRead(memPageIndex, pi);
 
             var livePageAddr = memPageBaseAddr + (memPageIndex * (long)PageSize);
 
@@ -2687,7 +3596,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // detect because OLC writes don't update ModificationCounter.
             if (Interlocked.CompareExchange(ref pi.ActiveChunkWriters, -1, 0) != 0)
             {
-                CheckpointSkipAcw++;   // #817 diagnostic: cause A — a live chunk writer held the page
+                Interlocked.Increment(ref CheckpointSkipAcw);   // #817 diagnostic: cause A — a live chunk writer held the page
                 continue;
             }
 
@@ -2751,19 +3660,48 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
             memPageIndices[i] = memPageIndices[writtenCount];
             memPageIndices[writtenCount] = memPageIndex;
-            if (capturedGen != null && writtenCount < capturedGen.Length)
+            if (writtenCount < capturedGen.Length)
             {
                 capturedGen[writtenCount] = genAtCapture;
             }
             writtenCount++;
-
-            _metrics.PageWrittenToDiskCount++;
-            _metrics.WrittenOperationCount++;
         }
 
-        if (writtenCount < memPageIndices.Length)
+        // Atomic, and once per call: a checkpoint wave's sub-batches are written by several threads at once.
+        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, writtenCount);
+        Interlocked.Add(ref _metrics.WrittenOperationCount, writtenCount);
+    }
+
+    /// <summary>
+    /// Orders <paramref name="memPageIndices"/> for a checkpoint pass: protected segment-directory pages first, then every other page by file position.
+    /// </summary>
+    /// <remarks>
+    /// Protected first because their persist fsyncs the whole file (see <see cref="WritePagesForCheckpoint"/>): ahead of every plain write of the pass it
+    /// can only make durable what an earlier batch already flushed the WAL for (CK-02). File order for the rest makes the data file's writeback mostly
+    /// sequential, which is what an fsync then pays for.
+    /// </remarks>
+    /// <returns>How many protected pages lead the order.</returns>
+    internal int OrderForCheckpointWrite(int[] memPageIndices)
+    {
+        var n = memPageIndices.Length;
+        var keys = ArrayPool<long>.Shared.Rent(n);
+        try
         {
-            Logger.LogInformation("Checkpoint: skipped {SkippedCount} pages with active writers", memPageIndices.Length - writtenCount);
+            var protectedCount = 0;
+            for (var i = 0; i < n; i++)
+            {
+                long filePageIndex = Slot(memPageIndices[i]).FilePageIndex;
+                var isProtected = filePageIndex > 0 && IsProtectedPage((int)filePageIndex);
+                keys[i] = isProtected ? filePageIndex - (1L << 40) : filePageIndex;
+                protectedCount += isProtected ? 1 : 0;
+            }
+
+            Array.Sort(keys, memPageIndices, 0, n);
+            return protectedCount;
+        }
+        finally
+        {
+            ArrayPool<long>.Shared.Return(keys);
         }
     }
 
@@ -2795,7 +3733,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var gensAtEntry = new long[memPageIndices.Length];
         for (int i = 0; i < memPageIndices.Length; i++)
         {
-            gensAtEntry[i] = Volatile.Read(ref _memPagesInfo[memPageIndices[i]].WritebackGen);
+            gensAtEntry[i] = Volatile.Read(ref Slot(memPageIndices[i]).WritebackGen);
         }
 
         // CK-05 (C2): protected segment-directory pages must be written to their ALTERNATE slot (gen+1 + CRC + fsync + flip,
@@ -2817,7 +3755,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var needsPartition = false;
         for (int i = 0; i < memPageIndices.Length; i++)
         {
-            var filePageIdx = _memPagesInfo[memPageIndices[i]].FilePageIndex;
+            var filePageIdx = Slot(memPageIndices[i]).FilePageIndex;
             if (IsExternallyPersisted(filePageIdx) || (filePageIdx > 0 && IsProtectedPage(filePageIdx)))
             {
                 needsPartition = true;
@@ -2830,7 +3768,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var normal = new List<int>(memPageIndices.Length);
             for (int i = 0; i < memPageIndices.Length; i++)
             {
-                var pi = _memPagesInfo[memPageIndices[i]];
+                var pi = Slot(memPageIndices[i]);
                 if (IsExternallyPersisted(pi.FilePageIndex))
                 {
                     // Owned by PersistMetaNow. Not written here at all — the continuation still releases its DirtyCounter.
@@ -2840,13 +3778,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 if (pi.FilePageIndex > 0 && IsProtectedPage(pi.FilePageIndex))
                 {
                     // Wait for any pending IO read so the live page is complete, bump ChangeRevision, then redirect the write.
-                    var ioTask = pi.IOReadTask;
-                    if (ioTask != null && !ioTask.IsCompletedSuccessfully)
-                    {
-                        ioTask.GetAwaiter().GetResult();
-                    }
+                    WaitForPendingRead(memPageIndices[i], pi);
 
-                    var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (pi.MemPageIndex * (long)PageSize));
+                    var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (memPageIndices[i] * (long)PageSize));
                     ++headerAddr->ChangeRevision;
                     TryPersistProtectedPage(pi.FilePageIndex, (byte*)headerAddr);
                 }
@@ -2876,64 +3810,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return Task.CompletedTask;
         }
 
-        var operations = new List<(int memPageIndex, int length)>();
-
-        var curPageInfo = _memPagesInfo[normalPages[0]];
-        var curOperation = (memPageIndex: normalPages[0], length: 1);
-
-        for (int i = 1; i < normalPages.Length; i++)
+        // Stamp every page (file page 0 is the file header, a different format, so it is left alone): bump its ChangeRevision, then stamp identity
+        // and checksum so the on-disk copy is self-consistent (CP-07 equivalent for SavePages).
+        var filePages = new int[normalPages.Length];
+        for (int i = 0; i < normalPages.Length; i++)
         {
-            // Increment the ChangeRevision for the page (File Page 0 is the file header, it's a different format so ignore it)
-            if (curPageInfo.FilePageIndex > 0)
+            var memPageIndex = normalPages[i];
+            var pi = Slot(memPageIndex);
+            filePages[i] = pi.FilePageIndex;
+            if (filePages[i] > 0)
             {
                 // Make sure the page to save is properly loaded first (wait for any pending IO read to complete).
-                var ioTask = curPageInfo.IOReadTask;
-                if (ioTask != null && !ioTask.IsCompletedSuccessfully)
-                {
-                    ioTask.GetAwaiter().GetResult();
-                }
+                WaitForPendingRead(memPageIndex, pi);
 
-                var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curPageInfo.MemPageIndex * PageSize));
+                var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (memPageIndex * (long)PageSize));
                 ++headerAddr->ChangeRevision;
-
-                // Stamp identity + checksum over the updated page so the on-disk copy is self-consistent (CP-07 equivalent for SavePages)
-                StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), curPageInfo.FilePageIndex);
+                StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), filePages[i]);
             }
-
-            var nextMemPageIndex = normalPages[i];
-            var nextPageInfo = _memPagesInfo[nextMemPageIndex];
-            if ((curPageInfo.MemPageIndex+1)==nextPageInfo.MemPageIndex && (curPageInfo.FilePageIndex+1)==nextPageInfo.FilePageIndex)
-            {
-                // We are contiguous, extend the current operation
-                curOperation.length++;
-            }
-            else
-            {
-                // We are not contiguous, store the current operation and start a new one
-                operations.Add(curOperation);
-                curOperation = (nextMemPageIndex, 1);
-            }
-
-            curPageInfo = nextPageInfo;
         }
 
-        // Increment ChangeRevision for the last page (the loop above only processes pages before the last one)
-        if (curPageInfo.FilePageIndex > 0)
-        {
-            var ioTask = curPageInfo.IOReadTask;
-            if (ioTask != null && !ioTask.IsCompletedSuccessfully)
-            {
-                ioTask.GetAwaiter().GetResult();
-            }
-
-            var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curPageInfo.MemPageIndex * PageSize));
-            ++headerAddr->ChangeRevision;
-
-            StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), curPageInfo.FilePageIndex);
-        }
-
-        // Don't forget to add the last operation
-        operations.Add(curOperation);
+        var operations = new List<(int memPageIndex, int length)>();
+        BuildWriteRuns(normalPages, filePages, operations);
 
         // Highest byte offset this batch will have made durable once its async writes + fsync complete. SavePageInternal no longer advances
         // _fileSize (it is the async path); we advance it once in the continuation below, AFTER FlushToDisk and BEFORE DecrementDirty, so a
@@ -2942,7 +3839,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         long batchEndOffset = 0;
         for (int i = 0; i < operations.Count; i++)
         {
-            var opFilePageIdx = _memPagesInfo[operations[i].memPageIndex].FilePageIndex;
+            var opFilePageIdx = Slot(operations[i].memPageIndex).FilePageIndex;
             var end = (opFilePageIdx + operations[i].length) * (long)PageSize;
             if (end > batchEndOffset)
             {
@@ -2983,23 +3880,56 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return saveTask;
     }
     
+    /// <summary>
+    /// Groups pages sorted by mem page into write runs. A run grows while the next page follows it in memory AND on file, and ends on the last page
+    /// of a page-cache window, so each run is one slice of one window (<see cref="PageCacheWindow.PageRunMemory"/>) and its byte length fits an
+    /// <c>int</c>. Pure, so a test can feed it made-up indices.
+    /// </summary>
+    internal static void BuildWriteRuns(ReadOnlySpan<int> memPageIndices, ReadOnlySpan<int> filePageIndices, List<(int memPageIndex, int length)> runs)
+    {
+        if (memPageIndices.IsEmpty)
+        {
+            return;
+        }
+
+        var start = memPageIndices[0];
+        var length = 1;
+        for (var i = 1; i < memPageIndices.Length; i++)
+        {
+            var prev = memPageIndices[i - 1];
+            if (memPageIndices[i] == prev + 1 && filePageIndices[i] == filePageIndices[i - 1] + 1 && !PageCacheAddressing.IsLastPageOfWindow(prev))
+            {
+                length++;
+            }
+            else
+            {
+                runs.Add((start, length));
+                start = memPageIndices[i];
+                length = 1;
+            }
+        }
+
+        runs.Add((start, length));
+    }
+
     internal ValueTask SavePageInternal(int firstMemPageIndex, int length)
     {
-        var pi = _memPagesInfo[firstMemPageIndex];
+        var pi = Slot(firstMemPageIndex);
 
         // Save the page to disk
         var filePageIndex = pi.FilePageIndex;
         var pageOffset = filePageIndex * (long)PageSize;
-        var lengthToWrite = PageSize * length;
-        var pageData = MemPages.DataAsMemory.Slice(firstMemPageIndex * PageSize, lengthToWrite);
+        // A run never leaves its window (SavePages' run builder ends one on a window's last page), so its length fits an int.
+        Debug.Assert((long)PageSize * length <= int.MaxValue, "A write run must fit one page-cache window.");
+        var pageData = PageCacheWindow.PageRunMemory(_windows, firstMemPageIndex, length);
 
         // NOTE: file-growth tracking is deliberately NOT done here. This is the only ASYNC write path (WriteAsync below), so advancing
         // _fileSize here — before the bytes physically land — would let the read gate (FetchPageToMemoryOnMiss, "loadPage = offset+PageSize <=
         // _fileSize") authorize a disk read of a page whose WriteAsync hasn't extended the file yet, yielding a 0-byte read past EOF. _fileSize
         // must only ever reflect DURABLE bytes; SavePages advances it in its post-FlushToDisk continuation, before any page becomes evictable.
         PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the async structural write
-        _metrics.PageWrittenToDiskCount += length;
-        _metrics.WrittenOperationCount++;
+        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, length);
+        Interlocked.Increment(ref _metrics.WrittenOperationCount);
 
         // Synchronous span brackets only the WriteAsync kickoff. Manual scope + Dispose: `using var` marks the local readonly and blocks the
         // PageCount setter (CS1654). We capture SpanId + StartTimestamp before disposing so the optional async-completion wrap below can
@@ -3027,6 +3957,49 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     internal unsafe byte* GetMemPageAddress(int memPageIndex) => &_memPagesAddr[memPageIndex * (long)PageSize];
 
     /// <summary>
+    /// PS-13: the slot whose raw data starts at <paramref name="rawData"/>, the reverse of <see cref="GetMemPageAddress"/> —
+    /// <c>MemPageIndexOfRawData(GetMemPageAddress(i) + PageHeaderSize, MemPagesBaseAddress) == i</c>. Exact, and two instructions, only because
+    /// the cache is one contiguous block: split into several, it would need a search.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static unsafe int MemPageIndexOfRawData(byte* rawData, byte* memPagesBase) => (int)((rawData - PageHeaderSize - memPagesBase) >> PageSizePow2);
+
+    /// <summary>
+    /// The page-cache block (#945): one 64-bit allocation, 4 KiB-aligned so every 8 KiB page covers exactly two OS pages, its contents undefined
+    /// (PS-14: nothing reads a page before it is read from disk or cleared). There is no configured ceiling: the OS is the limit, and its refusal
+    /// becomes a startup error naming the setting, the size and the limit that applied, instead of an <see cref="OutOfMemoryException"/>.
+    /// </summary>
+    internal static LargePinnedMemoryBlock AllocateCacheBlock(IMemoryAllocator allocator, IResource owner, ulong cacheSize)
+    {
+        try
+        {
+            return allocator.AllocateLargePinned("PageCache", owner, (long)cacheSize, 4096, LargeBlockContents.Undefined);
+        }
+        catch (OutOfMemoryException e)
+        {
+            throw CacheAllocationFailed(cacheSize, e);
+        }
+    }
+
+    /// <summary>
+    /// The named startup error for a cache the host will not grant: the setting, the whole footprint (pages, slot records, directory buckets)
+    /// and the platform limit that applied.
+    /// </summary>
+    private static StorageException CacheAllocationFailed(ulong cacheSize, OutOfMemoryException e)
+    {
+        var pages = (long)(cacheSize >> PageSizePow2);
+        var footprint = (long)cacheSize + pages * Unsafe.SizeOf<PageInfoData>() + PageDirectory.BucketCountFor(pages) * sizeof(int);
+        var limit = OperatingSystem.IsWindows()
+            ? "the system commit limit: physical memory plus the page file, less what is already committed"
+            : "the kernel's overcommit policy (vm.overcommit_memory): under the default heuristic, one allocation larger than about RAM plus swap " +
+              "is refused";
+        return new StorageException(TyphonErrorCode.PageCacheAllocationFailed,
+            $"The page cache could not be allocated: DatabaseCacheSize is {cacheSize:N0} bytes ({cacheSize / (1024.0 * 1024 * 1024):F1} GiB), and with " +
+            $"its slot records and page directory it needs {footprint:N0} bytes, more than this host grants. The limit that applied is {limit}. " +
+            "Lower DatabaseCacheSize, or give the host more memory.", e);
+    }
+
+    /// <summary>
     /// Test/diagnostic invariant check for the seqlock protocol: a quiescent (<see cref="PageState.Idle"/>) page that participates in the seqlock must carry an
     /// EVEN <see cref="PageBaseHeader.ModificationCounter"/> — an odd value signals a write in progress, but an Idle page has no writer. Returns the number of
     /// such Idle slots whose counter is odd; a correct engine always returns 0. A non-zero result means a slot was reused without resetting the stale counter
@@ -3046,7 +4019,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var hits = new List<string>();
         for (var i = 0; i < MemPagesCount; i++)
         {
-            var pi = _memPagesInfo[i];
+            var pi = Slot(i);
             if (pi.PageState != PageState.Idle)
             {
                 continue;
@@ -3082,7 +4055,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Diagnostic snapshot of a page's protection state. Used by ChunkAccessor error reporting.</summary>
     internal (int DirtyCounter, int ActiveChunkWriters, int SlotRefCount, long AccessEpoch, PageState PageState, bool CrcVerified) GetPageInfoForDiagnostic(int memPageIndex)
     {
-        var pi = _memPagesInfo[memPageIndex];
+        var pi = Slot(memPageIndex);
         return (pi.DirtyCounter, pi.ActiveChunkWriters, pi.SlotRefCount, pi.AccessEpoch, pi.PageState, pi.CrcVerified);
     }
 
@@ -3092,9 +4065,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal int GetClockSweepCounterForDiagnostic(int filePageIndex)
     {
-        if (_memPageIndexByFilePageIndex.TryGetValue(filePageIndex, out var memPageIndex))
+        var directory = _directory;
+        if (directory != null && _slots != null && directory.TryGet(filePageIndex, out var memPageIndex))
         {
-            var pi = _memPagesInfo[memPageIndex];
+            var pi = Slot(memPageIndex);
             if (pi.FilePageIndex == filePageIndex)
             {
                 return pi.ClockSweepCounter;
@@ -3130,7 +4104,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Used by <see cref="ChunkAccessor{TStore}"/> to detect stale cached pointers after page eviction/reuse.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal int GetFilePageIndex(int memPageIndex) => _memPagesInfo[memPageIndex].FilePageIndex;
+    internal int GetFilePageIndex(int memPageIndex) => Slot(memPageIndex).FilePageIndex;
+
+    /// <summary>Whether <paramref name="filePageIndex"/> is a protected segment-directory page (CK-05). Test seam.</summary>
+    internal bool IsProtectedFilePageForTests(int filePageIndex) => IsProtectedPage(filePageIndex);
 
     /// <summary>
     /// Increments the slot reference count for a memory page. While SlotRefCount &gt; 0,
@@ -3139,13 +4116,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// protected set, while SlotRefCount provides precise short-term protection for live slots.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void IncrementSlotRefCount(int memPageIndex) => Interlocked.Increment(ref _memPagesInfo[memPageIndex].SlotRefCount);
+    internal void IncrementSlotRefCount(int memPageIndex) => Interlocked.Increment(ref Slot(memPageIndex).SlotRefCount);
 
     /// <summary>
     /// Decrements the slot reference count for a memory page.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void DecrementSlotRefCount(int memPageIndex) => Interlocked.Decrement(ref _memPagesInfo[memPageIndex].SlotRefCount);
+    internal void DecrementSlotRefCount(int memPageIndex) => Interlocked.Decrement(ref Slot(memPageIndex).SlotRefCount);
 
     // ═══════════════════════════════════════════════════════════════════════
     // State Snapshot (test infrastructure)
@@ -3165,10 +4142,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     internal StateSnapshot SnapshotInternalState()
     {
-        var pages = new PageSnapshot[_memPagesInfo.Length];
-        for (int i = 0; i < _memPagesInfo.Length; i++)
+        var pages = new PageSnapshot[MemPagesCount];
+        for (int i = 0; i < MemPagesCount; i++)
         {
-            var pi = _memPagesInfo[i];
+            var pi = Slot(i);
             pages[i] = new PageSnapshot(pi.PageState, pi.ExclusiveLatchDepth, pi.DirtyCounter);
         }
         return new StateSnapshot(pages);
@@ -3176,14 +4153,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     internal bool CheckInternalState(in StateSnapshot snapshot)
     {
-        if (snapshot._pages.Length != _memPagesInfo.Length)
+        if (snapshot._pages.Length != MemPagesCount)
         {
             return false;
         }
 
-        for (int i = 0; i < _memPagesInfo.Length; i++)
+        for (int i = 0; i < MemPagesCount; i++)
         {
-            var pi = _memPagesInfo[i];
+            var pi = Slot(i);
             ref readonly var snap = ref snapshot._pages[i];
             if (pi.PageState != snap._state ||
                 pi.ExclusiveLatchDepth != snap._exclusiveLatchDepth ||
@@ -3195,21 +4172,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return true;
     }
 
-    /// <summary>Get the PageInfo for a memory page by its memory index.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal PageInfo GetPageInfoByMemIndex(int memPageIndex) => _memPagesInfo[memPageIndex];
-
     /// <summary>Get the AccessEpoch for a memory page (test infrastructure).</summary>
-    internal long GetPageAccessEpoch(int memPageIndex) => _memPagesInfo[memPageIndex].AccessEpoch;
+    internal long GetPageAccessEpoch(int memPageIndex) => Slot(memPageIndex).AccessEpoch;
 
     /// <summary>Get the PageState for a memory page (test infrastructure).</summary>
-    internal PageState GetPageState(int memPageIndex) => _memPagesInfo[memPageIndex].PageState;
+    internal PageState GetPageState(int memPageIndex) => Slot(memPageIndex).PageState;
 
-    public int EstimatedMemorySize
-    {
-        get
-        {
-            return Unsafe.SizeOf<PageInfo>() * _memPagesInfo.Length;
-        }
-    }
+    /// <summary>
+    /// Bytes this store holds itself: the debt bitmap; 0 once disposed. The cache block, the slot records and the page directory are child
+    /// blocks of the store, which report themselves (<see cref="IMemoryResource"/> excludes children).
+    /// </summary>
+    public long EstimatedMemorySize => _slots == null ? 0 : (long)_debtBits.Length * sizeof(long);
+
+    /// <summary>The slot table, for a test that checks it is released after dispose. Null once disposed.</summary>
+    internal PageSlotTable SlotTableForTests => _slots;
 }

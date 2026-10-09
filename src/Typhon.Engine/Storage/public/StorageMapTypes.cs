@@ -183,8 +183,8 @@ public enum StorageIntegrityIssueKind : byte
     ChainDirectoryMismatch,
 
     /// <summary>
-    /// <see cref="ChunkBasedSegment{TStore}"/>'s computed capacity (<c>ChunkCapacity</c>) ≠ <c>AllocatedChunkCount + FreeChunkCount</c>. The segment's chunk
-    /// free-list desynced from the chunk-occupancy bitmaps on its pages.
+    /// <see cref="ChunkBasedSegment{TStore}"/>'s computed capacity (<c>ChunkCapacity</c>) ≠ <c>AllocatedChunkCount + FreeChunkCount</c>. The segment's
+    /// allocated count desynced from the chunk-occupancy bitmaps on its pages.
     /// </summary>
     ChunkSegmentCapacity,
 

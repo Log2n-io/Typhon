@@ -73,6 +73,13 @@ public sealed class CatalogField
     /// <summary>How a client should present this field between updates, for example <c>snap</c>. Absent means the client decides.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string Smoothing { get; init; }
+
+    /// <summary>
+    /// What the field's values mean — <c>char</c>, <c>variant</c>, <c>point2</c>…<c>point4</c>, <c>quat</c>, <c>aabb2</c>, <c>aabb3</c>, <c>bsphere2</c>,
+    /// <c>bsphere3</c> (W33). A hint: it changes no byte, is hashed like every member, and a client that does not know a value ignores it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Shape { get; init; }
 }
 
 /// <summary>

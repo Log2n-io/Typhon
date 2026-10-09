@@ -69,7 +69,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | Durability Modes | Per-Unit-of-Work control over when WAL records become crash-safe — pick latency vs. data-at-risk per workload. | ✅ Implemented | 🟢 Start Here | [→](Durability/durability-modes/README.md) |
 | &nbsp;&nbsp;↳ Commit Discipline | Zero-loss, atomic writes on Typhon's cheapest component layout (SingleVersion) without paying for an MVCC revision chain. | ✅ Implemented | 🟣 Advanced | [→](Durability/durability-modes/committed-discipline.md) |
 | Write-Ahead Log (WAL v2 logical records) | The single source of durability truth: logical (EntityId, slot) records, one codec, a sequential CRC-chained log. | ✅ Implemented | 🟣 Advanced | [→](Durability/wal-v2.md) |
-| Commit Pipeline (append-before-publish) | Transaction.Commit's VALIDATE→PREPARE→BUILD→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back. | ✅ Implemented | 🟣 Advanced | [→](Durability/commit-pipeline.md) |
+| Commit Pipeline (append-before-publish) | Transaction.Commit's PREPARE→APPEND→PUBLISH→WAIT ordering guarantees nothing is visible before its WAL record is appended, and publish never rolls back. | ✅ Implemented | 🟣 Advanced | [→](Durability/commit-pipeline.md) |
 | Checkpoint v2 (SnapshotStore pipeline) | Background pipeline that consolidates dirty data pages into the data file, advances CheckpointLSN only over pages it actually wrote, and recycles WAL segments. | ✅ Implemented | 🟣 Advanced | [→](Durability/checkpoint-v2/README.md) |
 | Crash Recovery (RecoveryDriver) | On open, scans the WAL's durably-committed prefix and replays it idempotently, in strict LSN order, through the engine's own write primitives. | ✅ Implemented | 🟣 Advanced | [→](Durability/crash-recovery/README.md) |
 | Page Checksums & Seqlock Snapshots | CRC32C torn-page detection on every page, paired with a lock-free seqlock so checkpoints snapshot live pages without blocking writers. | ✅ Implemented | 🟣 Advanced | [→](Durability/page-checksums-seqlock.md) |
@@ -104,9 +104,9 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Entity & Archetype Model | Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed zero-copy component handles — the schema backbone of every other ECS feature. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-archetype-model.md) |
-| Entity Lifecycle & CRUD API | Zero-copy EntityRef accessor for Spawn, Open, Read, Write, Destroy, Enable/Disable — the sole entity manipulation API. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-lifecycle-crud/README.md) |
-| &nbsp;&nbsp;↳ Generated Multi-Component Accessors | Source-generated zero-copy Refs/MutRefs structs reading or writing every archetype component in one call. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/generated-multi-component-accessors.md) |
+| Entity & Archetype Model | Structured 64-bit entity identity, C# class-hierarchy archetypes, and typed component handles — the schema backbone of every other ECS feature. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-archetype-model.md) |
+| Entity Lifecycle & CRUD API | EntityRef / EntityRefMut handles for Spawn, Open, Read, Set, Destroy, Enable/Disable — Read returns a copy, Set stores one; the sole entity manipulation API. | ✅ Implemented | 🟢 Start Here | [→](Ecs/entity-lifecycle-crud/README.md) |
+| &nbsp;&nbsp;↳ Generated Multi-Component Accessors | A source-generated Values struct and ReadAll / WriteAll reading or setting every archetype component in one call. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/generated-multi-component-accessors.md) |
 | &nbsp;&nbsp;↳ Batch & SoA Spawn | Bulk entity creation — shared-value batches or per-entity SoA spans — amortizing per-call overhead across thousands of entities. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/batch-soa-spawn.md) |
 | &nbsp;&nbsp;↳ Enable/Disable Components | O(1) per-component bit-flip toggle — data preserved, not freed, with its own MVCC snapshot isolation independent of the component's StorageMode. | ✅ Implemented | 🔵 Core | [→](Ecs/entity-lifecycle-crud/enable-disable-components.md) |
 | Storage Modes | Pick durability and write cost per component type — from microsecond ACID to nanosecond scratch memory, in one engine. | ✅ Implemented | 🟢 Start Here | [→](Ecs/storage-modes/README.md) |
@@ -278,7 +278,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | Storage & Corruption Exceptions | Typed failures for storage I/O, CRC32C page corruption (unhealable), and another-process database-file-lock detection. | ✅ Implemented | 🟣 Advanced | [→](Errors/storage-corruption-exceptions.md) |
 | Durability (WAL / BulkLoad / Commit) Exceptions | Typed, fail-fast failures from the WAL writer, the commit pipeline's durability wait, and BulkLoad session lifecycle. | ✅ Implemented | 🟣 Advanced | [→](Errors/durability-exceptions.md) |
 | Schema & Constraint Violation Exceptions | Engine-refuses-to-proceed failures for the data model: breaking schema mismatch, migration failure, revision downgrade, duplicate unique key. | ✅ Implemented | 🟣 Advanced | [→](Errors/schema-constraint-exceptions.md) |
-| Runtime/Scheduler Declared-Access Validation | DEBUG-only InvalidAccessException when a system writes a component it never declared via Writes\<T\>()/SideWrites\<T\>(), compiled out in RELEASE. | ✅ Implemented | 🟣 Advanced | [→](Errors/runtime-access-validation.md) |
+| Runtime/Scheduler Declared-Access Validation | Opt-in InvalidAccessException when a system writes a component it never declared via Writes\<T\>()/SideWrites\<T\>() — enabled by `Typhon:Checks:DeclaredAccess`, zero cost when off. | ✅ Implemented | 🟣 Advanced | [→](Errors/runtime-access-validation.md) |
 
 ### Profiler
 

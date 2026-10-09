@@ -1,7 +1,8 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using Typhon.Engine.Internals;
 using Typhon.Engine.Tests.Runtime;
@@ -27,6 +28,36 @@ struct FireAt
 {
     public uint Target;
     public uint Shot;
+}
+
+/// <summary>A command carrying text beside a number: what a client says, and to which channel.</summary>
+struct SayText
+{
+    public Utf8Text256 Text;
+    public byte Channel;
+}
+
+/// <summary>
+/// A command of the exact wire's types (W32, W33), declared with no field at all: each defaults to its exact codec — u64, i64, f64, f32 × 3.
+/// </summary>
+struct Transfer64
+{
+    public ulong Amount;
+    public long Delta;
+    public double Ratio;
+    public Typhon.Schema.Definition.Point3F Where;
+}
+
+/// <summary>A command that declares a str on a field that cannot hold one. Only ever passed to a binder that must refuse it.</summary>
+struct SayWrongType
+{
+    public uint Text;
+}
+
+/// <summary>A command whose str cap and whose field's capacity disagree. Only ever passed to a binder that must refuse it.</summary>
+struct SayWrongCapacity
+{
+    public Utf8Text256 Text;
 }
 #pragma warning restore CS0649
 
@@ -83,6 +114,11 @@ class IngressDrainTests : TestBase<IngressDrainTests>
                 .Rate(10_000, 20_000)
                 .Field(f => f.Target, Codec.EntityRef)
                 .Field(f => f.Shot, Codec.VarUInt));
+            Subs.Command<SayText>(c => c
+                .Rate(10_000, 20_000)
+                .Field(t => t.Text, Codec.Str(Utf8Text256.Capacity))
+                .Field(t => t.Channel, Codec.U8));
+            Subs.Command<Transfer64>(c => c.Rate(10_000, 20_000));
             Subs.Freeze();
 
             var export = CatalogBuilder.Build(Subs, [], CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
@@ -174,6 +210,12 @@ class IngressDrainTests : TestBase<IngressDrainTests>
     {
         ["Target"] = FieldValue.Of(target),
         ["Shot"] = FieldValue.Of(shot),
+    };
+
+    private static RecordValues Say(string text, int channel) => new()
+    {
+        ["Text"] = FieldValue.Of(text),
+        ["Channel"] = FieldValue.Of(channel),
     };
 
     private static RecordValues Move(double x, double z, int speed) => new()
@@ -726,5 +768,160 @@ class IngressDrainTests : TestBase<IngressDrainTests>
         var request = new AdmissionRequest("player", null, 0, ReadOnlySpan<byte>.Empty, null, null, null, "harness");
         Assert.That(subscriptions.Sessions.TryAdmit(subscriptions.Registry.Sessions, request, out var session, out _, out _), Is.True);
         return session;
+    }
+
+    /// <summary>
+    /// E-11: a command's 64-bit integers, double and point reach the engine's struct exactly — 2⁶⁴ − 1, 2⁵³ + 1 and the extremes of a long, none of
+    /// which a double carries — through the exact codecs a field with no declaration defaults to.
+    /// </summary>
+    [Test]
+    public void ACommandCarries64BitValuesExactlyIntoItsStruct()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        var transfer = harness.Plan.CommandByName(nameof(Transfer64));
+        Assert.That(transfer.Body.Fields.Select(f => (f.Name, f.Codec.Type, f.Codec.Count)),
+            Is.EquivalentTo(new[] { ("Amount", "u64", 0), ("Delta", "i64", 0), ("Ratio", "f64", 0), ("Where", "f32", 3) }));
+
+        static RecordValues Values(ulong amount, long delta, double ratio) => new()
+        {
+            ["Amount"] = FieldValue.OfUInt64(amount),
+            ["Delta"] = FieldValue.OfInt64(delta),
+            ["Ratio"] = FieldValue.Of(ratio),
+            ["Where"] = FieldValue.Of(1.5, -2.25, 0.1),
+        };
+
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1u,
+            (nameof(Transfer64), 1, Values(ulong.MaxValue, long.MinValue, double.Epsilon)),
+            (nameof(Transfer64), 2, Values((1UL << 53) + 1, long.MaxValue, -0d))));
+        harness.Tick();
+
+        var seen = new List<Transfer64>();
+        foreach (ref readonly var c in harness.Api.Commands<Transfer64>())
+        {
+            seen.Add(c.Value);
+        }
+
+        Assert.That(seen, Has.Count.EqualTo(2));
+        Assert.Multiple(() =>
+        {
+            Assert.That((seen[0].Amount, seen[0].Delta, seen[0].Ratio), Is.EqualTo((ulong.MaxValue, long.MinValue, double.Epsilon)));
+            Assert.That((seen[1].Amount, seen[1].Delta), Is.EqualTo(((1UL << 53) + 1, long.MaxValue)), "2⁵³ + 1: a double would have rounded it");
+            Assert.That(BitConverter.DoubleToInt64Bits(seen[1].Ratio), Is.EqualTo(BitConverter.DoubleToInt64Bits(-0d)), "f64 keeps −0");
+            Assert.That((seen[0].Where.X, seen[0].Where.Y, seen[0].Where.Z), Is.EqualTo((1.5f, -2.25f, 0.1f)), "a point's components, in order");
+        });
+    }
+
+    /// <summary>
+    /// A command's text decodes into its struct byte for byte, and the field after it decodes too.
+    /// </summary>
+    /// <remarks>
+    /// <b>The bytes are compared, not the string.</b> A length prefix or an offset wrong by a little yields text that
+    /// still decodes — just not what was sent — and a string comparison of "ça va" against "ça v" is the assertion that
+    /// notices, where a round-trip through two encodings might not. The multi-byte characters are there for the same
+    /// reason: a length counted in characters passes every ASCII test.
+    /// </remarks>
+    [Test]
+    public void ACommandCarriesTextIntoItsStruct()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        const string Spoken = "Utinni! ça va, señor? \u3053\u3093\u306b\u3061\u306f";
+        var expected = System.Text.Encoding.UTF8.GetBytes(Spoken);
+        var full = new string('x', Utf8Text256.Capacity);
+
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1u,
+            ("SayText", 1, Say(Spoken, channel: 3)),
+            ("SayText", 2, Say(string.Empty, channel: 4)),
+            ("SayText", 3, Say(full, channel: 5))));
+        harness.Tick();
+
+        var seen = new List<(byte[] Utf8, byte Channel)>();
+        foreach (ref readonly var c in harness.Api.Commands<SayText>())
+        {
+            seen.Add((c.Value.Text.Utf8.ToArray(), c.Value.Channel));
+        }
+
+        Assert.That(seen, Has.Count.EqualTo(3));
+        Assert.Multiple(() =>
+        {
+            Assert.That(seen[0].Utf8, Is.EqualTo(expected), "the text decoded byte for byte");
+            Assert.That(seen[0].Channel, Is.EqualTo(3), "the field AFTER the text decoded, so the length prefix was right");
+
+            // Empty is a value: it arrives as zero bytes, and what follows it still lands.
+            Assert.That(seen[1].Utf8, Is.Empty);
+            Assert.That(seen[1].Channel, Is.EqualTo(4));
+
+            Assert.That(seen[2].Utf8, Has.Length.EqualTo(Utf8Text256.Capacity), "text at the declared cap arrives whole");
+            Assert.That(seen[2].Channel, Is.EqualTo(5));
+        });
+    }
+
+    /// <summary>
+    /// A str on a field that cannot hold one is refused at declaration, and the refusal names the type to use.
+    /// </summary>
+    /// <remarks>
+    /// <b>At Start, not at the first message.</b> A binder that shrugged here would leave a command whose text silently
+    /// never arrives — the field zeroed for ever, discovered by whoever is reading the chat. The message has to name a
+    /// type the caller can reach for, because "not supported" leaves them to guess what is.
+    /// </remarks>
+    [Test]
+    public void AStrOnAFieldThatCannotHoldOneIsRefusedWithTheTypeToUse()
+    {
+        var registry = new SubscriptionsRegistry();
+        registry.Command<SayWrongType>(c => c.Field(t => t.Text, Codec.Str(Utf8Text256.Capacity)));
+        registry.Freeze();
+
+        var error = Assert.Throws<InvalidOperationException>(() => Bind(registry));
+        Assert.Multiple(() =>
+        {
+            Assert.That(error.Message, Does.Contain("SayWrongType.Text"));
+            Assert.That(error.Message, Does.Contain(nameof(Utf8Text256)), "the refusal says what to use, not only what is wrong");
+        });
+    }
+
+    /// <summary>
+    /// A str whose declared cap EXCEEDS its field's capacity is refused: the wire must never admit more than the struct can hold.
+    /// </summary>
+    /// <remarks>
+    /// Only this direction is unsafe. The wire would accept up to its own cap and the store keep up to its own, so a message
+    /// between the two is truncated on arrival — the silent corruption the text type refuses everywhere else. A cap SMALLER
+    /// than the capacity is the opposite case and is allowed; see the test below.
+    /// </remarks>
+    [Test]
+    public void AStrWhoseCapExceedsItsFieldIsRefused()
+    {
+        var registry = new SubscriptionsRegistry();
+        registry.Command<SayWrongCapacity>(c => c.Field(t => t.Text, Codec.Str(Utf8Text256.Capacity + 8)));
+        registry.Freeze();
+
+        var error = Assert.Throws<InvalidOperationException>(() => Bind(registry));
+        Assert.Multiple(() =>
+        {
+            Assert.That(error.Message, Does.Contain((Utf8Text256.Capacity + 8).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            Assert.That(error.Message, Does.Contain(Utf8Text256.Capacity.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        });
+    }
+
+    /// <summary>
+    /// A str whose cap is SMALLER than its field's capacity binds: the wire cap is then the tighter bound and nothing truncates.
+    /// </summary>
+    /// <remarks>
+    /// This used to be refused, which made one storage size the engine's ingress policy: with a single inline text type, a
+    /// 24-byte name field had to admit 256 bytes from every client on every message. Per-field caps are the knob the wire
+    /// design names for ingress policy, and requiring equality took it away for no safety.
+    /// </remarks>
+    [Test]
+    public void AStrCappedBelowItsFieldBinds()
+    {
+        var registry = new SubscriptionsRegistry();
+        registry.Command<SayWrongCapacity>(c => c.Field(t => t.Text, Codec.Str(64)));
+        registry.Freeze();
+
+        Assert.DoesNotThrow(() => Bind(registry));
     }
 }

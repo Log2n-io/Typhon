@@ -74,7 +74,10 @@ class EcsOrViewTests : TestBase<EcsOrViewTests>
         // Update Rank to 5 → Rank>=5 branch now passes
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompFArch.F).Rank = 5;
+            var target = tx2.OpenMut(id);
+            var fCopy = target.Read(CompFArch.F);
+            fCopy.Rank = 5;
+            target.Set(CompFArch.F, fCopy);
             tx2.Commit();
         }
 
@@ -108,7 +111,10 @@ class EcsOrViewTests : TestBase<EcsOrViewTests>
         // Update Rank to 2 → Rank>=5 no longer passes, Gold still 50 (< 90) → no branch passes
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompFArch.F).Rank = 2;
+            var opened = tx2.OpenMut(id);
+            var fCopy = opened.Read(CompFArch.F);
+            fCopy.Rank = 2;
+            opened.Set(CompFArch.F, fCopy);
             tx2.Commit();
         }
 
@@ -141,7 +147,10 @@ class EcsOrViewTests : TestBase<EcsOrViewTests>
         // Update Rank to 2 → Rank>=5 fails, but Gold>=90 still passes → entity stays in view
         using (var tx2 = dbe.CreateQuickTransaction())
         {
-            tx2.OpenMut(id).Write(CompFArch.F).Rank = 2;
+            var target = tx2.OpenMut(id);
+            var fCopy = target.Read(CompFArch.F);
+            fCopy.Rank = 2;
+            target.Set(CompFArch.F, fCopy);
             tx2.Commit();
         }
 

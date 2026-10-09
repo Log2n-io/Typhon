@@ -13,7 +13,9 @@ import type { SessionCapability, SessionKind } from './useSessionStore';
 export function sessionCapabilitiesForKind(kind: SessionKind): SessionCapability[] {
   switch (kind) {
     case 'open':
-      return ['database'];
+      return ['database', 'schema'];
+    // An attach session acquires `schema` the moment its first Init frame carries the engine's static-structure tables
+    // (#WB-01), which a table keyed on kind cannot express — the same gap the note above describes for `profiler`.
     case 'attach':
       return ['profiler'];
     default:

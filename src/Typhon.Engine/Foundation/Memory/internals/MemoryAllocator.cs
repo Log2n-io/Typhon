@@ -17,6 +17,12 @@ internal interface IMemoryAllocator
 {
     MemoryBlockArray AllocateArray(string id, IResource parent, int size, bool zeroed = false, ushort sourceTag = 0);
     PinnedMemoryBlock AllocatePinned(string id, IResource parent, int size, bool zeroed = false, int alignment = 0, ushort sourceTag = 0);
+
+    /// <summary>
+    /// A native block whose size is a <c>long</c> (#945). <paramref name="alignment"/> is a power of two from 1 to 4096;
+    /// <paramref name="contents"/> says whether it must read as zero (lazily, never by a clear) or may hold anything.
+    /// </summary>
+    LargePinnedMemoryBlock AllocateLargePinned(string id, IResource parent, long size, int alignment, LargeBlockContents contents, ushort sourceTag = 0);
 }
 
 [PublicAPI]
@@ -29,6 +35,7 @@ public class MemoryAllocatorOptions
 internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, IDebugPropertiesProvider
 {
     private ConcurrentCollection<MemoryBlockBase> _blocks;
+    private readonly ConcurrentCollection<LargePinnedMemoryBlock> _largeBlocks = new();
 
     // Allocation tracking — grand totals (includes both pinned/unmanaged and managed arrays)
     private long _totalAllocatedBytes;
@@ -144,6 +151,50 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
         return mb;
     }
 
+    public LargePinnedMemoryBlock AllocateLargePinned(string id, IResource parent, long size, int alignment, LargeBlockContents contents,
+        ushort sourceTag = 0)
+    {
+        if (size <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(size), "Size must be positive");
+        }
+
+        if (alignment is < 1 or > 4096 || !BitOperations.IsPow2(alignment))
+        {
+            throw new ArgumentException("Alignment must be a power of 2 from 1 to 4096", nameof(alignment));
+        }
+
+        var mb = new LargePinnedMemoryBlock(this, size, alignment, contents, id, parent, sourceTag);
+        _largeBlocks.Add(mb);
+
+        var newTotal = Interlocked.Add(ref _totalAllocatedBytes, size);
+        if (newTotal > _peakAllocatedBytes)
+        {
+            _peakAllocatedBytes = newTotal;
+        }
+        Interlocked.Increment(ref _cumulativeAllocations);
+
+        var newPinnedTotal = Interlocked.Add(ref _pinnedBytes, size);
+        if (newPinnedTotal > _peakPinnedBytes)
+        {
+            _peakPinnedBytes = newPinnedTotal;
+        }
+        Interlocked.Increment(ref _pinnedLiveBlocks);
+
+        TyphonEvent.EmitMemoryAllocEvent(MemoryAllocDirection.Alloc, sourceTag, (ulong)size, (ulong)newPinnedTotal);
+        return mb;
+    }
+
+    internal void RemoveLarge(LargePinnedMemoryBlock block)
+    {
+        Interlocked.Add(ref _totalAllocatedBytes, -block.Size);
+        Interlocked.Increment(ref _cumulativeDeallocations);
+        var newPinnedTotal = Interlocked.Add(ref _pinnedBytes, -block.Size);
+        Interlocked.Decrement(ref _pinnedLiveBlocks);
+        _largeBlocks.Remove(block);
+        TyphonEvent.EmitMemoryAllocEvent(MemoryAllocDirection.Free, block.SourceTag, (ulong)block.Size, (ulong)newPinnedTotal);
+    }
+
     internal void Remove(MemoryBlockBase block)
     {
         var size = block.MemoryBlockSize;
@@ -173,7 +224,7 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
         writer.WriteMemory(_totalAllocatedBytes, _peakAllocatedBytes);
 
         // Capacity: active block count (no hard limit)
-        long blockCount = _blocks.Count;
+        long blockCount = _blocks.Count + _largeBlocks.Count;
         writer.WriteCapacity(blockCount, long.MaxValue);
 
         // Throughput: allocation lifecycle
@@ -188,6 +239,12 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
     public IReadOnlyDictionary<string, object> GetDebugProperties()
     {
         var blocks = _blocks.ToArray(); // Snapshot for consistency
+        var largeBlocks = _largeBlocks.ToArray();
+        long largeBytes = 0;
+        foreach (var block in largeBlocks)
+        {
+            largeBytes += block.Size;
+        }
 
         long arrayBlocks = 0, pinnedBlocks = 0;
         long arrayBytes = 0, pinnedBytes = 0;
@@ -209,7 +266,7 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
         return new Dictionary<string, object>
         {
             // Overall stats
-            ["Blocks.Total"] = blocks.Length,
+            ["Blocks.Total"] = blocks.Length + largeBlocks.Length,
             ["Bytes.Total"] = _totalAllocatedBytes,
             ["Bytes.Peak"] = _peakAllocatedBytes,
 
@@ -218,6 +275,8 @@ internal class MemoryAllocator : ResourceNode, IMemoryAllocator, IMetricSource, 
             ["ArrayBlocks.Bytes"] = arrayBytes,
             ["PinnedBlocks.Count"] = pinnedBlocks,
             ["PinnedBlocks.Bytes"] = pinnedBytes,
+            ["LargePinnedBlocks.Count"] = largeBlocks.Length,
+            ["LargePinnedBlocks.Bytes"] = largeBytes,
 
             // Lifecycle counters
             ["Cumulative.Allocations"] = _cumulativeAllocations,

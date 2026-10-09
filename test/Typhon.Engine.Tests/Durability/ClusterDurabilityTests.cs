@@ -192,11 +192,17 @@ class ClusterDurabilityTests : TestBase<ClusterDurabilityTests>
             {
                 if (checkpointArchetype)
                 {
-                    tx.OpenMut(id).Write(ClusterDurCkpt.Data).Value++;
+                    var target = tx.OpenMut(id);
+                    var dataCopy = target.Read(ClusterDurCkpt.Data);
+                    dataCopy.Value++;
+                    target.Set(ClusterDurCkpt.Data, dataCopy);
                 }
                 else
                 {
-                    tx.OpenMut(id).Write(ClusterDurWalled.Data).Value++;
+                    var opened = tx.OpenMut(id);
+                    var data = opened.Read(ClusterDurWalled.Data);
+                    data.Value++;
+                    opened.Set(ClusterDurWalled.Data, data);
                 }
             }
 

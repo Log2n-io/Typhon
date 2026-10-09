@@ -53,6 +53,7 @@ internal sealed class StatsEncoder
         Sessions,
         NetOutBytesPerSec,
         TrackP99,
+        DurabilityWaitP99,
         Application,
     }
 
@@ -240,6 +241,30 @@ internal sealed class StatsEncoder
         Volatile.Write(ref _isEmissionTick, 1);
     }
 
+    // ── operator telemetry (#WB-02) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // The profiler-wire emission needs three figures this class already knows how to compute, but it CANNOT reuse the values `Collect` leaves in
+    // `_serverValues`: those are indexed by the application's catalog plan, and `BeginTick` returns before collecting anything when the app declared no
+    // metrics. An operator's view of replication must not be silenceable by an application choosing not to declare metrics, so these are exposed as
+    // on-demand reads over the same sources, and the caller keeps its own window. That is also why `SentBytes` is a raw counter here rather than a rate —
+    // the rate's denominator belongs to whoever owns the window, and the two windows are independent by design.
+
+    /// <summary>Sessions open right now, for a caller that reports population alongside its own figures.</summary>
+    internal int OpenSessions => _sessions.OpenCount;
+
+    /// <summary>The send pump's lifetime byte count, or 0 with no pump. The caller differences it against its own mark.</summary>
+    internal long SentBytes => _sendPump?.BytesSent ?? 0;
+
+    /// <summary>p99 of the replication track's duration over <paramref name="window"/> ticks ending at <paramref name="tick"/>, in ms.</summary>
+    internal double TrackP99Ms(long tick, int window) => TrackPercentile(tick, window, 0.99);
+
+    /// <summary>p99 of the durability wait over the same window, in ms. Zero when no telemetry ring is attached.</summary>
+    internal double DurabilityWaitP99Ms(long tick, int window)
+    {
+        var telemetry = Volatile.Read(ref _telemetry);
+        return telemetry == null ? 0 : DurabilityWaitPercentile(telemetry, tick, window, 0.99);
+    }
+
     /// <summary>
     /// Writes one session's <c>STATS</c> block: the shared server bytes, then its own three values.
     /// </summary>
@@ -279,6 +304,9 @@ internal sealed class StatsEncoder
                     break;
                 case ServerSource.TrackP99:
                     _serverValues[at] = TrackPercentile(tick, window, 0.99);
+                    break;
+                case ServerSource.DurabilityWaitP99:
+                    _serverValues[at] = DurabilityWaitPercentile(telemetry, tick, window, 0.99);
                     break;
                 case ServerSource.SystemMean:
                     SystemMeans(telemetry, tick, window, _serverValues.AsSpan(at, binding.ValueCount));
@@ -422,6 +450,48 @@ internal sealed class StatsEncoder
     /// </remarks>
     private double TrackPercentile(long tick, int window, double q) => _track.Percentile(tick, window, q, _samples) / 1000.0;
 
+    /// <summary>
+    /// A percentile of the per-tick durability wait, in milliseconds — the Unit-of-Work flush, which in WAL mode is
+    /// <c>RequestFlush</c> + <c>WaitForDurable</c> (#CLI-04).
+    /// </summary>
+    /// <param name="telemetry">The runtime's telemetry ring.</param>
+    /// <param name="tick">The newest tick to consider.</param>
+    /// <param name="window">How many ticks back to look.</param>
+    /// <param name="q">The percentile, in [0, 1].</param>
+    /// <returns>Milliseconds.</returns>
+    /// <remarks>
+    /// <b>Per TICK, not per commit.</b> <c>typhon.durability.wait.p99</c> reads as a per-commit figure and this is not one: it is the wait the tick driver
+    /// pays once a tick, for every record the tick produced together. That is the right population for a server whose question is "is a tick ever held up by
+    /// durability", and the wrong one for "how long does one commit wait" — the per-commit population lives in <c>WalWriter.WaitForDurableSlow</c>, whose
+    /// fast path returns without timing anything, so it has no always-on accumulator to read.
+    /// <para>
+    /// Zeros are kept in the sample, deliberately. A tick whose records were already durable waited for nothing, and dropping those samples would turn a
+    /// p99 over every tick into a p99 over the ticks that happened to wait — which reports a busy engine and a quiet one identically.
+    /// </para>
+    /// </remarks>
+    private double DurabilityWaitPercentile(TickTelemetryRing telemetry, long tick, int window, double q)
+    {
+        if (telemetry == null)
+        {
+            return 0;
+        }
+
+        // TryGetRange rather than a hand-written clamp: an empty ring reports BOTH bounds as -1, so the natural loop reaches GetTick(-1) and throws. See
+        // TickTelemetryRing.TryGetRange for why that throw was unusually destructive from here, and what it cost.
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var t = first; t <= last && count < _samples.Length; t++)
+        {
+            _samples[count++] = telemetry.GetTick(t).UowFlushMs;
+        }
+
+        return Percentile(_samples, count, q);
+    }
+
     private int FillTickSamples(TickTelemetryRing telemetry, long tick, int window)
     {
         if (telemetry == null)
@@ -429,10 +499,13 @@ internal sealed class StatsEncoder
             return 0;
         }
 
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
+        {
+            return 0;
+        }
+
         var count = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-        for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
+        for (var t = first; t <= last && count < _samples.Length; t++)
         {
             _samples[count++] = telemetry.GetTick(t).ActualDurationMs;
         }
@@ -448,11 +521,14 @@ internal sealed class StatsEncoder
             return;
         }
 
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
+        {
+            return;
+        }
+
         Array.Clear(_systemSums);
         var ticks = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-        for (var t = Math.Max(oldest, tick - window); t <= newest; t++)
+        for (var t = first; t <= last; t++)
         {
             var systems = telemetry.GetSystemMetrics(t);
             var upTo = Math.Min(systems.Length, _systemSums.Length);
@@ -487,18 +563,14 @@ internal sealed class StatsEncoder
         }
     }
 
-    /// <summary>The nearest-rank percentile of the first <paramref name="count"/> samples, which the call is free to reorder.</summary>
-    private static double Percentile(double[] samples, int count, double q)
-    {
-        if (count <= 0)
-        {
-            return 0;
-        }
-
-        Array.Sort(samples, 0, count);
-        var rank = (int)Math.Ceiling(q * count) - 1;
-        return samples[Math.Clamp(rank, 0, count - 1)];
-    }
+    /// <summary>
+    /// The nearest-rank percentile of the first <paramref name="count"/> samples, which the call is free to reorder.
+    /// </summary>
+    /// <remarks>
+    /// Delegates to <see cref="TelemetryPercentile.NearestRank"/> since #ENG-07: <c>TyphonRuntime.ReadStats</c> reports the same figures over HTTP, and two
+    /// definitions of "p99" that differ by a rank would give the wire and the endpoint two plausible answers for one tick.
+    /// </remarks>
+    private static double Percentile(double[] samples, int count, double q) => TelemetryPercentile.NearestRank(samples, count, q);
 
     /// <summary>A counter travels cumulative mod 2³², so a session that missed an emission loses nothing by it (W25).</summary>
     private static double Counter(long value) => (uint)(value & 0xFFFFFFFFL);
@@ -585,8 +657,13 @@ internal sealed class StatsEncoder
         "typhon.net.outBytesPerSec" => ServerSource.NetOutBytesPerSec,
         "typhon.subscriptions.track.p99" => ServerSource.TrackP99,
 
-        // typhon.durability.wait.p99 lands here on purpose: the runtime times the UoW flush only through the profiler's phase wrapper, which is folded away
-        // when the profiler is off, so there is no always-on number to read. It emits zero until one exists, rather than a number nobody measured.
+        // Sourced since #CLI-04. The runtime used to time the UoW flush only through the profiler's phase wrapper, which folds away when the profiler is off
+        // — so with no always-on number this emitted a hard zero. TickTelemetry.UowFlushMs is now stamped every tick, and the percentile comes out of the
+        // same window pass as typhon.tick.p99. It is the per-TICK wait, not the per-commit one; see DurabilityWaitPercentile.
+        "typhon.durability.wait.p99" => ServerSource.DurabilityWaitP99,
+
+        // A built-in this engine cannot source yet emits zero rather than a number nobody measured. None is left today; the arm stays because the next
+        // reserved index is added to the table before its source exists, and a silent fall-through to Application would call a reader that is not there.
         _ => name.StartsWith(ProtocolConstants.BuiltInMetricPrefix, StringComparison.Ordinal) ? ServerSource.Unsourced : ServerSource.Application,
     };
 

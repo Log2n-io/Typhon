@@ -59,6 +59,7 @@ const reader = new WireReader();
 const discard: CommandSink = {
   command: () => undefined,
   number: () => undefined,
+  integer64: () => undefined,
   text: () => undefined,
   bytes: () => undefined,
   list: () => undefined,

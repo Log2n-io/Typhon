@@ -49,6 +49,52 @@
       "closeCode": 1007
     },
     {
+      "name": "varu64-tenth-byte-0x02",
+      "kind": "codec",
+      "codec": {
+        "t": "varu64"
+      },
+      "hex": "80808080808080808002",
+      "closeCode": 1007
+    },
+    {
+      "name": "varu64-eleven-bytes",
+      "kind": "codec",
+      "codec": {
+        "t": "varu64"
+      },
+      "hex": "8080808080808080808000",
+      "closeCode": 1007
+    },
+    {
+      "name": "vari64-tenth-byte-0x7f",
+      "kind": "codec",
+      "codec": {
+        "t": "vari64"
+      },
+      "hex": "ffffffffffffffffff7f",
+      "closeCode": 1007
+    },
+    {
+      "name": "u64-truncated",
+      "kind": "codec",
+      "codec": {
+        "t": "u64"
+      },
+      "hex": "01020304050607",
+      "closeCode": 1007
+    },
+    {
+      "name": "f64-x3-truncated",
+      "kind": "codec",
+      "codec": {
+        "t": "f64",
+        "count": 3
+      },
+      "hex": "0000000000000000000000000000000000000000",
+      "closeCode": 1007
+    },
+    {
       "name": "u32-truncated",
       "kind": "codec",
       "codec": {
@@ -266,6 +312,27 @@
       "kind": "tick",
       "hex": "0270110100000105030000000001050300000000",
       "closeCode": 1007
+    },
+    {
+      "name": "coll-sent-over-total",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101010200",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
+    },
+    {
+      "name": "coll-sent-over-max-count",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101050500",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
+    },
+    {
+      "name": "coll-element-truncated",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101010123",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
     },
     {
       "name": "realm-without-reset",

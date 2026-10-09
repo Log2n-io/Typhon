@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-25 |
-| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime |
+| Last Updated | 2026-10-06 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -493,7 +493,7 @@ reclaimed.
         SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
   scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
          Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
-         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.Write,
+         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.WriteRef,
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
   on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
@@ -670,8 +670,8 @@ caller holds decides what it may do, and the write paths rely on preconditions o
   on_violation: before #997 one `EntityRef` served both kinds of open, told apart by a `_writable` flag checked only
                 when `CheckConfig.Enabled` (off by default). With checks off, `Open(id).Write(...)` wrote in place into
                 HEAD from a transaction that never ran `EnsureMutable` — a read-only or already finalized one included —
-                and never moved to InProgress. The value was not lost (the fence's PS-10 backstop records the page); the
-                transaction's own contract was.
+                and never moved to InProgress. Nothing recorded the page before the fence, so an eviction lost the value (#1172); the
+                transaction's own contract was broken too.
   note: `Commit()` on a transaction that did nothing returns true and leaves it in `Created`, so it still accepts a
         writable open afterwards. That is the commit path's behaviour, not a gap in the prep.
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes [VerifiesRule] (the type split as an
@@ -727,6 +727,58 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             the "reachable without a test calling it" clause, and Drain_LeavesNoOutstandingDirtyMarks_AtQuiesce guards
             the ChangeSet note above.
 
+### REAP-02: An entity's Versioned storage is freed exactly once, by its owner `[fatal]` `[silent]`
+  invariant a transaction frees only the content chunks it allocated itself (a Created or Updated revision's). The chunk a destroy merely READ is the
+            committed revision's, owned by the chain: older snapshots still read it, and the revision GC frees it once the tombstone hides it
+            (Transaction.MarkComponentDeleted)
+  invariant a destroy that follows a write in the same transaction turns the write's revision into the tombstone — its element's chunk set to 0
+            before the chunk is freed (ComponentRevisionManager.MakeOwnRevisionTombstone) — rather than adding a second revision: no committed
+            element may name a freed chunk, and the chain must reduce to a lone tombstone
+  invariant a commit that relocates a tombstone, or resolves a conflict for one, writes a tombstone: a destroy that lost a race to a concurrent write
+            stays a destroy and names no chunk (Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict)
+  invariant a rollback frees the chunk it wrote and forgets it (Transaction.RollbackComponent zeroes CurCompContentChunkId); the transaction's reset
+            frees a rolled-back spawn's storage only if the rollback has not (Transaction.CleanupEcsState)
+  invariant the revision GC's compaction frees every overflow chunk of the chain it rewrites — the ChainLength - 1 chunks linked from the root,
+            exactly that many — once the root names the new chain, deferred with its content frees past every transaction alive: a rollback or a
+            conflict resolution may still write through a handle into the old layout (ComponentRevisionManager.CleanUpUnusedEntriesCore). The chain
+            it builds ends where its length says: its new chunks are allocated cleared, so the last one links to 0 — a reissued chunk keeps its
+            previous owner's link, and a walk that followed it freed another chain's chunk. It skips an entry whose root is no longer allocated or
+            names another entity, and never frees a destroyed chain's root (DeferredCleanupManager.CleanupEntityRevisionsBatched,
+            ForeignChainsSkipped)
+  invariant a destroyed entity's revision chain is released whole by the entity cleanup alone, once the entity's DiedTSN is below every live snapshot:
+            every chunk of the chain and every content chunk a live element names, freed deferred past every transaction alive at the release
+            (DeferredCleanupManager.ReleaseDestroyedEntityChain). A chain not quiescent — a revision cleanup still queued for it, its lock held, an
+            element still uncommitted — puts the entity off to a later pass with its record kept; a chain already released is detached from the
+            record first, so no retry releases it twice (DatabaseEngine.ProcessEcsCleanups). A root that is not allocated or names another entity
+            is never freed and is counted (DestroyedChainsForeign): a bug, never a free of someone else's chunk
+  invariant a clean close with no transaction alive drains what is queued — revision GC entries, destroyed entities, deferred chunk frees —
+            before its final checkpoint, in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a
+            destroy's frees do not wait for a transaction that will never come. A chain root still allocated reads back as a live entity when its
+            archetype's map reopens empty and is rebuilt from the chain heads (#1231). What the drain cannot finish — an entry whose lock was busy,
+            an entity still put off — stays allocated, a leak; a drain that throws is logged and the close goes on
+  scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
+         Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
+         DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
+         DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
+         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk
+  on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
+                spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
+                MarketHardeningTests' consume-and-craft storm: an item's entity read another item's data within a few thousand operations, and 100
+                destroy-then-respawn rounds over 2,000 entities reproduced it single-threaded. With several threads the chain root went the same way —
+                the GC and the entity cleanup both freed a lone tombstone's root, a concurrent spawn took it in between, and that spawn's commit found its
+                own revision gone (AP-05). A write followed by a destroy left the write's revision isolated, naming its freed chunk; every rollback after
+                a Versioned write freed its chunk twice; a compaction freed none of a chain's overflow chunks when the chain started at its first slot.
+                The last three leak or corrupt silently: ChunkBasedSegment ignores a second free of a free chunk, so only DoubleFreeCount shows it
+  note: an entity spawned AND destroyed in one committed transaction still leaks the storage its spawn allocated — both commit paths skip it (#1229,
+        a leak, no live entity affected); its test is quarantined against that issue
+  verified: DestroyRespawnSlotReuseTests [VerifiesRule] — destroy-and-respawn in one transaction, after a read, after a write, in two transactions
+            and on 8 threads keeps every live id on its own data; after a full cleanup no chunk was freed twice and the revision and content segments
+            hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a destroy
+            committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
+            overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
+            a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
+            shape, found by the gate)
+
 ## Module: VIEWLIFE — What a long-lived view may retain
 
 An `EcsView` outlives the `Transaction` that built it: a caller may construct the view in a scoped setup transaction,
@@ -768,3 +820,127 @@ easy to get wrong — the copy is invisible at the call site and outlives everyt
             the three regression tests beside it do NOT do: they assert the CONSEQUENCE (a view still refreshes once its
             creator is gone) and would stay green against a fix that merely rebound at the top of `Refresh`.
             Mutant_AQueryStillBoundToItsTransaction_IsReported is the mutant.
+
+---
+
+## Module: QFENCE — What an indexed query answers between a write and its tick fence
+
+A `SingleVersion` write under the default TickFence discipline, and any `Transient` write, lands in place at once, while
+the secondary B+Tree indexes and the per-cluster zone maps catch up only at `WriteTickFence`: the index still holds the
+entity under its old key, and a zone map may still rule its cluster out for the new value. Writes that reconcile at
+commit have no such window — `Versioned` components, `SingleVersion` under the Commit discipline, spawns. A destroy
+removes the entity's entries itself, unless the entity was written earlier in the tick: then it leaves them for the
+fence, and every query path must drop them by the cleared occupancy bit. A query answers from a structure that lags the data, so it cannot be
+both fast and exact inside the window; this rule fixes what it does promise.
+
+### QFENCE-01: An indexed query never returns a row its current value fails `[silent]`
+  invariant ∀ query Q with an indexed `WhereField`, run after an in-place write to entity e (the write happens-before Q)
+            and before the tick fence that moves e's index entries: Q returns e only if e is live and its CURRENT value
+            satisfies Q's condition — on every path the planner may take (the index path, the zone-map scan) and every
+            terminal (`Execute`, `Count`, `Any`, `ExecuteOrdered`)
+  invariant an entity whose value STARTED satisfying Q since the last fence may be absent from Q's result until the fence;
+            once the fence has run, Q is exact
+  invariant an ordered result places a written entity that still satisfies Q by its value as of the last fence — its key
+            in the tree — and Skip / Take count only the rows returned
+  never trusting a tree key for an entity written since the fence: the index path skips re-testing the predicate its
+        range enforced (`PrimaryRangeAdmitsOnlyMatches`), and the ordered merge tests no value at all, so both re-test the
+        entities whose shadow-bitmap bit is set (`ClusterShadowBitmap`, set before the in-place write lands)
+  never looking for the new values by checking every entity written since the fence: that costs each query in proportion
+        to the tick's writes — measured at +0.9 ms per point lookup with 100 000 entities written — where the index's
+        point is a cost independent of them. A caller that needs the new value inside the tick uses the Commit
+        discipline, or fences first
+  enforce the re-test runs only while the queried component may have stale keys
+          (`ArchetypeClusterState.MayHaveFenceStaleKeys`): some entity marked since the fence, AND its slot written, OR a
+          slot released this tick (a destroy after a write to ANY component leaves this one's entries for the fence), OR
+          an empty written-slot union (a path that does not maintain it) — the fence drain's own three-term gate. A tick
+          that only writes other components and destroys nothing costs an index query on this one nothing
+  scope: EcsQuery.ScanPerArchetypeBTreeSelective, ArchetypeSortedStream, ArchetypeSortedStream.Create,
+         ArchetypeClusterState.MayHaveFenceStaleKeys, DirtyBitmap.ReadWord, DirtyBitmap.AnyTestAndSetSinceClear
+  on_violation: a row that fails the query's own condition, with nothing raised — and only when the planner happened to
+                pick the index path, which it does on an estimate. A unique point lookup on 1 000 000 rows returned an
+                entity whose key had moved 100 → 5 000 000 since the fence, while the zone-map scan of the same query
+                returned nothing; an ordered query returned it at its old position
+  rationale: a missing row is the documented lag of a structure maintained at the fence; a wrong row breaks every caller
+             that trusts its WHERE clause. Re-testing costs one bitmap word per cluster the index path's result touches,
+             and on the ordered path one per page of keys it reads; a value test runs only for an entity written since
+             the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
+             `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
+  note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
+        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186); a write through
+        `ClusterRef.GetSpan` / `Get` marks no entity and records no old key, so the indexes never follow it, even at the
+        fence (#1187); a slot destroyed after a write and reused by a spawn before the fence makes an ordered query
+        return the new entity twice, and the fence then leaves the indexes answering keys no entity holds (#1188). Reads
+        of an index that test no value — `Transaction.EnumerateIndex`, foreign-key navigation — are not queries and are
+        not covered
+  verified: QueryBetweenWriteAndFenceTests [VerifiesRule] — the old value, a range left and a range still matched, the
+            new value before and after the fence (inside and outside the cluster's old bounds), the `AllowMultiple`
+            index, a second vectorisable predicate (the SIMD branch), a write followed by a destroy, and a write to
+            ANOTHER component followed by a destroy and a respawn into the freed slot, each on the
+            planner's path and both forced paths; the ordered query (ascending, descending, Skip / Take, before and after
+            the fence, a destroyed entity), which takes the merge whatever path is forced; the gate (a write to another
+            component leaves the re-test off, a write to this one turns it on, the fence turns it off); and the
+            controls — a Commit-discipline write and a `Versioned` write have no window. Mutants: without the index
+            path's re-test, or its SIMD-branch half, the cases that reach it fail; without the stream's, the ordered
+            case; without its liveness test, the destroy case; with the gate always off, seven of ten; with the gate
+            blind to which component was written, the gate case; with the gate blind to releases, the
+            destroy-after-another-write case
+
+## Module: EMAP — Where an entity map keeps its buckets
+
+The per-archetype entity map is a linear hash map (`PagedHashMapBase`). Its layout used to hold a directory of bucket chunk ids, counted in 16 bits and
+reached through a linked list walked on every lookup: a map stopped at 4 194 240 buckets (6–14M entities, by the archetype's record size) and a lookup
+cost 12 µs at 20M entries (#1205).
+
+### EMAP-01: A bucket lives at the chunk its index names `[fatal]` `[silent]`
+  invariant ∀ b < BucketCount: bucket b is chunk b + 1 of the map's segment; chunk 0 is the meta; the map keeps no directory. The hash state is
+            BucketCount alone — level and split pointer derive from it (BucketCount = N0 · 2^level + next)
+  invariant every allocated chunk past BucketCount is an overflow chunk, and one linked into a chain names its owner (header OlcVersion = bucket + 1;
+            an overflow chunk is never latched). The segment's allocation floor sits a runway above the frontier (BucketCount + 1), so the allocator
+            hands out nothing a split will need soon
+  invariant a split claims chunk newBucket + 1 before it takes any latch: free → reserved; held by a linked overflow chunk → moved, under its owner's
+            latch, to a chunk reserved before that latch, the owner's version bumped; held and linked to nothing (a writer between reserving and
+            linking) → the split is skipped and retried by a later insert, never waited for
+  invariant the new bucket is written before the count that names it is published, with release semantics, and every reader resolves its bucket from an
+            acquire read of the count: a reader that reaches the new bucket sees what the split wrote, on x64 and on arm64
+  invariant past MaxBucketCount (2³⁰) a map stops splitting and inserts go on into longer chains; what refuses at last is the segment, whose allocator
+            throws ResourceExhausted when its chunk ids run out (PS-18). Under concurrent inserts the lock holder splits in batches, and an inserter that
+            finds the load a third past the threshold waits, bounded, for the lock — the load stays bounded, and with it a lookup's chunk count
+  invariant a split runs before the write that triggers it takes effect, in a reservation scope of its own: a fault in it fails a write that changed
+            nothing, which its caller can retry — InsertNew has no duplicate check. One that cannot get its chunk or its pages (ResourceExhausted,
+            page-cache back-pressure) is skipped and counted instead. A claimed chunk is freed only while the count that would name it is unpublished.
+            A frontier chunk held unlinked is remembered, and inserts skip the split until its holder links or frees it
+  invariant each count in the meta chunk has one writer: the bucket count the split that published it, under the split lock — or the checkpoint's
+            FlushMeta, under that lock, when a split's own persist faulted after it published; the entry count the checkpoint (FlushMeta), on every
+            cycle it changed. A writer reading the bucket count outside the lock could store an older one over a newer
+  invariant no allocated chunk stays linked to nothing: a reservation frees every chunk it did not hand out even if one free throws, a crash open
+            rebuilds every map it opens (ClearForRebuild frees all), and the offline check reports any allocated chunk past the buckets that no chain
+            reaches (CHK-MAP-05) — one at the frontier would defer every split for good
+  invariant an open tolerates an unusable meta — opening the map as N0 empty buckets — exactly when it is about to rebuild that map, by the same
+            predicate as the rebuild gate (WillRebuildEntityMapOnCrash): a crash reopen, or a repair's forced recovery open after a clean close
+  invariant a multi-value map (the generic PagedHashMap) keeps its value buffers in a segment of their own: one in the map's segment would sit where a
+            split must put a bucket, and could not be moved
+  invariant an 8-byte key's hash keeps an aligned run of 256 keys in 256 consecutive buckets (RunPreservingHash64: the run's mixed high part, the
+            key's low byte XOR the mix's): consecutive entity keys share pages, while runs, and keys issued unevenly within a run, spread like xxHash32.
+            The hash is part of the format: a map written under another (meta format other than "LHA3") is refused, never read
+  scope: RawValuePagedHashMap.RunPreservingHash64, PagedHashMapBase.ClaimBucketChunk, PagedHashMapBase.PublishBucketCount, PagedHashMapBase.ReadMeta, PagedHashMapBase.GetBucketChunkId,
+         PagedHashMapBase.TagOverflowOwner, PagedHashMapBase.TrySplitIfNeeded, PagedHashMapBase.PersistBucketCount, PagedHashMapBase.FlushMeta,
+         PagedHashMapMeta.IsUsable, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.AppendUnderBucketLock, ChunkBasedSegment.TryReserveChunk,
+         ChunkBasedSegment.RaiseAllocationFloor, ChunkReservation.TryTakeReserved, ChunkReservation.End, EntityMapChecks
+  on_violation: a hash that scatters consecutive keys makes every batch of spawns dirty one map page per entity: a bulk load rewrote the whole map at
+                every checkpoint cycle, 85 % of its writes (MarketHardeningTests); one that keeps the key's low bits as they are overloads the buckets
+                partly-issued key blocks use. A split that took the frontier chunk while an overflow chunk sat there would overwrite a live chain —
+                entries lost, silently; one that
+                waited for a chunk held unlinked could wait on its own reservation; a count published before its bucket would let a reader resolve to
+                a chunk not yet written
+  verified: EntityMapAddressingTests [VerifiesRule] — every bucket at its position after 30 000 inserts; an overflow chunk on the frontier chunk is
+            moved by the next split whether its predecessor is the bucket or another overflow chunk, and when its owner is the bucket being split; a
+            frontier chunk held unlinked defers every split until it is freed, one with a stale owner defers until freed, one whose owner is latched
+            defers then moves, one in the splitter's own reservation is taken back; a fault in a split fails only a write that took no effect, and
+            frees the chunk it claimed — but not after the count that names it was published; each meta count has one writer; at a lowered cap
+            the map keeps inserting; the allocator stays above its floor;
+            inserters, readers and a remover at once over splits that move overflow chunks. EntityMapChecksTests — every structural fault reported
+            exactly, a recovery open rebuilds a map whose meta it cannot use, a despawn-only session persists the count. HashMapTests — a multi-value
+            map keeps splitting. EntityMapScaleTests (on demand): 500M entries (4-byte values), 200M (23-byte) and 50M over a 1 GiB cache — every
+            sampled entry found before and after a clean reopen. EntityMapHashTests [VerifiesRule] — an aligned run of keys fills one aligned block of
+            buckets; sequential, partly-issued blocks, strided, churned and random keys all overflow and fill buckets within a margin of a random hash's
+            on the same keys at load 0.75 ([RuleMutant]: the key's own low bits, the naive locality hash, are reported)

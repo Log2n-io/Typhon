@@ -22,6 +22,13 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 /// folds (the flags and the block's identity). Every constant moved once for it, flat and deep alike, and nothing else changed.
 /// </para>
 /// <para>
+/// <b>Re-pinned by #1205</b> (<see cref="SpheresUnderChurnAndSkips"/>, <see cref="WorldObserversUnderChurnAndSkips"/>,
+/// <see cref="AProfileServedEveryFourthTick"/>): the chunk allocator's room bits (ADR-071) hand freed chunks out in another order than the free list did,
+/// which renumbers clusters, and with them the order entities enter a view and the netIds a session gives them. These digests fold netIds, so they pin
+/// the allocator's choice among free chunks: a first-fit variant of the same allocator moved all fourteen runs to third values. The oracle still converges
+/// and flat still equals deep; the six runs of the other two tests kept their values. A digest independent of allocation order is #1215.
+/// </para>
+/// <para>
 /// <b>Both implementations</b> (10 § 3.5, L6): every run is also served by the deep implementation on the same flat world, and must give the flat one's
 /// digest — the deep geometry with z = 0 everywhere is the flat geometry, bit for bit (10 § 3.4). The one exception is a <c>World</c> fill the enter
 /// budget splits, whose frames follow key order, tile-major in the deep implementation.
@@ -56,7 +63,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1501, [0, 30, 60], nameof(PushFrameDigestTests),
             deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(17696479548640764162UL));
+        Assert.That(Run(oracle), Is.EqualTo(4990014507720829212UL));
     }
 
     [Test]
@@ -65,7 +72,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1502, [0, 60], nameof(PushFrameDigestTests),
             worldObserver: true, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(9776740011609362849UL));
+        Assert.That(Run(oracle), Is.EqualTo(14538279044339551025UL));
     }
 
     /// <summary>
@@ -109,6 +116,6 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1504, [0, 30], nameof(PushFrameDigestTests),
             worldObserver: world, every: 4, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(737783597812732568UL));
+        Assert.That(Run(oracle), Is.EqualTo(10995054603920554470UL));
     }
 }

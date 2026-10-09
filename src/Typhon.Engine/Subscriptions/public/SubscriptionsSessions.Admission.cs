@@ -120,6 +120,21 @@ public enum SessionEventKind : byte
 
     /// <summary>A session was served less — a rate class dropped, a near radius shrunk — rather than closed. Built with the send pump.</summary>
     Degraded = 4,
+
+    /// <summary>
+    /// The realm the session was in was unregistered and removed: the session is in <see cref="RealmId.None"/> now, and
+    /// <see cref="SessionEvent.Realm"/> names the realm that went away.
+    /// </summary>
+    /// <remarks>
+    /// <b>The session is still open.</b> A realm going away is not a reason to drop the client that was watching it — an instance closing under a party is
+    /// ordinary, and the application decides where they go next (12-realms § 1.6, Q7). Its client has already been told the same thing the only way a client
+    /// can be: the frame of the tick this was produced in is a <c>RESET</c> whose <c>REALM</c> block is <c>NONE</c>, so its store is empty and it holds
+    /// nothing. Until the application places it somewhere it is served events only.
+    /// <para>
+    /// Delivered <b>once</b> per realm a session loses, not once per tick it spends in none afterwards.
+    /// </para>
+    /// </remarks>
+    RealmClosed = 5,
 }
 
 /// <summary>
@@ -170,8 +185,10 @@ public enum SessionCloseReason : byte
 public readonly struct SessionEvent
 {
     internal SessionEvent(SessionEventKind kind, SessionId session, SessionRole role, SessionLimits limits, object appData, string sessionKind,
-        byte[] helloPayload, ClaimsPrincipal principal, SessionId resumedFrom, SessionCloseReason reason, ushort closeCode, bool resumable)
+        byte[] helloPayload, ClaimsPrincipal principal, SessionId resumedFrom, SessionCloseReason reason, ushort closeCode, bool resumable,
+        RealmId realm = default)
     {
+        Realm = kind == SessionEventKind.RealmClosed ? realm : RealmId.None;
         Kind = kind;
         Session = session;
         Role = role;
@@ -222,10 +239,24 @@ public readonly struct SessionEvent
     /// <summary>Whether the client may come back to this session within the grace period.</summary>
     public bool Resumable { get; }
 
+    /// <summary>
+    /// The realm this is about. Meaningful on <see cref="SessionEventKind.RealmClosed"/>, where it is the realm that was removed;
+    /// <see cref="RealmId.None"/> on every other kind.
+    /// </summary>
+    /// <remarks>
+    /// <b>The realm that went away, not the one the session is in</b> — which is <see cref="RealmId.None"/> by the time this is read and would tell the
+    /// application nothing. An application with per-realm state keyed by id (a party, an instance record, a timer) needs the key to drop it by, and this is
+    /// the last moment that key exists anywhere: the realm is out of the table before the tick delivering this begins.
+    /// </remarks>
+    public RealmId Realm { get; }
+
     /// <inheritdoc />
-    public override string ToString() => Kind == SessionEventKind.Closed
-        ? $"{Kind} {Session} ({Reason}, {CloseCode})"
-        : $"{Kind} {Session}";
+    public override string ToString() => Kind switch
+    {
+        SessionEventKind.Closed => $"{Kind} {Session} ({Reason}, {CloseCode})",
+        SessionEventKind.RealmClosed => $"{Kind} {Session} (realm {Realm.Value})",
+        _ => $"{Kind} {Session}",
+    };
 }
 
 /// <summary>

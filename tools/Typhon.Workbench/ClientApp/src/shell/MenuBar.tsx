@@ -43,8 +43,9 @@ import {
   saveLayoutAsDefault,
   resetLayout,
 } from './commands/openSchemaBrowser';
-import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, registerOpenSaveReplay } from './commands/profilerCommands';
+import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, toggleViewSubscriptions, registerOpenSaveReplay } from './commands/profilerCommands';
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
+import { toggleViewRealms } from './commands/openRealms';
 import { openIntegrity } from './commands/openIntegrity';
 import { registerOpenConnect } from './commands/baseCommands';
 import { ANY_ZONE_D_VIEW_ACTIVE, isViewVisible } from './viewRegistry';
@@ -141,6 +142,9 @@ export default function MenuBar() {
  {isViewVisible('SchemaExplorer', sessionScope) && (
  <MenubarItem onClick={toggleViewSchemaExplorer}>Schema</MenubarItem>
  )}
+ {isViewVisible('Realms', sessionScope) && (
+ <MenubarItem onClick={toggleViewRealms}>Realms</MenubarItem>
+ )}
  {isViewVisible('DataBrowserEntities', sessionScope) && (
  <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>
  )}
@@ -192,6 +196,9 @@ export default function MenuBar() {
  )}
 {isViewVisible('SpatialMaintenance', sessionScope) && (
  <MenubarItem onClick={toggleViewSpatialMaintenance}>Spatial</MenubarItem>
+)}
+{isViewVisible('Subscriptions', sessionScope) && (
+ <MenubarItem onClick={toggleViewSubscriptions}>Subscriptions</MenubarItem>
 )}
  {/* Systems & Queries Navigator — the trace/attach-mode default left-edge navigator (the profiler-mode
      counterpart of Resource Tree). Shown only in a profiler session — the in-mode recovery path to reopen

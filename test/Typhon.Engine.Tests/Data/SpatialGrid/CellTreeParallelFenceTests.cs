@@ -614,8 +614,8 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
         var chunksPerCell = new Dictionary<int, HashSet<int>>();
         for (int chunk = 0; chunk < plan.ChunkCount; chunk++)
         {
-            int start = plan.ChunkStart[chunk];
-            int end = start + plan.ChunkItemCnt[chunk];
+            int start = plan.Chunks[chunk].ItemStart;
+            int end = start + plan.Chunks[chunk].ItemCount;
             for (int i = start; i < end; i++)
             {
                 ref readonly var item = ref plan.Items[i];

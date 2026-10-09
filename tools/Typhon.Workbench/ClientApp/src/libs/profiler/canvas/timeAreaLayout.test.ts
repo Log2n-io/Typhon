@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildLayout, deriveSlotInfo, getVisibleTicks } from './timeAreaLayout';
+import { buildLayout, deriveActiveSystems, deriveSlotInfo, getVisibleTicks } from './timeAreaLayout';
+import { TraceEventKind } from '@/libs/profiler/model/types';
 import type { SpanData, TickData } from '@/libs/profiler/model/traceModel';
 
 /**
@@ -336,6 +337,49 @@ describe('timeAreaLayout.deriveSlotInfo', () => {
     deriveSlotInfo([tickWithSpans(0, 0, 100, [a, b])]);
     expect(a.renderDepth).toBe(0);
     expect(b.renderDepth).toBe(0);
+  });
+
+  it('separates a span that straddles a tick boundary from a later span in the next tick', () => {
+    // A long op is recorded in the tick where it COMPLETES, so its start can precede the ticks it covers. The packer
+    // has to see the whole window at once for this to work — it is the reason the pass is not per-tick.
+    const straddler = span(0, 1500, 0, 'straddler');
+    const later = span(1100, 1200, 0, 'later');
+    deriveSlotInfo([
+      tickWithSpans(0, 0, 1000, [straddler]),
+      tickWithSpans(1, 1000, 1000, [later]),
+    ]);
+    expect(straddler.renderDepth).toBe(0);
+    expect(later.renderDepth).not.toBe(straddler.renderDepth);
+  });
+
+  it('pins Idle / BetweenTick spans to renderDepth -1 without claiming a row', () => {
+    const idle = span(0, 500, 0, 'idle');
+    idle.kind = TraceEventKind.SchedulerWorkerIdle;
+    const work = span(100, 200, 0, 'work');
+    deriveSlotInfo([tickWithSpans(0, 0, 500, [idle, work])]);
+    expect(idle.renderDepth).toBe(-1);
+    // `work` overlaps `idle` in time, but idle never took row 0, so work gets it. Were idle packed, work would be
+    // pushed to row 1 and every slot lane would grow a phantom span row.
+    expect(work.renderDepth).toBe(0);
+  });
+
+  it('derives the active system indices and their chunk slots from the ticks chunks', () => {
+    const withChunks = (tickNumber: number, startUs: number, systemIndexes: number[]): TickData => {
+      const t = tickWithSpans(tickNumber, startUs, 100, []);
+      t.chunks = systemIndexes.map((systemIndex, i) => ({
+        systemIndex,
+        systemName: `sys${systemIndex}`,
+        threadSlot: i,
+        startUs,
+        endUs: startUs + 10,
+        durationUs: 10,
+      } as TickData['chunks'][number]));
+      return t;
+    };
+    const ticks = [withChunks(0, 0, [3, 1]), withChunks(1, 100, [1, 7])];
+    // Deduplicated and ascending — the per-system lane order depends on it.
+    expect(deriveActiveSystems(ticks)).toEqual([1, 3, 7]);
+    expect(deriveSlotInfo(ticks).slotsWithChunks).toEqual(new Set([0, 1]));
   });
 });
 

@@ -396,7 +396,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
-    public void TryGetHashMapLayout_ReportsWidthsCapacityAndNonDataChunks()
+    public void TryGetHashMapLayout_ReportsWidthsCapacityAndBucketCount()
     {
         using var dbe = SetupClusterEngine();
         var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
@@ -426,15 +426,14 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         }
         Assert.That(stride, Is.GreaterThan(0));
 
-        var found = dbe.TryGetHashMapLayout(mapRoot, out var keyWidth, out var valueWidth, out var bucketCapacity, out var nonDataChunkIds);
+        var found = dbe.TryGetHashMapLayout(mapRoot, out var keyWidth, out var valueWidth, out var bucketCapacity, out var bucketCount);
 
         Assert.That(found, Is.True);
         Assert.That(keyWidth, Is.EqualTo(8), "EntityKey is a long");
         Assert.That(valueWidth, Is.GreaterThan(0));
         Assert.That(bucketCapacity, Is.EqualTo((stride - 12) / (keyWidth + valueWidth)), "capacity = (stride − header) / (key + value)");
-        // The structural set is meta (chunk 0) plus every directory chunk — at least 2 ids, and chunk 0 must be present.
-        Assert.That(nonDataChunkIds, Does.Contain(0), "the meta chunk is always chunk 0");
-        Assert.That(nonDataChunkIds.Length, Is.GreaterThanOrEqualTo(2), "meta + at least one directory chunk");
+        // Bucket b is chunk b + 1 (#1205): the count tells a bucket chunk from an overflow chunk, so it is what the renderer needs.
+        Assert.That(bucketCount, Is.EqualTo(dbe._archetypeStates[meta.ArchetypeId].EntityMap.BucketCount));
     }
 
     [Test]
@@ -538,7 +537,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             var entity = readTx.Open(ids[i]);
             Assert.That(entity.IsValid, Is.True, $"Entity {i} not valid");
-            ref readonly var readPos = ref entity.Read(ClAnt.Position);
+            var readPos = entity.Read(ClAnt.Position);
             Assert.That(readPos.X, Is.EqualTo((float)i), $"Entity {i} Position.X");
             Assert.That(readPos.Y, Is.EqualTo(i * 10f), $"Entity {i} Position.Y");
         }
@@ -744,10 +743,10 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         var accessor = readTx.For<ClAnt>();
         var entity = accessor.Open(id);
         Assert.That(entity.IsValid, Is.True);
-        ref readonly var rp = ref entity.Read(ClAnt.Position);
+        var rp = entity.Read(ClAnt.Position);
         Assert.That(rp.X, Is.EqualTo(123f));
         Assert.That(rp.Y, Is.EqualTo(456f));
-        ref readonly var rm = ref entity.Read(ClAnt.Movement);
+        var rm = entity.Read(ClAnt.Movement);
         Assert.That(rm.VX, Is.EqualTo(7f));
         Assert.That(rm.VY, Is.EqualTo(8f));
         accessor.Dispose();
@@ -828,10 +827,10 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         // foreach iteration should return correct data
         foreach (var entity in qTx.Query<ClAnt>())
         {
-            ref readonly var rp = ref entity.Read(ClAnt.Position);
+            var rp = entity.Read(ClAnt.Position);
             Assert.That(rp.X, Is.EqualTo(42f));
             Assert.That(rp.Y, Is.EqualTo(84f));
-            ref readonly var rm = ref entity.Read(ClAnt.Movement);
+            var rm = entity.Read(ClAnt.Movement);
             Assert.That(rm.VX, Is.EqualTo(7f));
             Assert.That(rm.VY, Is.EqualTo(3f));
         }
@@ -876,7 +875,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         {
             var entity = readTx.Open(ids[i]);
             Assert.That(entity.IsValid, Is.True, $"Entity {i} not valid");
-            ref readonly var rp = ref entity.Read(ClAnt.Position);
+            var rp = entity.Read(ClAnt.Position);
             Assert.That(rp.X, Is.EqualTo(i * 10f), $"Entity {i} Position.X wrong");
             Assert.That(rp.Y, Is.EqualTo(i * 20f), $"Entity {i} Position.Y wrong");
         }

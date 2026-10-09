@@ -124,6 +124,24 @@ public sealed class UnitOfWork : IDisposable
     }
 
     /// <summary>
+    /// Creates a transaction of this UoW that may run concurrently with its other transactions, on another thread: it tracks its dirty pages in a
+    /// <see cref="ChangeSet"/> of its own rather than the UoW's shared one, which is single-thread-affine (#1116). For the runtime's per-chunk transactions.
+    /// </summary>
+    [return: TransfersOwnership]
+    internal Transaction CreateConcurrentTransaction(CommitDiscipline discipline = CommitDiscipline.TickFence)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_state != UnitOfWorkState.Pending)
+        {
+            throw new InvalidOperationException($"Cannot create transaction: UoW is {_state}");
+        }
+
+        Interlocked.Increment(ref _transactionCount);
+        _dbe.RecordTransactionCreated();
+        return _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline, ownChangeSet: true);
+    }
+
+    /// <summary>
     /// Creates a <see cref="UnitOfWorkContext"/> for use with <see cref="Transaction.Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)"/>.
     /// Composes the UoW's deadline with the provided timeout (tighter deadline wins).
     /// </summary>

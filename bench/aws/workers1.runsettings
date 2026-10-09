@@ -4,8 +4,15 @@
        suite's process-static state. Parallelism comes from running K of these
        processes concurrently, not from workers within a process. DefaultTimeout
        mirrors test.runsettings (a 10 s per-test deadlock guard). -->
+  <!-- AssemblySelectLimit: above this many selected test cases the NUnit adapter (6.x) drops the filter,
+       runs EVERY test in the assembly and keeps only the selected results ("Setting filter to empty due to
+       Test Filter size which is exceeding AssemblySelectLimit"). Its default sits near 2 000, and shard 0,
+       the catch-all, had 1 995: past it, shard 0 silently ran every other shard's tests at the same time as
+       those shards, on the same temp databases. Measured: 287 s instead of 85 s, plus "file in use" failures
+       and a hang landing in the wrong shard. The limit is set far above the suite's size. -->
   <NUnit>
     <NumberOfTestWorkers>1</NumberOfTestWorkers>
     <DefaultTimeout>10000</DefaultTimeout>
+    <AssemblySelectLimit>1000000</AssemblySelectLimit>
   </NUnit>
 </RunSettings>

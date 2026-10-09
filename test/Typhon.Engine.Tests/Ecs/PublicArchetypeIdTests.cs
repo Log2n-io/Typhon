@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -133,6 +133,54 @@ class PublicArchetypeIdTests : TestBase<PublicArchetypeIdTests>
         Assert.That(spawned.ArchetypeId, Is.GreaterThan((ushort)0), "a spawned entity must carry a real routing id");
         Assert.That(dbe.GetMetaByRouting(spawned.ArchetypeId).ArchetypeId, Is.EqualTo(Archetype<PubArchIdUnit>.CatalogId),
             "routing id -> metadata -> catalog id must land back on Archetype<T>.CatalogId: that hop IS the relationship between the two id spaces");
+    }
+
+    /// <summary>
+    /// The public inverse of the hop the fixture above makes internally: from an archetype type to the routing id its entity ids carry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The gap this closes is the one the test above documents.</b> <see cref="EntityId.ArchetypeId"/> is public and carries the per-database ROUTING id;
+    /// <c>Archetype&lt;T&gt;.CatalogId</c> is public and is the process-global CATALOG id; and the map between them
+    /// (<c>GetMetaByRouting</c>, <c>RoutingIdForCatalog</c>) was internal. So an application holding an id of unknown provenance — one a client named over the
+    /// wire, one read out of a query over several archetypes, one stored in a component — could not discover which archetype it belonged to at all. Both
+    /// numbers are <see cref="ushort"/>, so comparing the wrong pair compiles and silently never matches, which is the failure this fixture already records
+    /// finding at 98 against 2.
+    /// </para>
+    /// <para>
+    /// Asserted against a SPAWNED entity's id rather than against <c>RoutingIdForCatalog</c>, which is the same expression the accessor evaluates: an accessor
+    /// checked against its own implementation can only be wrong in both places at once.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ArchetypeIdOfIsTheRoutingIdASpawnedEntityCarries()
+    {
+        using var dbe = CreateEngine();
+
+        EntityId unit;
+        EntityId other;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new PubArchIdPos { Bounds = new AABB2F { MinX = 10f, MinY = 10f, MaxX = 11f, MaxY = 11f } };
+            unit = tx.Spawn<PubArchIdUnit>(PubArchIdUnit.Pos.Set(in pos));
+            var tag = new PubArchIdTag { Value = 7 };
+            other = tx.Spawn<PubArchIdOther>(PubArchIdOther.Tag.Set(in tag));
+            tx.Commit();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.ArchetypeIdOf<PubArchIdUnit>(), Is.EqualTo(unit.ArchetypeId), "the accessor must answer what the entity's own id carries");
+            Assert.That(dbe.ArchetypeIdOf<PubArchIdOther>(), Is.EqualTo(other.ArchetypeId));
+
+            // Two archetypes, because an accessor that returned the same number for everything would pass the two assertions above if both ids happened to
+            // agree — and the whole use of this method is telling one archetype from another.
+            Assert.That(dbe.ArchetypeIdOf<PubArchIdUnit>(), Is.Not.EqualTo(dbe.ArchetypeIdOf<PubArchIdOther>()), "two archetypes must not share a routing id");
+
+            // And it is NOT the catalog id, which is the confusion this fixture exists to keep pinned down.
+            Assert.That(dbe.ArchetypeIdOf<PubArchIdUnit>(), Is.Not.EqualTo(Archetype<PubArchIdUnit>.CatalogId),
+                "routing and catalog ids must stay distinct: if these are ever equal by construction the two id spaces have been merged");
+        });
     }
 
     /// <summary>

@@ -44,7 +44,10 @@ class EcsViewCreatorTransactionLifetimeTests : TestBase<EcsViewCreatorTransactio
             // Lease both transactions while creator is still live. After creator.Dispose(), its pooled
             // object therefore stays reset instead of being reused as either transaction and masking #862.
             using var mutation = dbe.CreateQuickTransaction();
-            mutation.OpenMut(id).Write(CompDArch.D).B = 60;
+            var entity = mutation.OpenMut(id);
+            var dCopy = entity.Read(CompDArch.D);
+            dCopy.B = 60;
+            entity.Set(CompDArch.D, dCopy);
             mutation.Commit();
 
             using var refresh = dbe.CreateQuickTransaction();
@@ -90,7 +93,10 @@ class EcsViewCreatorTransactionLifetimeTests : TestBase<EcsViewCreatorTransactio
             Assert.That(view.Count, Is.Zero);
 
             using var mutation = dbe.CreateQuickTransaction();
-            mutation.OpenMut(id).Write(CompFArch.F).Rank = 7;
+            var target = mutation.OpenMut(id);
+            var fCopy = target.Read(CompFArch.F);
+            fCopy.Rank = 7;
+            target.Set(CompFArch.F, fCopy);
             mutation.Commit();
 
             using var refresh = dbe.CreateQuickTransaction();

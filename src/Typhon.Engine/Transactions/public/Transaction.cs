@@ -185,7 +185,12 @@ public unsafe partial class Transaction : EntityAccessor
     /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
     /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
     /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence)
+    /// <param name="ownChangeSet">
+    /// When <see langword="true"/>, the transaction makes and releases its own <see cref="ChangeSet"/> even inside a unit of work that has a shared one: for a
+    /// transaction that runs concurrently with others of the same unit of work, whose shared ChangeSet is single-thread-affine (#1116).
+    /// </param>
+    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
+        bool ownChangeSet = false)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
@@ -213,8 +218,13 @@ public unsafe partial class Transaction : EntityAccessor
         // Immediate mode it has none, so the transaction makes its own — and must therefore release it itself, which
         // Dispose now does. Nothing did before: every mark taken by every Immediate-mode transaction was stranded for the
         // life of the process, which is a far larger leak than the per-cycle drip #824 was opened for.
-        _ownsChangeSet = !readOnly && uow?.ChangeSet == null;
-        _changeSet = readOnly ? null : (uow?.ChangeSet ?? _dbe.MMF.CreateChangeSet());
+        //
+        // A transaction that runs beside others of its unit of work, on another thread, makes its own too (ownChangeSet): the shared one is a plain
+        // Dictionary and List, and two writers corrupt it (#400, #1116). Its marks are only dirty-page accounting — the checkpoint writes the pages, never
+        // the unit of work (ADR-054) — so a private ChangeSet released at dispose loses nothing, as the fence's per-chunk ChangeSets show.
+        _ownsChangeSet = !readOnly && (ownChangeSet || uow?.ChangeSet == null);
+        // Rented from the engine's pool and returned at dispose, so a per-chunk transaction allocates nothing in steady state.
+        _changeSet = readOnly ? null : _ownsChangeSet ? _dbe.MMF.RentChangeSet() : uow.ChangeSet;
         State = TransactionState.Created;
         TSN = tsn;
 
@@ -333,6 +343,12 @@ public unsafe partial class Transaction : EntityAccessor
                 _hasEntityMapCache = false;
             }
 
+            // The component and cluster accessors hold a slot reference on every page cached in their slots, which no epoch releases. Reset recycles the
+            // component entries without disposing them, and a transaction dropped by a full pool is never reset at all: left here, those pages could
+            // never be evicted again. MarketHardeningTests' snapshot, read in short read-only transactions, left 94 % of its cache that way.
+            FlushAccessors();
+            DisposeClusterCache();
+
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
             // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
@@ -353,13 +369,21 @@ public unsafe partial class Transaction : EntityAccessor
         ProcessDeferredCleanups();
         dbe.LogTxDispose(tsn, "FlushAccessors");
         FlushAccessors();
+        DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
+        if (_hasEntityMapCache)
+        {
+            _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
+            _hasEntityMapCache = false;
+        }
 
         // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
         // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
         // #385 was.
-        if (_ownsChangeSet)
+        if (_ownsChangeSet && _changeSet != null)
         {
-            _changeSet?.ReleaseDirtyMarks();
+            _changeSet.ReleaseDirtyMarks();
+            dbe.MMF.ReturnChangeSet(_changeSet);
+            _changeSet = null;
         }
         // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
         // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
@@ -518,17 +542,19 @@ public unsafe partial class Transaction : EntityAccessor
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Creates a mutable accessor over a <see cref="ComponentCollection{T}"/> field, bound to this transaction's <see cref="ChangeSet"/> so edits are tracked
-    /// for commit/rollback.
+    /// Creates a mutable accessor over a <see cref="ComponentCollection{T}"/> field of a component value that is not stored yet — one being built for a
+    /// spawn — or to read one back; bound to this transaction's <see cref="ChangeSet"/> so edits are tracked for commit/rollback.
     /// </summary>
+    /// <remarks>
+    /// To change the collection of a component an entity already holds, use <see cref="EntityRefMut.CreateComponentCollectionAccessor{T, TElem}"/>: on a
+    /// Versioned component it creates the new revision first, so the buffer the committed revision points to is cloned rather than edited in place.
+    /// Through this method, a copy read from a Versioned component would edit that buffer in place (#1199).
+    /// </remarks>
     /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
     /// <param name="field">Reference to the collection field to wrap.</param>
     /// <returns>A mutable accessor over the collection's backing buffer.</returns>
-    public ComponentCollectionAccessor<T> CreateComponentCollectionAccessor<T>(ref ComponentCollection<T> field) where T : unmanaged
-    {
-        AssertThreadAffinity();
-        return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
-    }
+    public ComponentCollectionAccessor<T> CreateComponentCollectionAccessor<T>(ref ComponentCollection<T> field) where T : unmanaged =>
+        CreateComponentCollectionAccessorCore(ref field);
 
     /// <summary>
     /// Returns a read-only enumerator that streams the elements of a <see cref="ComponentCollection{T}"/> field without allocating.
@@ -1189,7 +1215,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <para>
     /// For <see cref="StorageMode.SingleVersion"/> there is no revision chain to walk (<c>ComponentTable</c> allocates
     /// <c>CompRevTableSegment</c> only for Versioned), so the read goes through <see cref="EntityAccessor.TryOpen"/> +
-    /// <see cref="EntityRef.TryRead{T}"/>, which resolve the cluster-or-flat slot location and apply
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>, which resolve the cluster-or-flat slot location and apply
     /// BornTSN/DiedTSN visibility. Before issue #623 this method assumed the Versioned layout unconditionally and threw a
     /// bare <see cref="NullReferenceException"/> from the chain walker on any SingleVersion component — which is what made
     /// FK navigation unusable on the storage mode the engine steers hot ECS data toward.
@@ -1264,8 +1290,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         var entityId = Unsafe.As<long, EntityId>(ref pk);
         var entity = OpenMut(entityId);
-        ref var target = ref entity.Write<T>();
-        target = comp;
+        entity.Set(in comp);
         return true;
     }
 
@@ -1473,10 +1498,13 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
-        // Free the chunk storing the content (if any)
+        // Free the chunk storing the content (if any) — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a copy-on-write or
+        // a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone. It was left
+        // set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one payload.
         if (compRevInfo.CurCompContentChunkId != 0)
         {
-            componentSegment.FreeChunk(compRevInfo.CurCompContentChunkId);
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
+            compRevInfo.CurCompContentChunkId = 0;
         }
 
         // If we roll back a created component, we must delete the revision table chunk
@@ -1551,6 +1579,16 @@ public unsafe partial class Transaction : EntityAccessor
         // Save the orphan index before AddCompRev changes CurRevisionIndex
         var conflictOrphanIndex = compRevInfo.CurRevisionIndex;
 
+        // A destroy wins the conflict as a destroy: a fresh tombstone after the commit it lost to, ours voided. There is no payload to carry over and nothing
+        // for a handler to resolve — the generic path below would publish a LIVE revision copied from chunk 0 (REAP-02).
+        if (compRevInfo.CurCompContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        {
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, lockHeld);
+            elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+            compRev.GetRevisionElement(conflictOrphanIndex).Element.Void();
+            return;
+        }
+
         // Create a new revision for the resolved data (under existing lock when handler is provided)
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, lockHeld);
 
@@ -1597,6 +1635,15 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // Save the chunk that holds our modified data
         var oldContentChunkId = compRevInfo.CurCompContentChunkId;
+
+        // A tombstone moves as a tombstone: nothing to copy, nothing to free (REAP-02). Relocated as data, it would publish a live revision copied from — and
+        // then free — chunk 0.
+        if (oldContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        {
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
+            compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
+            return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        }
 
         // Create new entry at end of chain (under existing lock)
         ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
@@ -1809,32 +1856,90 @@ public unsafe partial class Transaction : EntityAccessor
     {
         var info = e.Info;
         ref var compRevTableAccessor = ref info.CompRevTableAccessor;
+        _dbe.PublishComponentProbe?.Invoke(info.ComponentTable, e.FirstChunkId);
 
-        // Reconstruct the revision handle from the coordinates resolved in PREPARE (no locking walk — AP-03) and clear IsolationFlag (THE publication act).
-        var elementHandle = new ComponentRevisionManager.ElementRevisionHandle(ref compRevTableAccessor, e.ElementChunkId, e.ElementIsFirst, e.ElementIndexInChunk);
-        elementHandle.Commit(TSN);
-
-        // LCRI / CommitSequence bookkeeping — header field writes (under the retained handler lock when LockHeld).
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
-        header.LastCommitRevisionIndex = Math.Max(e.LastCommitRevisionIndex, e.CurRevisionIndex);
-        if (!e.Created)
+
+        // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here
+        // a cleanup on another thread can compact this chain: CleanUpUnusedEntries rewrites every kept entry from index 0, the still-isolated one included.
+        // Stamping the coordinates PREPARE recorded then cleared IsolationFlag on whatever had moved there — often the previous committed entry, re-stamped
+        // with this TSN — and left this transaction's own entry isolated, invisible to every reader for good.
+        //
+        // The wait is unbounded, so publish stays non-throwing (AP-03), and it ends: a cleanup only ever TRIES the lock, another publish holds it for a few
+        // writes and one slot copy, and a conflict-handler transaction holding it from its PREPARE releases it at the end of its own publish — or, if it is
+        // itself waiting on a chain this transaction holds, when its bounded PREPARE wait times out and it rolls back. Readers hold it SHARED while they walk
+        // a chain that has a pending entry, and AccessControlSmall gives a waiting writer no preference: an entity read without pause can delay this publish
+        // for as long as the reads overlap. It does not deadlock — a reader holds no lock this transaction waits for — but the delay is not bounded.
+        var lockTaken = false;
+        if (!e.LockHeld)
         {
-            header.CommitSequence++;
+            var unbounded = new WaitContext(Deadline.Infinite, default);
+            header.Control.EnterExclusiveAccess(ref unbounded);
+            lockTaken = true;
         }
 
-        // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration).
-        if (e.ClusterCopyPending)
+        try
         {
-            PublishClusterVersionedSlot(e);
-        }
+            // Reconstruct the revision handle from the coordinates resolved in PREPARE. Held since PREPARE (handler path), the lock kept every compaction
+            // out and they are exact. Otherwise they are trusted only while they still name this transaction's pending entry: the root chunk outlives every
+            // compaction, but an overflow chunk may have been freed and reissued still holding a stale copy of the entry, so its coordinates are never trusted.
+            var revisionIndex = e.CurRevisionIndex;
+            var elementHandle = new ComponentRevisionManager.ElementRevisionHandle(ref compRevTableAccessor, e.ElementChunkId, e.ElementIsFirst,
+                e.ElementIndexInChunk);
+            if (!e.LockHeld && !_dbe.PublishTrustsPrepareCoordinatesForTest
+                && (!e.ElementIsFirst || !IsThisTransactionsPendingEntry(elementHandle.Element, e.CurCompContentChunkId)))
+            {
+                // The lock this thread holds makes the walk take no lock of its own.
+                var found = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, e.FirstChunkId, e.CurCompContentChunkId, TSN);
+                if (found < 0)
+                {
+                    // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
+                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing is published: no stamp, no LCRI, no
+                    // cluster copy. The commit is lost either way; this keeps it from taking a neighbour down with it, and says so.
+                    Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
+                    _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
+                    return;
+                }
 
-        // Release the per-entity revision-chain lock retained by PrepareComponent (handler path).
-        if (e.LockHeld)
+                revisionIndex = found;
+                elementHandle = ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, e.FirstChunkId, found);
+            }
+
+            elementHandle.Commit(TSN);   // THE publication act: TSN stamp + IsolationFlag clear
+
+            // LCRI / CommitSequence bookkeeping, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it. Read from
+            // the live header: a compaction since PREPARE renumbered the entries, and under a lock held since PREPARE it is the recorded value anyway.
+            var previousLastCommit = header.LastCommitRevisionIndex;
+            header.LastCommitRevisionIndex = Math.Max(previousLastCommit, revisionIndex);
+            if (!e.Created)
+            {
+                header.CommitSequence++;
+            }
+
+            // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
+            // is the newest committed one. Two transactions updating one entity can publish in the opposite order to their revisions; copying outside the
+            // lock let the older one land last, leaving the slot behind the chain's HEAD, and let two copies interleave into one slot.
+            if (e.ClusterCopyPending && revisionIndex >= previousLastCommit)
+            {
+                PublishClusterVersionedSlot(e);
+            }
+        }
+        finally
         {
-            ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
-            lockHeader.Control.ExitExclusiveAccess();
+            // Both forms released here: the one taken above, and the one PrepareComponent retained (handler path), which nothing else releases.
+            if (lockTaken || e.LockHeld)
+            {
+                header.Control.ExitExclusiveAccess();
+            }
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="element"/> is this transaction's still-pending revision: isolated, and carrying the content chunk it committed — or, for a
+    /// delete, no chunk and this transaction's TSN, the same identity <see cref="ComponentRevisionManager.FindRevisionIndexByChunkId"/> matches on.
+    /// </summary>
+    private bool IsThisTransactionsPendingEntry(in CompRevStorageElement element, int contentChunkId) =>
+        element.IsolationFlag && (contentChunkId != 0 ? element.ComponentChunkId == contentChunkId : element.ComponentChunkId == 0 && element.TSN == TSN);
 
     /// <summary>
     /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.
@@ -2039,7 +2144,12 @@ public unsafe partial class Transaction : EntityAccessor
         _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
         _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
         _clusterCommitContentSegment = contentSegment;
-        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        // The publish writes through this accessor — the committed Versioned HEAD (PublishClusterVersionedSlot), a Commit-discipline staged value
+        // (PublishStagedEntry) and an AllowMultiple element id (ReconcileClusterIndexAndViews) — so it registers its pages with the transaction's ChangeSet,
+        // like the index accessors below (AP-04). It had none: MarkSlotDirty then only toggled ActiveChunkWriters, the page never owed a write, and nothing
+        // ever wrote it — not the checkpoint, not the close's flush, not the fence (#559 stopped emitting Versioned slots). A clean reopen then trusted the
+        // stale HEAD (CS-03) and Path-B scans returned the old value while point reads, which walk the chain, returned the new one (#1159).
+        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(_changeSet);
         _clusterCommitIndexAccessor = clusterState.IndexSegment?.CreateChunkAccessor(_changeSet) ?? default;
         _clusterCommitIndexAccessorS64 = clusterState.IndexSegmentString64?.CreateChunkAccessor(_changeSet) ?? default;
         _clusterCommitArchId = archId;
@@ -2378,6 +2488,15 @@ public unsafe partial class Transaction : EntityAccessor
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
         // Same as the Versioned publish above: compSlot is the component being published, so name it rather than falling back to "emit everything" (M31).
         clusterState.SetDirty(clusterChunkId, slotIndex, compSlot);
+
+        // A spatial value or a realm key landing NOW: flagged for the fence as the barrier would, after the memcpy, so a fence that consumes the flag reads
+        // the new value. The flag raised when the write was staged may already have been consumed against the old one (CC-02).
+        ref var spatial = ref clusterState.SpatialSlot;
+        if (spatial.HasSpatialIndex && spatial.FieldInfo.Mode == SpatialMode.Dynamic
+            && (compSlot == spatial.Slot || (spatial.HasRealmKey && compSlot == spatial.RealmKeySlot)))
+        {
+            clusterState.FlagOutOfBarrierSpatialWrite(clusterChunkId, slotIndex);
+        }
     }
 
     /// <summary>

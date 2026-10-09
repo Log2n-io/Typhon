@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The live server the client SDKs' end-to-end tests connect to (design/Subscriptions/07 § 7, 13 § 7): a small deterministic world served over
+       TCP, with every kind of block a client applies — moving and static archetypes, change groups, an onEnter field, events, and a command the
+       host echoes back as an event. A console, not a test project: the native SDK's live test drives it from outside, and the TypeScript suite
+       will too. It asserts nothing itself. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>default</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
+    <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />
+    <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
+    <ProjectReference Include="..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+    <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                      ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+</Project>

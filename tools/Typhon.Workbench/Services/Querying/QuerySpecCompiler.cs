@@ -498,6 +498,7 @@ public static class QuerySpecCompiler
         try
         {
             method.MakeGenericMethod(table.Definition.POCOType).Invoke(ecsQuery, args);
+            ApplySpatialRealm(ecsQuery, ecsQueryType, clause, engine);
         }
         catch (TargetInvocationException tie) when (tie.InnerException is InvalidOperationException ex)
         {
@@ -505,6 +506,64 @@ public static class QuerySpecCompiler
             throw new WorkbenchException(400, "spatial_error", ex.Message);
         }
     }
+
+    /// <summary>
+    /// Scope the spatial predicate to a realm, and refuse to guess one on a database that holds several (#1083, WB-06).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This closes a silent wrong answer in a shipped feature.</b> <c>EcsQuery.InRealm</c> is documented "Realm 0 when
+    /// never called", and this compiler never called it — so every SPATIAL query the Console has run since #386 was
+    /// scoped to realm 0 whatever the author meant. On a single-realm database that is right by accident; on a realm
+    /// database it returns an empty result for a dungeon and gives no reason at all.
+    /// </para>
+    /// <para>
+    /// <b>The realm-less case is refused rather than defaulted</b>, which is the same stance the engine takes from the
+    /// other side: <c>EcsQuery.CheckRealmScope</c> raises when a realm is named and no spatial predicate consumes it,
+    /// because the query "would answer every realm's entities". Defaulting here would be choosing a world on the
+    /// author's behalf and calling it their query. A database with one realm is not asked: there is nothing to mean.
+    /// </para>
+    /// </remarks>
+    private static void ApplySpatialRealm(object ecsQuery, Type ecsQueryType, SpatialClauseDto clause, DatabaseEngine engine)
+    {
+        if (clause.Realm == null)
+        {
+            if (HoldsSeveralRealms(engine))
+            {
+                throw new WorkbenchException(400, "spatial_realm_required",
+                    "This database holds several realms, so a SPATIAL stage must say which one to search: add 'IN REALM <n>'. "
+                    + "Without it the query would silently answer realm 0 only. The Realms navigator lists the ids.");
+            }
+
+            return;
+        }
+
+        var realm = clause.Realm.Value;
+        if (realm < 0 || realm > ushort.MaxValue)
+        {
+            throw new WorkbenchException(400, "invalid_realm",
+                $"'IN REALM {realm}' is not a realm id. A realm id is a whole number in [0, {ushort.MaxValue}].");
+        }
+
+        // The engine validates registration when the query executes and raises InvalidOperationException, which the
+        // caller's catch already turns into a clean 400 — so an id that is in range but not registered reports the
+        // engine's own words rather than a second, differently-worded refusal from here.
+        var inRealm = ecsQueryType.GetMethod(nameof(EcsQuery<>.InRealm), [typeof(RealmId)])
+            ?? throw new WorkbenchException(500, "spatial_error", "EcsQuery.InRealm(RealmId) was not found on the query type.");
+        inRealm.Invoke(ecsQuery, [new RealmId((ushort)realm)]);
+    }
+
+    /// <summary>
+    /// Whether this database holds more than one world, and so whether "which realm?" is a real question.
+    /// </summary>
+    /// <remarks>
+    /// The persisted catalog first, because the configured capacity is not a persisted field: the engine raises it from
+    /// the catalog during <c>InitializeArchetypes</c>, which a generic opener with no schema assemblies never reaches.
+    /// Testing the capacity alone would let a realm database through the refusal below and back into the silent
+    /// realm-0 answer this exists to stop.
+    /// </remarks>
+    private static bool HoldsSeveralRealms(DatabaseEngine engine) =>
+        engine.PersistedRealmCatalog is { Count: > 0 } || engine.Realms.MaxRealms > 1;
 
     private static void RequireSpatialParamCount(SpatialClauseDto clause, double[] parameters, int expected)
     {

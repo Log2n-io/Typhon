@@ -154,6 +154,20 @@ const cases: [string, (c: CatalogObject) => void, RegExp][] = [
     /not a byte-aligned number/,
   ],
   [
+    'a metric carrying a count',
+    (c) => {
+      c.metrics[4]!.codec = { t: 'unorm', bits: 8, count: 5 };
+    },
+    /carries count 5/,
+  ],
+  [
+    'a list element carrying a count',
+    (c) => {
+      field(event(c, 'Ping').fields, 'path').codec = { t: 'list', of: { t: 'u8', count: 16 }, maxCount: 4 };
+    },
+    /carries count 16/,
+  ],
+  [
     'a grid of no tile',
     (c) => {
       c.grids[0] = { idx: 0, tileCells: 0, archetypes: [1] };
@@ -245,6 +259,16 @@ const cases: [string, (c: CatalogObject) => void, RegExp][] = [
 describe('CatalogPlan.compile refuses', () => {
   it('nothing in the unmodified catalog', () => {
     expect(() => CatalogPlan.compile(kitchenSink())).not.toThrow();
+  });
+
+  it('nothing for a count of 0, which is one value as the validator reads it', () => {
+    const catalog = kitchenSink();
+    field(event(catalog, 'Ping').fields, 'path').codec = { t: 'list', of: { t: 'u8', count: 0 }, maxCount: 4 };
+    const path = CatalogPlan.compile(catalog)
+      .eventByName('Ping')!
+      .body.fields.find((f) => f.name === 'path')!;
+    expect(path.element!.count).toBe(1);
+    expect(path.element!.components).toBe(1);
   });
 
   for (const [name, mutate, problem] of cases) {

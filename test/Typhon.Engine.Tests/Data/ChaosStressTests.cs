@@ -304,22 +304,28 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                                     case 0:
                                     {
                                         txn.Open(targetEntity).Read(CompAArch.A);
-                                        ref var w = ref txn.OpenMut(targetEntity).Write(CompAArch.A);
+                                        var target = txn.OpenMut(targetEntity);
+                                        var w = target.Read(CompAArch.A);
                                         w.A = rand.Next();
+                                        target.Set(CompAArch.A, w);
                                         break;
                                     }
                                     case 1:
                                     {
                                         txn.Open(targetEntity).Read(CompBArch.B);
-                                        ref var w = ref txn.OpenMut(targetEntity).Write(CompBArch.B);
+                                        var opened = txn.OpenMut(targetEntity);
+                                        var w = opened.Read(CompBArch.B);
                                         w.A = rand.Next();
+                                        opened.Set(CompBArch.B, w);
                                         break;
                                     }
                                     case 2:
                                     {
                                         txn.Open(targetEntity).Read(CompDArch.D);
-                                        ref var w = ref txn.OpenMut(targetEntity).Write(CompDArch.D);
+                                        var entity2 = txn.OpenMut(targetEntity);
+                                        var w = entity2.Read(CompDArch.D);
                                         w.B = rand.Next();
+                                        entity2.Set(CompDArch.D, w);
                                         break;
                                     }
                                 }
@@ -476,8 +482,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                     {
                         using var txn = dbe.CreateQuickTransaction();
                         txn.Open(targetId).Read(CompAArch.A);
-                        ref var w2 = ref txn.OpenMut(targetId).Write(CompAArch.A);
+                        var entity = txn.OpenMut(targetId);
+                        var w2 = entity.Read(CompAArch.A);
                         w2.A += 1;
+                        entity.Set(CompAArch.A, w2);
 
                         if (txn.Commit())
                         {
@@ -648,14 +656,18 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         if (hasA)
                         {
                             compA.A += 1;
-                            ref var wA = ref txn.OpenMut(targetId).Write(CompAArch.A);
+                            var target = txn.OpenMut(targetId);
+                            var wA = target.Read(CompAArch.A);
                             wA = compA;
+                            target.Set(CompAArch.A, wA);
                         }
                         if (hasB)
                         {
                             compB.A += 1;
-                            ref var wB = ref txn.OpenMut(targetId).Write(CompABArch.B);
+                            var entity2 = txn.OpenMut(targetId);
+                            var wB = entity2.Read(CompABArch.B);
                             wB = compB;
+                            entity2.Set(CompABArch.B, wB);
                         }
                         if (hasD)
                         {
@@ -663,8 +675,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                             // and incrementing it would collide with adjacent entities' B values.
                             compD.A += 0.1f;
                             compD.C += 0.1;
-                            ref var wD = ref txn.OpenMut(targetId).Write(CompABDArch.D);
+                            var opened = txn.OpenMut(targetId);
+                            var wD = opened.Read(CompABDArch.D);
                             wD = compD;
+                            opened.Set(CompABDArch.D, wD);
                         }
 
                         if (!txn.Commit())
@@ -773,7 +787,28 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         var current = txn.Open(targetEntity).Read(CompAArch.A);
                         if (current.A != initial.A)
                         {
-                            errors.Add($"Reader {readerId}: MVCC violation! Expected {initial.A}, got {current.A}");
+                            // Capture the state that tells the two candidate causes APART, because the bare "expected 0, got 1" this used to report cannot:
+                            // it fires about once a month on a 4-vCPU nightly and 0/28 times on a 32-thread box, so whatever one occurrence records is all
+                            // anyone will have to work from. Either the snapshot was trimmed under the reader — TSN below RetainedMinTSN, which per SNAP-01
+                            // (rules/concurrency.md) surfaces as a WRONG VALUE rather than a SnapshotExpiredException for a Transaction, because
+                            // EntityAccessor.ThrowIfSnapshotExpired only throws for a PointInTimeAccessor — or the chain walk resolved a revision newer than
+                            // the snapshot, which is a visibility defect somewhere other than the optimistic fast path (that path's seqlock re-validates
+                            // every load, so it is not the suspect). TSN vs the retention floor is what separates them.
+                            // Defensive on purpose: this branch fires roughly once a month, and losing that one occurrence to an exception raised while
+                            // describing it would be worse than the bare message. The detail is insurance, so it must not be able to destroy the evidence.
+                            string detail;
+                            try
+                            {
+                                var retained = dbe.TransactionChain.RetainedMinTSN;
+                                detail = $"[read #{i} of {readsPerReader}, readerTSN {txn.TSN}, retainedMinTSN {retained}, "
+                                    + $"trimmedUnderReader {txn.TSN < retained}, writerCommits {writerCounts.Values.Sum()}]";
+                            }
+                            catch (Exception ex)
+                            {
+                                detail = $"[detail capture failed: {ex.GetType().Name}: {ex.Message}]";
+                            }
+
+                            errors.Add($"Reader {readerId}: MVCC violation! Expected {initial.A}, got {current.A} {detail}");
                         }
                         Thread.Sleep(5);
                     }
@@ -799,8 +834,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                 {
                     using var txn = dbe.CreateQuickTransaction();
                     txn.Open(targetEntity).Read(CompAArch.A);
-                    ref var w2 = ref txn.OpenMut(targetEntity).Write(CompAArch.A);
+                    var target = txn.OpenMut(targetEntity);
+                    var w2 = target.Read(CompAArch.A);
                     w2.A += 1;
+                    target.Set(CompAArch.A, w2);
 
                     if (txn.Commit())
                     {
@@ -909,8 +946,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         {
                             // Update
                             txn.Open(targetId).Read(CompAArch.A);
-                            ref var w = ref txn.OpenMut(targetId).Write(CompAArch.A);
+                            var target = txn.OpenMut(targetId);
+                            var w = target.Read(CompAArch.A);
                             w.B += 1;
+                            target.Set(CompAArch.A, w);
                             if (txn.Commit())
                             {
                                 Interlocked.Increment(ref updateCounts[threadId]);
@@ -1011,8 +1050,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         using var txn = dbe.CreateQuickTransaction();
 
                         txn.Open(targetId).Read(CompAArch.A);
-                        ref var w = ref txn.OpenMut(targetId).Write(CompAArch.A);
+                        var target = txn.OpenMut(targetId);
+                        var w = target.Read(CompAArch.A);
                         w.A += 1;
+                        target.Set(CompAArch.A, w);
 
                         if (shouldRollback)
                         {
@@ -1551,8 +1592,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             {
                 using var txn = dbe.CreateQuickTransaction();
                 txn.Open(targetEntity).Read(CompAArch.A);
-                ref var w = ref txn.OpenMut(targetEntity).Write(CompAArch.A);
+                var opened = txn.OpenMut(targetEntity);
+                var w = opened.Read(CompAArch.A);
                 w.A = ++updateCounter;
+                opened.Set(CompAArch.A, w);
                 txn.Commit();
             }
 
@@ -1662,8 +1705,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         {
                             using var txn = dbe.CreateQuickTransaction();
                             txn.Open(entityId).Read(CompAArch.A);
-                            ref var w = ref txn.OpenMut(entityId).Write(CompAArch.A);
+                            var opened = txn.OpenMut(entityId);
+                            var w = opened.Read(CompAArch.A);
                             w.A += 1;
+                            opened.Set(CompAArch.A, w);
                             if (txn.Commit())
                             {
                                 commitCounts.AddOrUpdate(entityId, 1, (_, v) => v + 1);
@@ -1697,8 +1742,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                     using var txn = dbe.CreateQuickTransaction();
                     var idx = i % entityCount;
                     txn.Open(entityIds[idx]).Read(CompAArch.A);
-                    ref var w = ref txn.OpenMut(entityIds[idx]).Write(CompAArch.A);
+                    var target = txn.OpenMut(entityIds[idx]);
+                    var w = target.Read(CompAArch.A);
                     w.B += 1f;
+                    target.Set(CompAArch.A, w);
                     txn.Commit();
                 }
                 catch (Exception ex)
@@ -1767,8 +1814,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
             {
                 using var txn = dbe.CreateQuickTransaction();
                 txn.Open(targetEntity).Read(CompAArch.A);
-                ref var w = ref txn.OpenMut(targetEntity).Write(CompAArch.A);
+                var opened = txn.OpenMut(targetEntity);
+                var w = opened.Read(CompAArch.A);
                 w.A = ++updateCounter;
+                opened.Set(CompAArch.A, w);
                 txn.Commit();
             }
 
@@ -1784,8 +1833,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         {
             using var txn = dbe.CreateQuickTransaction();
             txn.Open(targetEntity).Read(CompAArch.A);
-            ref var w = ref txn.OpenMut(targetEntity).Write(CompAArch.A);
+            var entity2 = txn.OpenMut(targetEntity);
+            var w = entity2.Read(CompAArch.A);
             w.A = ++updateCounter;
+            entity2.Set(CompAArch.A, w);
             txn.Commit();
         }
 
@@ -1899,10 +1950,14 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         var readSrc = srcComp.A;
                         var readDst = dstComp.A;
 
-                        ref var wSrc = ref txn.OpenMut(entityIds[srcIdx]).Write(CompAArch.A);
+                        var opened = txn.OpenMut(entityIds[srcIdx]);
+                        var wSrc = opened.Read(CompAArch.A);
                         wSrc = new CompA(srcComp.A - 1, srcComp.B, srcComp.C);
-                        ref var wDst = ref txn.OpenMut(entityIds[dstIdx]).Write(CompAArch.A);
+                        opened.Set(CompAArch.A, wSrc);
+                        var target = txn.OpenMut(entityIds[dstIdx]);
+                        var wDst = target.Read(CompAArch.A);
                         wDst = new CompA(dstComp.A + 1, dstComp.B, dstComp.C);
+                        target.Set(CompAArch.A, wDst);
 
                         // Delta-rebase handler: merge concurrent modifications by
                         // applying our delta (dirtyVal - readVal) onto the committed value.
@@ -2344,8 +2399,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                     {
                         using var txn = dbe.CreateQuickTransaction();
                         txn.Open(entityIds[targetIdx]).Read(CompAArch.A);
-                        ref var w2 = ref txn.OpenMut(entityIds[targetIdx]).Write(CompAArch.A);
+                        var entity = txn.OpenMut(entityIds[targetIdx]);
+                        var w2 = entity.Read(CompAArch.A);
                         w2.B += 1f;
+                        entity.Set(CompAArch.A, w2);
                         if (txn.Commit())
                         {
                             Interlocked.Increment(ref totalUpdates[0]);
@@ -2549,10 +2606,14 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                         var srcComp = txn.Open(compAIds[srcIdx]).Read(CompAArch.A);
                         var dstComp = txn.Open(compAIds[dstIdx]).Read(CompAArch.A);
 
-                        ref var wSrc = ref txn.OpenMut(compAIds[srcIdx]).Write(CompAArch.A);
+                        var target = txn.OpenMut(compAIds[srcIdx]);
+                        var wSrc = target.Read(CompAArch.A);
                         wSrc.A = srcComp.A - 1;
-                        ref var wDst = ref txn.OpenMut(compAIds[dstIdx]).Write(CompAArch.A);
+                        target.Set(CompAArch.A, wSrc);
+                        var opened = txn.OpenMut(compAIds[dstIdx]);
+                        var wDst = opened.Read(CompAArch.A);
                         wDst.A = dstComp.A + 1;
+                        opened.Set(CompAArch.A, wDst);
 
                         // Delta-rebase handler: apply our delta onto the committed value
                         void ConcurrencyConflictHandler(ref ConcurrencyConflictSolver solver)
@@ -2632,9 +2693,11 @@ class ChaosStressTests : TestBase<ChaosStressTests>
                     if (txn.IsAlive(item.entityId))
                     {
                         txn.Open(item.entityId).Read(CompDArch.D);
-                        ref var w = ref txn.OpenMut(item.entityId).Write(CompDArch.D);
+                        var entity = txn.OpenMut(item.entityId);
+                        var w = entity.Read(CompDArch.D);
                         w.A = rand.NextSingle(); // AllowMultiple -> index entry changes
-                        w.C = rand.NextDouble(); // AllowMultiple -> index entry changes
+                        w.C = rand.NextDouble();
+                        entity.Set(CompDArch.D, w); // AllowMultiple -> index entry changes
                         if (txn.Commit())
                         {
                             stats.AddOrUpdate("Index_Updates", 1, (_, v) => v + 1);

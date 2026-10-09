@@ -121,7 +121,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         for (var i = 0; i < ids.Count; i++)
         {
             var eref = tx.Open(ids[i]);
-            ref readonly var pos = ref eref.Read(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             ref readonly var b = ref pos.Bounds;
             result.Add((0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY), pos.Tag));
         }

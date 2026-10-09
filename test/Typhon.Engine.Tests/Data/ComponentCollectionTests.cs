@@ -46,6 +46,117 @@ class ComponentCollectionTests : TestBase<ComponentCollectionTests>
         base.RegisterComponents(dbe);
     }
 
+    /// <summary>
+    /// #1199: the collection of a stored Versioned component is changed through a copy, so the handle creates the new revision before the accessor exists.
+    /// The buffer is then shared and cloned; the committed revision's buffer is never edited in place, and a reader on the older snapshot still sees its
+    /// elements. Mutating the copy before the new revision existed would have appended into that buffer.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-03")]
+    public void Collection_ChangedThroughAHandle_LeavesTheCommittedRevisionsBufferAlone()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId entityId;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var a = new CompA(2);
+            var e = new CompE_Eng(1);
+            using (var cca = t.CreateComponentCollectionAccessor(ref e.Collection))
+            {
+                for (var i = 0; i < 10; i++)
+                {
+                    cca.Add(i);
+                }
+            }
+
+            entityId = t.Spawn<CompAEArch>(CompAEArch.A.Set(in a), CompAEArch.E.Set(in e));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using var reader = dbe.CreateReadOnlyTransaction();   // a snapshot taken before the change
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var entity = t.OpenMut(entityId);
+            var copy = entity.Read(CompAEArch.E);
+            using (var cca = entity.CreateComponentCollectionAccessor(CompAEArch.E, ref copy, ref copy.Collection))
+            {
+                cca.Add(99);
+            }
+
+            entity.Set(CompAEArch.E, copy);
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        var old = reader.Open(entityId).Read(CompAEArch.E);
+        using (var cca = reader.CreateComponentCollectionAccessor(ref old.Collection))
+        {
+            Assert.That(cca.ElementCount, Is.EqualTo(10), "the change reached the committed revision's buffer: an older snapshot sees it");
+        }
+
+        using (var t = dbe.CreateReadOnlyTransaction())
+        {
+            var current = t.Open(entityId).Read(CompAEArch.E);
+            using var cca = t.CreateComponentCollectionAccessor(ref current.Collection);
+            Assert.That(cca.ElementCount, Is.EqualTo(11), "the change was lost");
+        }
+    }
+
+    /// <summary>
+    /// #1199: the handle's accessor stores the buffer it ended on into the component when disposed, so a collection changed through a copy needs no
+    /// <c>Set</c>. Without the write-back, the new revision kept the original buffer id — whose extra reference the clone had already released — and the
+    /// change was lost.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-03")]
+    public void Collection_ChangedThroughAHandle_WithoutASet_IsStored()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        EntityId entityId;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var a = new CompA(2);
+            var e = new CompE_Eng(1);
+            using (var cca = t.CreateComponentCollectionAccessor(ref e.Collection))
+            {
+                for (var i = 0; i < 10; i++)
+                {
+                    cca.Add(i);
+                }
+            }
+
+            entityId = t.Spawn<CompAEArch>(CompAEArch.A.Set(in a), CompAEArch.E.Set(in e));
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var entity = t.OpenMut(entityId);
+            var copy = entity.Read(CompAEArch.E);
+            using (var cca = entity.CreateComponentCollectionAccessor(CompAEArch.E, ref copy, ref copy.Collection))
+            {
+                cca.Add(99);
+            }
+
+            Assert.That(t.Commit(), Is.True);   // no Set: the accessor stored its buffer
+        }
+
+        dbe.FlushDeferredCleanups();
+
+        using (var t = dbe.CreateReadOnlyTransaction())
+        {
+            var current = t.Open(entityId).Read(CompAEArch.E);
+            using var cca = t.CreateComponentCollectionAccessor(ref current.Collection);
+            Assert.That(cca.ElementCount, Is.EqualTo(11), "the change made through the handle's accessor was lost");
+            Assert.That(t.GetComponentCollectionRefCounter(ref current.Collection), Is.EqualTo(1), "the stored buffer's reference count is off");
+        }
+    }
+
     [Test]
     public void Collection_CreateReadUpdate_Successful()
     {
@@ -98,16 +209,17 @@ class ComponentCollectionTests : TestBase<ComponentCollectionTests>
             using var t = dbe.CreateQuickTransaction();
 
             var entity = t.OpenMut(entityId);
-            ref var e2 = ref entity.Write(CompAEArch.E);
+            var e2 = entity.Read(CompAEArch.E);
 
             {
-                using var cca = t.CreateComponentCollectionAccessor(ref e2.Collection);
+                using var cca = entity.CreateComponentCollectionAccessor(CompAEArch.E, ref e2, ref e2.Collection);
 
                 for (int i = 10; i < 20; i++)
                 {
                     cca.Add(i);
                 }
             }
+            entity.Set(CompAEArch.E, e2);
 
             var res = t.Commit();
             Assert.That(res, Is.True, "Transaction commit should be successful");
@@ -163,10 +275,11 @@ class ComponentCollectionTests : TestBase<ComponentCollectionTests>
             using var t = dbe.CreateQuickTransaction();
 
             var entity = t.OpenMut(entityId);
-            ref var e2 = ref entity.Write(CompAEArch.E);
+            var e2 = entity.Read(CompAEArch.E);
 
-            // Change A to trigger the creation of a new revision during the Write call above
+            // Change A, then Set it: the Set creates the new revision, which shares the collection buffer with the committed one
             e2.A = 12;
+            entity.Set(CompAEArch.E, e2);
 
             {
                 Assert.That(t.GetComponentCollectionRefCounter(ref e2.Collection), Is.EqualTo(2), "RefCounter should be 2, because shared by 2 revisions");
@@ -234,11 +347,12 @@ class ComponentCollectionTests : TestBase<ComponentCollectionTests>
             using var t = dbe.CreateQuickTransaction();
 
             var entity = t.OpenMut(entityId);
-            ref var e2 = ref entity.Write(CompAEArch.E);
+            var e2 = entity.Read(CompAEArch.E);
             {
-                using var cca = t.CreateComponentCollectionAccessor(ref e2.Collection);
+                using var cca = entity.CreateComponentCollectionAccessor(CompAEArch.E, ref e2, ref e2.Collection);
                 cca.Add(99);
             }
+            entity.Set(CompAEArch.E, e2);
 
             Assert.That(t.Commit(), Is.True, "Update commit should be successful");
         }

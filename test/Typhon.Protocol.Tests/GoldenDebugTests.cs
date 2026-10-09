@@ -128,6 +128,45 @@ public class GoldenDebugTests
         });
     }
 
+    /// <summary>
+    /// A DEBUG block holding two sub-blocks, the first of a sub-type no decoder knows: it must be skipped by its declared
+    /// length and the second must arrive intact.
+    /// </summary>
+    /// <remarks>
+    /// 03 § 12 W26 names this as a required golden, and neither suite had it: every other vector here writes exactly one
+    /// sub-block, so the skip-by-length path — the entire reason the block is framed the way it is, and the property a
+    /// forward-compatible client relies on — was never exercised end to end on either side.
+    /// </remarks>
+    [Test]
+    public void UnknownSubBlockIsSkipped()
+    {
+        var grid = new DebugGrid(512, -1024, 0, 64, 12, 9, 1);
+        var scratch = new byte[512];
+        var unknown = new WireWriter(scratch);
+        unknown.WriteU32(0xDEADBEEF);
+        unknown.WriteU8(7);
+        var unknownPayload = unknown.Written.ToArray();
+
+        var gridScratch = new byte[512];
+        var gridWriter = new WireWriter(gridScratch);
+        grid.Write(ref gridWriter);
+        var gridPayload = gridWriter.Written.ToArray();
+
+        var buffer = new byte[8192];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.None);
+        TickWriter.WriteDebug(ref w, [(UnknownSubType, unknownPayload), (DebugSubTypes.Grid, gridPayload)]);
+        var bytes = w.Written.ToArray();
+
+        Assert.That(DebugGrid.Read(gridPayload), Is.EqualTo(grid), "the known sub-block still decodes on its own");
+        Golden.Assert("debug-unknown-then-grid", bytes, Expectation(
+            "A DEBUG block of two sub-blocks: an unknown sub-type 0x42 that a decoder must skip by its length, then a GRID it must still read.",
+            bytes, GridJson(DebugGrid.Read(gridPayload))));
+    }
+
+    /// <summary>A sub-type no decoder recognises, and none may: chosen outside every assigned value.</summary>
+    private const byte UnknownSubType = 0x42;
+
     private delegate void WritePayload(ref WireWriter w);
 
     // A TICK holding one DEBUG block of one sub-block; the payload comes back as the decoder saw it.
@@ -155,6 +194,10 @@ public class GoldenDebugTests
         {
             ["description"] = description,
             ["catalog"] = "catalog-kitchen-sink",
+
+            // The frame the session held: none of these messages carries a REALM, and a decoder without one refuses a PUSH_GEOMETRY outright (12-realms § 5.2),
+            // so another language's decoder cannot reproduce the read without being told which frame to start from.
+            ["frame"] = CatalogSamples.FrameJson(CatalogSamples.KitchenFrame),
             ["log"] = sink.Log.DeepClone(),
             ["decoded"] = decoded,
         };

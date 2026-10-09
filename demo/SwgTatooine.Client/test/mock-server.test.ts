@@ -57,6 +57,8 @@ function runOracle(server: MockServer, ticks: number, move: (t: number) => void)
   const grid = new AggregateGrid(AGG_GRID);
   const events: Recorded[] = [];
   const sink: EventSink = {
+    // The mock emits no chat; the handler is here because the seam declares it.
+    onChat: () => undefined,
     onAttack: (_tick, attacker, target) => {
       events.push({
         attacker,

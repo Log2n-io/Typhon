@@ -45,7 +45,7 @@ public sealed partial class Ant : Archetype<Ant>
 
 The archetype's **identity is the CLR type name** (or `[Archetype(Name = "…")]` if you want a name decoupled from the class). The engine auto-assigns a per-process **catalog id** and a per-DB **routing id** (persisted in `ArchetypeR1`, re-matched by name on reopen) — no numeric id is set in source, and a DB can hold up to 65,536 archetypes. The `Register<T>()` calls declare components. CRTP (`Archetype<Ant>`) gives compile-time type identity. Archetypes **self-register up-front** via a generated `[ModuleInitializer]` barrier at assembly load — lock-guarded and thread-safe, not lazy first-access reflection.
 
-The class is declared **`partial`** so a source generator can extend it — see **[§5 Generated accessors](#generated-accessors--readall--readwriteall)** below. Without `partial` the archetype still works for `Spawn` / `Open` / `OpenMut`, but the generated typed bulk accessors aren't emitted.
+The class is declared **`partial`** so a source generator can extend it — see **[§5 Generated accessors](#generated-accessors--readall--writeall)** below. Without `partial` the archetype still works for `Spawn` / `Open` / `OpenMut`, but the generated typed bulk accessors aren't emitted.
 
 To **rename** an archetype (or its backing class) without losing its persisted data, keep the old identity as a hatch: `[Archetype(Name = "NewName", PreviousName = "OldName")]` — the engine matches `PreviousName` against `ArchetypeR1` on reopen and adopts the existing routing id. This mirrors the component/field rename hatches in [04-schema](04-schema.md).
 
@@ -182,7 +182,7 @@ Reading and mutating components flows through accessors. Three flavours, dependi
 [`Ecs/public/EntityAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs), [`EntityAccessor.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.ECS.cs)
 
 ```csharp
-EntityRef e = accessor.Open(id);                    // read-only: no Write/Enable/Disable member at all
+EntityRef e = accessor.Open(id);                    // read-only: no Set/Enable/Disable member at all
 if (accessor.TryOpen(id, out EntityRef e2)) { ... }
 EntityRefMut em = accessor.OpenMut(id);             // writable; converts implicitly to EntityRef
 if (accessor.TryOpenMut(id, out EntityRefMut e3)) { ... }   // one resolve for a maybe-stale target
@@ -191,7 +191,7 @@ bool alive = accessor.IsAlive(id);                  // the existence probe
 
 - All four opens resolve the entity at the accessor's `TSN`, applying MVCC visibility (`BornTSN ≤ TSN < DeadTSN`) and `EnabledBits` overrides. `Open`/`OpenMut` throw on a miss, `TryOpen`/`TryOpenMut` return `false`.
 - Access is the handle's **type**: `Open`/`TryOpen` return `EntityRef`, `OpenMut`/`TryOpenMut` return `EntityRefMut`. Writing through a read-only open does not compile.
-- The returned handles are `ref struct`s — stack-allocated, must not outlive the accessor that created them.
+- The returned handles are `ref struct`s — stack-allocated, must not outlive the accessor that created them. Within that, a handle stays valid however long the transaction runs: it hands out copies, never references into a page, and finds its page again if the accessor let go of it in between (rule EP-03, #1199).
 - `OpenMut`/`TryOpenMut` on the **base** `EntityAccessor` write **SingleVersion / Transient** components only. Versioned writes need a `Transaction`, whose mutation prep (`EnsureMutable` + state transition) runs before every writable open.
 
 ### `Transaction` (extends `EntityAccessor`)
@@ -227,28 +227,28 @@ EntityRef ant = ants.Open(id);
 
 Pre-bound to a specific archetype. Bypasses the epoch check and archetype lookup of every open — intended for PTA workers in parallel `QuerySystem`s, where those are amortized to once per dispatch, not once per entity. It still checks MVCC visibility and that the id belongs to its archetype, and has the same `Open` / `OpenMut` / `TryOpen` / `TryOpenMut` / `IsAlive` contract as the transaction — except that it does not see its transaction's own spawns, which are not in the EntityMap until commit. Its pending destroys are misses, as on the transaction.
 
-### Generated accessors — `ReadAll` / `ReadWriteAll`
+### Generated accessors — `ReadAll` / `WriteAll`
 
 `EntityRef` resolves components one at a time (`e.Read(Ant.Position)`). When you want *all* of an archetype's components at once with compile-time field names, Typhon generates them. [`ArchetypeAccessorGenerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Generators/ArchetypeAccessorGenerator.cs) is an incremental Roslyn source generator that, for every `[Archetype]` **`partial`** class, emits:
 
-- a `Refs` ref struct (read-only) and a `MutRefs` ref struct (mutable), one typed field per component, and
-- static `ReadAll(tx, id)` → `Refs` and `ReadWriteAll(tx, id)` → `MutRefs` methods,
+- a `Values` struct, one typed field per component, and
+- static `ReadAll(tx, id)` → `Values` and `WriteAll(tx, id, in values)` methods,
 
 into `{ArchetypeName}.g.cs`.
 
 ```csharp
-// read every component of the entity in one call
-var refs = Ant.ReadAll(tx, id);
-float x = refs.Position.X;
-int hp  = refs.Health.Current;
+// read every component of the entity in one call — copies
+var values = Ant.ReadAll(tx, id);
+float x = values.Position.X;
+int hp  = values.Health.Current;
 
-// mutate in place
-var mut = Ant.ReadWriteAll(tx, id);
-mut.Position.X = 999;
-mut.Health.Current = 50;
+// change the copies, then set every component back
+values.Position.X = 999;
+values.Health.Current = 50;
+Ant.WriteAll(tx, id, values);
 ```
 
-Inheritance flows through: `FlyingAnt.ReadAll(tx, id)` exposes the parent's `Position` / `Velocity` *and* `FlyingAnt`'s own `Wings`. The generated structs are `ref struct`s — same stack-only, no-copy rules as `EntityRef`. The generator fires only when the class is `partial`; a non-`partial` archetype compiles fine but gets no `ReadAll` / `ReadWriteAll`.
+Inheritance flows through: `FlyingAnt.ReadAll(tx, id)` exposes the parent's `Position` / `Velocity` *and* `FlyingAnt`'s own `Wings`. `Values` is an ordinary struct of copies, like what `EntityRef.Read` returns. The generator fires only when the class is `partial`; a non-`partial` archetype compiles fine but gets no `ReadAll` / `WriteAll`.
 
 (Two sibling generators live alongside it: `SourceLocationGenerator` and `TraceEventGenerator`, both for the profiler — see [12-observability](12-observability.md).)
 
@@ -262,13 +262,14 @@ Inheritance flows through: `FlyingAnt.ReadAll(tx, id)` exposes the parent's `Pos
 
 ```csharp
 EntityRef ant = accessor.Open(id);
-ref readonly var pos = ref ant.Read(Ant.Position);  // zero-copy
+var pos = ant.Read(Ant.Position);  // a copy
 EntityRefMut antMut = accessor.OpenMut(id);
-antMut.Write(Ant.Position) = new Position(x, y);    // ant.Write(...) would not compile
+antMut.Set(Ant.Position, new Position(x, y));    // ant.Set(...) would not compile
 ```
 
-- `Read<T>(Comp<T>)` returns a `ref readonly T` directly into the chunk page (or cluster slot). Zero copy.
-- `Write<T>(Comp<T>)` (on `EntityRefMut`) returns a `ref T` to mutate in place; for Versioned components, this is the *initial write before commit* — the actual revision-chain extension happens during commit.
+- `Read<T>(Comp<T>)` returns a copy of the component, read from the chunk page (or cluster slot) at the accessor's snapshot.
+- `Set<T>(Comp<T>, in T)` (on `EntityRefMut`) copies a value in and does the component's bookkeeping in the same call; for Versioned components, this is the *initial write before commit* — the actual revision-chain extension happens during commit. To change one field: read, change the copy, `Set` it back.
+- Neither hands out a reference into the page, so neither can be left pointing at a page the cache has since given to another (rule EP-03, #1199). Zero-copy access is cluster iteration's: a `ClusterRef` and its spans, valid until the enumerator's next `MoveNext`.
 - `IsValid` on both. There is no runtime writability flag: `EntityRefMut` → `EntityRef` is an implicit copy, and nothing converts back.
 - `EnabledBits` tracks per-component enable state (16-bit mask, up to 16 components per archetype). A *disabled* component was supplied at Spawn (its storage exists) but is logically absent from queries — re-enabling it is a free O(1) bit flip. An *absent* component was never supplied and has no storage (for `Versioned`: no chunk, no revision chain); re-enabling requires `Enable(comp, in value)` to supply the value first.
 
@@ -310,7 +311,7 @@ Every archetype is cluster-backed: `IsClusterEligible` on `ArchetypeMetadata` is
 
 | | **Versioned** (default) | **SingleVersion** | **Transient** |
 |---|---|---|---|
-| Write path | Allocates a new revision chunk; stamps the writer's `UowId`; chain head extended at commit | Returns a `ref T` into the live SoA chunk page; **the store *is* the page mutation** | Same as SV — `ref T` into the live page |
+| Write path | Allocates a new revision chunk; stamps the writer's `UowId`; chain head extended at commit | `Set` stores into the live SoA chunk page; **the store *is* the page mutation** | Same as SV — stored into the live page |
 | Visibility | Snapshot-isolated; readers at TSN ≤ commit don't see the write | **Immediate** — every reader (any TSN, any PTA worker) sees the new bytes the moment the store retires | Same as SV — immediate |
 | Conflict detection | Yes (write-write at commit, see [08-transactions](08-transactions.md)) | None — last writer wins, silently | None |
 | Rollback (`tx.Rollback`) | Voids the new revision element; chain head untouched | **Cannot be reverted** — no before-image is captured anywhere¹ | Cannot be reverted |
@@ -443,7 +444,7 @@ tx.Commit();
 // Read (single thread)
 using var readTx = dbe.CreateTransaction(readOnly: true);
 EntityRef a = readTx.Open(ant);
-ref readonly var pos = ref a.Read(Ant.Position);
+var pos = a.Read(Ant.Position);
 
 // Read (parallel system)
 var pta = new PointInTimeAccessor();
@@ -458,7 +459,7 @@ foreach (var cluster in accessor.GetClusterEnumerator<Ant>())
     {
         int idx = BitOperations.TrailingZeroCount(bits);
         bits &= bits - 1;
-        ref readonly var pos = ref cluster.Get(Ant.Position, idx);
+        ref readonly var pos = ref cluster.Get(Ant.Position, idx);   // zero-copy; valid until the next MoveNext (EP-03)
         // ...
     }
 }

@@ -245,6 +245,7 @@ public partial class DatabaseEngine
             row.State = RealmR1.StateRetired;
             WriteRealmCatalogRow(chunkId, ref row);
             _persistedRealms.Remove(id);
+            PublishRealmGeneration(id, 0);
             (_retiredRealmRows ??= [])[id] = (chunkId, row);
             foreach (var state in _archetypeStates)
             {

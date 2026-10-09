@@ -166,6 +166,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames.Engine = engine;
             _frames.Realm = Realm0Frame;
 
+            // A wide section's body is copied from its archetype's arena (13 § 6), which the replication state owns.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                _frames.EncodePlanOf(a).Arena = _replicationStates[a].WideBodies;
+            }
+
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
@@ -235,6 +241,16 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     {
                         _replicationStates[a].Push = Push;
                         _replicationStates[a].PushArchetypeIndex = a;
+                    }
+                }
+
+                // References (13 § 5): one reverse index for the runtime — identities are global, and a referrer and its target may be of two archetypes.
+                if (HasReferences(Plans, observed))
+                {
+                    References = new ReferenceIndex(engine, netIds, Plans, _replicationStates);
+                    foreach (var state in _replicationStates)
+                    {
+                        state.References = References;
                     }
                 }
 
@@ -412,10 +428,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public StatsEncoder Stats { get; }
 
     /// <summary>
-    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
-    /// <see langword="null"/> on an inactive runtime.
-    /// </summary>
-    /// <summary>
     /// The nominal tick period a base tick rate implies, in microseconds.
     /// </summary>
     /// <param name="baseTickRate">The runtime's base tick rate, in hertz.</param>
@@ -428,6 +440,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     internal static uint NominalTickPeriodUsFor(int baseTickRate)
         => (uint)Math.Round(1_000_000.0 / Math.Max(1, baseTickRate), MidpointRounding.AwayFromZero);
 
+    /// <summary>
+    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
+    /// <see langword="null"/> on an inactive runtime.
+    /// </summary>
     public SubscriptionsIngress Ingress => _ingress;
 
     /// <summary>
@@ -632,13 +648,13 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }
 
+    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
+    public PushHub Hub { get; private set; }
+
     /// <summary>
     /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
     /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
     /// </summary>
-    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
-    public PushHub Hub { get; private set; }
-
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
@@ -675,6 +691,72 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;
 
+    /// <summary>The reverse index of references (13 § 5), when an observed archetype projects one; <see langword="null"/> otherwise.</summary>
+    internal ReferenceIndex References { get; }
+
+    /// <summary>
+    /// Whether an observed archetype projects a reference — and, for every <c>EntityLink&lt;T&gt;</c> one, that some profile observes <c>T</c> or an archetype
+    /// deriving from it: a target nobody replicates never has an identity, so the field would send 0 forever (13 § 5). An untyped <see cref="EntityId"/>
+    /// cannot be checked, and resolves to 0 when its target has none.
+    /// </summary>
+    private static bool HasReferences(CompiledProjectionPlan[] plans, bool[] observed)
+    {
+        var any = false;
+        for (var a = 0; a < plans.Length; a++)
+        {
+            if (!observed[a] || (plans[a].ReferenceCount == 0 && !Array.Exists(plans[a].Collections, c => c.HasReferences)))
+            {
+                continue;
+            }
+
+            any = true;
+
+            // A collection's element references are references too (13 § 5), checked the same way.
+            var fields = new List<CompiledField>([.. plans[a].Fields, .. plans[a].OwnerFields]);
+            foreach (var collection in plans[a].Collections)
+            {
+                fields.AddRange(collection.Fields);
+            }
+
+            foreach (var field in fields)
+            {
+                if (field.Path == ColumnPath.EntityRef && field.ReferenceTarget != null && !ObservesSubtree(plans, observed, field.ReferenceTarget))
+                {
+                    throw new InvalidOperationException(
+                        $"Archetype '{plans[a].Name}' replicates the reference '{field.Name}', an EntityLink<{field.ReferenceTarget.Name}>, and no " +
+                        $"profile observes '{field.ReferenceTarget.Name}' or an archetype deriving from it: its target never has a netId, so the field " +
+                        "would always read 0. Observe the target's archetype, or leave the field unreplicated.");
+                }
+            }
+        }
+
+        return any;
+    }
+
+    private static bool ObservesSubtree(CompiledProjectionPlan[] plans, bool[] observed, Type target)
+    {
+        ArchetypeMetadata meta = null;
+        foreach (var candidate in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (candidate.ArchetypeType == target)
+            {
+                meta = candidate;
+                break;
+            }
+        }
+
+        var subtree = meta?.SubtreeArchetypeIds ?? (meta != null ? [meta.ArchetypeId] : []);
+        for (var a = 0; a < plans.Length; a++)
+        {
+            if (observed[a] && Array.IndexOf(subtree, plans[a].ArchetypeCatalogId) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>The declared profiles, resolved to plan indices. <see langword="null"/> on an inactive runtime.</summary>
     public SubscriptionProfiles Profiles { get; }
 
@@ -690,6 +772,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
+
+    /// <summary>The send pump, so a teardown test can read what its quiesce observed (#1006).</summary>
+    internal SendPump SendPumpForTest => _sendPump;
 
     /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
     internal SelfTracker Self { get; private set; }
@@ -855,12 +940,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         var frames = _frames;
         if (frames != null && session.IsValid && session.Slot < Options.MaxSessions)
         {
-            var send = frames.SendStateOf(session.Slot);
-            SessionSendState.Initialize(send);
+            ref var send = ref frames.SendStateOf(session.Slot);
+            SessionSendState.Initialize(ref send);
 
             // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same
             // schedule as one that stops mid-session, and a zero here would exempt it forever.
-            send->NotePing(Volatile.Read(ref _currentTick));
+            send.NotePing(Volatile.Read(ref _currentTick));
         }
 
         _sendPump?.AttachLink(session, link);
@@ -887,7 +972,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        frames.SendStateOf(session.Slot)->NoteCapsGranted(caps);
+        frames.SendStateOf(session.Slot).NoteCapsGranted(caps);
     }
 
     /// <inheritdoc />
@@ -907,9 +992,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        var send = frames.SendStateOf(session.Slot);
-        send->NotePing(Volatile.Read(ref _currentTick));
-        send->ReportAppliedTick(appliedTick);
+        ref var send = ref frames.SendStateOf(session.Slot);
+        send.NotePing(Volatile.Read(ref _currentTick));
+        send.ReportAppliedTick(appliedTick);
     }
 
     /// <inheritdoc />
@@ -1001,6 +1086,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     private ArchetypeReplicationState[] AttachReplicationStates(DatabaseEngine engine, IResource parent, NetIdAllocator netIds)
     {
         var states = new ArchetypeReplicationState[Plans.Length];
+        CatalogPlan wire = null;
 
         // Assigned to the field as they are created rather than at the end: a throw half way through has to reach Dispose with the states already built, or
         // their pools' native slabs and their registry nodes outlive the runtime that failed to start.
@@ -1015,6 +1101,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // The motion rule's teleport threshold and its heartbeat are both expressed in ticks, so the state carries the nominal period rather than
             // assuming one: a 10 Hz runtime left at the default would get a threshold six times too tight and a heartbeat six times too long.
             states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
+            states[i].SizeClampCounters(plan.Fields.Length + plan.OwnerFields.Length);
+            states[i].AttachWideSections(plan, engine.MemoryAllocator, Options);
+
+            // A collection's buffer segment, and the catalog section its stored body decodes with when its element names entities (13 § 6.5).
+            wire ??= plan.Collections.Length > 0 ? CatalogPlan.Compile(Catalog.Canonical) : null;
+            states[i].AttachCollections(plan, engine, wire?.ArchetypeByName(plan.Name));
             states[i].AttachTo(clusterState);
 
             // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the
@@ -1148,6 +1240,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             states[i]?.Dispose();
         }
 
+        // After the states, whose entries were its only writers.
+        References?.Dispose();
+
         // Disposed and KEPT, where it used to be nulled. A transport thread can be inside a HELLO while this runs, and the table is built for exactly that —
         // it latches, waits for the callers already inside and then answers every later call as it would for a slot that is gone. Nulling the field instead
         // turned that designed-for race into a NullReferenceException on a network thread, which is the one outcome neither side can do anything about.
@@ -1163,7 +1258,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         // Before the assembler, because a running pump holds a pointer into the assembler's frame pool for the duration of one send. Its Dispose quiesces.
         _sendPump?.Dispose();
 
-        _frames?.Dispose();
+        // #1006: the quiesce above is bounded, so a pump can still be inside a send here, holding a pointer into a frame-pool slab. The assembler leaves those
+        // slabs allocated rather than free them under a socket; its send states need no such care, being managed memory it references.
+        _frames?.Dispose(pumpsStillRunning: (_sendPump?.PumpsStillRunningAtDispose ?? 0) > 0);
     }
 
     /// <summary>

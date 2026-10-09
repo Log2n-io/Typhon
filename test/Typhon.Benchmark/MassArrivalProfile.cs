@@ -279,7 +279,7 @@ static class MassArrivalProfile
 
                         xs[i] = nx;
                         ys[i] = ny;
-                        tx.OpenMut(ids[i]).Write(MaUnit.Pos) = new MaPos { Bounds = Point(nx, ny) };
+                        tx.OpenMut(ids[i]).Set(MaUnit.Pos, new MaPos { Bounds = Point(nx, ny) });
                     }
 
                     // Churn: a few background entities a tick jump to a random point outside the destination — every cell keeps receiving arrivals
@@ -303,7 +303,7 @@ static class MassArrivalProfile
 
                         xs[i] = cx;
                         ys[i] = cy;
-                        tx.OpenMut(ids[i]).Write(MaUnit.Pos) = new MaPos { Bounds = Point(cx, cy) };
+                        tx.OpenMut(ids[i]).Set(MaUnit.Pos, new MaPos { Bounds = Point(cx, cy) });
                     }
 
                     if (landing != null)
@@ -313,7 +313,7 @@ static class MassArrivalProfile
                             xs[i] = x;
                             ys[i] = y;
                             frozen[i] = true;
-                            tx.OpenMut(ids[i]).Write(MaUnit.Pos) = new MaPos { Bounds = Point(x, y) };
+                            tx.OpenMut(ids[i]).Set(MaUnit.Pos, new MaPos { Bounds = Point(x, y) });
                         }
                     }
 

@@ -234,7 +234,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         // Mutate Current from 10 → 20
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClIdxUnit.Health) = new ClIdxHealth(20, 200);
+            tx.OpenMut(id).Set(ClIdxUnit.Health, new ClIdxHealth(20, 200));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -272,7 +272,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var e = tx.OpenMut(tx.Query<ClIdxUnit>().Execute().First());
-            e.Write(ClIdxUnit.Health) = new ClIdxHealth(50, 100);
+            e.Set(ClIdxUnit.Health, new ClIdxHealth(50, 100));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -405,7 +405,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         // Mutate first entity: 10 → 5
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClIdxUnit.Health) = new ClIdxHealth(5, 100);
+            tx.OpenMut(id).Set(ClIdxUnit.Health, new ClIdxHealth(5, 100));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -439,7 +439,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         // Mutate then destroy — same tick
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClIdxUnit.Health) = new ClIdxHealth(88, 0);
+            tx.OpenMut(id).Set(ClIdxUnit.Health, new ClIdxHealth(88, 0));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
@@ -530,7 +530,7 @@ class ClusterIndexTests : TestBase<ClusterIndexTests>
         // Mutate first entity from 1 → 2
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(ClIdxUnit.Health) = new ClIdxHealth(2, 100);
+            tx.OpenMut(id).Set(ClIdxUnit.Health, new ClIdxHealth(2, 100));
             tx.Commit();
         }
         dbe.WriteTickFence(2);

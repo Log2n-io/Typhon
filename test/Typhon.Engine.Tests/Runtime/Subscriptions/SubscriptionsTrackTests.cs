@@ -274,11 +274,18 @@ class SubscriptionsTrackTests : TestBase<SubscriptionsTrackTests>
 
         runtime.Start();
         SpinWait.SpinUntil(() => runtime.CurrentTickNumber >= 10, TimeSpan.FromSeconds(5));
-        runtime.Shutdown();
-        runtime.Scheduler.WakeProbe = null;
 
+        // Stop counting BEFORE the shutdown, and read the tick count after. Ordered the other way — which is how this
+        // was written — the window the probe counted in extended past `Shutdown`, which is explicitly not a quiescence
+        // point: the in-flight tick and the release of the parked workers both happen after it returns, and each can
+        // add a wake round that no tick in `ticks` accounts for. The `+ 1` slack absorbed one of those, so the case
+        // failed on a cold run when it got two. Closing the window first makes every round counted attributable to a
+        // tick already included, which is a STRICTER comparison than the old one, not a looser: the slack now covers
+        // only a straggler that had already loaded the delegate.
+        runtime.Scheduler.WakeProbe = null;
         var ticks = runtime.CurrentTickNumber;
         var rounds = Volatile.Read(ref wakes) / 2.0;   // WorkerCount = 2, one probe call per worker per round
+        runtime.Shutdown();
 
         Assert.That(ticks, Is.GreaterThanOrEqualTo(10), "the runtime must actually have ticked, or this proves nothing");
         Assert.That(rounds, Is.LessThanOrEqualTo(ticks + 1),

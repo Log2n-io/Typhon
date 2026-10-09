@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { Clock } from '../src/index.js';
 
+import { readFileSync } from 'node:fs';
+import { monotonicNow } from '../src/clock/now.js';
+
+const read = (path: string): string => readFileSync(new URL(path, import.meta.url), 'utf8');
+const connectionSource = read('../src/net/connection.ts');
+const pingSource = read('../src/net/ping.ts');
+const queueSource = read('../src/commands/queue.ts');
+const regionSource = read('../src/interest/region.ts');
+const reconnectSource = read('../src/net/reconnect.ts');
+
 const PERIOD = 100;
 
 /** Server time of a tick in the tests' constant-period world: tick 0 is sent at local time 5 000. */
@@ -192,5 +202,43 @@ describe('Clock', () => {
     clock.onFrame(100, 1000);
     clock.update(1000);
     expect(clock.renderTime).toBeCloseTo(98, 9);
+  });
+});
+
+describe('the SDK default clock', () => {
+  it('is monotonic where the host has one, and shares its origin with the renderer', () => {
+    // The defect this guards: five parts of the SDK defaulted to `Date.now()` while the browser client feeds
+    // `Clock.update` `performance.now()`. The two differ by the Unix epoch, ~1.79e12 ms, so the offset estimator put
+    // render time about 1.8e10 ticks in the past and every moving entity was culled. The view still drew static
+    // archetypes, so it looked like a replication bug rather than a clock one.
+    const a = monotonicNow();
+    const b = performance.now();
+    expect(Math.abs(a - b)).toBeLessThan(1000);
+
+    // Never goes backwards within a session, which `Date.now()` does on an NTP correction.
+    let previous = monotonicNow();
+    for (let i = 0; i < 1000; i++) {
+      const now = monotonicNow();
+      expect(now).toBeGreaterThanOrEqual(previous);
+      previous = now;
+    }
+  });
+
+  it('is what a connection, a ping scheduler, a command queue, a region sender and a reconnect all take by default', () => {
+    // Asserted as one fact because the failure mode is a mix: any one of them left on another timeline reintroduces it.
+    //
+    // It reads the source text, which is weaker than driving each of the five — a behavioural version would have to reach
+    // a private field or invent an observable for each. What it must not be is satisfiable by a class that takes the
+    // default and then overwrites it, so the second assertion is that `this.now` is assigned EXACTLY once per file.
+    for (const [name, source] of [
+      ['connection', connectionSource],
+      ['ping', pingSource],
+      ['queue', queueSource],
+      ['region', regionSource],
+      ['reconnect', reconnectSource],
+    ] as const) {
+      expect(source, name).toContain('options.now ?? monotonicNow');
+      expect(source.match(/this\.now\s*=/g) ?? [], name).toHaveLength(1);
+    }
   });
 });

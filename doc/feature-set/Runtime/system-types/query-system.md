@@ -47,8 +47,10 @@ public class HealthRegen : QuerySystem
     {
         foreach (var id in ctx.Entities)
         {
-            ref var hp = ref ctx.Transaction.OpenMut(id).Write<EcsHealth>();
+            var target = ctx.Transaction.OpenMut(id);
+            var hp = target.Read<EcsHealth>();
             hp.Current = Math.Min(hp.Current + 1, hp.Max);
+            target.Set<EcsHealth>(hp);
         }
     }
 }
@@ -68,8 +70,9 @@ public class MovementSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);
-            ref var pos = ref entity.Write<EcsPosition>();
+            var pos = entity.Read<EcsPosition>();
             pos.X += entity.Read<EcsVelocity>().X * ctx.DeltaTime;
+            entity.Set<EcsPosition>(pos);
         }
     }
 }
@@ -98,7 +101,8 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
   cost markedly more than `ctx.Accessor`, so only declare `WritesVersioned()` when actually writing `Versioned`
   components.
 - `ctx.Accessor` can read all storage modes and write `SingleVersion`/`Transient` components but throws on a
-  `Versioned` write, and cannot `Spawn`/`Destroy`/`Commit`/`Rollback`.
+  `Versioned` write, and cannot `Spawn`/`Destroy`/`Commit`/`Rollback` directly. Use `ctx.Commands` to queue
+  deferred spawns and destroys from inside a parallel chunk; they are applied at the post-parallel fence.
 - The DAG, not the runtime, guarantees parallel chunks don't race — overlapping writes across parallel systems
   or chunks are a design error to fix with `.After()`/`.Before()`, not something the runtime detects.
 - Scaling falls off past one CCD's worth of cores on multi-CCD hardware (cross-CCD EntityMap access) — see the

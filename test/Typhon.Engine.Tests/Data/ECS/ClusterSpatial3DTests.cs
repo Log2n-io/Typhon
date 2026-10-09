@@ -405,8 +405,9 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
         {
             using var tx = dbe.CreateQuickTransaction();
             var eref = tx.OpenMut(id);
-            ref var pos = ref eref.Write(ClSpatialUnit.Pos);
+            var pos = eref.Read(ClSpatialUnit.Pos);
             pos = MakePos(50, 50, 500);
+            eref.Set(ClSpatialUnit.Pos, pos);
             tx.Commit();
         }
 

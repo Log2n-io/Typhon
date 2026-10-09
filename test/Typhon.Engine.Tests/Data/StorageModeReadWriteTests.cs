@@ -76,7 +76,7 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         var entityId = tx.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(in comp));
 
         var entity = tx.Open(entityId);
-        ref readonly var read = ref entity.Read(SvTestArchetype.SvComp);
+        var read = entity.Read(SvTestArchetype.SvComp);
         Assert.That(read.Value, Is.EqualTo(42));
     }
 
@@ -92,11 +92,12 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        ref var write = ref entity.Write(SvTestArchetype.SvComp);
+        var write = entity.Read(SvTestArchetype.SvComp);
         write.Value = 99;
+        entity.Set(SvTestArchetype.SvComp, write);
 
         // SV is in-place — visible immediately
-        ref readonly var read = ref entity.Read(SvTestArchetype.SvComp);
+        var read = entity.Read(SvTestArchetype.SvComp);
         Assert.That(read.Value, Is.EqualTo(99));
     }
 
@@ -116,8 +117,9 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        ref var write = ref entity.Write(SvTestArchetype.SvComp);
+        var write = entity.Read(SvTestArchetype.SvComp);
         write.Value = 2;
+        entity.Set(SvTestArchetype.SvComp, write);
 
         if (clusterState != null)
         {
@@ -146,8 +148,9 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        ref var write = ref entity.Write(SvTestArchetype.SvComp);
+        var write = entity.Read(SvTestArchetype.SvComp);
         write.Value = 2;
+        entity.Set(SvTestArchetype.SvComp, write);
 
         if (clusterState != null)
         {
@@ -188,7 +191,7 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         var entityId = tx.Spawn<TransientTestArchetype>(TransientTestArchetype.TransComp.Set(in comp));
 
         var entity = tx.Open(entityId);
-        ref readonly var read = ref entity.Read(TransientTestArchetype.TransComp);
+        var read = entity.Read(TransientTestArchetype.TransComp);
         Assert.That(read.Value, Is.EqualTo(77));
     }
 
@@ -204,10 +207,11 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        ref var write = ref entity.Write(TransientTestArchetype.TransComp);
+        var write = entity.Read(TransientTestArchetype.TransComp);
         write.Value = 55;
+        entity.Set(TransientTestArchetype.TransComp, write);
 
-        ref readonly var read = ref entity.Read(TransientTestArchetype.TransComp);
+        var read = entity.Read(TransientTestArchetype.TransComp);
         Assert.That(read.Value, Is.EqualTo(55));
     }
 
@@ -284,7 +288,7 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         var entityId = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos));
 
         var entity = tx.Open(entityId);
-        ref readonly var read = ref entity.Read(EcsUnit.Position);
+        var read = entity.Read(EcsUnit.Position);
         Assert.That(read.X, Is.EqualTo(1f));
         Assert.That(read.Y, Is.EqualTo(2f));
         Assert.That(read.Z, Is.EqualTo(3f));
@@ -515,9 +519,15 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
 
-        entity.Write(MixedModeArchetype.Versioned).Value = 100;
-        entity.Write(MixedModeArchetype.SV).Value = 200;
-        entity.Write(MixedModeArchetype.Trans).Value = 300;
+        var versionedCopy = entity.Read(MixedModeArchetype.Versioned);
+        versionedCopy.Value = 100;
+        entity.Set(MixedModeArchetype.Versioned, versionedCopy);
+        var sV = entity.Read(MixedModeArchetype.SV);
+        sV.Value = 200;
+        entity.Set(MixedModeArchetype.SV, sV);
+        var trans = entity.Read(MixedModeArchetype.Trans);
+        trans.Value = 300;
+        entity.Set(MixedModeArchetype.Trans, trans);
 
         Assert.That(entity.Read(MixedModeArchetype.Versioned).Value, Is.EqualTo(100));
         Assert.That(entity.Read(MixedModeArchetype.SV).Value, Is.EqualTo(200));
@@ -549,9 +559,15 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(entityId);
-        entity.Write(MixedModeArchetype.Versioned).Value = 100;
-        entity.Write(MixedModeArchetype.SV).Value = 200;
-        entity.Write(MixedModeArchetype.Trans).Value = 300;
+        var versioned = entity.Read(MixedModeArchetype.Versioned);
+        versioned.Value = 100;
+        entity.Set(MixedModeArchetype.Versioned, versioned);
+        var sV = entity.Read(MixedModeArchetype.SV);
+        sV.Value = 200;
+        entity.Set(MixedModeArchetype.SV, sV);
+        var transCopy = entity.Read(MixedModeArchetype.Trans);
+        transCopy.Value = 300;
+        entity.Set(MixedModeArchetype.Trans, transCopy);
 
         // Dirty tracking: cluster-eligible archetypes use per-archetype ClusterDirtyBitmap, not per-ComponentTable DirtyBitmap.
         var meta = ArchetypeRegistry.GetMetadata<MixedModeArchetype>();
@@ -639,9 +655,15 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
         // Write all modes, then commit
         using var tx2 = dbe.CreateQuickTransaction();
         var entity = tx2.OpenMut(id);
-        entity.Write(MixedModeArchetype.Versioned).Value = 100;
-        entity.Write(MixedModeArchetype.SV).Value = 200;
-        entity.Write(MixedModeArchetype.Trans).Value = 300;
+        var versioned = entity.Read(MixedModeArchetype.Versioned);
+        versioned.Value = 100;
+        entity.Set(MixedModeArchetype.Versioned, versioned);
+        var sVCopy = entity.Read(MixedModeArchetype.SV);
+        sVCopy.Value = 200;
+        entity.Set(MixedModeArchetype.SV, sVCopy);
+        var trans = entity.Read(MixedModeArchetype.Trans);
+        trans.Value = 300;
+        entity.Set(MixedModeArchetype.Trans, trans);
         tx2.Commit();
 
         // Verify writes persisted
@@ -765,14 +787,20 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
 
         // First tick — write to make dirty
         using var tx2 = dbe.CreateQuickTransaction();
-        tx2.OpenMut(id).Write(SvTestArchetype.SvComp).Value = 10;
+        var target = tx2.OpenMut(id);
+        var svComp = target.Read(SvTestArchetype.SvComp);
+        svComp.Value = 10;
+        target.Set(SvTestArchetype.SvComp, svComp);
         dbe.WriteTickFence(1);
 
         // No WAL → LSN stays 0, but bitmap was cleared
         Assert.That(dbe.GetComponentTable<CompSmSingleVersion>().DirtyBitmap.HasDirty, Is.False);
 
         // Second tick — write again
-        tx2.OpenMut(id).Write(SvTestArchetype.SvComp).Value = 20;
+        var opened = tx2.OpenMut(id);
+        var svCompCopy = opened.Read(SvTestArchetype.SvComp);
+        svCompCopy.Value = 20;
+        opened.Set(SvTestArchetype.SvComp, svCompCopy);
         dbe.WriteTickFence(2);
 
         Assert.That(dbe.GetComponentTable<CompSmSingleVersion>().DirtyBitmap.HasDirty, Is.False);

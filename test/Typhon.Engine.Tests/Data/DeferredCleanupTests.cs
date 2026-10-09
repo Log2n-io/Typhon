@@ -34,8 +34,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // T3 updates entity E, commits and disposes
         {
             using var t3 = dbe.CreateQuickTransaction();
-            ref var a = ref t3.OpenMut(entityId).Write(CompAArch.A);
+            var target = t3.OpenMut(entityId);
+            var a = target.Read(CompAArch.A);
             a = new CompA(20);
+            target.Set(CompAArch.A, a);
             t3.Commit();
         }
 
@@ -80,8 +82,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         foreach (var v in new[] { 20, 30, 40, 50 })
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var a = ref t.OpenMut(e).Write(CompAArch.A);
+            var target = t.OpenMut(e);
+            var a = target.Read(CompAArch.A);
             a = new CompA(v);
+            target.Set(CompAArch.A, a);
             t.Commit();
         }
 
@@ -208,8 +212,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // T3 updates entity E, commits
         {
             using var t3 = dbe.CreateQuickTransaction();
-            ref var a = ref t3.OpenMut(entityId).Write(CompAArch.A);
+            var target = t3.OpenMut(entityId);
+            var a = target.Read(CompAArch.A);
             a = new CompA(20);
+            target.Set(CompAArch.A, a);
             t3.Commit();
         }
 
@@ -247,8 +253,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // T3 updates the same entity E, commits
         {
             using var t3 = dbe.CreateQuickTransaction();
-            ref var a = ref t3.OpenMut(entityId).Write(CompAArch.A);
+            var target = t3.OpenMut(entityId);
+            var a = target.Read(CompAArch.A);
             a = new CompA(20);
+            target.Set(CompAArch.A, a);
             t3.Commit();
         }
 
@@ -318,8 +326,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         for (int i = 0; i < entityCount; i++)
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var a = ref t.OpenMut(entityIds[i]).Write(CompAArch.A);
+            var target = t.OpenMut(entityIds[i]);
+            var a = target.Read(CompAArch.A);
             a = new CompA(i + 1000);
+            target.Set(CompAArch.A, a);
             t.Commit();
         }
 
@@ -395,8 +405,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // Should be a no-op because T1.TSN is already the oldest blocker
         {
             using var t4 = dbe.CreateQuickTransaction();
-            ref var a = ref t4.OpenMut(entityId).Write(CompAArch.A);
+            var target = t4.OpenMut(entityId);
+            var a = target.Read(CompAArch.A);
             a = new CompA(20);
+            target.Set(CompAArch.A, a);
             t4.Commit();
         }
 
@@ -436,8 +448,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // Update entity A → creates 2nd revision, blocked by T_a
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var a = ref t.OpenMut(idA).Write(CompAArch.A);
+            var opened = t.OpenMut(idA);
+            var a = opened.Read(CompAArch.A);
             a = new CompA(11);
+            opened.Set(CompAArch.A, a);
             t.Commit();
         }
 
@@ -447,8 +461,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         // Update entity B → creates 2nd revision, blocked by T_a (still the tail)
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var a = ref t.OpenMut(idB).Write(CompAArch.A);
+            var target = t.OpenMut(idB);
+            var a = target.Read(CompAArch.A);
             a = new CompA(22);
+            target.Set(CompAArch.A, a);
             t.Commit();
         }
 
@@ -519,8 +535,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         }
         {
             using var t3 = dbe.CreateQuickTransaction();
-            ref var a = ref t3.OpenMut(entityId).Write(CompAArch.A);
+            var target = t3.OpenMut(entityId);
+            var a = target.Read(CompAArch.A);
             a = new CompA(20);
+            target.Set(CompAArch.A, a);
             t3.Commit();
         }
 
@@ -570,8 +588,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         }
         {
             using var t3 = dbe.CreateQuickTransaction();
-            ref var a = ref t3.OpenMut(entityId).Write(CompAArch.A);
+            var opened = t3.OpenMut(entityId);
+            var a = opened.Read(CompAArch.A);
             a = new CompA(20);
+            opened.Set(CompAArch.A, a);
             t3.Commit();
         }
 
@@ -623,8 +643,10 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         Parallel.For(0, entityCount, i =>
         {
             using var t = dbe.CreateQuickTransaction();
-            ref var a = ref t.OpenMut(entityIds[i]).Write(CompAArch.A);
+            var target = t.OpenMut(entityIds[i]);
+            var a = target.Read(CompAArch.A);
             a = new CompA(i + 1000);
+            target.Set(CompAArch.A, a);
             t.Commit();
         });
 

@@ -2033,6 +2033,179 @@
         ]
       }
     },
+    "/api/sessions/{sessionId}/profiler/capture": {
+      "post": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureStateDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureStateDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/profiler/watch": {
+      "post": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WatchRequest"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WatchRequest"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/WatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureStateDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "Profiler"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/profiler/save-replay": {
       "post": {
         "tags": [
@@ -2971,6 +3144,42 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QueryParseResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": [ ],
+            "SessionToken": [ ]
+          }
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/realms": {
+      "get": {
+        "tags": [
+          "Realms"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealmListDto"
                 }
               }
             }
@@ -4533,6 +4742,87 @@
           }
         }
       },
+      "CaptureRequest": {
+        "required": [
+          "tickCount"
+        ],
+        "type": "object",
+        "properties": {
+          "tickCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "CaptureStateDto": {
+        "required": [
+          "state",
+          "remaining",
+          "recordedTicks",
+          "mode",
+          "tickNumbersAbsolute",
+          "tickNumberingSuspect",
+          "bytesReceived",
+          "bytesRetained"
+        ],
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "remaining": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "recordedTicks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "mode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "tickNumbersAbsolute": {
+            "type": "boolean"
+          },
+          "tickNumberingSuspect": {
+            "type": "boolean"
+          },
+          "bytesReceived": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "bytesRetained": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "CategorySliceDto": {
         "required": [
           "categoryId",
@@ -5069,7 +5359,8 @@
             ]
           },
           "cherryPick": {
-            "type": "boolean"
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -7058,7 +7349,7 @@
       },
       "PostTickSummary": {
         "type": "object",
-        "description": "Per-tick post-tick serial markers in CacheSectionId.PostTickSummaries. One row per tick, capturing the duration of each TickPhase\r\nregion that runs after the system DAG completes — wraps the existing `InspectorPhase` blocks in `TyphonRuntime.OnTickEndInternal`. Zero µs means\r\nthe phase ran with no measurable work (e.g. no subscriptions active for float PostTickSummary.SubscriptionOutputUs)."
+        "description": "Per-tick post-tick serial markers in CacheSectionId.PostTickSummaries. One row per tick, capturing the duration of each TickPhase\r\nregion that runs after the system DAG completes — wraps the existing `InspectorPhase` blocks in `TyphonRuntime.OnTickEndInternal`. Zero µs means\r\nthe phase ran with no measurable work."
       },
       "PredicateNodeDto": {
         "required": [
@@ -8419,6 +8710,216 @@
         "type": "object",
         "description": "Per-(tick, queue) rollup row in CacheSectionId.QueueTickSummaries. One row per queue per tick. Folded from the new `QueueTickEnd` wire\r\nevent the engine emits at end-of-tick per active event queue."
       },
+      "RealmDto": {
+        "required": [
+          "id",
+          "generation",
+          "source",
+          "registered",
+          "lifecycle",
+          "grid",
+          "runState",
+          "divisor",
+          "sessions",
+          "kind"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "generation": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "source": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "registered": {
+            "type": "boolean"
+          },
+          "lifecycle": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "grid": {
+            "$ref": "#/components/schemas/RealmGridDto"
+          },
+          "runState": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "divisor": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sessions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "kind": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "RealmGridDto": {
+        "required": [
+          "minX",
+          "minY",
+          "minZ",
+          "maxX",
+          "maxY",
+          "maxZ",
+          "cellSize",
+          "migrationHysteresisRatio",
+          "deep"
+        ],
+        "type": "object",
+        "properties": {
+          "minX": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "minY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "minZ": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "maxX": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "maxY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "maxZ": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "cellSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "migrationHysteresisRatio": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "deep": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RealmListDto": {
+        "required": [
+          "maxRealms",
+          "realms",
+          "liveState",
+          "liveStateReason",
+          "catalogued"
+        ],
+        "type": "object",
+        "properties": {
+          "maxRealms": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "realms": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RealmDto"
+            }
+          },
+          "liveState": {
+            "type": "boolean"
+          },
+          "liveStateReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "catalogued": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "RepairApplyRequestDto": {
         "required": [
           "path",
@@ -9251,6 +9752,15 @@
               ],
               "format": "double"
             }
+          },
+          "realm": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
@@ -9465,7 +9975,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           },
           "aabbMinY": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
@@ -9473,7 +9983,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           },
           "aabbMinZ": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
@@ -9481,7 +9991,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           },
           "aabbMaxX": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
@@ -9489,7 +9999,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           },
           "aabbMaxY": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
@@ -9497,7 +10007,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           },
           "aabbMaxZ": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
@@ -9505,7 +10015,7 @@
               "number",
               "string"
             ],
-            "format": "float"
+            "format": "double"
           }
         }
       },
@@ -11591,27 +12101,6 @@
             "$ref": "#/components/schemas/TraceEventDtoRuntimePhaseUoWFlushEventDto"
           },
           {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaBuildEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaDirtyBitmapSupplementEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaSerializeEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionOutputCleanupEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionOutputExecuteEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionSubscriberEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoRuntimeSubscriptionTransitionBeginSyncEventDto"
-          },
-          {
             "$ref": "#/components/schemas/TraceEventDtoRuntimeTransactionLifecycleEventDto"
           },
           {
@@ -11669,6 +12158,9 @@
             "$ref": "#/components/schemas/TraceEventDtoSchedulerWorkerWakeEventDto"
           },
           {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialArchetypeTelemetryEventDto"
+          },
+          {
             "$ref": "#/components/schemas/TraceEventDtoSpatialCellIndexAddEventDto"
           },
           {
@@ -11708,12 +12200,6 @@
             "$ref": "#/components/schemas/TraceEventDtoSpatialMaintainBackPointerWriteEventDto"
           },
           {
-            "$ref": "#/components/schemas/TraceEventDtoSpatialMaintainInsertEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoSpatialMaintainUpdateSlowPathEventDto"
-          },
-          {
             "$ref": "#/components/schemas/TraceEventDtoSpatialQueryAabbEventDto"
           },
           {
@@ -11742,6 +12228,15 @@
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoSpatialRTreeRemoveEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialRealmTelemetryEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialRelocationOutcomeEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSpatialRepairUnitEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoSpatialTierIndexRebuildEventDto"
@@ -11784,6 +12279,12 @@
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoStorageSegmentLoadEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSubscriptionsServerTelemetryEventDto"
+          },
+          {
+            "$ref": "#/components/schemas/TraceEventDtoSubscriptionsSessionTelemetryEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoSystemReadyEventDto"
@@ -11832,9 +12333,6 @@
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceShadowEventDto"
-          },
-          {
-            "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceSpatialEventDto"
           },
           {
             "$ref": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
@@ -11969,13 +12467,6 @@
             "runtimePhaseSpan": "#/components/schemas/TraceEventDtoRuntimePhaseSpanEventDto",
             "runtimePhaseUoWCreate": "#/components/schemas/TraceEventDtoRuntimePhaseUoWCreateEventDto",
             "runtimePhaseUoWFlush": "#/components/schemas/TraceEventDtoRuntimePhaseUoWFlushEventDto",
-            "runtimeSubscriptionDeltaBuild": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaBuildEventDto",
-            "runtimeSubscriptionDeltaDirtyBitmapSupplement": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaDirtyBitmapSupplementEventDto",
-            "runtimeSubscriptionDeltaSerialize": "#/components/schemas/TraceEventDtoRuntimeSubscriptionDeltaSerializeEventDto",
-            "runtimeSubscriptionOutputCleanup": "#/components/schemas/TraceEventDtoRuntimeSubscriptionOutputCleanupEventDto",
-            "runtimeSubscriptionOutputExecute": "#/components/schemas/TraceEventDtoRuntimeSubscriptionOutputExecuteEventDto",
-            "runtimeSubscriptionSubscriber": "#/components/schemas/TraceEventDtoRuntimeSubscriptionSubscriberEventDto",
-            "runtimeSubscriptionTransitionBeginSync": "#/components/schemas/TraceEventDtoRuntimeSubscriptionTransitionBeginSyncEventDto",
             "runtimeTransactionLifecycle": "#/components/schemas/TraceEventDtoRuntimeTransactionLifecycleEventDto",
             "schedulerChunk": "#/components/schemas/TraceEventDtoSchedulerChunkEventDto",
             "schedulerDependencyFanOut": "#/components/schemas/TraceEventDtoSchedulerDependencyFanOutEventDto",
@@ -11995,6 +12486,7 @@
             "schedulerWorkerBetweenTick": "#/components/schemas/TraceEventDtoSchedulerWorkerBetweenTickEventDto",
             "schedulerWorkerIdle": "#/components/schemas/TraceEventDtoSchedulerWorkerIdleEventDto",
             "schedulerWorkerWake": "#/components/schemas/TraceEventDtoSchedulerWorkerWakeEventDto",
+            "spatialArchetypeTelemetry": "#/components/schemas/TraceEventDtoSpatialArchetypeTelemetryEventDto",
             "spatialCellIndexAdd": "#/components/schemas/TraceEventDtoSpatialCellIndexAddEventDto",
             "spatialCellIndexRemove": "#/components/schemas/TraceEventDtoSpatialCellIndexRemoveEventDto",
             "spatialCellIndexUpdate": "#/components/schemas/TraceEventDtoSpatialCellIndexUpdateEventDto",
@@ -12008,8 +12500,6 @@
             "spatialGridOccupancyChange": "#/components/schemas/TraceEventDtoSpatialGridOccupancyChangeEventDto",
             "spatialMaintainAabbValidate": "#/components/schemas/TraceEventDtoSpatialMaintainAabbValidateEventDto",
             "spatialMaintainBackPointerWrite": "#/components/schemas/TraceEventDtoSpatialMaintainBackPointerWriteEventDto",
-            "spatialMaintainInsert": "#/components/schemas/TraceEventDtoSpatialMaintainInsertEventDto",
-            "spatialMaintainUpdateSlowPath": "#/components/schemas/TraceEventDtoSpatialMaintainUpdateSlowPathEventDto",
             "spatialQueryAabb": "#/components/schemas/TraceEventDtoSpatialQueryAabbEventDto",
             "spatialQueryCount": "#/components/schemas/TraceEventDtoSpatialQueryCountEventDto",
             "spatialQueryFrustum": "#/components/schemas/TraceEventDtoSpatialQueryFrustumEventDto",
@@ -12020,6 +12510,9 @@
             "spatialRTreeInsert": "#/components/schemas/TraceEventDtoSpatialRTreeInsertEventDto",
             "spatialRTreeNodeSplit": "#/components/schemas/TraceEventDtoSpatialRTreeNodeSplitEventDto",
             "spatialRTreeRemove": "#/components/schemas/TraceEventDtoSpatialRTreeRemoveEventDto",
+            "spatialRealmTelemetry": "#/components/schemas/TraceEventDtoSpatialRealmTelemetryEventDto",
+            "spatialRelocationOutcome": "#/components/schemas/TraceEventDtoSpatialRelocationOutcomeEventDto",
+            "spatialRepairUnit": "#/components/schemas/TraceEventDtoSpatialRepairUnitEventDto",
             "spatialTierIndexRebuild": "#/components/schemas/TraceEventDtoSpatialTierIndexRebuildEventDto",
             "spatialTierIndexVersionSkip": "#/components/schemas/TraceEventDtoSpatialTierIndexVersionSkipEventDto",
             "spatialTriggerCacheInvalidate": "#/components/schemas/TraceEventDtoSpatialTriggerCacheInvalidateEventDto",
@@ -12034,6 +12527,8 @@
             "storageSegmentCreate": "#/components/schemas/TraceEventDtoStorageSegmentCreateEventDto",
             "storageSegmentGrow": "#/components/schemas/TraceEventDtoStorageSegmentGrowEventDto",
             "storageSegmentLoad": "#/components/schemas/TraceEventDtoStorageSegmentLoadEventDto",
+            "subscriptionsServerTelemetry": "#/components/schemas/TraceEventDtoSubscriptionsServerTelemetryEventDto",
+            "subscriptionsSessionTelemetry": "#/components/schemas/TraceEventDtoSubscriptionsSessionTelemetryEventDto",
             "systemReady": "#/components/schemas/TraceEventDtoSystemReadyEventDto",
             "systemSkipped": "#/components/schemas/TraceEventDtoSystemSkippedEventDto",
             "threadContextSwitch": "#/components/schemas/TraceEventDtoThreadContextSwitchEventDto",
@@ -12050,7 +12545,6 @@
             "writeTickFenceClusterShadow": "#/components/schemas/TraceEventDtoWriteTickFenceClusterShadowEventDto",
             "writeTickFenceClusterSpatial": "#/components/schemas/TraceEventDtoWriteTickFenceClusterSpatialEventDto",
             "writeTickFenceShadow": "#/components/schemas/TraceEventDtoWriteTickFenceShadowEventDto",
-            "writeTickFenceSpatial": "#/components/schemas/TraceEventDtoWriteTickFenceSpatialEventDto",
             "writeTickFenceTable": "#/components/schemas/TraceEventDtoWriteTickFenceTableEventDto"
           }
         }
@@ -13074,6 +13568,36 @@
               "string"
             ],
             "description": "`ClusterMigration` event payload — component count.",
+            "format": "int32"
+          },
+          "crossingCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `ClusterMigration` event payload — crossing count. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "relocationCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `ClusterMigration` event payload — relocation count. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "repairCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `ClusterMigration` event payload — repair count. `null` when the wire record omits it.",
             "format": "int32"
           },
           "durationUs": {
@@ -23700,875 +24224,6 @@
         },
         "description": "Generated instant-event DTO for `RuntimePhaseUoWFlush`. 12-byte header + payload; no span fields."
       },
-      "TraceEventDtoRuntimeSubscriptionDeltaBuildEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionDeltaBuild"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "viewId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaBuild` event payload — view id.",
-            "format": "uint16"
-          },
-          "added": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaBuild` event payload — added.",
-            "format": "int32"
-          },
-          "removed": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaBuild` event payload — removed.",
-            "format": "int32"
-          },
-          "modified": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaBuild` event payload — modified.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionDeltaBuild` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionDeltaDirtyBitmapSupplementEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionDeltaDirtyBitmapSupplement"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "modifiedFromRing": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaDirtyBitmapSupplement` event payload — modified from ring.",
-            "format": "int32"
-          },
-          "supplementCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaDirtyBitmapSupplement` event payload — supplement count.",
-            "format": "int32"
-          },
-          "unionSize": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaDirtyBitmapSupplement` event payload — union size.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionDeltaDirtyBitmapSupplement` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionDeltaSerializeEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionDeltaSerialize"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "clientId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaSerialize` event payload — client id.",
-            "format": "uint32"
-          },
-          "viewId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaSerialize` event payload — view id.",
-            "format": "uint16"
-          },
-          "bytes": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaSerialize` event payload — bytes.",
-            "format": "int32"
-          },
-          "format": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionDeltaSerialize` event payload — format.",
-            "format": "uint8"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionDeltaSerialize` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionOutputCleanupEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionOutputCleanup"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "deadCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputCleanup` event payload — dead count.",
-            "format": "int32"
-          },
-          "deregCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputCleanup` event payload — dereg count.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionOutputCleanup` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionOutputExecuteEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionOutputExecute"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "tick": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — tick.",
-            "format": "int64"
-          },
-          "level": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — level.",
-            "format": "uint8"
-          },
-          "clientCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — client count.",
-            "format": "uint16"
-          },
-          "viewsRefreshed": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — views refreshed.",
-            "format": "uint16"
-          },
-          "deltasPushed": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — deltas pushed.",
-            "format": "uint32"
-          },
-          "overflowCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionOutputExecute` event payload — overflow count.",
-            "format": "uint16"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionOutputExecute` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionSubscriberEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionSubscriber"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "subscriberId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionSubscriber` event payload — subscriber id.",
-            "format": "uint32"
-          },
-          "viewId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionSubscriber` event payload — view id.",
-            "format": "uint16"
-          },
-          "deltaCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionSubscriber` event payload — delta count.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionSubscriber` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoRuntimeSubscriptionTransitionBeginSyncEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "runtimeSubscriptionTransitionBeginSync"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "clientId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionTransitionBeginSync` event payload — client id.",
-            "format": "uint32"
-          },
-          "viewId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionTransitionBeginSync` event payload — view id.",
-            "format": "uint16"
-          },
-          "entitySnapshot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`RuntimeSubscriptionTransitionBeginSync` event payload — entity snapshot.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `RuntimeSubscriptionTransitionBeginSync` trace events. Wire format mirrors the encoder partial."
-      },
       "TraceEventDtoRuntimeTransactionLifecycleEventDto": {
         "properties": {
           "kind": {
@@ -26532,6 +26187,367 @@
         },
         "description": "Generated instant-event DTO for `SchedulerWorkerWake`. 12-byte header + payload; no span fields."
       },
+      "TraceEventDtoSpatialArchetypeTelemetryEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialArchetypeTelemetry"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "activeClusters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — active clusters.",
+            "format": "int32"
+          },
+          "migrations": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — migrations.",
+            "format": "int32"
+          },
+          "migrationCpuMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — migration cpu ms.",
+            "format": "float"
+          },
+          "hysteresisAbsorbed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — hysteresis absorbed.",
+            "format": "int32"
+          },
+          "driftersDetected": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — drifters detected.",
+            "format": "int32"
+          },
+          "repairUnits": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair units.",
+            "format": "int32"
+          },
+          "repairUnitsRefused": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair units refused.",
+            "format": "int32"
+          },
+          "repairQueueDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair queue depth.",
+            "format": "int32"
+          },
+          "budgetUsedMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — budget used ms.",
+            "format": "float"
+          },
+          "tightnessSamples": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — tightness samples.",
+            "format": "int32"
+          },
+          "extentRatio": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — extent ratio.",
+            "format": "float"
+          },
+          "packingBound": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — packing bound.",
+            "format": "float"
+          },
+          "cellTreePromotions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — cell tree promotions.",
+            "format": "int32"
+          },
+          "cellTreeDemotions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — cell tree demotions.",
+            "format": "int32"
+          },
+          "queryClustersOpened": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — query clusters opened.",
+            "format": "int64"
+          },
+          "queryCandidates": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — query candidates.",
+            "format": "int64"
+          },
+          "queryHits": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — query hits.",
+            "format": "int64"
+          },
+          "budgetConfiguredMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — budget configured ms.",
+            "format": "float"
+          },
+          "budgetGrantedMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — budget granted ms.",
+            "format": "float"
+          },
+          "efficiencyTolerance": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — efficiency tolerance.",
+            "format": "float"
+          },
+          "candidatesPerHitSmoothed": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — candidates per hit smoothed.",
+            "format": "float"
+          },
+          "candidatesPerHitBest": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — candidates per hit best.",
+            "format": "float"
+          },
+          "ticksAtWholeBudget": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — ticks at whole budget.",
+            "format": "int32"
+          },
+          "controllerFlags": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — controller flags.",
+            "format": "uint8"
+          },
+          "efficiencyRebases": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — efficiency rebases.",
+            "format": "int32"
+          },
+          "repairCellsCooling": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair cells cooling.",
+            "format": "int32"
+          },
+          "repairValveFires": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair valve fires.",
+            "format": "int32"
+          },
+          "repairedEntities": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repaired entities.",
+            "format": "int32"
+          },
+          "repairQueueEvicted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — repair queue evicted.",
+            "format": "int64"
+          },
+          "measuredNsPerEntity": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — measured ns per entity.",
+            "format": "float"
+          },
+          "driftTargetBoost": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — drift target boost.",
+            "format": "float"
+          },
+          "presentRealms": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — present realms.",
+            "format": "int32"
+          },
+          "runnableRealms": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialArchetypeTelemetry` event payload — runnable realms.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SpatialArchetypeTelemetry`. 12-byte header + payload; no span fields."
+      },
       "TraceEventDtoSpatialCellIndexAddEventDto": {
         "properties": {
           "kind": {
@@ -27731,244 +27747,6 @@
         },
         "description": "Generated instant-event DTO for `SpatialMaintainBackPointerWrite`. 12-byte header + payload; no span fields."
       },
-      "TraceEventDtoSpatialMaintainInsertEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "spatialMaintainInsert"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "entityPK": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`SpatialMaintainInsert` event payload — entity pk.",
-            "format": "int64"
-          },
-          "componentTypeId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`SpatialMaintainInsert` event payload — component type id.",
-            "format": "uint16"
-          },
-          "didDegenerate": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`SpatialMaintainInsert` event payload — did degenerate.",
-            "format": "uint8"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `SpatialMaintainInsert` trace events. Wire format mirrors the encoder partial."
-      },
-      "TraceEventDtoSpatialMaintainUpdateSlowPathEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "spatialMaintainUpdateSlowPath"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "entityPK": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`SpatialMaintainUpdateSlowPath` event payload — entity pk.",
-            "format": "int64"
-          },
-          "componentTypeId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`SpatialMaintainUpdateSlowPath` event payload — component type id.",
-            "format": "uint16"
-          },
-          "escapeDistSq": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "`SpatialMaintainUpdateSlowPath` event payload — escape dist sq.",
-            "format": "float"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `SpatialMaintainUpdateSlowPath` trace events. Wire format mirrors the encoder partial."
-      },
       "TraceEventDtoSpatialQueryAabbEventDto": {
         "properties": {
           "kind": {
@@ -28736,6 +28514,481 @@
           }
         },
         "description": "Generated DTO for `SpatialQueryRay` trace events. Wire format mirrors the encoder partial."
+      },
+      "TraceEventDtoSpatialRealmTelemetryEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialRealmTelemetry"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "realmId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — realm id.",
+            "format": "uint16"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "runState": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — run state.",
+            "format": "uint8"
+          },
+          "divisor": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — divisor.",
+            "format": "uint8"
+          },
+          "cellSize": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — cell size.",
+            "format": "float"
+          },
+          "cellCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — cell count.",
+            "format": "int32"
+          },
+          "gridDepth": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — grid depth.",
+            "format": "int32"
+          },
+          "clusters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — clusters.",
+            "format": "int32"
+          },
+          "clusterReach": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — cluster reach.",
+            "format": "float"
+          },
+          "escapedClusters": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — escaped clusters.",
+            "format": "int32"
+          },
+          "promotedCells": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — promoted cells.",
+            "format": "int32"
+          },
+          "blockedCells": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — blocked cells.",
+            "format": "int32"
+          },
+          "budgetConfiguredMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — budget configured ms.",
+            "format": "float"
+          },
+          "efficiencyTolerance": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SpatialRealmTelemetry` event payload — efficiency tolerance.",
+            "format": "float"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SpatialRealmTelemetry`. 12-byte header + payload; no span fields."
+      },
+      "TraceEventDtoSpatialRelocationOutcomeEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialRelocationOutcome"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "admitted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — admitted.",
+            "format": "int32"
+          },
+          "throttled": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — throttled.",
+            "format": "int32"
+          },
+          "superseded": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — superseded.",
+            "format": "int32"
+          },
+          "unplaced": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — unplaced.",
+            "format": "int32"
+          },
+          "unplacedNoCandidate": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — unplaced no candidate.",
+            "format": "int32"
+          },
+          "spilled": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — spilled.",
+            "format": "int32"
+          },
+          "pinsRejected": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — pins rejected.",
+            "format": "int32"
+          },
+          "crossingsQueued": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRelocationOutcome` event payload — crossings queued.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SpatialRelocationOutcome`. 12-byte header + payload; no span fields."
+      },
+      "TraceEventDtoSpatialRepairUnitEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "spatialRepairUnit"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "archetypeId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRepairUnit` event payload — archetype id.",
+            "format": "uint16"
+          },
+          "cellKey": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRepairUnit` event payload — cell key.",
+            "format": "int32"
+          },
+          "clusterCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRepairUnit` event payload — cluster count.",
+            "format": "int32"
+          },
+          "entityCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SpatialRepairUnit` event payload — entity count.",
+            "format": "int32"
+          },
+          "degradation": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "null",
+              "number",
+              "string"
+            ],
+            "description": "Optional `SpatialRepairUnit` event payload — degradation. `null` when the wire record omits it.",
+            "format": "float"
+          },
+          "valveFired": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `SpatialRepairUnit` event payload — valve fired. `null` when the wire record omits it.",
+            "format": "uint8"
+          },
+          "movedCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "description": "Optional `SpatialRepairUnit` event payload — moved count. `null` when the wire record omits it.",
+            "format": "int32"
+          },
+          "durationUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
+            "format": "double"
+          },
+          "spanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
+          },
+          "parentSpanId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
+          },
+          "traceIdHi": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "traceIdLo": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated DTO for `SpatialRepairUnit` trace events. Wire format mirrors the encoder partial."
       },
       "TraceEventDtoSpatialRTreeBulkLoadEventDto": {
         "properties": {
@@ -30518,6 +30771,242 @@
         },
         "description": "Generated instant-event DTO for `StorageSegmentLoad`. 12-byte header + payload; no span fields."
       },
+      "TraceEventDtoSubscriptionsServerTelemetryEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "subscriptionsServerTelemetry"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "sessions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — sessions.",
+            "format": "int32"
+          },
+          "netOutBytesPerSec": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — net out bytes per sec.",
+            "format": "float"
+          },
+          "trackP99Ms": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — track p99 ms.",
+            "format": "float"
+          },
+          "durabilityWaitP99Ms": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — durability wait p99 ms.",
+            "format": "float"
+          },
+          "framesSkipped": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — frames skipped.",
+            "format": "int64"
+          },
+          "framePoolRented": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — frame pool rented.",
+            "format": "int32"
+          },
+          "framePoolBlocks": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — frame pool blocks.",
+            "format": "int32"
+          },
+          "framePoolBudgetSkips": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — frame pool budget skips.",
+            "format": "int64"
+          },
+          "reportedSessions": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsServerTelemetry` event payload — reported sessions.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SubscriptionsServerTelemetry`. 12-byte header + payload; no span fields."
+      },
+      "TraceEventDtoSubscriptionsSessionTelemetryEventDto": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "subscriptionsSessionTelemetry"
+            ],
+            "type": "string"
+          },
+          "kindByte": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "uint8"
+          },
+          "sessionId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — session id.",
+            "format": "uint64"
+          },
+          "realmId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — realm id.",
+            "format": "uint16"
+          },
+          "bytesPerSec": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — bytes per sec.",
+            "format": "float"
+          },
+          "framesSkipped": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — frames skipped.",
+            "format": "int64"
+          },
+          "degradeLevel": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "`SubscriptionsSessionTelemetry` event payload — degrade level.",
+            "format": "int32"
+          },
+          "threadSlot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
+            "format": "uint8"
+          },
+          "tickNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
+            "format": "int32"
+          },
+          "timestampUs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
+            "format": "double"
+          },
+          "sourceLocationId": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
+            "format": "uint16"
+          }
+        },
+        "description": "Generated instant-event DTO for `SubscriptionsSessionTelemetry`. 12-byte header + payload; no span fields."
+      },
       "TraceEventDtoSystemReadyEventDto": {
         "properties": {
           "kind": {
@@ -32221,126 +32710,6 @@
         },
         "description": "Generated DTO for `WriteTickFenceShadow` trace events. Wire format mirrors the encoder partial."
       },
-      "TraceEventDtoWriteTickFenceSpatialEventDto": {
-        "properties": {
-          "kind": {
-            "enum": [
-              "writeTickFenceSpatial"
-            ],
-            "type": "string"
-          },
-          "kindByte": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "format": "uint8"
-          },
-          "componentTypeId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`WriteTickFenceSpatial` event payload — component type id.",
-            "format": "uint16"
-          },
-          "dirtyEntryCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "`WriteTickFenceSpatial` event payload — dirty entry count.",
-            "format": "int32"
-          },
-          "escapedCount": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "null",
-              "integer",
-              "string"
-            ],
-            "description": "Optional `WriteTickFenceSpatial` event payload — escaped count. `null` when the wire record omits it.",
-            "format": "int32"
-          },
-          "durationUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Span duration in microseconds. Computed as `DurationTicks / ticksPerUs`.",
-            "format": "double"
-          },
-          "spanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "This span's id as a decimal string (JS-safe — JavaScript `Number` can't represent the full `ulong` range)."
-          },
-          "parentSpanId": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Enclosing span's id as a decimal string (zero ⇒ top-level span ⇒ \"0\")."
-          },
-          "traceIdHi": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Upper 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "traceIdLo": {
-            "type": [
-              "null",
-              "string"
-            ],
-            "description": "Lower 64 bits of the OpenTelemetry trace id, decimal string. Empty / null when no trace context attached."
-          },
-          "threadSlot": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Producer thread slot (0..255). Indexes `ThreadSlotRegistry`.",
-            "format": "uint8"
-          },
-          "tickNumber": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Tick number stamped by the consumer thread from the most recent `TickStart` marker.",
-            "format": "int32"
-          },
-          "timestampUs": {
-            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
-            "type": [
-              "number",
-              "string"
-            ],
-            "description": "Wall-clock timestamp in microseconds since trace start. Computed as `StartTimestamp / ticksPerUs`.",
-            "format": "double"
-          },
-          "sourceLocationId": {
-            "pattern": "^-?(?:0|[1-9]\\d*)$",
-            "type": [
-              "integer",
-              "string"
-            ],
-            "description": "Source-location id from the `SourceLocationGenerator` (#302) — non-zero when the event was emitted via an\r\nintercepted `BeginXxx` call that baked in the literal site id. Resolves through\r\n`RuntimeSourceLocationManifest` to file + line on the consumer side.",
-            "format": "uint16"
-          }
-        },
-        "description": "Generated DTO for `WriteTickFenceSpatial` trace events. Wire format mirrors the encoder partial."
-      },
       "TraceEventDtoWriteTickFenceTableEventDto": {
         "properties": {
           "kind": {
@@ -32628,6 +32997,15 @@
       "TransactionRollbackReason": {
         "type": "integer"
       },
+      "WatchRequest": {
+        "type": "object",
+        "properties": {
+          "cherryPick": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
       "WorkbenchOptions": {
         "type": "object",
         "properties": {
@@ -32724,6 +33102,9 @@
     },
     {
       "name": "QueryConsole"
+    },
+    {
+      "name": "Realms"
     },
     {
       "name": "Schema"

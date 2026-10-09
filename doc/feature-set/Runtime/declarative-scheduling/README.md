@@ -45,7 +45,7 @@ the DAG gets *built* changed.
 - `.After()` / `.Before()` remain as the escape hatch for non-access ordering constraints, and as the
   required disambiguation tool for an intentional same-phase `W×W`.
 - An opt-in runtime check (`Typhon:Checks:DeclaredAccess`, off by default in every build) asserts every
-  `EntityRefMut.Write<T>()` against the executing system's declared `Writes`/`SideWrites` set; off, the JIT
+  `EntityRefMut.Set<T>()` against the executing system's declared `Writes`/`SideWrites` set; off, the JIT
   folds the gate away — zero overhead.
 - This is declaration, not inference — Typhon never inspects a system body to detect its actual
   reads/writes. An undeclared access is simply invisible to the scheduler (and, with the check on, only the

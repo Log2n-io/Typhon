@@ -73,17 +73,28 @@ public record PredicateNodeDto(
     object Value);
 
 /// <summary>
-/// Spatial clause — one entry per <c>SPATIAL</c> stage. Phase 1: parser stores; compiler does not yet emit
-/// <c>EcsQuery.WhereNearby/WhereInAABB/WhereRay</c> calls (those land in a later phase per design §13).
+/// Spatial clause — one entry per <c>SPATIAL</c> stage.
 /// </summary>
 /// <param name="Component">Component with <c>[SpatialIndex]</c> the spatial query targets.</param>
 /// <param name="Kind"><c>"nearby"</c> (sphere), <c>"aabb"</c> (axis-aligned box), or <c>"ray"</c>.</param>
 /// <param name="Parameters">Kind-dependent: nearby = <c>[cx, cy, cz, r]</c>; aabb = <c>[minX, minY, minZ, maxX, maxY, maxZ]</c>;
 /// ray = <c>[ox, oy, oz, dx, dy, dz, maxDist]</c>.</param>
+/// <param name="Realm">
+/// Which realm the predicate evaluates in (<c>IN REALM &lt;n&gt;</c>), or <see langword="null"/> for none named.
+/// </param>
+/// <remarks>
+/// <b><paramref name="Realm"/> is not optional on a database that holds realms, and that is a behaviour change (#1083).</b>
+/// <c>EcsQuery.InRealm</c>'s own documentation reads "Realm 0 when never called", so every SPATIAL query the Console has
+/// ever run was scoped to realm 0 — silently, with no error and no hint. A developer debugging a dungeon got an empty
+/// result set and no reason. The compiler now refuses a realm-less spatial query against a multi-realm database rather
+/// than answering the wrong world, which is the direction the engine's own <c>CheckRealmScope</c> guard already takes
+/// for the mirror case. A single-realm database is unaffected: there is only one realm to mean.
+/// </remarks>
 public record SpatialClauseDto(
     string Component,
     string Kind,
-    double[] Parameters);
+    double[] Parameters,
+    int? Realm = null);
 
 /// <summary>
 /// Cross-archetype navigation clause — one entry per <c>NAVIGATE</c> stage. Phase 1: parser stores; compiler does not

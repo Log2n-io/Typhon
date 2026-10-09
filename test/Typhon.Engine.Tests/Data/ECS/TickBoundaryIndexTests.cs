@@ -112,7 +112,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Mutate Category 10 → 20
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(20, 200);
+            tx.OpenMut(id).Set(comp, new TbSvData(20, 200));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -146,12 +146,12 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Two mutations same tick: 1 → 5 → 9
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(5, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(5, 0));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(9, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(9, 0));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -181,7 +181,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Mutate same tick (no WriteTickFence between)
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(200, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(200, 0));
             tx.Commit();
         }
         dbe.WriteTickFence(1);
@@ -239,7 +239,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Mutate then destroy — same tick
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(88, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(88, 0));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
@@ -274,7 +274,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Write same Category, only Value changes
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(55, 999);
+            tx.OpenMut(id).Set(comp, new TbSvData(55, 999));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -305,7 +305,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Entity 1: mutate (1 → 10), Entity 2: unchanged, Entity 3: destroyed
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id1).Write(comp) = new TbSvData(10, 0);
+            tx.OpenMut(id1).Set(comp, new TbSvData(10, 0));
             tx.Commit();
         }
         using (var tx = dbe.CreateQuickTransaction())
@@ -342,7 +342,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Tick 2: 1 → 2
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(2, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(2, 0));
             tx.Commit();
         }
         dbe.WriteTickFence(2);
@@ -350,7 +350,7 @@ class TickBoundaryIndexTests : TestBase<TickBoundaryIndexTests>
         // Tick 3: 2 → 3
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(id).Write(comp) = new TbSvData(3, 0);
+            tx.OpenMut(id).Set(comp, new TbSvData(3, 0));
             tx.Commit();
         }
         dbe.WriteTickFence(3);

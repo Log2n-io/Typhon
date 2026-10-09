@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Buffers;
 using System.Net.WebSockets;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Engine;
@@ -15,7 +16,8 @@ using Typhon.Protocol;
 namespace Typhon.Subscriptions.AspNetCore;
 
 /// <summary>
-/// The browser's door: <c>AddTyphonSubscriptions</c>, <c>MapTyphonSubscriptions</c> and <c>MapTyphonCatalog</c>.
+/// The browser's door: <c>AddTyphonSubscriptions</c>, <c>MapTyphonSubscriptions</c>, <c>MapTyphonCatalog</c> — and the operator's,
+/// <c>MapTyphonStats</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -96,6 +98,145 @@ public static class TyphonSubscriptionsEndpoints
             http.Response.ContentType = "application/json; charset=utf-8";
             await http.Response.Body.WriteAsync(catalog, http.RequestAborted).ConfigureAwait(false);
         }).WithDisplayName("Typhon catalog");
+    }
+
+    /// <summary>
+    /// Maps the operator stats endpoint: the numbers <c>08-hosting.md § 7</c> specifies — tick p50/p99 against the target, overruns, per-system µs,
+    /// entities per archetype, CCU, outbound bytes, and compute versus durability wait.
+    /// </summary>
+    /// <param name="endpoints">The host's endpoint builder.</param>
+    /// <param name="pattern">The route. Defaults to <c>/typhon/stats.json</c>, beside the catalog.</param>
+    /// <returns>The endpoint, for chaining conventions.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why an HTTP surface for numbers that already cross the wire.</b> The same figures reach subscribing game clients in the <c>STATS</c> block once a
+    /// second — and reached nothing else, because the encoder's values live in a private array whose only exit is a frame. So the answer to "is the tick
+    /// overrunning on the box I just deployed?" required writing a subscription client. This is a <c>curl</c>.
+    /// </para>
+    /// <para>
+    /// <b>It answers with replication off.</b> <see cref="TyphonRuntime.ReadStats"/> reads the telemetry ring and the engine directly rather than the
+    /// encoder, so an engine with no sessions — or whose application declared no metrics of its own — still reports its tick, its systems and its durability
+    /// wait. The session figures are zero there and <c>replication.running</c> says why.
+    /// </para>
+    /// <para>
+    /// <b>No authentication, so do not expose it to the internet unfiltered.</b> It publishes system names, archetype names and entity counts: a useful map
+    /// of the running server for anyone who asks. Behind a reverse proxy, restrict it as you restrict an admin route; the design's public deployment puts it
+    /// behind a 1 s edge cache and a static page rather than serving it raw.
+    /// </para>
+    /// <para>
+    /// Written straight to the response with a <see cref="Utf8JsonWriter"/>: no DTO graph, no serializer reflection, and nothing for a trimmer or an AOT
+    /// publish to lose. <c>503</c> before the runtime is registered, which is the honest answer while the host is still starting.
+    /// </para>
+    /// </remarks>
+    public static IEndpointConventionBuilder MapTyphonStats(this IEndpointRouteBuilder endpoints, string pattern = "/typhon/stats.json")
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+
+        return endpoints.MapGet(pattern, static async (HttpContext http) =>
+        {
+            var runtime = http.RequestServices.GetService<TyphonRuntime>();
+            if (runtime == null)
+            {
+                http.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+
+            var stats = runtime.ReadStats();
+            http.Response.ContentType = "application/json; charset=utf-8";
+            // No-store rather than a max-age: the point of the endpoint is what the engine is doing NOW, and the design puts the 1 s cache at the edge
+            // where it can be reasoned about, not in a header every intermediary interprets its own way.
+            http.Response.Headers.CacheControl = "no-store";
+
+            await using var writer = new Utf8JsonWriter(http.Response.Body);
+            writer.WriteStartObject();
+
+            writer.WriteNumber("tick"u8, stats.Tick);
+            writer.WriteNumber("ticksInWindow"u8, stats.TicksInWindow);
+
+            writer.WriteStartObject("tickMs"u8);
+            writer.WriteNumber("target"u8, stats.TargetTickMs);
+            writer.WriteNumber("p50"u8, stats.TickP50Ms);
+            writer.WriteNumber("p99"u8, stats.TickP99Ms);
+            writer.WriteNumber("overruns"u8, stats.Overruns);
+            // Beside `overruns` because it is what makes that count readable: the count is measured against `target`, the 1x rate, so while the multiplier is
+            // above 1 it includes ticks doing exactly what the overload manager told them to. Rising overruns at multiplier 1 is the engine falling behind;
+            // rising overruns with a rising multiplier is load being shed. See RuntimeStatsSnapshot.Overruns.
+            writer.WriteNumber("multiplier"u8, stats.TickMultiplier);
+            writer.WriteEndObject();
+
+            // Beside the tick, because the pair IS the reading: 12 ms of tick with 9 of it here is a disk problem, and the same 12 with 0.2 here is not.
+            writer.WriteStartObject("durabilityMs"u8);
+            writer.WriteNumber("waitP99"u8, stats.DurabilityWaitP99Ms);
+            writer.WriteEndObject();
+
+            writer.WriteStartObject("replication"u8);
+            // A count, not a flag: a subscriptions runtime exists on every started engine, so "running" would be true on a server that replicates nothing.
+            writer.WriteNumber("archetypes"u8, stats.ReplicatedArchetypes);
+            writer.WriteNumber("sessions"u8, stats.Sessions);
+            // Cumulative on purpose: a rate computed server-side would be a rate over a window the caller did not choose. Two reads give the caller theirs.
+            writer.WriteNumber("outBytesTotal"u8, stats.NetOutBytesTotal);
+            writer.WriteNumber("trackP99Ms"u8, stats.ReplicationTrackP99Ms);
+            // Beside trackP99Ms and a different quantity: that percentile covers the whole stage, most of which is chunks on worker threads, while this is the
+            // part no second core can help with. Cumulative with its own denominator, because the ticks the stage was BUSY are not the ticks the engine ran.
+            // Both zero unless the engine was started with phase timing on.
+            writer.WriteNumber("prologueMsTotal"u8, stats.ReplicationPrologueMsTotal);
+            writer.WriteNumber("prologueTicks"u8, stats.ReplicationPrologueTicks);
+            // Realms visited by a serial per-realm stage, cumulative: eight per tick, each adding the realms SERVED. Held against the realms[] rows below, this
+            // is what says whether the tick's realm cost follows what is served or what is merely registered (Realms D-7).
+            writer.WriteNumber("realmPassSteps"u8, stats.RealmPassSteps);
+            // Beside realmPassSteps although it is the realm table's and not replication's: the two are read as a ratio — serial passes against registry
+            // walks — and a client computing it should not have to reach into two objects for the pair.
+            writer.WriteNumber("realmPolicyEvaluations"u8, stats.RealmPolicyEvaluations);
+            writer.WriteEndObject();
+
+            writer.WriteStartArray("systems"u8);
+            foreach (var system in stats.Systems)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name"u8, system.Name);
+                writer.WriteNumber("meanUs"u8, system.MeanUs);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+
+            writer.WriteStartArray("archetypes"u8);
+            foreach (var archetype in stats.Archetypes)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("name"u8, archetype.Name);
+                writer.WriteNumber("entities"u8, archetype.Entities);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+
+            // One row per REGISTERED realm, not per served one: at scale most realms are empty, and "served": false is how a reader tells a realm that cost
+            // nothing from a realm that is simply not in the list. The work figures are cumulative for the same reason the bytes above are.
+            writer.WriteStartArray("realms"u8);
+            foreach (var realm in stats.Realms)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("id"u8, realm.Realm);
+                writer.WriteNumber("generation"u8, realm.Generation);
+                writer.WriteString("kind"u8, realm.Kind);
+                writer.WriteString("state"u8, realm.State.ToString());
+                writer.WriteBoolean("served"u8, realm.Served);
+                writer.WriteNumber("divisor"u8, realm.Divisor);
+                writer.WriteNumber("sessions"u8, realm.Sessions);
+                writer.WriteNumber("enters"u8, realm.Enters);
+                writer.WriteNumber("updates"u8, realm.Updates);
+                writer.WriteNumber("leaves"u8, realm.Leaves);
+                writer.WriteNumber("cellsDelivered"u8, realm.CellsDelivered);
+                writer.WriteNumber("resets"u8, realm.Resets);
+                writer.WriteNumber("events"u8, realm.Events);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+            await writer.FlushAsync(http.RequestAborted).ConfigureAwait(false);
+        }).WithDisplayName("Typhon stats");
     }
 
     private static async Task HandleAsync(HttpContext http)

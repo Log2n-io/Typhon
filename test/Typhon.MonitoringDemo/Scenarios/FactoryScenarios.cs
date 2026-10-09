@@ -173,10 +173,12 @@ public class FactoryProductionScenario : IScenario
                             {
                                 var hopper = entity.Read(HarvesterArch.Hopper);
                                 var mut = t.OpenMut(id);
-                                ref var wm = ref mut.Write(HarvesterArch.Maintenance);
+                                var wm = mut.Read(HarvesterArch.Maintenance);
                                 wm.PaidUntil = localRand.Next();
-                                ref var wh = ref mut.Write(HarvesterArch.Hopper);
+                                mut.Set(HarvesterArch.Maintenance, wm);
+                                var wh = mut.Read(HarvesterArch.Hopper);
                                 wh.Amount = Math.Max(0, hopper.Amount + localRand.Next(-50, 100));
+                                mut.Set(HarvesterArch.Hopper, wh);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -187,8 +189,10 @@ public class FactoryProductionScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var power = entity.Read(FactoryArch.Power);
-                                ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                var target = t.OpenMut(id);
+                                var wp = target.Read(FactoryArch.Power);
                                 wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-500, 1000));
+                                target.Set(FactoryArch.Power, wp);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -313,8 +317,10 @@ public class FactorySupplyChainScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var hopper = entity.Read(HarvesterArch.Hopper);
-                                ref var wh = ref t.OpenMut(id).Write(HarvesterArch.Hopper);
+                                var target = t.OpenMut(id);
+                                var wh = target.Read(HarvesterArch.Hopper);
                                 wh.Amount = Math.Max(0, hopper.Amount + localRand.Next(-30, 50));
+                                target.Set(HarvesterArch.Hopper, wh);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }
@@ -335,8 +341,10 @@ public class FactorySupplyChainScenario : IScenario
                             if (t.TryOpen(id, out var entity))
                             {
                                 var power = entity.Read(FactoryArch.Power);
-                                ref var wp = ref t.OpenMut(id).Write(FactoryArch.Power);
+                                var opened = t.OpenMut(id);
+                                var wp = opened.Read(FactoryArch.Power);
                                 wp.CreditsRemaining = Math.Max(0, power.CreditsRemaining + localRand.Next(-100, 200));
+                                opened.Set(FactoryArch.Power, wp);
                                 stats.RecordSuccess((Stopwatch.GetTimestamp() - sw) * 1_000_000 / Stopwatch.Frequency);
                             }
                         }

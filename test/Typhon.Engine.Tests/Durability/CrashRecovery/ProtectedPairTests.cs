@@ -156,7 +156,7 @@ public class ProtectedPairTests : AllocatorTestBase
         {
             length += 2;
             var cs = _mmf.CreateChangeSet();
-            seg.Grow(length, true, cs);
+            seg.Grow(length, cs);
             cs.SaveChanges();                                     // each grow rewrites the root directory → one protected-pair persist to the alternate slot
         }
 

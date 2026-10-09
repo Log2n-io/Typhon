@@ -1829,7 +1829,7 @@ internal sealed class DifferentialRecoveryOracleTests
             var e = read.Open(id);
             Assert.That(e.IsEnabled(EcsUnit.Velocity), Is.True, "the mid-life enable must be recovered");
 
-            ref readonly var vr = ref e.Read(EcsUnit.Velocity);
+            var vr = e.Read(EcsUnit.Velocity);
             Assert.That(vr.Dx, Is.EqualTo(61f), "the mid-life supplied value must survive the crash");
         }
 
@@ -1842,7 +1842,7 @@ internal sealed class DifferentialRecoveryOracleTests
             reopened.InitializeArchetypes();
 
             using var read = reopened.CreateQuickTransaction();
-            ref readonly var vr = ref read.Open(id).Read(EcsUnit.Velocity);
+            var vr = read.Open(id).Read(EcsUnit.Velocity);
             Assert.That(vr.Dx, Is.EqualTo(61f),
                 "recovery must have CREATED the revision chain, not just written the SoA HEAD — a rootless HEAD is rebuilt back to zero on the next open");
         }

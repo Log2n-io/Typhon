@@ -48,8 +48,9 @@ class MovementSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);
-            ref var pos = ref entity.Write(Unit.Position);
+            var pos = entity.Read(Unit.Position);
             pos.X += entity.Read(Unit.Velocity).X * ctx.DeltaTime;
+            entity.Set(Unit.Position, pos);
         }
     }
 }
@@ -87,7 +88,7 @@ class RenderSystem : QuerySystem
 - `SideWrites<T>()` (writes via a `DurabilityMode.Immediate` side-transaction) is surfaced to tooling
   but intentionally does **not** participate in scheduler ordering.
 - An opt-in check (`SystemAccessValidator`, `Typhon:Checks:DeclaredAccess`) throws `InvalidAccessException` when
-  `EntityRefMut.Write<T>()` runs from a system that didn't declare `Writes<T>`/`SideWrites<T>` — silently skipped
+  `EntityRefMut.Set<T>()` runs from a system that didn't declare `Writes<T>`/`SideWrites<T>` — silently skipped
   for systems with zero declarations (migration window) and folded away by the JIT when the check is off.
 - Conflict checks consult only direct `.After()`/`.Before()` adjacency, not transitive reachability —
   a chain `A.Before(B).Before(C)` does not implicitly resolve an `A`/`C` write conflict; each pair

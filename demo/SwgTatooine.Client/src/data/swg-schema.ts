@@ -101,8 +101,6 @@ export const POSITION_QUANTUM_M = 16384 / (1 << 24);
 /** Velocity quantum: 1/16 of a position quantum per tick. */
 export const VELOCITY_QUANTUM_M = POSITION_QUANTUM_M / 16;
 
-export const ARCHETYPE_LABELS: readonly string[] = ['Structure', 'Lair', 'Creature', 'City NPC', 'Player'];
-
 export const AI_MODE_NAMES: readonly string[] = ['Idle', 'Wander', 'Pursue', 'Fighting', 'Leashing', 'Dead'];
 export const AiMode = { Idle: 0, Wander: 1, Pursue: 2, Fighting: 3, Leashing: 4, Dead: 5 } as const;
 

@@ -326,7 +326,7 @@ internal sealed class TrueCrashE2ETests
                 for (int i = 0; i < count; i++)
                 {
                     using var tx = uow.CreateTransaction();
-                    tx.OpenMut(entityIds[i]).Write(CompAArch.A) = new CompA(i + 1000, i + 0.5f, i + 0.25); // V1 (post-spawn update)
+                    tx.OpenMut(entityIds[i]).Set(CompAArch.A, new CompA(i + 1000, i + 0.5f, i + 0.25)); // V1 (post-spawn update)
                     tx.Commit();
                 }
 
@@ -416,7 +416,7 @@ internal sealed class TrueCrashE2ETests
                         tx.Destroy(id);
                         break;
                     case PausedOp.Update:
-                        tx.OpenMut(id).Write(CompAArch.A) = updated;
+                        tx.OpenMut(id).Set(CompAArch.A, updated);
                         break;
                     case PausedOp.Spawn:
                         var comp = new CompA(7, 7.5f, 7.25);
@@ -713,7 +713,7 @@ internal sealed class TrueCrashE2ETests
 
         using var tx = dbe.CreateQuickTransaction();
         Assert.That(tx.IsAlive(good), Is.True);
-        ref readonly var read = ref tx.Open(good).Read(CompAArch.A);
+        var read = tx.Open(good).Read(CompAArch.A);
         Assert.That(read.A, Is.EqualTo(42), "value recovered at the durable slot");
         Assert.That(read.B, Is.EqualTo(1.5f));
         Assert.That(read.C, Is.EqualTo(2.5));

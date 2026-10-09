@@ -1,4 +1,5 @@
 import '@babylonjs/core/Meshes/thinInstanceMesh';
+import { useChat } from '../state/chat-store';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial';
 import { Vector2 } from '@babylonjs/core/Maths/math.vector';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
@@ -7,6 +8,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import { archetypeOf, evaluateSlot, MAX_MOTION_STRIDE, NOT_FOUND, slotOf, type WorldStore } from '@typhondb/client';
 import type { EventSink } from '../data/source';
 import type { FrameView } from './entity-layer';
+import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { LINE_FRAGMENT, LINE_VERTEX } from './shaders';
@@ -43,10 +45,19 @@ export class AttackLines implements EventSink {
   private readonly mesh: Mesh;
   private readonly material: ShaderMaterial;
   private readonly ends = new Float32Array(INSTANCES * 4);
-  /** Per instance: alpha, and 0 for a line or ±MARKER_PX for one diagonal of a marker. */
+  /**
+   * Per instance: each end's altitude — the entity's own (0 in a flat realm, CLI3D-04) plus the ground under it.
+   *
+   * Readable because it is the only place the grounding of a line's ends is observable without a GPU, and a line drawn at
+   * sea level over a 130 m mesa is exactly the defect worth a test.
+   */
+  readonly heights = new Float32Array(INSTANCES * 2);
   private readonly styles = new Float32Array(INSTANCES * 2);
   private readonly endsUploader = new PrefixUploader(this.ends, 4);
+  private readonly heightsUploader = new PrefixUploader(this.heights, 2);
   private readonly stylesUploader = new PrefixUploader(this.styles, 2);
+  /** The one reader that knows where altitude sits for a 2- or 3-axis store. */
+  private readonly placement = new Placement();
   private readonly endpoint = new Float64Array(MAX_MOTION_STRIDE);
   private readonly viewport = new Vector2(1, 1);
   private world: WorldStore | null = null;
@@ -62,6 +73,7 @@ export class AttackLines implements EventSink {
     mesh.isPickable = false;
     mesh.renderingGroupId = SCENE_GROUP;
     mesh.thinInstanceSetBuffer('lineEnds', this.ends, 4, false);
+    mesh.thinInstanceSetBuffer('lineHeights', this.heights, 2, false);
     mesh.thinInstanceSetBuffer('lineStyle', this.styles, 2, false);
     this.mesh = mesh;
 
@@ -70,7 +82,7 @@ export class AttackLines implements EventSink {
       scene,
       { vertexSource: LINE_VERTEX, fragmentSource: LINE_FRAGMENT },
       {
-        attributes: ['position', 'lineEnds', 'lineStyle'],
+        attributes: ['position', 'lineEnds', 'lineHeights', 'lineStyle'],
         uniforms: ['viewProjection', 'uViewport', 'uWidth', 'uHeight'],
         needAlphaBlending: true,
       },
@@ -89,6 +101,18 @@ export class AttackLines implements EventSink {
     this.count = 0;
     this.head = 0;
     this.setCount(0, 0);
+  }
+
+  /**
+   * Something said within earshot (SWG-09). It is not drawn as a line — it goes to the chat panel — but this is the
+   * object the app hands the source as its `EventSink`, so the routing of both events lands here.
+   */
+  onChat(tick: number, speakerNetId: number, text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+
+    useChat.getState().say({ tick, speaker: speakerNetId, text, atMs: performance.now() });
   }
 
   onAttack(tick: number, attackerNetId: number, targetNetId: number): void {
@@ -132,15 +156,17 @@ export class AttackLines implements EventSink {
       const alpha = 1 - age / LIFETIME_TICKS;
       const hasAttacker = this.resolve(world, this.attackers[e], view);
       const ax = this.endpoint[0];
-      const az = this.endpoint[1];
+      const ay = this.endpoint[1];
+      const az = this.endpoint[2];
       const hasTarget = this.resolve(world, this.targets[e], view);
       if (hasAttacker && hasTarget) {
-        this.write(n++, ax, az, this.endpoint[0], this.endpoint[1], alpha, 0);
+        this.write(n++, ax, ay, az, this.endpoint[0], this.endpoint[1], this.endpoint[2], alpha, 0);
       } else if (hasAttacker || hasTarget) {
         const x = hasTarget ? this.endpoint[0] : ax;
-        const z = hasTarget ? this.endpoint[1] : az;
-        this.write(n++, x, z, x, z, alpha, MARKER_PX);
-        this.write(n++, x, z, x, z, alpha, -MARKER_PX);
+        const y = hasTarget ? this.endpoint[1] : ay;
+        const z = hasTarget ? this.endpoint[2] : az;
+        this.write(n++, x, y, z, x, y, z, alpha, MARKER_PX);
+        this.write(n++, x, y, z, x, y, z, alpha, -MARKER_PX);
       } else {
         continue;
       }
@@ -149,6 +175,7 @@ export class AttackLines implements EventSink {
     }
 
     this.endsUploader.upload(this.mesh.getVertexBuffer('lineEnds')?.getWrapperBuffer() ?? null, n);
+    this.heightsUploader.upload(this.mesh.getVertexBuffer('lineHeights')?.getWrapperBuffer() ?? null, n);
     this.stylesUploader.upload(this.mesh.getVertexBuffer('lineStyle')?.getWrapperBuffer() ?? null, n);
 
     this.viewport.set(view.viewportWidth, view.viewportHeight);
@@ -161,12 +188,24 @@ export class AttackLines implements EventSink {
     this.mesh.dispose();
   }
 
-  private write(i: number, ax: number, az: number, bx: number, bz: number, alpha: number, marker: number): void {
+  private write(
+    i: number,
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    alpha: number,
+    marker: number,
+  ): void {
     const b = i * 4;
     this.ends[b] = ax;
     this.ends[b + 1] = az;
     this.ends[b + 2] = bx;
     this.ends[b + 3] = bz;
+    this.heights[i * 2] = ay;
+    this.heights[i * 2 + 1] = by;
     this.styles[i * 2] = alpha;
     this.styles[i * 2 + 1] = marker;
   }
@@ -182,16 +221,14 @@ export class AttackLines implements EventSink {
       return false;
     }
 
-    evaluateSlot(
-      world.archetypeStore(archetypeOf(location)),
-      slotOf(location),
-      view.renderTick,
-      view.renderFrac,
-      this.endpoint,
-      0,
-    );
-    this.endpoint[0] = this.endpoint[0] - view.originX;
-    this.endpoint[1] = this.endpoint[1] - view.originZ;
+    const store = world.archetypeStore(archetypeOf(location));
+    evaluateSlot(store, slotOf(location), view.renderTick, view.renderFrac, this.endpoint, 0);
+
+    // Rewritten in place as (x, y, z) in render space: the caller reads three.
+    const at = this.placement.read(store.dims, this.endpoint, 0);
+    this.endpoint[0] = at.x - view.originX;
+    this.endpoint[1] = altitudeOf(altitudeField(store), slotOf(location), at, view.ground);
+    this.endpoint[2] = at.z - view.originZ;
     return true;
   }
 

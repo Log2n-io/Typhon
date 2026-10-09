@@ -6,6 +6,7 @@ import type { SpatialClauseDto } from '@/api/generated/model/spatialClauseDto';
 import { useArchetypeComponents } from '@/hooks/queryConsole/useArchetypeComponents';
 import { useComponentNames } from '@/hooks/queryConsole/useComponentNames';
 import { humpFilter } from '@/shell/camelHumpFilter';
+import { realmLabel, type Realm } from '@/hooks/realms/types';
 
 /**
  * SPATIAL chip (#386). A single spatial constraint: pick a `[SpatialIndex]` component (picker filtered via the
@@ -33,14 +34,28 @@ function zeros(kind: SpatialKind): number[] {
   return KIND_FIELDS[kind].map(() => 0);
 }
 
+/**
+ * The SPATIAL clause editor.
+ *
+ * <b>Realms arrive as props rather than from a hook, and that is deliberate.</b> This is a leaf editor: giving it its
+ * own network dependency would make every one of its tests need a QueryClient to assert that a number input updates one
+ * index. The panel that owns the spec already has the session context, so it fetches and passes down — which also keeps
+ * the realm list and the scope that seeds it resolved in one place instead of two.
+ */
 export function SpatialChip({
   value,
   archetype,
   onChange,
+  realms = [],
+  scopedRealm = null,
 }: {
   value: SpatialClauseDto | null;
   archetype: string | null | undefined;
   onChange: (next: SpatialClauseDto | null) => void;
+  /** Realms this database holds, for the IN REALM picker. Empty on a single-world database, which hides the control. */
+  realms?: readonly Realm[];
+  /** The context bar's realm scope, already through its link toggle — seeds a newly added clause. */
+  scopedRealm?: number | null;
 }) {
   const { label: nameLabel } = useComponentNames();
 
@@ -48,17 +63,19 @@ export function SpatialChip({
     return (
       <AddSpatialPopover
         archetype={archetype}
-        onPick={(component) => onChange({ component, kind: 'nearby', parameters: zeros('nearby') })}
+        onPick={(component) => onChange({ component, kind: 'nearby', parameters: zeros('nearby'), realm: scopedRealm })}
       />
     );
   }
 
   const kind = (value.kind ?? 'nearby') as SpatialKind;
+  const realm = value.realm ?? null;
   const fields = KIND_FIELDS[kind] ?? KIND_FIELDS.nearby;
   const params = fields.map((_, i) => Number(value.parameters?.[i] ?? 0));
 
   const setKind = (k: SpatialKind) => onChange({ ...value, kind: k, parameters: zeros(k) });
   const setParam = (i: number, v: number) => onChange({ ...value, parameters: params.map((p, j) => (j === i ? v : p)) });
+  const setRealm = (r: number | null) => onChange({ ...value, realm: r });
 
   return (
     <span className="inline-flex flex-wrap items-center gap-1 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-xs">
@@ -89,6 +106,28 @@ export function SpatialChip({
           />
         </label>
       ))}
+      {/* IN REALM — required on a database that holds several, because a spatial query naming none is now refused
+          rather than silently answering realm 0 (WB-06). Offered only when there ARE realms to pick, so a single-world
+          database's chip is exactly what it was. Seeded from the context bar's scope, so the scope does the work. */}
+      {realms.length > 1 && (
+        <span className="flex items-center gap-1" title="Which realm the predicate evaluates in">
+          <span className="text-muted-foreground">IN REALM</span>
+          <select
+            value={realm == null ? '' : String(realm)}
+            onChange={(e) => setRealm(e.target.value === '' ? null : Number(e.target.value))}
+            className="bg-transparent text-inherit outline-none"
+            aria-label="Spatial realm"
+          >
+            <option value="">(none)</option>
+            {realms.map((r) => (
+              <option key={r.id} value={String(r.id)}>
+                {realmLabel(r)}
+              </option>
+            ))}
+          </select>
+        </span>
+      )}
+
       <button
         type="button"
         onClick={() => onChange(null)}

@@ -289,6 +289,33 @@ keys.
                 `key < landedLeaf.firstKey`
   verified: BTreeDescentHopAtomicityTests.ParentVersionChangedWhileTakingTheChildVersion_RestartsTheDescent
 
+### IXS-08: A zone map bounds a cluster only after seeing every value the cluster holds `[silent]`
+  invariant ∀ cluster c, ∀ indexed field f with a zone map: state(c) == Bounded → [min, max] covers every value of f in c.
+    The states are Unset (nothing recorded, nothing unseen), Bounded, and Unknown (c may hold values the map never saw)
+  invariant every widen form (Widen, WidenInto, WidenMasked, WidenMaskedInto) leaves Unknown unchanged; only a recompute
+    (Recompute, RecomputeInto), which reads every occupied slot, takes a cluster out of Unknown. MayContain answers yes for every
+    state but Bounded
+  invariant zone maps are not persisted and no open path scans the data to rebuild them, so the end of every open marks each
+    cluster that holds entities Unknown, in the persistent and the Transient index homes alike — after the load, the
+    schema-migration rebuild (RebuildClusterFromChains) and WAL replay (RecoveryApplier), which all fill clusters without
+    widening. Marking where the maps are built (InitializeIndexes) is too early: the last two run after it
+  invariant State publishes a cluster's bounds to the lock-free readers: a writer stores Mins/Maxs first and Bounded last with
+    release; MayContain and TryGetBounds acquire State before reading them — on arm64 a plain pair lets a reader see Bounded
+    over bounds not yet written
+  rationale: "no bounds" was one state meaning both "nothing here yet" and "never seen". Every widen took it for the first, so
+    the first update after a reopen recorded [newValue, newValue] over a cluster holding dozens of other values, and Path B
+    pruned the cluster for all of them. Without a runtime no fence recomputed it, so the rows stayed hidden for the session (#1151)
+  scope: ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.WidenMasked, ZoneMapArray.WidenMaskedInto, ZoneMapArray.MarkUnknown,
+    ZoneMapArray.MayContain, ZoneMapArray.RecomputeInto, ArchetypeClusterState.MarkActiveClustersZoneMapsUnknown,
+    DatabaseEngine.InitializeArchetypes
+  on_violation: rows silently missing from Path-B scans — `WhereField` equality or a range that excludes the widened value —
+    while the B+Tree is intact and every structural validator passes; forcing Path A finds them. Measured: one update after a
+    reopen hid 63 of 200 entities (a whole 64-slot cluster minus the updated one), and the same after a crash recovery
+  verified: ZoneMapUnseenClusterTests.Widen_OnAClusterItHasNotSeen_LeavesItUnbounded (class),
+            ZoneMapUnseenClusterTests.AfterAReopen_UpdatingOneIndexedField_KeepsEveryClusterMateFindable (engine, Path B forced),
+            ZoneMapUnseenClusterRecoveryTests.AfterACrashRecovery_UpdatingOneIndexedField_KeepsEveryClusterMateFindable [VerifiesRule];
+            mutant ZoneMapUnseenClusterTests.Widen_OnAnUnseenClusterLeftUnmarked_PrunesTheValuesItHolds [RuleMutant]
+
 ---
 
 ## Module: IXW — Index writes under OLC
@@ -473,6 +500,10 @@ written for the read path; these are the write-path obligations that went unwrit
         optimistic descent and this rule closes it for the pessimistic one
   never an unbounded retry around the authority test — it is a STATE test, and a stale separator nobody fixes would spin forever (IXW-01); the loop is
         bounded by `MaxPessimisticRestarts` and throws, as `RemoveIterative`'s `RemoveLeafNotAuthoritative` bail does
+  never an optimistic `MoveValue` path that bails to the pessimistic path after its first storage write — a full leaf that must take a new key is
+        decided before the element leaves its buffer. Decided after, and undone by appending the element back, it moved the element to the
+        buffer's tail chunk: the pessimistic retry, holding the old element id, found nothing and dropped the move, the entity under its old key
+        for good (#1232; `OwnerIndexChurnTests.MovesThatEachCreateAKey_FillingTheLeaf_LoseNoEntry` [VerifiesRule] — the 19th key lost its item)
   never an optimistic `MoveValue` path taking an entry out of a leaf that would underflow — when the move empties the old buffer and no entry comes in
         (two-leaf always; same-leaf when the new key already exists) it bails to the pessimistic path BEFORE any storage write, as `Move` always did;
         without that the two-leaf path left EMPTY leaves linked in the chain, which `CheckConsistency` reports and the census cannot see
@@ -527,3 +558,41 @@ written for the read path; these are the write-path obligations that went unwrit
             `Mutant_AnElementRemovedBehindTheCensus_IsReported` shows the census detects the loss shape rather than passing vacuously.
   requires IXW-04 (the leaf-authority proof both paths take, and which says nothing about the buffer behind the entry)
 
+### IXW-07: A writer never allocates storage while it holds a node or bucket latch `[fatal]`
+  invariant every chunk a B+Tree split, or an entity-map append, bulk append or bucket split, writes under its latches is reserved before the first
+            latch is taken (`ChunkReservation.Fill`, which grows to the exact need), its page pinned until the writer ends; under a latch
+            `ChunkReservation.AllocateUnderLatch` hands out reserved chunks — anything else is counted (`UnreservedAllocations`). A bucket split's
+            new bucket is its own address (EMAP-01): claimed before any latch, and an overflow chunk moved out of it lands in a chunk reserved
+            before its owner is latched
+  invariant a writer that finds its reservation short under its latches releases every one and reserves before it latches again; a fault under an
+            entity-map bucket lock releases the lock — with a version bump once anything may have been written (an upsert's in-place update, an
+            append, a bulk run's entries, a split's rewrite), without one only when nothing was
+  never `AllocateChunk`, a segment grow, or a page fault for a chunk being written, between a latch's acquisition and its release
+  scope: ChunkReservation, BTree.AllocNode, BTree.InsertIterative, BTree.AddOrUpdateCorePessimistic, RawValuePagedHashMap.AppendUnderBucketLock,
+         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.ClaimBucketChunk
+  on_violation: an allocation can grow the segment — up to 1 024 pages — and wait seconds on page-cache back-pressure, or throw. Waiting, it holds
+                every writer of the node or bucket: the B+Tree's waiters exhaust their bounded retries and report a liveness defect (IXW-01), two workers
+                in one MarketHardeningTests storm. Throwing, it leaves the latch held for good: an entity-map bucket nobody would unlock froze a storm at
+                175 623 operations, and the test's teardown then freed the engine under the spinning writer (AccessViolationException)
+  note: an `AllowMultiple` index still allocates its VSBS buffers under the leaf latch, which IXW-06 makes the only place the buffer may be touched;
+        not covered here. Nor is the generic `PagedHashMap<TKey, TValue, TStore>`, used only by tests and benchmarks, which still allocates under its
+        bucket latches
+  verified: LatchFreeAllocationTests [VerifiesRule] — 20 000 inserts that split a B+Tree, and chain and split an entity map, allocate nothing under
+            a latch (713 and 6 467 allocations when the reservation is ignored); after an injected allocation fault a scan and further writes
+            complete. With the code before the reservation, the map's scan spins until the 15 s guard and the tree's next insert reports IXW-01
+            ("made no progress in 10000 pessimistic retries") — the hardening signature, reproduced. A split of a chain longer than the initial
+            reservation allocates nothing under its lock (with the reservation capped at 64 it did); a fault in a bulk insert's write phase leaves no
+            bucket locked and the map's count equal to what its buckets hold (without the release, the scan spins until the 15 s guard)
+  requires IXW-01 (the bounded retry that turned a latch held across a slow allocation into that report)
+
+### IXW-08: A value buffer's append cursor stays in its chain `[fatal]` `[silent]`
+  invariant a multi-value buffer's append cursor — `FirstStoredChunkId`, where `AddElement` appends without walking the chain — is always a chunk of
+            its storage chain: a reader that unlinks the empty chunks it walks past (`VariableSizedBufferAccessor.NextChunk`) never unlinks the cursor,
+            however empty it is
+  scope: VariableSizedBufferAccessor.NextChunk, VariableSizedBufferSegment.AddElement
+  on_violation: the cursor, unlinked and parked on the buffer's free list (or freed to the segment), keeps receiving appends: every element appended
+                after the walk is in a chunk no walk reaches — an index entry that exists and is never found — and is wiped when AddElement takes the
+                chunk off the free list, or the segment reissues it. Found through MarketHardeningTests' owner index (#1232): a key whose last chunk
+                was emptied, then walked by a reader, lost the next append
+  verified: OwnerIndexChurnTests.AKeyWhoseLastChunkWasEmptied_ThenWalked_FindsWhatIsAppendedNext [VerifiesRule] — move a key's last 1, 2, 8, 32 or
+            100 items out, walk the key, move one back: the key finds it (before the fix, at 100: "finds 300, expected 301")

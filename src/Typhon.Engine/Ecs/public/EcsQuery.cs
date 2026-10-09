@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
@@ -401,7 +402,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     /// <summary>
     /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="EntityAccessor.Open(EntityId)"/> +
-    /// <see cref="EntityRef.TryRead{T}"/>. Multiple Where calls chain as AND (each must pass).
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>. Multiple Where calls chain as AND (each must pass).
     /// </summary>
     /// <remarks>Targeted scan (index-first) is not yet available — always uses broad scan.</remarks>
     public EcsQuery<TArchetype> Where<T>(Func<T, bool> predicate) where T : unmanaged
@@ -554,6 +555,46 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // Spatial predicates
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Guard: the component carries <c>[SpatialIndex]</c>, so there is a tree to query. Unconditional, not strict-mode gated (#897).
+    /// </summary>
+    /// <typeparam name="T">The component named by the spatial predicate.</typeparam>
+    /// <exception cref="InvalidOperationException">The component has no spatial index.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this one is not behind <see cref="CheckConfig.Enabled"/>.</b> That gate exists so a cheap user-facing check costs nothing when off, and
+    /// the bargain it offers is "a diagnostic when strict mode is on, silence when it is off". Here the alternative to the diagnostic is not silence:
+    /// the query dereferences a null index state and the user gets a bare <see cref="NullReferenceException"/> from inside the engine. That reads as an
+    /// engine bug, so it gets filed as one instead of prompting the attribute that was missing. A misleading diagnostic is worse than none, which is
+    /// what makes this check different from the others behind the gate.
+    /// </para>
+    /// <para>
+    /// <b>And it costs nothing measurable.</b> A query builder is constructed once per query, never per entity, so this is one null test on a path that
+    /// already did a dictionary lookup for the component table on the line above.
+    /// </para>
+    /// <para>
+    /// The typed surface, <c>ClusterSpatialQuery&lt;TArch&gt;</c>, has always thrown here and named the fix. This brings the fluent surface to the same
+    /// behaviour rather than inventing one.
+    /// </para>
+    /// </remarks>
+    private readonly void RequireSpatialIndex<T>() where T : unmanaged
+    {
+        if (_spatialTable?.SpatialIndex == null)
+        {
+            ThrowNoSpatialIndex<T>();
+        }
+    }
+
+    /// <summary>Out of line, so the message is not built into every inlined predicate call — the shape <c>ClusterSpatialQuery</c> uses.</summary>
+    /// <typeparam name="T">The component named by the spatial predicate.</typeparam>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNoSpatialIndex<T>() =>
+        throw new InvalidOperationException(
+            $"Component {typeof(T).Name} has no [SpatialIndex], so it cannot answer a spatial predicate "
+            + "(WhereNearby / WhereInAABB / WhereRay / WhereFrustum). Put [SpatialIndex] on the component's AABB or bounding-sphere field, and ensure "
+            + "ConfigureSpatialGrid was called on the engine before InitializeArchetypes.");
+
     /// <summary>Guard: at most one spatial predicate per query — a second call would silently overwrite the first.</summary>
     private readonly void ThrowIfSpatialAlreadySet()
     {
@@ -593,7 +634,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Radius;
         _spatialParams[0] = centerX; _spatialParams[1] = centerY; _spatialParams[2] = centerZ; _spatialParams[3] = radius;
         // Phase 7: ECS:Query:Spatial:Attach instant. queryBox encodes the bounding box of the radius sphere.
@@ -606,7 +647,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.AABB;
         _spatialParams[0] = minX; _spatialParams[1] = minY; _spatialParams[2] = minZ;
         _spatialParams[3] = maxX; _spatialParams[4] = maxY; _spatialParams[5] = maxZ;
@@ -621,7 +662,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Ray;
         _spatialParams[0] = originX; _spatialParams[1] = originY; _spatialParams[2] = originZ;
         _spatialParams[3] = dirX; _spatialParams[4] = dirY; _spatialParams[5] = dirZ; _spatialParams[6] = maxDist;
@@ -666,7 +707,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Frustum;
         _frustumPlanes = planes.ToArray();
         _frustumPlaneCount = planeCount;
@@ -1127,6 +1168,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 allArchetypesIndexOnArchetype = false;
                 break;
             }
+
         }
 
         return allArchetypesIndexOnArchetype ? ExecuteOrderedClustered(plan, evaluators) : ExecuteOrderedViaSortFallback(evaluators, plan);
@@ -1250,7 +1292,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 // No per-stream entry cap: the stream is a live cursor now, so a stream the merge stops consuming stops reading. The cap this used to pass
                 // (skip+take) was the bound on how much each stream drained EAGERLY, and it is what made an ordered Take cost K times what it emitted.
-                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout);
+                // QFENCE-01: the stream re-checks the entities written since the last fence against these evaluators — see ArchetypeSortedStream.
+                streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout,
+                    evaluators, matchSlot.Slot);
             }
 
             if (streamCount == 0)
@@ -1643,7 +1687,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         if (!transientHome)
         {
-            var svAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            var svAccessor = clusterState.ClusterSegment.CreateScanAccessor();
             try
             {
                 ScanClusterSoa(evaluators, clusterState, meta, clusterState.IndexSlots, ixSlotIdx, ref svAccessor, ref svAccessor, ref result);
@@ -1656,7 +1700,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return;
         }
 
-        var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+        var transientAccessor = clusterState.TransientSegment.CreateScanAccessor();
         try
         {
             if (clusterState.ClusterSegment == null)
@@ -1666,7 +1710,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
             else
             {
-                var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+                var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
                 try
                 {
                     ScanClusterSoa(evaluators, clusterState, meta, clusterState.TransientIndexSlots, ixSlotIdx, ref clusterAccessor, ref transientAccessor,
@@ -1740,7 +1784,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
         var visRecordSize = meta._entityRecordSize;
         byte* visBuf = stackalloc byte[visRecordSize];
-        var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+        var visAccessor = visState != null ? visState.EntityMap.Segment.CreateScanAccessor() : default;
         try
         {
             ref var matchSlot = ref ixSlots[ixSlotIdx];
@@ -2028,11 +2072,17 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         ref var primaryField = ref fields[plan.PrimaryFieldIndex];
 
-        // A unique index stores one entry per row, so its fan-out is 1 by construction and the arithmetic below would reject it anyway. Asked explicitly
-        // because it also states the precondition the entry count relies on: only for AllowMultiple is an entry a DISTINCT KEY rather than a row.
+        // A unique index stores one entry per row: fan-out 1, Path A's worst case per key, which the arithmetic below would reject — and only for
+        // AllowMultiple is an entry a DISTINCT KEY rather than a row. What the fan-out rule cannot see is the archetype's SIZE. Path B pays per cluster it
+        // cannot prune, and once the keys are scattered over the clusters that is every cluster however few rows match; the tables below were measured
+        // over 157 clusters, where a full pass is cheap. A range on a unique index bounds its matches exactly — one row per key — so when that bound is far
+        // below the cluster count Path A visits a handful of clusters where Path B reads all of them. MarketHardeningTests made 2 000 point lookups on a
+        // 1 000 000-row archetype, and each read the archetype's whole cluster segment from disk.
         if (!primaryField.AllowMultiple)
         {
-            return false;
+            clusterState.ReadActiveClusterList(out var activeClusters);
+            return KeyRange.MaxKeysInRange(plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax)
+                   <= activeClusters / MinClustersPerUniqueKeyForSelectiveScan;
         }
 
         var distinctKeys = primaryField.Index?.EntryCount ?? 0;
@@ -2114,6 +2164,19 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </para>
     /// </remarks>
     private const int MinFanOutClustersForSelectiveScan = 2;
+
+    /// <summary>
+    /// For a range on a unique index: how many of the archetype's clusters each key the range can hold must stand against before the planner takes the
+    /// selective scan (<see cref="HasFanOutForSelectiveScan"/>).
+    /// </summary>
+    /// <remarks>
+    /// The fan-out-1 cells above set it. Over 157 clusters, a range matching 1 % of the rows (100 keys, strided so zone maps prune nothing) took Path A
+    /// 2.8 times Path B's full pass: about 4.4 cluster passes per key. Eight per key doubles that, so where the rule takes Path A it is not the slower path
+    /// on data the table measured, and it takes it only where Path B's cost — every cluster — dwarfs Path A's: a point lookup qualifies from 8 clusters up.
+    /// Choosing wrong is not symmetric, which is why the margin sits on Path B's side: Path A on a small archetype costs microseconds, Path B on a large
+    /// scattered one reads the whole archetype.
+    /// </remarks>
+    private const int MinClustersPerUniqueKeyForSelectiveScan = 8;
 
     /// <summary>
     /// Find the per-archetype index slot that owns <see cref="_whereComponentTable"/>, in EITHER index home. Returns an index into
@@ -2218,7 +2281,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             // Gated on the planner vouching for the range rather than assumed from the op, because ComputeBounds widens in four cases and each would turn a
             // skipped evaluator into wrong rows: NotEqual, strict inequalities on floating types, integer inequalities saturating at the type extent, and NaN
             // thresholds. int.MinValue is the "matches nothing" sentinel — FieldIndex is never negative.
+            //
+            // QFENCE-01: the tree vouches only for entities it is current for. A slot whose index the tick fence maintains keeps its pre-write key until the
+            // fence moves it, so an entity written since the last fence — its bit set in the shadow bitmap before the write lands — may sit under a key its
+            // value has left. For those entities (fenceDirty below) the skipped evaluator runs after all, so a stale key never returns a row whose value no
+            // longer matches. An entity whose NEW value matches is not looked for: the tree cannot find it until the fence, and checking every entity
+            // written since would cost each query in proportion to the tick's writes. The bitmap is skipped whole unless this component was written since.
             var enforcedByScanFieldIndex = plan.PrimaryRangeAdmitsOnlyMatches ? plan.PrimaryFieldIndex : int.MinValue;
+            var shadowBitmap = enforcedByScanFieldIndex >= 0 && clusterState.MayHaveFenceStaleKeys(compSlot) ? clusterState.ClusterShadowBitmap : null;
 
             // Pre-determine SIMD eligibility for each evaluator (once, before cluster loop)
             var evalCount = evaluators.Length;
@@ -2245,13 +2315,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
             var visRecordSize = meta._entityRecordSize;
             byte* visBuf = stackalloc byte[visRecordSize];
-            var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+            var visAccessor = visState != null ? visState.EntityMap.Segment.CreateScanAccessor() : default;
 
             // Step 2: For each active cluster with matches, verify ALL evaluators on matched entities
             // CLUSTERWALK-02: one count-first read through the one reader, hoisted out of the loop — see ScanClusterSoa for why the per-iteration
             // plain loads this replaced are safe on x64 and not on arm64.
             var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
-            var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+            var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
             try
             {
                 for (var c = 0; c < activeCount; c++)
@@ -2275,6 +2345,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // H1 — same cluster-granularity visibility as the SoA scan (see ScanClusterSoa). Path A raised the stake rather than lowering it: the
                     // tree has already narrowed the candidate set, so the per-match probe is a LARGER share of what remains than it is on a full scan.
                     var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+
+                    // The cluster's entities written since the last fence: one word, as the shadow bitmap indexes entities by chunkId * 64 + slot.
+                    var fenceDirty = shadowBitmap?.ReadWord(clusterChunkId) ?? 0;
 
                     var compBase = clusterBase + compOffset;
 
@@ -2303,10 +2376,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             matchBits &= matchBits - 1;
 
                             var entityComp = compBase + slotIndex * compSize;
+                            var enforced = (fenceDirty & (1UL << slotIndex)) == 0 ? enforcedByScanFieldIndex : int.MinValue;
                             var pass = true;
                             for (var e = 0; e < evalCount; e++)
                             {
-                                if (simdEligible[e] || evaluators[e].FieldIndex == enforcedByScanFieldIndex)
+                                if (simdEligible[e] || evaluators[e].FieldIndex == enforced)
                                 {
                                     continue;
                                 }
@@ -2336,11 +2410,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             remaining &= remaining - 1;
 
                             var entityComp = compBase + slotIndex * compSize;
+                            var enforced = (fenceDirty & (1UL << slotIndex)) == 0 ? enforcedByScanFieldIndex : int.MinValue;
                             var allMatch = true;
                             for (var e = 0; e < evaluators.Length; e++)
                             {
                                 ref var eval = ref evaluators[e];
-                                if (eval.FieldIndex == enforcedByScanFieldIndex)
+                                if (eval.FieldIndex == enforced)
                                 {
                                     continue;
                                 }
@@ -2536,7 +2611,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 var meta = ArchetypeRegistry.GetMetadata((ushort)cs.ArchetypeId);
                 var visGated = meta.VersionedSlotMask != 0;
                 var visState = visGated ? _tx.DBE._archetypeStates[meta.ArchetypeId] : null;
-                var visAccessor = visState != null ? visState.EntityMap.Segment.CreateChunkAccessor() : default;
+                var visAccessor = visState != null ? visState.EntityMap.Segment.CreateScanAccessor() : default;
                 try
                 {
                     if (_spatialQueryType == SpatialQueryType.AABB)
@@ -3289,7 +3364,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
             var action = new BroadScanAction
             {
                 Meta = meta,
@@ -3305,8 +3380,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 PendingEnableDisable = _tx.PendingEnableDisable,
                 PendingDestroys = _tx.PendingDestroys,
             };
-            engineState.EntityMap.ForEachEntry(ref accessor, ref action);
-            accessor.Dispose();
+            try
+            {
+                engineState.EntityMap.ForEachEntry(ref accessor, ref action);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
 
             if (stopOnFirst && action.Found)
             {
@@ -3358,7 +3439,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             QueryPathProbe.MapProbeCounts++;
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
             var pred = new BroadScanPredicate
             {
                 Meta = meta,
@@ -3371,8 +3452,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 PendingEnableDisable = _tx.PendingEnableDisable,
                 PendingDestroys = _tx.PendingDestroys,
             };
-            total += engineState.EntityMap.CountEntries(ref accessor, ref pred);
-            accessor.Dispose();
+            try
+            {
+                total += engineState.EntityMap.CountEntries(ref accessor, ref pred);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
         }
 
         return total;
@@ -3430,7 +3517,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return false;
         }
 
-        var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        var accessor = clusterState.ClusterSegment.CreateScanAccessor();
         try
         {
             // CLUSTERWALK-02: the (count, array) pair goes through the one reader, never read directly here. This used to be a plain load of both, which
@@ -3503,7 +3590,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
             var pred = new BroadScanPredicate
             {
                 Meta = meta,
@@ -3516,8 +3603,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 PendingEnableDisable = _tx.PendingEnableDisable,
                 PendingDestroys = _tx.PendingDestroys,
             };
-            var found = engineState.EntityMap.AnyEntry(ref accessor, ref pred);
-            accessor.Dispose();
+            bool found;
+            try
+            {
+                found = engineState.EntityMap.AnyEntry(ref accessor, ref pred);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
 
             if (found)
             {
@@ -3559,7 +3653,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
             var action = new BroadScanCollectAction
             {
                 Meta = meta,
@@ -3573,8 +3667,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 PendingEnableDisable = _tx.PendingEnableDisable,
                 PendingDestroys = _tx.PendingDestroys,
             };
-            engineState.EntityMap.ForEachEntry(ref accessor, ref action);
-            accessor.Dispose();
+            try
+            {
+                engineState.EntityMap.ForEachEntry(ref accessor, ref action);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
         }
     }
 
@@ -3786,7 +3886,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Iterates pre-collected query results, yielding read-only <see cref="EntityRef"/>s with zero-copy component access.
+    /// Iterates pre-collected query results, yielding read-only <see cref="EntityRef"/>s; their component reads return copies.
     /// To write, open the entity with <see cref="EntityAccessor.OpenMut"/> or <see cref="EntityAccessor.TryOpenMut"/>.
     /// </summary>
     [PublicAPI]

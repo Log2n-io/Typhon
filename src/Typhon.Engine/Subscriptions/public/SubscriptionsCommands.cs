@@ -434,6 +434,130 @@ public sealed class SubscriptionsCommands
     }
 
     /// <summary>
+    /// <see cref="Enter(SessionId, RealmId)"/>, answering <see langword="false"/> where it would raise for something that can change under the caller.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A realm. Need not still be registered, or open.</param>
+    /// <returns>
+    /// <see langword="false"/> when the session is closing or gone, when it follows an entity, or when the realm is gone or closing; otherwise
+    /// <see langword="true"/> and the session is in it from this tick.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>It exists because the alternative cannot be written correctly by an application.</b> A session whose profile follows an entity may not be moved
+    /// explicitly — the entity decides its realm — and <see cref="Enter(SessionId, RealmId)"/> raises on one. But whether a session is anchored is decided by
+    /// <see cref="ViewpointSource"/>, which is internal, and a profile requested on one tick is applied by the NEXT tick's prologue: so an application that
+    /// asks first and acts second is asking about a state that changes between the two, and the wrong answer is an exception on the tick thread. That is not
+    /// hypothetical — it is the defect the SWG demo's spectator control shipped with, reachable by pressing Stop and picking a realm inside one tick.
+    /// </para>
+    /// <para>
+    /// <b>So the test and the act are one call.</b> <see cref="IsAnchored"/> answers the same question and cannot promise this, which is why it is documented
+    /// as a query rather than as a guard.
+    /// </para>
+    /// <para>
+    /// <b>What it does NOT swallow.</b> <see cref="RealmId.None"/> and a realm declaring no <see cref="RealmConfig.Replication"/> still raise: neither can
+    /// change under a caller — one is a misuse of the API and the other is fixed when the realm is registered — and answering <see langword="false"/> for them
+    /// would turn a bug in the application into a session that quietly never arrives.
+    /// </para>
+    /// </remarks>
+    public bool TryEnter(SessionId session, RealmId realm)
+    {
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default);
+    }
+
+    /// <summary>
+    /// <see cref="Place(SessionId, RealmId, Vector3D)"/>, answering <see langword="false"/> where it would raise for something that can change under the
+    /// caller. See <see cref="TryEnter"/> for why.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A realm. Need not still be registered, or open.</param>
+    /// <param name="position">Where it is looking from, in the realm's space.</param>
+    /// <returns><see langword="false"/> when the session is closing, gone or anchored, or the realm is gone or closing.</returns>
+    public bool TryPlace(SessionId session, RealmId realm, Vector3D position)
+    {
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position);
+    }
+
+    /// <summary>
+    /// Whether a session's realm is an entity's rather than the application's — the condition <see cref="Enter(SessionId, RealmId)"/>,
+    /// <see cref="Place(SessionId, RealmId, Vector3D)"/> and <see cref="Leave"/> raise on.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>
+    /// <see langword="true"/> when the session follows an entity at run time (<c>Session(s).Follow</c>), or when its applied profile is
+    /// <c>AroundControlled</c> or bound to an entity.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A query, not a guard.</b> It reports the profile the engine has APPLIED, and a profile requested through <c>Session(s).Profile(name)</c> is applied
+    /// by the next tick's prologue — so between asking and acting the answer can change, and the failure is a throw on the tick thread. Use it to decide what
+    /// to draw, offer or log; use <see cref="TryEnter"/> and <see cref="TryPlace"/> to act.
+    /// </para>
+    /// <para>
+    /// <b>A run-time <c>Follow</c> counts, whatever the profile declared.</b> It is the same condition for the same reason: the engine is moving the session's
+    /// realm every tick from the followed entity, so an application moving it too would be the second writer of one field that 12-realms § 1.3 forbids. A
+    /// <c>Follow</c> on an otherwise unanchored profile — a god camera tracking a player's realm while keeping its own hull — anchors it exactly as
+    /// <c>AroundControlled</c> does, and releasing it with <see cref="EntityId.Null"/> gives it back.
+    /// </para>
+    /// </remarks>
+    public bool IsAnchored(SessionId session)
+    {
+        if (!_ingress.Sessions.FollowedOf(session).IsNull)
+        {
+            return true;
+        }
+
+        var profiles = _ingress.Profiles;
+        var profile = _ingress.Sessions.ProfileIndex(session);
+        return profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled;
+    }
+
+    /// <summary>
+    /// The entity a session is anchored to, or <see cref="EntityId.Null"/> when its realm and viewpoint are the application's to set.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The controlled entity, as <c>Session(s).Control(entity)</c> last set it.</returns>
+    /// <remarks>
+    /// Tick-thread only, as the rest of this type is: it reads the session row without the gate, because the controlled entity is written only on the tick.
+    /// </remarks>
+    public EntityId ControlledOf(SessionId session) => _ingress.Sessions.ControlledOf(session);
+
+    /// <summary>
+    /// The entity a session's viewpoint follows, or <see cref="EntityId.Null"/> — <c>Session(s).Follow(entity)</c>, 12-realms § 2.2 Q5.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The followed entity.</returns>
+    /// <remarks>
+    /// <b>Not the same question as <see cref="ControlledOf"/>, which is why both exist.</b> A session that follows an entity is centred on it and is in its
+    /// realm; a session that controls one is also served its <c>SELF</c> block and its owner fields. An application with a spectator mode wants the first and
+    /// must not have the second, so it asks this one. Tick-thread only, as the rest of this type is.
+    /// </remarks>
+    public EntityId FollowedOf(SessionId session) => _ingress.Sessions.FollowedOf(session);
+
+    /// <summary>
+    /// Points a session's viewpoint at an entity it does not control, or releases it — <b>this tick</b>, as <see cref="Place(SessionId, RealmId, Vector3D)"/>
+    /// and <see cref="Enter(SessionId, RealmId)"/> apply this tick.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to follow, or <see cref="EntityId.Null"/> to release and give the profile's own anchor back.</param>
+    /// <returns><see langword="false"/> when the session is no longer open.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists beside <c>Session(s).Follow(entity)</c>, which does the same thing a tick later.</b> The staged form is right for a system deciding
+    /// something about a session it is looking at, and it is the only form available from a parallel system. But a follow is also the thing an application has
+    /// to UNDO before it may move a session itself, and a release that lands next tick makes "stop following this player and put the camera on planet 0"
+    /// impossible to express in one tick: the <see cref="Leave"/> in the same tick still sees the follow and throws. That is the same two-phase trap
+    /// <see cref="TryEnter"/> was added to close, met from the other side — so the release is available immediately, from the tick, like every other verb on
+    /// this type.
+    /// </para>
+    /// <para>
+    /// Following is not controlling: the session is given the entity's position and realm and none of its owner data. See
+    /// <c>SessionRequest.Follow</c> for the whole argument.
+    /// </para>
+    /// </remarks>
+    public bool Follow(SessionId session, EntityId entity) => _ingress.Sessions.SetFollowed(session, entity);
+
+    /// <summary>
     /// Takes a session out of every realm (12-realms § 1.6): its client is told with a <c>RESET</c> carrying <c>REALM(NONE)</c>, and it hears only the events
     /// addressed to it. Applied this tick.
     /// </summary>
@@ -486,11 +610,58 @@ public sealed class SubscriptionsCommands
         CheckNotAnchored(session);
     }
 
+    /// <summary>
+    /// <see cref="CheckRealmTarget"/>'s answer as a bool for what can race, still raising for what cannot. See <see cref="TryEnter"/>.
+    /// </summary>
+    private bool TryRealmTarget(SessionId session, RealmId realm)
+    {
+        if (realm.IsNone)
+        {
+            throw new ArgumentException("RealmId.None is no realm to be in: take the session out of every realm with Leave(session).", nameof(realm));
+        }
+
+        var table = _ingress.Realms;
+        if (table != null || realm.Value != RealmId.Default.Value)
+        {
+            var target = table?.TryGet(realm.Value);
+
+            // Gone or closing: both are a realm being torn down while the caller was deciding to go there, which is the
+            // case this overload exists for. A dungeon unregisters at the first fence that finds it empty.
+            if (target == null || target.Closing)
+            {
+                return false;
+            }
+
+            if (realm.Value != RealmId.Default.Value && target.Config?.Replication == null)
+            {
+                throw new InvalidOperationException(
+                    $"{realm} declares no replication (RealmConfig.Replication): no session may be in it (12-realms § 2.1).");
+            }
+        }
+
+        return !IsAnchored(session);
+    }
+
+    /// <summary>
+    /// Refuses to move a session whose realm is an entity's, naming which of the two ways it got that way.
+    /// </summary>
+    /// <remarks>
+    /// <b>The distinction is in the message because it decides what the caller does next.</b> A session anchored by its PROFILE is released by changing the
+    /// profile; one anchored by <see cref="Follow"/> is released by <c>Follow(EntityId.Null)</c>, and nothing about the profile is wrong. A message that blamed
+    /// the profile for a run-time follow sent the reader to the wrong lever — and would do it on a profile that declares no anchor at all, which reads as an
+    /// engine bug rather than as the caller's own follow still being in force.
+    /// </remarks>
     private void CheckNotAnchored(SessionId session)
     {
-        var profiles = _ingress.Profiles;
-        var profile = _ingress.Sessions.ProfileIndex(session);
-        if (profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled)
+        var followed = _ingress.Sessions.FollowedOf(session);
+        if (!followed.IsNull)
+        {
+            throw new InvalidOperationException(
+                $"{session} follows {followed} (Session(s).Follow): its realm is that entity's and moves with it. Release it with Follow(EntityId.Null) — "
+                + "changing the profile will not (12-realms § 1.3).");
+        }
+
+        if (IsAnchored(session))
         {
             throw new InvalidOperationException(
                 $"{session} follows an entity (profile '{_ingress.Sessions.ProfileName(session)}'): its realm is that entity's, and moves with it (12-realms § 1.3).");
@@ -694,6 +865,25 @@ public sealed class SubscriptionsCommands
             return (SubscriptionsProjectExecSystem.PrologueCreateTicks * k, SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
                 SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
         }
+    }
+
+    /// <summary>
+    /// The projection's column walk — every scalar field of every pushed slot read and coded, references resolved, clamps noted — per tick, in ms of thread
+    /// time summed over workers. An upper bound on what a vectorized walk could cut (13 § 4.1): the resolution and the clamp notes stay scalar. Zero unless
+    /// phase timing is on.
+    /// </summary>
+    public double ProjectWalkMs => PerTickMs(ref SubscriptionsProjectExecSystem.ProjectWalkTicks);
+
+    /// <summary>
+    /// The projection's blocks, read and encoded, per tick, in ms of CPU summed over workers: <see cref="ProjectPrologueMs"/>' busy time less the claiming
+    /// and the waits, the denominator <see cref="ProjectWalkMs"/> is a share of. Zero unless phase timing is on.
+    /// </summary>
+    public double ProjectBlocksMs => PerTickMs(ref SubscriptionsProjectExecSystem.ProjectBlockTicks);
+
+    private static double PerTickMs(ref long ticks)
+    {
+        var n = Volatile.Read(ref SubscriptionsProjectExecSystem.PrologueCount);
+        return n == 0 ? 0d : Volatile.Read(ref ticks) * 1000d / System.Diagnostics.Stopwatch.Frequency / n;
     }
 
     /// <summary>The frame stage's single-threaded prologue, per tick, in ms.</summary>

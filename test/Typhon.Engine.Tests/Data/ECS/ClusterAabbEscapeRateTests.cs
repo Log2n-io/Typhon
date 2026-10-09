@@ -95,8 +95,9 @@ class ClusterAabbEscapeRateTests : TestBase<ClusterAabbEscapeRateTests>
                     ys[i] = Math.Clamp(ys[i] + (((float)rng.NextDouble() - 0.5f) * stepSize), 1f, CellSize - 1f);
 
                     var eref = tx.OpenMut(ids[i]);
-                    ref var pos = ref eref.Write(ClCohUnit.Pos);
+                    var pos = eref.Read(ClCohUnit.Pos);
                     pos.Bounds = new AABB2F { MinX = xs[i], MinY = ys[i], MaxX = xs[i], MaxY = ys[i] };
+                    eref.Set(ClCohUnit.Pos, pos);
                 }
                 tx.Commit();
             }

@@ -1,0 +1,67 @@
+name: Nightly small page-cache windows
+
+# Runs the whole engine suite with the page cache cut into 1 MiB windows instead of 1 GiB (#945).
+#
+# WHY THIS EXISTS. The async disk read and the async structural write take a Memory<byte>, which cannot address past 2 GiB from one base, so
+# they go through per-window MemoryManagers (PageCacheAddressing / PageCacheWindow). At the default 1 GiB window, every test cache (8 MiB)
+# is ONE window: window selection, the in-window offset and the write-run split at a window's end would never run in the merge gate. A wrong
+# window or offset reads or writes ANOTHER page's bytes, which surfaces much later as a CRC failure or a torn B+Tree node, far from its cause.
+#
+# At TYPHON_PAGECACHE_WINDOW_PAGES_POW2=7 (128 pages per window) the same 8 MiB cache spans 8 windows, and every miss, eviction, structural
+# write, segment grow, checkpoint and reopen in the suite crosses them. The variable is read once at type initialisation, so the whole
+# process runs at one window size. The gate keeps the pure arithmetic tests (PageCacheAddressingTests, PageCacheWindowTests,
+# PageCacheWriteRunTests), which hold at either size.
+#
+# Same runner as the gate (bench/aws/shard.py: same plan, category exclusions, Sensitive pass and retry policy), so a red here is a red the gate
+# would have reported at small windows.
+
+on:
+  schedule:
+    - cron: "0 2 * * *"     # 02:00 UTC — after nightly-suppressed (01:00) and the arm64 nightly, so they do not contend for hosted runners.
+  workflow_dispatch: {}
+  # Self-validation, and the S5 control on any change to the window code: runs on a PR that touches it, and only then.
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-small-windows.yml'
+      - 'src/Typhon.Engine/Storage/internals/PageCacheAddressing.cs'
+      - 'src/Typhon.Engine/Storage/internals/PageCacheWindow.cs'
+      - 'src/Typhon.Engine/Storage/internals/PagedMMF.cs'   # where the windows are used: the miss read, the run builder, the write
+
+concurrency:
+  group: nightly-small-windows
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  small-windows:
+    # GitHub-hosted: must not consume the self-hosted runner the merge gate depends on. The suite asserts correctness, not throughput.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TYPHON_PAGECACHE_WINDOW_PAGES_POW2: '7'
+      # Four cores: run the plan two shards at a time rather than eight at once. Caps concurrency, never changes what runs.
+      SHARD_CONCURRENCY: '2'
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build (Release)
+        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+
+      - name: Engine suite at 1 MiB windows
+        run: python3 bench/aws/shard.py run --results-dir ci-out
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: small-windows-results
+          path: ci-out
+          if-no-files-found: warn
+          retention-days: 14

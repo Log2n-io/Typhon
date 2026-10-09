@@ -243,6 +243,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         public int ElementId;
         public int BufferRootId;
 
+        /// <summary>Set by a pass that reached its split without the nodes reserved: the next pass reserves whatever the leaf looks like (IXW-07).</summary>
+        public bool ReserveForSplit;
+
         public ref ChunkAccessor<TStore> Accessor;
         /// <summary>Dedicated accessor for horizontal (sibling) navigation — prevents sibling page loads from evicting parent path pages in the primary accessor.</summary>
         public ref ChunkAccessor<TStore> SiblingAccessor;
@@ -576,6 +579,15 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     internal long _obsoleteSmoSiblingLocks;
     internal long _emptyInitRacesLost;
 
+    // Spill diagnostics (#1098). Same always-on discipline as the counters above, and on the same frequency class: all four are written only once a leaf has
+    // been found FULL, which is the branch that already moves up to half a node's entries and rewrites a separator in the parent. One interlocked add beside
+    // that is not measurable, and these are the numbers that decide whether a parallel bulk insert can partition by leaf at all — spill writes the chain
+    // NEIGHBOUR and the neighbour's ancestor, so it crosses a leaf partition exactly as a split does, and nothing counted it.
+    internal long _leafFullCount;
+    internal long _spillLeftCount;
+    internal long _spillRightCount;
+    internal long _spillEntriesMoved;
+
     /// <summary>
     /// Histogram of <see cref="InsertRetryExit"/> codes: which of <c>InsertIterative</c>'s seventeen bails burned each pessimistic retry.
     /// </summary>
@@ -838,6 +850,33 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <summary>Number of contention splits (proactive splits of hot leaves).</summary>
     public long ContentionSplitCount => Interlocked.Read(ref _contentionSplitCount);
 
+    /// <summary>Number of inserts that found the target leaf FULL, and therefore had to spill or split (#1098).</summary>
+    /// <remarks>
+    /// The denominator for the three counters below: <c>LeafFullCount - SpillLeftCount - SpillRightCount</c> is how many full leaves fell through to a split
+    /// because neither neighbour was eligible.
+    /// </remarks>
+    public long LeafFullCount => Interlocked.Read(ref _leafFullCount);
+
+    /// <summary>Number of inserts resolved by spilling into the LEFT chain neighbour rather than splitting (#1098).</summary>
+    /// <remarks>
+    /// A spill writes the neighbour AND the separator in the neighbour's ancestor, so it crosses a leaf-range partition exactly as a split does. That is why
+    /// this is counted separately from <see cref="SplitCount"/>: a bulk insert that partitions by leaf must account for both, and only splits were visible.
+    /// </remarks>
+    public long SpillLeftCount => Interlocked.Read(ref _spillLeftCount);
+
+    /// <summary>Number of inserts resolved by spilling into the RIGHT chain neighbour rather than splitting (#1098).</summary>
+    public long SpillRightCount => Interlocked.Read(ref _spillRightCount);
+
+    /// <summary>
+    /// Total entries physically moved between leaves by spill, including the bulk tail that targets half-full (#1098).
+    /// </summary>
+    /// <remarks>
+    /// The number that answers "is the cost proportional to the batch or to the number of structural events". A spill is not one moved entry: it moves one, then
+    /// bulk-moves toward half capacity to lower the future <see cref="LeafFullCount"/> rate. Against a batch size, this ratio is what tells you whether a
+    /// pre-split pass would be O(splits) as hoped or O(batch) as feared.
+    /// </remarks>
+    public long SpillEntriesMoved => Interlocked.Read(ref _spillEntriesMoved);
+
     /// <summary>
     /// Number of times a pessimistic writer refused a node a concurrent SMO had detached, and restarted its descent instead of writing into it (IXW-02, #716).
     /// Non-zero is HEALTHY — it is the defect being caught. It was zero before the fix only because the write went through.
@@ -880,6 +919,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         Interlocked.Exchange(ref _obsoleteRestarts, 0);
         Interlocked.Exchange(ref _obsoleteSmoSiblingLocks, 0);
         Interlocked.Exchange(ref _emptyInitRacesLost, 0);
+        Interlocked.Exchange(ref _leafFullCount, 0);
+        Interlocked.Exchange(ref _spillLeftCount, 0);
+        Interlocked.Exchange(ref _spillRightCount, 0);
+        Interlocked.Exchange(ref _spillEntriesMoved, 0);
     }
 
     /// <summary>
@@ -2490,9 +2533,16 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     #region Private API
 
+    /// <remarks>
+    /// IXW-07: a split calls this holding the leaf, its neighbours and the whole path, so the chunk comes from the reservation the insert made before it
+    /// latched anything (<see cref="ChunkReservation{TStore}"/>), on a page pinned since. Allocating here instead could grow the segment and wait on the page
+    /// cache with every one of those latches held — the other writers' bounded retries then ran out and reported a liveness defect (IXW-01) — or throw and
+    /// leave them held for good. Only an empty tree's first root allocates here, counted as an unreserved allocation.
+    /// </remarks>
     protected internal NodeWrapper AllocNode(NodeStates states, ref ChunkAccessor<TStore> accessor)
     {
-        var node = new NodeWrapper(_storage, _segment.AllocateChunk(false, accessor.ChangeSet), (states & NodeStates.IsLeaf) != 0);
+        var chunkId = ChunkReservation<TStore>.AllocateUnderLatch(_segment, accessor.ChangeSet, ref accessor);
+        var node = new NodeWrapper(_storage, chunkId, (states & NodeStates.IsLeaf) != 0);
         _storage.InitializeNode(node, states, ref accessor);
         return node;
     }

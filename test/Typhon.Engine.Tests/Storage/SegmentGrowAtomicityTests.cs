@@ -298,7 +298,7 @@ public sealed class SegmentGrowBackpressureTests
                 }
 
                 var changeSet = pmmf.CreateChangeSet();
-                Assert.Throws<PageCacheBackpressureTimeoutException>(() => segment.Grow(900, true, changeSet));
+                Assert.Throws<PageCacheBackpressureTimeoutException>(() => segment.Grow(900, changeSet));
                 changeSet.SaveChanges();
             }
 
@@ -375,7 +375,7 @@ internal static class SegmentGrowTestKit
         using (EpochGuard.Enter(pmmf.EpochManager))
         {
             var changeSet = pmmf.CreateChangeSet();
-            Assert.Throws<InjectedGrowFault>(() => segment.Grow(length, true, changeSet));
+            Assert.Throws<InjectedGrowFault>(() => segment.Grow(length, changeSet));
             changeSet.SaveChanges();
         }
     }
@@ -387,7 +387,7 @@ internal static class SegmentGrowTestKit
         using (EpochGuard.Enter(pmmf.EpochManager))
         {
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(length, true, changeSet);
+            segment.Grow(length, changeSet);
             changeSet.SaveChanges();
         }
 
@@ -408,15 +408,17 @@ internal static class SegmentGrowTestKit
         return n;
     }
 
-    /// <summary>Loads the segment again from its root page, as a reopen would: the directory and the chain must agree (<c>LogicalSegment.Load</c>).</summary>
+    /// <summary>
+    /// Loads the segment again from its root page, as a reopen would, and checks the directory and the forward chain agree. The load itself no longer walks
+    /// the chain (#1143: a clean open reads directories only, CS-07), so the cross-check it used to make is made here explicitly.
+    /// </summary>
     internal static int LoadAfresh(ManagedPagedMMF pmmf, int root)
     {
-        using (EpochGuard.Enter(pmmf.EpochManager))
-        {
-            var fresh = new LogicalSegment<PersistentStore>(new PersistentStore(pmmf));
-            fresh.Load(root);
-            return fresh.Length;
-        }
+        using var guard = EpochGuard.Enter(pmmf.EpochManager);
+        var fresh = new LogicalSegment<PersistentStore>(new PersistentStore(pmmf));
+        fresh.Load(root);
+        Assert.That(fresh.WalkForwardChainPageCount(), Is.EqualTo(fresh.Length), "the forward chain and the directory must agree after a grow");
+        return fresh.Length;
     }
 
     /// <summary>Entries in the root's directory before its 0 terminator. Every segment here stays below the root's 2000 entries.</summary>
@@ -451,7 +453,7 @@ internal static class SegmentGrowTestKit
             using (EpochGuard.Enter(pmmf.EpochManager))
             {
                 var changeSet = pmmf.CreateChangeSet();
-                segment.Grow(Math.Min(segment.Length + BuildStep, pages), true, changeSet);
+                segment.Grow(Math.Min(segment.Length + BuildStep, pages), changeSet);
                 changeSet.SaveChanges();
             }
         }
@@ -459,7 +461,7 @@ internal static class SegmentGrowTestKit
         return segment;
     }
 
-    internal static ServiceProvider CreateProvider(int memPageCount, string databaseName, List<string> bundles)
+    internal static ServiceProvider CreateProvider(int memPageCount, string databaseName, List<string> bundles, bool fresh = true)
     {
         var services = new ServiceCollection();
         services
@@ -477,7 +479,11 @@ internal static class SegmentGrowTestKit
             });
 
         var provider = services.BuildServiceProvider();
-        provider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        if (fresh)
+        {
+            provider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        }
+
         bundles.Add(provider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BundleDirectory);
         return provider;
     }

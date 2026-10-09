@@ -1,3 +1,4 @@
+using System;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -145,5 +146,100 @@ class EntityIdTests
                 Assert.That(id.ArchetypeId, Is.EqualTo(routing), $"key {key}, routing {routing}");
             }
         }
+    }
+
+    // ── ENG-02: the public round trip ───────────────────────────────────────────────────────────────────────────────
+    //
+    // Before this, an id could be taken apart (EntityKey, ArchetypeId, ToString) and not put back together: FromRaw and
+    // RawValue were internal, so an application carrying an id through its own wire format, its account rows, its logs or
+    // an admin tool needed a friend declaration or a parallel id scheme. These cases are the contract that fixes it.
+
+    [Test]
+    public void FromParts_RebuildsWhatTheAccessorsExpose()
+    {
+        foreach (var key in new long[] { 0, 1, 65535, 65536, 1L << 24, 1L << 40, (1L << 48) - 1 })
+        {
+            foreach (var routing in new ushort[] { 0, 1, 4095, 4096, 32768, 65535 })
+            {
+                var original = new EntityId(key, routing);
+                var rebuilt = EntityId.FromParts(original.EntityKey, original.ArchetypeId);
+                Assert.That(rebuilt, Is.EqualTo(original), $"key {key}, routing {routing}");
+            }
+        }
+    }
+
+    [Test]
+    public void FromRawValue_RebuildsFromRawValue()
+    {
+        var original = new EntityId(123456789L, 40000);
+        Assert.That(EntityId.FromRawValue(original.RawValue), Is.EqualTo(original));
+    }
+
+    [Test]
+    public void FromRawValue_Zero_IsTheNullEntity()
+    {
+        Assert.That(EntityId.FromRawValue(0UL), Is.EqualTo(EntityId.Null));
+        Assert.That(EntityId.FromRawValue(0UL).IsNull, Is.True);
+    }
+
+    /// <summary>
+    /// The range check must hold with strict mode OFF, which is the default everywhere and what the NuGet ships. The internal
+    /// constructor's equivalent guard sits behind <c>CheckConfig.Enabled</c> and is folded away — correct for a path the engine
+    /// feeds itself, wrong for one taking numbers from outside it.
+    /// </summary>
+    [TestCase(-1L)]
+    [TestCase(long.MinValue)]
+    [TestCase(1L << 48)]
+    [TestCase(long.MaxValue)]
+    public void FromParts_AnEntityKeyOutOfRangeIsRefused_WhateverStrictModeSays(long badKey)
+    {
+        Assume.That(CheckConfig.Enabled, Is.False, "this case is about the guard holding when strict mode is off");
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => EntityId.FromParts(badKey, 7));
+        Assert.That(ex.ParamName, Is.EqualTo("entityKey"));
+    }
+
+    [Test]
+    public void FromParts_TheLargestLegalKeyIsAccepted()
+    {
+        var id = EntityId.FromParts((1L << 48) - 1, 65535);
+        Assert.That(id.EntityKey, Is.EqualTo((1L << 48) - 1));
+        Assert.That(id.ArchetypeId, Is.EqualTo(65535));
+    }
+
+    [Test]
+    public void TryParse_RoundTripsWhatToStringProduces()
+    {
+        foreach (var id in new[] { EntityId.Null, new EntityId(0, 0), new EntityId(42, 7), new EntityId((1L << 48) - 1, 65535) })
+        {
+            Assert.That(EntityId.TryParse(id.ToString(), out var parsed), Is.True, id.ToString());
+            Assert.That(parsed, Is.EqualTo(id), id.ToString());
+        }
+    }
+
+    [Test]
+    public void TryParse_ToleratesSurroundingWhitespace()
+    {
+        Assert.That(EntityId.TryParse("  Entity(Key=42, Arch=7)\t", out var id), Is.True);
+        Assert.That(id, Is.EqualTo(new EntityId(42, 7)));
+    }
+
+    /// <summary>A half-matching line must fail rather than parse its prefix, or a log scraper silently invents ids.</summary>
+    [TestCase(null)]
+    [TestCase("")]
+    [TestCase("   ")]
+    [TestCase("Entity(Null")]
+    [TestCase("Entity(Key=42)")]
+    [TestCase("Entity(Key=42, Arch=7")]
+    [TestCase("Entity(Key=42, Arch=7) trailing")]
+    [TestCase("Entity(Key=42,Arch=7)")]               // the space after the comma is part of the form
+    [TestCase("Entity(Key=-1, Arch=7)")]              // NumberStyles.None rejects the sign
+    [TestCase("Entity(Key=42, Arch=65536)")]          // past a ushort
+    [TestCase("Entity(Key=281474976710656, Arch=0)")] // past 48 bits
+    [TestCase("Entity(Key=abc, Arch=7)")]
+    [TestCase("prefix Entity(Key=42, Arch=7)")]
+    public void TryParse_RefusesAnythingElse(string text)
+    {
+        Assert.That(EntityId.TryParse(text, out var id), Is.False, text ?? "<null>");
+        Assert.That(id, Is.EqualTo(EntityId.Null), "a failed parse yields Null, never a partial value");
     }
 }

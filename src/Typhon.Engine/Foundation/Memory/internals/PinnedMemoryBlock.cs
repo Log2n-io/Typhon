@@ -11,7 +11,7 @@ internal unsafe class PinnedMemoryBlock : MemoryBlockBase
     public byte* DataAsPointer { get; private set; }
     public IntPtr DataAsIntPtr => (IntPtr)DataAsPointer;
 
-    public override int EstimatedMemorySize => MemoryBlockSize;
+    public override long EstimatedMemorySize => MemoryBlockSize;
     public override int MemoryBlockSize { get; }
     public override bool IsDisposed => DataAsPointer == null;
     public override Span<byte> DataAsSpan => new(DataAsPointer, MemoryBlockSize);

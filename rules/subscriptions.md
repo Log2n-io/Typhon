@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-25 |
+| Last Updated | 2026-10-02 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -75,14 +75,17 @@
   never resolve a component's column, a slot's stride or a field's offset from anything but the archetype's layout and the component's
     measured schema — not from a copy, not from a recomputation, not from a structure replication owns
   never reach a value through a component segment, a chunk accessor or an entity-location map: replication addresses SLOTS OF A CLUSTER,
-    never entities of a table
+    never entities of a table — with one exception, a collection's elements (below)
+  invariant ∀ projected ComponentCollection<T> field c: c's HANDLE is read through the cluster layout like any field; its ELEMENTS are read
+    through T's VariableSizedBufferSegment only, lock-free (ReadElementsUnlocked), with the projection worker's own chunk accessor, inside
+    the chunk's EpochGuard, in the replication track only — and the element layout is T's, compiled once at Start
   never invoke a selector, a delegate or reflection per entity — a declaration's field name becomes an offset once, at Start, or it is
     refused there by name
   scope: ProjectionCompiler.Compile, ProjectionCompiler.VelocityCodec, CompiledField.ComponentSlot,
     CompiledField.ComponentOffsetInCluster, CompiledField.ComponentSize, CompiledField.FieldOffsetInComponent,
     CompiledPosition.FieldOffsetInComponent, CompiledProjectionPlan.ClusterLayout, ProjectionColumn, ProjectionColumnWalk.Quantize,
     ProjectionColumnWalk.Walk, ArchetypeMetadata.GetSlot, ArchetypeClusterInfo.ComponentOffset, ArchetypeClusterInfo.ComponentSize,
-    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan
+    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan, CollectionContext.Bind, VariableSizedBufferSegment.ReadElementsUnlocked
   on_violation: a second reader of the storage, with its own idea of where a value lives. It does not fail — it reads the neighbouring
     field, or the neighbouring slot, and replicates that. Every client then agrees with every other client on a world the server does not
     have, and nothing on either side reports an error. The engine's own layout moves under refactors (a component gains a field, a
@@ -98,6 +101,10 @@
     something faster takes it, and the first clause is then violated by a diff that looks local.
   note Versioned components are no exception and need none: a cluster slot caches the committed HEAD (copied there at commit), so the
     projection reads it through `ClusterRef.GetReadOnlySpan` like any other column, and after the fence it is the tick's committed value.
+  note amended for collections (#1085, 13 § 6.5): a collection's elements do not live in the cluster — the slot holds a buffer id — so the
+    buffer segment is the only place they can be read. The exception is narrow: the handle still comes from the layout, nothing else is
+    reached through a segment, and the read is unlocked only because the replication track runs in the tick's exclusive window (EW-01),
+    where nothing writes a collection. Every other caller reads a buffer through the locked ReadAllElementsRaw.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
     ClusterRef.GetSpan — the path that sets no dirty bit — projects to exactly what ClusterRef.GetReadOnlySpan reports, field by field
@@ -214,6 +221,7 @@
   invariant the identity space is GLOBAL: a netId names at most one live entity across the whole database, never one per archetype
   never one netId held by two live entities at the same time
   never reissue an identity before its quarantine window has passed
+  invariant a realm change is not a release (03 § 2, #1081): an entity that crosses realms keeps its netId and its generation (SUB-09)
   never a Release of an identity that is already free or quarantined (it would thread the list to itself, after which every
     Allocate returns that same identity and LiveCount runs negative)
   invariant every identity an entry loses is released once: a vacated or reused slot's by the projection (queued in its lease, released at the next
@@ -263,11 +271,21 @@
     re-initialises — this is what catches slot reuse inside a LIVING cluster, which no move hook can see
   never a directory entry naming a block whose cluster has been freed
   never an entry inherited by a different entity through slot reuse or a recycled chunk id
+  invariant ∀ move of e across REALMS (03 § 2, #1081): the source realm's sessions are told e left (a leave filed in the source realm, decoded in its
+    frame) and e's netId is NOT released — the identity goes with the entity:
+    - destination cluster has a block → the entry is carried as for any move and marked FlagRealmArrived, and the destination's next projection
+      re-initializes it in the destination's frame (codes, v̂, enter bytes, every group stamped, motion epoch bumped) under the same netId;
+    - destination cluster has no block (typically a realm a follower is switching into) → the entry is ended and cleared, and the netId is KEPT BY
+      ENTITY (ArchetypeReplicationState.KeepArrival) for whichever projection first gives e an identity, in any cluster, which takes it instead of a new
+      one; unclaimed after ArrivalSteps blocks steps it is released. Keyed by entity, not (cluster, slot), because e may move again before its realm has
+      a block — a parked (cluster, slot) entry was tried and lost exactly that case
+  never a realm crossing that releases the identity of an entity still live (it renamed the entity for every client, its follower's included)
   scope: ReplicationDirectory.TryAdd, ReplicationDirectory.TryRemove, ReplicationBlockPool.TryRent,
     ReplicationBlockHeader.ChunkId, ReplicationHotEntry.Entity,
     ArchetypeReplicationState.MigrateEntry, ArchetypeReplicationState.DrainParkedEntries, ParkedEntryList.Add,
     ArchetypeReplicationState.TryReleaseBlock, ArchetypeReplicationState.ReleaseBlockForDrain,
-    ArchetypeReplicationState.AttachTo, ArchetypeClusterState.ReplicationState,
+    ArchetypeReplicationState.AttachTo, ArchetypeClusterState.ReplicationState, ArchetypeReplicationState.KeepArrival,
+    ArchetypeReplicationState.TryTakeArrival, ProjectionPass.FlagRealmArrived,
     ArchetypeClusterState.DrainPendingClusterFinalizations, ArchetypeClusterState.ReleaseSlot
   on_violation: hits into a cluster that inherited a recycled id find state describing the cluster that
     drained — a client is told about an entity that no longer exists, or told the wrong values for one that
@@ -290,6 +308,10 @@
   note the `[UNBUILT]` marker was dropped on 2026-09-18 when the move hook landed. The rule's second historically-missing item, the
     per-entry `EntityId` check on the read path, turned out to be present already (`ProjectionPass` compares `hot->Entity` with the slot's id,
     releases the identity and re-initialises on mismatch) — the note claiming it missing was stale.
+  verified (realms, #1081): RealmSessionTests.AFollowedEntityKeepsItsNetIdThroughARealmRoundTrip (follower, both legs, enters + SELF + replica) and
+    AnEntityThatCrossesLeavesItsRealmAndArrivesInTheOtherUnderTheSameNetId (bystander; destination watched and not). Mutants: releasing instead of
+    keeping fails both; releasing instead of carrying, and carrying without FlagRealmArrived, each fail the watched case. Demo scale:
+    SwgTatooine.Tests.RealmCrossingChecks.Portal_RoundTrip_NetIdStable, out of quarantine
   verified: MigrationIdentityTests.ANetIdAcrossAClusterChange, which asserted the OPPOSITE until the hook landed and was written inverted on
     purpose so that it would go red and force the edit; MigrationIdentityTests.TheEntryIsCarriedAcrossRatherThanReissued, which reads the
     migration counters because a netId that is unchanged is also what a LIFO allocator handing back what it just released would produce, so
@@ -647,37 +669,83 @@
     only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
   invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
     re-pushed whole and recounted as after a gap
+  invariant every SERIAL per-realm stage of a tick walks the SERVED set, never the realm registry — the overload step, the index build and world order,
+    the index finish, the far flushes, the LOD census, the queued shadow checks, the two chunk plans and the unplaced sweep each visit exactly the realms
+    served when they run; so the serial cost of a tick is O(served realms) and registering more realms adds nothing to it. The one per-tick term that is
+    O(registered) is the realm policy (RLM-03), and it is one walk per tick
   invariant an entity that moves to another realm is never carried in its old realm's frame: it leaves the source realm (a leave there, decoded
     with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
   invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
     the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
-    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches
+    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
+    PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
+    PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
+    RuntimeStatsSnapshot.RealmPolicyEvaluations, RuntimeStatsSnapshot.ReplicationPrologueMsTotal, RuntimeStatsSnapshot.ReplicationPrologueTicks
   on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
   verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
     RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+  note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
+    Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
+    are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
+  note verified at workload scale by demo/SwgTatooine.Tests RealmCostChecks (a two-planet galaxy, ~1 200 interiors), which is NOT cited in verified:
+    above because the coverage audit scans test/ only. Its load-bearing case is AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting: a realm
+    is given replication state only when a session ENTERS it, so every assertion over realms no session was ever in passes whether or not
+    PushHub.SweepUnplaced releases a realm it is finished with — proved by mutant, which left the other four cases green.
+  note the O(served) half is COUNTED since PRV-04: RuntimeStatsSnapshot.RealmPassSteps adds the number of realms served to itself at each serial per-realm
+    stage of the blocks, mark, index and frame paths, so holding the served set fixed and doubling the registration must leave it unmoved — which no
+    assertion over Served itself could check, a stage walking the registry serving exactly the same set while doing hundreds of times the work.
+    RealmPolicyEvaluations is its companion and the honest half: policy is allowed to be O(registered), and what must hold of it is that it runs once per
+    tick. The counter is NOT exhaustive and its own remarks enumerate what it leaves out — PrepareBlocks's two bootstrap-guarded walks, and the per-chunk
+    stages (CountWorkers, PlaceWorker, FoldFarChunk) which run on worker threads where a shared add would measure itself.
+    Measured at workload scale by demo/SwgTatooine.Tests RealmScaleChecks (again not citable above — the audit scans test/ only): 15.016 serial passes per
+    served realm per tick, flat from 2 to 17 served realms, and 75.04 against 75.33 per tick at 1 236 and at 2 472 registered realms. Falsified by mutant —
+    one per-tick loop over RealmTable.Registered in the push prologue takes the per-served figure to 633 and the two registered figures to 1 311 against
+    2 547, reddening both cases while leaving the policy case correctly green.
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
-    tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
-    on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+    tick's fence (Bind, AroundControlled, Follow(e) — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in
+    realm 0 on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+  invariant Session(s).Follow(e) outranks the profile's own anchor while it is set and gives the session e's realm and centre — on a shape with no centre
+    (World, ClientRegion) the realm alone — and Follow(EntityId.Null) returns the session to the profile's anchor; following is NOT controlling, so no
+    SELF block and no owner field of e ever reaches a session that merely follows it (SUB-11), and e is absent from the owner-routing map that would
+    carry them; a followed entity that cannot be read leaves the session at its last position and realm, counting BoundLost (09 § 6)
+  invariant a realm removed while s is in it (unregistered, then emptied and dropped by a fence) puts s in None in the tick that sees it, publishes that
+    as a RESET whose REALM is NONE, and queues exactly ONE SessionEvent.RealmClosed{s, realm} naming the realm that went — not one per tick after it:
+    both the session's stored realm and its anchor cache are cleared, because either one left pointing at the dead id re-notices it for ever
   invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
     retried as a RESET until one is (SUB-03); a switch of a session that has been sent any frame is a forced RESET, sent at once; only a session never
     framed has its first realm ride the first frame that has something to say
   invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
     are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
-  invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
-    realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
+  invariant an entity-anchored session is never moved explicitly: Place(realm) / Enter / Leave throw, and TryEnter / TryPlace answer false and move
+    nothing — the test and the act are one call because ViewpointSource is internal and a requested profile is applied by the NEXT tick's prologue, so
+    an application that asks with IsAnchored and acts afterwards is asking about a state that changes between the two; a realm-less Place on an engine
+    with several realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
   scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
-    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave
+    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave, SubscriptionsCommands.TryEnter,
+    SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget, SessionRequest.Follow,
+    SubscriptionsCommands.Follow, SubscriptionsCommands.FollowedOf, SessionTable.SetFollowed, SessionTable.FollowedOf, SessionTable.AnchorsOf,
+    SessionTable.NoteRealmClosed, FrameAssembler.RealmClosed, SessionEventKind.RealmClosed, SessionEvent.Realm
   on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
     another place — or keeps a store the server believes cleared.
   verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
-    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick
-    (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
+    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick,
+    RealmSessionTests.AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising, RealmSessionTests.AnUnanchoredSessionIsMovedByTheTryOverloads,
+    RealmSessionTests.TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse,
+    RealmSessionTests.ARealmRemovedUnderASessionMovesItToNoneAndTellsTheApplicationOnce,
+    RealmSessionTests.AnAnchoredSessionWhoseRealmIsRemovedIsAlsoMovedToNoneOnce,
+    RealmSessionTests.AFollowedEntityCrossingRealmsTakesItsSessionInTheSameTick,
+    RealmSessionTests.AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject,
+    RealmSessionTests.AFollowAnchorsASessionWhoseProfileDeclaredNoAnchor,
+    RealmSessionTests.TheImmediateFollowReleasesInTheSameTickTheApplicationPlacesTheSession
+    (unplaced sessions, the link state kept and realm observation: the fixture's other tests; Follow's own centre and release:
+    AFollowedSessionIsCentredAndRealmedOnItsEntityWithoutControllingIt, FollowOverridesTheProfilesOwnAnchorAndReleasingReturnsToIt,
+    ASessionWhoseFollowedEntityDiesKeepsItsLastViewpoint)
 
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
   invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the
@@ -877,7 +945,7 @@
     how much it missed after.
   verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
-    EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps, EventDeliveryTests.AnEnumValueOutsideItsNamesDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
     EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
     EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
     30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
@@ -993,3 +1061,25 @@
     multiset of (identity, cell, secondary) against the runs' raw events; PushIndexTests.AnEmptyWorldIndexesNothingWhateverTheGrid.
     Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
     PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.
+
+### SUB-31: A reference field never names, for longer than one tick, a netId whose holder is not the entity it was resolved from `[fatal][silent]`
+  invariant a reference field (an EntityId or EntityLink<T> in entityRef, 13 § 5) encodes its target's netId when the target is replicated, alive and
+    identified before the tick, and 0 otherwise; a target whose identity is taken during the tick reads 0 that tick, whichever worker projects it first
+    (NetIdAllocator.IsLeased), and its referrer is pushed again so it resolves the next
+  invariant when a netId is released — by the projection or as an orphan — every referrer whose cold entry names it is pushed at the next blocks step, so
+    it re-resolves (to 0, or to the target's new identity) in the tick after the release, long before the quarantine lets the netId be reissued
+  invariant the reverse index counts exactly what live entries name: a projection logs ±1 only where a resolution differs from the entry's held netId,
+    and every path that ends an entry (the projection's ClearEntry, a cross-realm move, a migration or drain overwrite, a dropped park, a released block)
+    logs its −1s
+  never declare a reference in an onEnter section or on a static archetype: sent once, it can never be corrected (refused at Start)
+  never replicate an EntityLink<T> whose T, and every archetype deriving from it, no profile observes (refused at Start)
+  scope: ReferenceIndex.Step, ReferenceIndex.Note, ReferenceIndex.NoteShared, ReferenceResolver.Resolve, ProjectionPass.ProjectBlock,
+    ArchetypeReplicationState.EndEntry, NetIdAllocator.IsLeased, NetIdLeaseSet.BeginTick, ReplicationBlockLayout.ReferenceOffsetInColdEntry
+  on_violation: silent. A reference left naming a released netId resolves, once the number is reissued, to whoever holds it next: a client draws a
+    sword in the wrong hand, a target lock on a stranger, with no error anywhere.
+  rationale: a stored body names a netId, and nothing else re-pushes the referrer when its target goes; a reverse index fed by changes keeps the cost
+    with the references that change, not with the archetype (SUB-13).
+  verified: ReferenceTests.UnderReuseNoFrameNamesAnotherHolder (a churning oracle with identities reissued every tick it can: in every frame a reference
+    names 0 or its own target, and one naming an identity nobody holds is fixed by the next frame — red when the reverse index's step is skipped),
+    ReferenceTests.ADestroyedTargetMakesEveryReferrerSendZeroWithinOneTick, ReferenceTests.AReferenceCarriesItsTargetsNetIdAndATargetIdentifiedThisTickResolvesTheNext,
+    ReferenceTests.TheIndexCountsExactlyWhatLiveEntriesNameAfterChurn, ReferenceTests.AReferenceOnEnterOrToAnArchetypeNobodyObservesIsRefused.

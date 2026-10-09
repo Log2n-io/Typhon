@@ -1,5 +1,8 @@
 export {
   allocateField,
+  allocateInteger64Field,
+  isInteger64Kind,
+  MAX_COMPONENTS,
   isNumericKind,
   MAX_GROUPS,
   MOTION_CHANGE_BIT,
@@ -7,6 +10,8 @@ export {
   type ArchetypeSchema,
   type FieldArray,
   type FieldKind,
+  type Integer64FieldArray,
+  type Integer64FieldKind,
   type FieldSchema,
   type NumericFieldKind,
   type PositionSchema,
@@ -20,8 +25,10 @@ export {
   segmentHistoryFor,
 } from './store/archetype-store.js';
 export { archetypeOf, NOT_FOUND, slotOf, WorldStore, type WorldStoreOptions } from './store/world-store.js';
+export { CollectionValue } from './store/collection-value.js';
 export { epochAt, evaluateLive, evaluateSlot, headingOf, MAX_MOTION_STRIDE, segmentEntryAt } from './motion/motion.js';
 export { Clock, type ClockOptions } from './clock/clock.js';
+export { monotonicNow } from './clock/now.js';
 export { AggregateGrid, type GridSchema } from './aggregates/aggregate-grid.js';
 export { FrameApplier, type FrameApplierOptions } from './apply/frame-applier.js';
 export { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './apply/frame-state.js';
@@ -99,13 +106,26 @@ export {
   type CatalogProtocolVersion,
   type CatalogTick,
 } from './protocol/catalog.js';
-export { CODEC_TOKENS, CodecKind, codecKindOf, isListElement, isPacked } from './protocol/codec-kinds.js';
+export {
+  CODEC_TOKENS,
+  CodecKind,
+  codecKindOf,
+  isInteger64,
+  isListElement,
+  isPacked,
+  isSigned64,
+  takesCount,
+} from './protocol/codec-kinds.js';
+export { bigintOf, hex64, HIGH_WORD, LOW_WORD, wordsOf } from './protocol/int64.js';
 export { checkCanonical, validateCatalog } from './protocol/catalog-validator.js';
 export {
   MAX_LIST_COMPONENTS,
+  readInteger64,
   readNumber,
   readPackedBits,
   readSection,
+  writeInteger64,
+  writeInteger64Words,
   writeNumber,
   writePackedBits,
   writeSection,
@@ -157,6 +177,7 @@ export {
 } from './protocol/tick-writer.js';
 export { readCommands, writeCommands, type CommandInput, type CommandSink } from './protocol/commands.js';
 export { NO_REALM, RealmFrame } from './protocol/realm-frame.js';
+export { DebugGrid, DebugSubType, PushGeometry, PushGeometryFlags, PushShape } from './protocol/debug-payloads.js';
 export {
   catalogHashFromHex,
   catalogHashToHex,

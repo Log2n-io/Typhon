@@ -167,8 +167,9 @@ class RecoveryRealmTests : TestBase<RecoveryRealmTests>
         EntityId id = default;
         SessionThenCrash((_, tx) =>
             {
-                ref var pos = ref tx.OpenMut(id).Write(RealmUnit.Pos);
-                pos.Realm = 1;   // unregistered: a raw write no validation sees
+                // Unregistered, written through the internal raw core: stands in for an invalid key reaching the file by a path no validation
+                // sees (a cluster span, or a realm gone since). Set validates the key at the call since #1199.
+                tx.OpenMut(id).WriteRef(RealmUnit.Pos).Realm = 1;
             },
             fenceFirst: true,
             before: dbe =>

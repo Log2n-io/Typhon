@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using Typhon.Client;
@@ -63,9 +63,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="replicationCellM">The cell side the defaults declare, as <see cref="ReplicationHarness.Create"/>.</param>
     /// <returns>The harness.</returns>
     public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
-        double replicationCellM = 0)
+        double replicationCellM = 0, int maxSessions = 256)
     {
-        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM);
+        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM, maxSessions);
         try
         {
             return new FrameHarness(replication);
@@ -144,6 +144,15 @@ sealed unsafe class FrameHarness : IDisposable
     public bool SerialIndex { get; set; }
 
     /// <summary>
+    /// Whether the push index and far-flush stages run through <see cref="PushHub"/> over every served realm, as the runtime's stages do, instead of on
+    /// realm 0's replication alone. The hub lays the realms' chunks end to end, so this is the only way a test reaches its per-chunk realm plan.
+    /// </summary>
+    public bool IndexThroughHub { get; set; }
+
+    /// <summary>Stopwatch ticks spent in the hub's index and far stages under <see cref="IndexThroughHub"/>: plans and chunks, nothing else.</summary>
+    public long HubIndexTicks { get; private set; }
+
+    /// <summary>
     /// Drains the identity quarantine at each tick's start, as the runtime does. Off by default, where no identity is ever reissued; on, a released netId
     /// comes back a tick later (the harness's quarantine is one tick), so a skipped session can meet its reuse inside the push log (SUB-06).
     /// </summary>
@@ -181,9 +190,19 @@ sealed unsafe class FrameHarness : IDisposable
     private void PublishTick(long tick) =>
         Subscriptions.PublishTickState(tick, System.Diagnostics.Stopwatch.GetTimestamp(), Assembler.TickMultiplier);
 
+    // The message is built only when the check fails: an interpolated message passed to Assert.That is built on every call, and the allocation tests
+    // measure these calls.
+    private void RequireNextTick(long tick)
+    {
+        if (Tick != 0 && tick != Tick + 1)
+        {
+            Assert.Fail($"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        }
+    }
+
     public void RunTick(long tick, int workers = 1)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
 
         PublishTick(tick);
@@ -219,7 +238,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="tick">The tick number, which must advance.</param>
     public void SkipTick(long tick)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)
@@ -235,7 +254,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="tick">The tick number, which must advance.</param>
     public void RunTickWithoutIndex(long tick)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)
@@ -252,7 +271,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="workers">Worker-pool width.</param>
     public void RunUpToFrames(long tick, int workers = 1)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)
@@ -275,10 +294,10 @@ sealed unsafe class FrameHarness : IDisposable
     public int Deliver(SessionId session)
     {
         var replica = _replicas[session.Value];
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var delivered = 0;
 
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
             if (DigestFrames)
@@ -287,7 +306,7 @@ sealed unsafe class FrameHarness : IDisposable
             }
 
             replica.Apply(bytes);
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             delivered++;
         }
 
@@ -299,11 +318,11 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>How many frames were drained.</returns>
     public int Drain(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var drained = 0;
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             drained++;
         }
 
@@ -490,6 +509,8 @@ sealed unsafe class FrameHarness : IDisposable
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => Mix(components);
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => Mix(System.Runtime.InteropServices.MemoryMarshal.AsBytes(components));
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => Mix(utf8);
 
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) => Mix(bytes);
@@ -507,14 +528,35 @@ sealed unsafe class FrameHarness : IDisposable
     public List<byte[]> Collect(SessionId session)
     {
         var frames = new List<byte[]>();
-        var send = Assembler.SendStateOf(session.Slot);
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             frames.Add(new ReadOnlySpan<byte>(frame.Bytes, frame.Length).ToArray());
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
         }
 
         return frames;
+    }
+
+    /// <summary>Applies every ready frame to the session's replica, as <see cref="Deliver"/> does, and returns each one decoded into a call log.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The logs, oldest first; empty when no frame was ready.</returns>
+    public List<FrameLog> DeliverLogged(SessionId session)
+    {
+        var replica = _replicas[session.Value];
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        var logs = new List<FrameLog>();
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        {
+            var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
+            var log = new FrameLog();
+            log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
+            logs.Add(log);
+            replica.Apply(bytes);
+            send.CompleteSend(frame.Sequence);
+        }
+
+        return logs;
     }
 
     /// <summary>Claims one frame, decodes it into a call log and releases it.</summary>
@@ -522,8 +564,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The log, or <see langword="null"/> when no frame was ready.</returns>
     public FrameLog Read(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        if (!send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        if (!send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             return null;
         }
@@ -531,7 +573,7 @@ sealed unsafe class FrameHarness : IDisposable
         var log = new FrameLog();
         var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
         log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
-        send->CompleteSend(frame.Sequence);
+        send.CompleteSend(frame.Sequence);
         return log;
     }
 
@@ -540,8 +582,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns><see langword="true"/> when one is ready.</returns>
     public bool HasFrame(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        return send->ReadySequence > send->SentSequence;
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        return send.ReadySequence > send.SentSequence;
     }
 
     /// <summary>The per-session frame state, for a test that has to set up a condition the engine reaches rarely.</summary>
@@ -566,7 +608,8 @@ sealed unsafe class FrameHarness : IDisposable
         var stamp = (uint)tick;
 
         // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
-        // entity that migrated into a cluster with no block lands in one this tick.
+        // entity that migrated into a cluster with no block lands in one this tick. The reverse index's step first: its referrers ride the repush list.
+        Subscriptions.References?.Step(states, Subscriptions.Hub);
         Subscriptions.Hub.PrepareBlocks(stamp);
         Subscriptions.Self?.Refresh(Sessions);
         for (var a = 0; a < states.Length; a++)
@@ -603,45 +646,77 @@ sealed unsafe class FrameHarness : IDisposable
         }
 
         var projected = 0;
+        var references = Subscriptions.References;
+        if (watched != 0)
+        {
+            references?.BeginTick(lists);
+        }
 
         using (EpochGuard.Enter(Engine.EpochManager))
         {
-            for (var a = 0; a < plans.Length; a++)
+            for (var w = 0; references != null && watched != 0 && w < lists; w++)
             {
-                var state = states[a];
-                var clusterState = state.ClusterState;
-                if (clusterState == null || state.WatchedBlocks.Count == 0)
-                {
-                    continue;
-                }
+                references.ResolverFor(w).Open();
+            }
 
-                // Both stores, as SubscriptionsProjectExecSystem.ProjectOne reads them: a transient-only archetype has no persistent segment at all.
-                var persistent = clusterState.ClusterSegment;
-                var transient = clusterState.TransientSegment;
-                var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
-                var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
-                try
+            try
+            {
+                for (var a = 0; a < plans.Length; a++)
                 {
-                    for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                    var state = states[a];
+                    var clusterState = state.ClusterState;
+                    if (clusterState == null || state.WatchedBlocks.Count == 0)
                     {
-                        var block = state.WatchedBlocks[i];
-                        var chunkId = block->ChunkId;
-                        if (chunkId < 0)
-                        {
-                            continue;
-                        }
+                        continue;
+                    }
 
-                        var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
-                        var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
-                        ProjectionPass.ProjectBlock(plans[a], a, state, projected++ % lists, block, clusterBase, transientBase, stamp);
+                    // Both stores, as SubscriptionsProjectExecSystem.ProjectOne reads them: a transient-only archetype has no persistent segment at all.
+                    var persistent = clusterState.ClusterSegment;
+                    var transient = clusterState.TransientSegment;
+                    var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
+                    var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+                    try
+                    {
+                        for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                        {
+                            var block = state.WatchedBlocks[i];
+                            var chunkId = block->ChunkId;
+                            if (chunkId < 0)
+                            {
+                                continue;
+                            }
+
+                            var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+                            var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
+                            var worker = projected++ % lists;
+                            ProjectionPass.ProjectBlock(plans[a], a, state, worker, block, clusterBase, transientBase, stamp,
+                                plans[a].ResolvesReferences ? references?.ResolverFor(worker) : null);
+                        }
+                    }
+                    finally
+                    {
+                        persistentAccessor.Dispose();
+                        transientAccessor.Dispose();
                     }
                 }
-                finally
+            }
+            finally
+            {
+                for (var w = 0; watched != 0 && w < lists; w++)
                 {
-                    persistentAccessor.Dispose();
-                    transientAccessor.Dispose();
+                    references?.ResolverFor(w).Close();
+                    foreach (var state in states)
+                    {
+                        state.CollectionContextFor(w)?.Close();
+                    }
                 }
             }
+        }
+
+        if (IndexThroughHub)
+        {
+            RunHubIndex(lists, finish);
+            return;
         }
 
         // The push index stage: sorted by the projection above, split into key ranges, then merged one range at a time.
@@ -675,6 +750,44 @@ sealed unsafe class FrameHarness : IDisposable
         for (var c = 0; c < chunks; c++)
         {
             push.FoldFarChunk(c);
+        }
+    }
+
+    // The index and far stages as the runtime runs them (SubscriptionsPushIndexExecSystem, SubscriptionsPushFarExecSystem): one plan over every served
+    // realm, its chunks run concurrently.
+    private void RunHubIndex(int lists, bool finish)
+    {
+        var hub = Subscriptions.Hub;
+        for (var w = 0; w < lists; w++)
+        {
+            hub.CountWorkers(w);
+        }
+
+        var from = System.Diagnostics.Stopwatch.GetTimestamp();
+        var ranges = hub.BeginParallelIndex();
+        RunChunks(ranges, hub.PlaceWorker);
+        if (finish)
+        {
+            var chunks = hub.PrepareFar(2, Sessions.OpenCount > 0);
+            RunChunks(chunks, hub.FoldFarChunk);
+        }
+
+        HubIndexTicks += System.Diagnostics.Stopwatch.GetTimestamp() - from;
+    }
+
+    // Concurrently when ProjectionWorkers asks for it, on this thread otherwise: a single-threaded run is the one whose time measures the chunks rather
+    // than the thread pool.
+    private void RunChunks(int chunks, Action<int> chunk)
+    {
+        if (ProjectionWorkers > 1)
+        {
+            System.Threading.Tasks.Parallel.For(0, chunks, chunk);
+            return;
+        }
+
+        for (var c = 0; c < chunks; c++)
+        {
+            chunk(c);
         }
     }
 
@@ -769,6 +882,55 @@ sealed class SessionReplica
 
         return null;
     }
+
+    /// <summary>Every component of a numeric field (a count's included, W33) for an entity the replica holds.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The components.</returns>
+    public double[] Numbers(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Numbers[plan.Ordinal].AsSpan(slot * plan.Components, plan.Components).ToArray();
+    }
+
+    /// <summary>Every component of a 64-bit integer field (W32) for an entity the replica holds, as bit patterns — never through a double.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The components.</returns>
+    public ulong[] Integers(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Integers[plan.Ordinal].AsSpan(slot * plan.Components, plan.Components).ToArray();
+    }
+
+    /// <summary>A text field's value for an entity the replica holds.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The text.</returns>
+    public string Text(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Texts[plan.Ordinal][slot];
+    }
+
+    /// <summary>A collection field (W34) of an entity the replica holds.</summary>
+    public CollectionValue Collection(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Collections[plan.Ordinal][slot];
+    }
+
+    private (ArchetypeStore Store, FieldPlan Plan, int Slot) Locate(int archetype, uint netId, string field)
+    {
+        Assert.That(Store.TryLocate(netId, out var located, out var slot) && located == archetype, Is.True, $"the replica does not hold netId {netId}");
+        var store = Store.Archetypes[archetype];
+        var plan = Array.Find(store.Plan.Fields, f => f.Name == field);
+        Assert.That(plan, Is.Not.Null, $"no field '{field}'");
+        return (store, plan, slot);
+    }
 }
 
 /// <summary>Records every call one decoded frame makes into its sink, so a test can assert the ORDER a decoder sees and not only the state it ends in.</summary>
@@ -800,6 +962,9 @@ sealed class FrameLog : ITickSink
 
     /// <summary>The owner field values the <c>SELF</c> blocks carried, by field name (the last one wins).</summary>
     public Dictionary<string, double> SelfNumbers { get; } = [];
+
+    /// <summary>The 64-bit owner field values (W32) the <c>SELF</c> blocks carried, as bit patterns, by field name (the last one wins).</summary>
+    public Dictionary<string, ulong> SelfIntegers { get; } = [];
 
     /// <summary>The <c>ACKS</c> records, in stream order.</summary>
     public List<(ushort Seq, byte Reason)> Acks { get; } = [];
@@ -930,6 +1095,15 @@ sealed class FrameLog : ITickSink
     }
 
     /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (_inSelf)
+        {
+            SelfIntegers[field.Name] = components[0];
+        }
+    }
+
+    /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 
     /// <inheritdoc />
@@ -985,6 +1159,8 @@ sealed class FrameLog : ITickSink
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _log.Number(field, components);
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => _log.Integer64(field, components);
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) { }
@@ -993,13 +1169,29 @@ sealed class FrameLog : ITickSink
     }
 }
 
-/// <summary>Records a replica's decoded events: each one's type and numeric fields, in order; <c>EventsLost</c> is summed, not listed.</summary>
+/// <summary>Records a replica's decoded events: each one's type, numeric fields and text, in order; <c>EventsLost</c> is summed, not listed.</summary>
 sealed class EventRecorder : IEventHandler
 {
     private Dictionary<string, double> _current;
+    private Dictionary<string, byte[]> _currentText;
 
     /// <summary>The events, in order: name and field values (a vector field's first component).</summary>
     public List<(string Name, Dictionary<string, double> Fields)> Received { get; } = [];
+
+    /// <summary>
+    /// The text fields of each received event, by index into <see cref="Received"/>, as the RAW decoded UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// Bytes rather than strings, because what a test about text on the wire has to be able to say is that the bytes are
+    /// the ones that were sent — a string comparison would pass on a value that had been through a lossy decode.
+    /// </remarks>
+    public List<Dictionary<string, byte[]>> Texts { get; } = [];
+
+    /// <summary>
+    /// The 64-bit integer fields (W32) of the received events, exactly — a double in <see cref="Received"/> would round them: the event's index into
+    /// <see cref="Received"/>, the field and its first component's bit pattern.
+    /// </summary>
+    public List<(int Event, string Field, ulong Bits)> Integers { get; } = [];
 
     /// <summary>The sum of every <c>EventsLost</c> count received.</summary>
     public long Lost { get; private set; }
@@ -1020,9 +1212,11 @@ sealed class EventRecorder : IEventHandler
         LostOutOfPlace += _lost && _inFrame > 0 ? 1 : 0;
         _inFrame++;
         _current = new Dictionary<string, double>(StringComparer.Ordinal);
+        _currentText = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         if (!_lost)
         {
             Received.Add((type.Name, _current));
+            Texts.Add(_currentText);
         }
     }
 
@@ -1039,8 +1233,21 @@ sealed class EventRecorder : IEventHandler
     }
 
     /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (!_lost)
+        {
+            Integers.Add((Received.Count - 1, field.Name, components[0]));
+        }
+    }
+
+    /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
+        if (!_lost)
+        {
+            _currentText[field.Name] = utf8.ToArray();
+        }
     }
 
     /// <inheritdoc />

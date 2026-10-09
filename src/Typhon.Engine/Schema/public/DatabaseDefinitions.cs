@@ -3,6 +3,8 @@
 using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -200,6 +202,34 @@ public class DatabaseDefinitions
     }
 
     /// <summary>
+    /// Refuses a component field whose CLR type has no schema mapping, naming the component, the field and the type.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This used to be a <c>continue</c>, and the silence was the defect.</b> A field of an unmapped type was dropped from the schema with no
+    /// diagnostic: its bytes stayed in the struct and were readable from C#, because component values are copied whole, so nothing looked wrong — but the
+    /// field had no field id, which means no Workbench column, no index, no foreign key and no projection. It is the kind of mistake that survives a
+    /// review and a test suite.
+    /// </para>
+    /// <para>
+    /// <b>And when the component had no OTHER field, the symptom was worse than silence.</b> <c>DBComponentDefinition.Build</c> takes
+    /// <c>fields.Max(f =&gt; f.FieldId)</c>, so a component left with zero fields failed with "sequence contains no elements" from inside LINQ — an error
+    /// naming neither the component nor the field nor the type. That is how this was found.
+    /// </para>
+    /// <para>
+    /// The message names <c>EntityLink&lt;T&gt;</c> because reaching for some other entity-shaped type is the likely way to get here now that
+    /// <see cref="EntityId"/> itself maps.
+    /// </para>
+    /// </remarks>
+    [DoesNotReturn]
+    private static void ThrowUnmappableField(Type componentType, string fieldName, Type fieldType) =>
+        throw new InvalidOperationException(
+            $"Component '{componentType.Name}' field '{fieldName}' has type '{fieldType.Name}', which has no schema field type. Use one of the supported "
+            + "types (the primitives, String64 / String1024 / VarString, the Point / Quaternion / AABB / BSphere families, a nested [Component] struct, "
+            + "ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
+            + "silently, which left it invisible to the Workbench, un-indexable and absent from replication.");
+
+    /// <summary>
     /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
     /// <c>GetFields</c>/<c>GetCustomAttribute</c>; source-generated components bypass it entirely by supplying their spec directly.
     /// </summary>
@@ -224,7 +254,14 @@ public class DatabaseDefinitions
             var (fieldType, _) = DatabaseSchemaExtensions.FromType(fieldInfo.FieldType);
             if (fieldType == FieldType.None)
             {
-                continue;
+                // A fixed buffer is the one unmappable shape that is deliberate: it is inline bytes with no schema type of its own, the component's later
+                // fields are laid out after it, and ReflectedOffsetProvenanceTests asserts exactly that arithmetic. Everything else here is a mistake.
+                if (fieldInfo.GetCustomAttribute<FixedBufferAttribute>() != null)
+                {
+                    continue;
+                }
+
+                ThrowUnmappableField(t, fieldInfo.Name, fieldInfo.FieldType);
             }
 
             var fa = fieldInfo.GetCustomAttribute<FieldAttribute>();
@@ -298,13 +335,38 @@ public class DatabaseDefinitions
             }
         }
 
+        // The guard that replaces "sequence contains no elements". DBComponentDefinition.Build takes Max over the fields, so a component that ends up with
+        // none fails inside LINQ, naming neither the component nor a field. Reachable whenever every declared field was exempt or the spec was empty.
+        var mappable = 0;
+        foreach (var f in specFields)
+        {
+            if (!f.IsStatic && DatabaseSchemaExtensions.FromType(f.DotNetType).field != FieldType.None)
+            {
+                mappable++;
+            }
+        }
+
+        if (mappable == 0)
+        {
+            throw new InvalidOperationException(
+                $"Component '{pocoType?.Name ?? spec.Name}' has no field with a schema type, so there is nothing to store. A component needs at least one "
+                + "field of a supported type; check that its fields are not all static, fixed buffers, or types the schema does not map.");
+        }
+
         var fieldId = 0;
         foreach (var f in specFields)
         {
             var (fieldType, fieldUnderlyingType) = DatabaseSchemaExtensions.FromType(f.DotNetType);
             if (fieldType == FieldType.None)
             {
-                continue;
+                // Same exemption as the reflection path, identified from the TYPE because a spec carries no FieldInfo: the compiler emits a fixed buffer's
+                // backing struct with UnsafeValueTypeAttribute, which nothing hand-written has.
+                if (f.DotNetType?.GetCustomAttribute<UnsafeValueTypeAttribute>() != null)
+                {
+                    continue;
+                }
+
+                ThrowUnmappableField(pocoType, f.Name, f.DotNetType);
             }
 
             var resolvedId = resolver?.ResolveFieldId(f.Name, f.PreviousName, f.ExplicitFieldId) ?? (f.ExplicitFieldId ?? fieldId++);

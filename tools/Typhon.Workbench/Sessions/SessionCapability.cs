@@ -22,6 +22,36 @@ public static class SessionCapability
     /// </summary>
     public const string Profiler = "profiler";
 
-    /// <summary>The session has a live database behind it — schema, data browser, storage map. Open sessions only.</summary>
+    /// <summary>The session has a live database behind it — data browser, storage map, query console. Open sessions only.</summary>
     public const string Database = "database";
+
+    /// <summary>
+    /// The session can serve <c>/api/sessions/{id}/schema/*</c> — component layouts, archetype composition, the index catalog.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="Database"/> in #WB-01, when schema stopped implying a reachable database. An Open session reads it from its live engine;
+    /// an Attach session reads it from the static-structure tables in the Init frame, and so has schema over a database it cannot browse (blocker B1).
+    /// Deriving the Schema Inspector's availability from <see cref="Database"/> would have hidden it in exactly the mode the engine was changed to serve.
+    /// </remarks>
+    public const string Schema = "schema";
+
+    /// <summary>
+    /// The session can serve <c>/api/sessions/{id}/realms/*</c> — the realm catalog, and whatever any one realm's state can be known from here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own capability for the reason <see cref="Schema"/> is, one turn further out.</b> An <c>Open</c> session has realms because it has a
+    /// <see cref="Database"/>: the catalog rows are in the file. An <c>Attach</c> session has realm <i>state</i> because it has a <see cref="Profiler"/> —
+    /// spatial trace records carry a row per runnable realm — over a database it cannot browse at all. Deriving this from <c>Database</c> would hide the realm
+    /// board in live attach, which is the sysops case; deriving it from <c>Profiler</c> would hide the realm navigator in a plain open, which is the developer
+    /// case. Neither existing capability describes it, so it is one of its own and either route grants it.
+    /// </para>
+    /// <para>
+    /// <b>Granted on the engine's realm CAPACITY, not on how many realms happen to exist.</b> A database configured for one realm never gets it — a single
+    /// world has no realm to navigate, which is the same call <c>RuntimeStatsSnapshot.Realms</c> makes by being empty there. A database configured for
+    /// thousands gets it even while only realm 0 is registered, because realms register and unregister at run time (a dungeon opens, a party disperses) and a
+    /// capability derived from the live count would take the whole realm UI away and put it back as that happened.
+    /// </para>
+    /// </remarks>
+    public const string Realms = "realms";
 }

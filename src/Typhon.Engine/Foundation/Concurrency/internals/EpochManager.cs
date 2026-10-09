@@ -47,6 +47,9 @@ public sealed class EpochManager : ResourceNode, IMetricSource
     /// </summary>
     public long MinActiveEpoch => _registry.ComputeMinActiveEpoch(_globalEpoch);
 
+    /// <summary>The threads pinned to an epoch, oldest first — which scope holds <see cref="MinActiveEpoch"/> back. Diagnostic.</summary>
+    internal string DescribePinnedThreads() => _registry.DescribePinnedThreads(_globalEpoch);
+
     /// <summary>Number of active (pinned) slots in the thread registry.</summary>
     public int ActiveSlotCount => _registry.ActiveSlotCount;
 

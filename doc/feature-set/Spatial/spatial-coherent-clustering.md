@@ -81,7 +81,7 @@ foreach (var cluster in wt.GetClusterEnumerator<Ant>())
 wt.Commit();
 ```
 
-The plain `OpenMut(...).Write(...)` path is still correct, and it is the one to use when you are editing a single
+The plain `OpenMut(...).Set(...)` path is still correct, and it is the one to use when you are editing a single
 entity by id, when the component is `Versioned` (the barrier refuses those, since it would bypass the revision
 chain), or when you also need the slot marked dirty for the write-ahead log — `WriteSpatial` deliberately does not
 set the dirty bit. It costs the engine a wider fall-back scan at the fence, because a plain write leaves the

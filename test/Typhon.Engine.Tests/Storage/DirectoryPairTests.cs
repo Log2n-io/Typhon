@@ -124,11 +124,11 @@ public class DirectoryPairTests
 
         // Each grow rewrites the root directory → re-persists it → alternates the slot and bumps the generation.
         var cs1 = mmf.CreateChangeSet();
-        seg.Grow(4, true, cs1);
+        seg.Grow(4, cs1);
         cs1.SaveChanges();                                     // persist #2: root → twin slot, gen 2
 
         var cs2 = mmf.CreateChangeSet();
-        seg.Grow(8, true, cs2);
+        seg.Grow(8, cs2);
         cs2.SaveChanges();                                     // persist #3: root → primary slot, gen 3
 
         var genPrimary = ReadSlotGeneration(mmf, root);
@@ -208,7 +208,7 @@ public class DirectoryPairTests
             twin = TwinOf(mmf, root);
 
             var cs1 = mmf.CreateChangeSet();
-            seg.Grow(5, true, cs1);
+            seg.Grow(5, cs1);
             cs1.SaveChanges();                                 // make both slots valid, then corrupt both
 
             mmf.WritePageDirect(root, GarbagePage());
@@ -257,6 +257,53 @@ public class DirectoryPairTests
         Assert.That(reloaded.Length, Is.EqualTo(length), "every directory page (root + extensions) round-trips through the slot-aware reopen");
         Assert.That(reloaded.Pages.ToArray(), Is.EqualTo(pagesBefore),
             "every one of the 2100 directory entries — spanning the root AND the map-extension page(s) — must round-trip exactly, not merely the count");
+    }
+
+    /// <summary>
+    /// A directory that ends exactly at a page's end puts its terminator alone on a fresh map page. That page got no twin, and the reopen walk —
+    /// which registers each page's current slot — stopped at the first page without one, so every later directory page was read from its primary
+    /// slot, whatever its current slot was. A page persisted an even number of times holds its latest bytes in its twin: the directory reopened short,
+    /// at an earlier terminator (#1206 — a 200M-entry map reopened 800 000 pages short).
+    /// </summary>
+    [Test]
+    [CancelAfter(20000)]
+    [VerifiesRule("CK-05")]
+    public void ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot()
+    {
+        int root;
+        int[] pagesBefore;
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+            // 2 000 entries fill the root exactly: the terminator goes alone on map page 1.
+            var cs0 = mmf.CreateChangeSet();
+            var seg = mmf.AllocateSegment(PageBlockType.None, 2000, cs0);
+            cs0.SaveChanges();
+            root = seg.RootPageIndex;
+
+            // Each grow persisted on its own: map page 2 is created by the second (persist #1, primary slot) and extended by the third (persist #2,
+            // twin slot), so its current slot is the twin.
+            foreach (var length in new[] { 3000, 4500, 5200 })
+            {
+                var cs = mmf.CreateChangeSet();
+                seg.Grow(length, cs);
+                cs.SaveChanges();
+            }
+
+            pagesBefore = seg.Pages.ToArray();
+            var paired = mmf.DirectoryPairs.Select(p => p.Primary).ToHashSet();
+            var directory = seg.DirectoryPagesForTest.ToArray();
+            Assert.That(directory, Has.Length.EqualTo(3), "premise: root, the page that held the terminator alone, and the page past it");
+            Assert.That(directory, Is.SubsetOf(paired), "every directory page has a twin, the terminator-only one included");
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        var reloaded = mmf2.GetSegment(root);
+
+        Assert.That(reloaded.Length, Is.EqualTo(5200), "the directory reopens at its last terminator, not an earlier one left in a stale slot");
+        Assert.That(reloaded.Pages.ToArray(), Is.EqualTo(pagesBefore));
     }
 
     [Test]

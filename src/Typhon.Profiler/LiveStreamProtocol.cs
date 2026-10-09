@@ -15,6 +15,15 @@ public static class LiveStreamProtocol
     /// <summary>Size of the frame header in bytes: 1 (type) + 4 (length) = 5.</summary>
     public const int FrameHeaderSize = 5;
 
+    /// <summary>
+    /// The largest frame a receiver accepts, header included. A longer one is a malformed stream, not a big message: the length field is the only thing a
+    /// reader has to trust before it allocates, so an unbounded value is an allocation an attacker — or a corrupted socket — chooses. It lives here rather
+    /// than in one reader because it binds BOTH ends: a producer that writes a larger frame is not sending a message a reader merely declines, it is
+    /// dropping the connection. The Init frame is the only one that can approach it (it carries the whole schema), and <c>TcpExporter</c> checks against
+    /// this constant before sending.
+    /// </summary>
+    public const int MaxFrameBytes = 8 * 1024 * 1024;
+
     /// <summary>Write a frame header into <paramref name="destination"/>.</summary>
     public static void WriteFrameHeader(Span<byte> destination, LiveFrameType type, int payloadLength)
     {

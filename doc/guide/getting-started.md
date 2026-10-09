@@ -212,7 +212,9 @@ of *Versioned* components (the default): transactional writes, snapshot-isolated
 using (var tx = dbe.CreateQuickTransaction())
 {
     var e = tx.OpenMut(scout);                 // mutable handle (vs. read-only tx.Open)
-    e.Write(Character.Wallet).Credits += 500;   // pay a reward — an in-place ref write
+    var wallet = e.Read(Character.Wallet);
+    wallet.Credits += 500;
+    e.Set(Character.Wallet, wallet);           // pay a reward — stores the new value
     tx.Commit();                               // durable + visible here
     // No Commit() → the change is discarded at scope end.
 }

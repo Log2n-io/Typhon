@@ -9,7 +9,7 @@ namespace Typhon.Workbench.Streams;
 /// SSE stream of growth-deltas for an Attach session (#289 unified pipeline; retyped for #308).
 /// Emits a full <c>metadata</c> snapshot on connect / reconnect, then per-tick / per-chunk / 1 Hz
 /// metrics deltas as the builder grows the in-memory cache. Each delta ships as a typed SSE event
-/// (<c>event: tickSummaryAdded</c> etc.) — clients install one <c>addEventListener</c> per kind for
+/// (<c>event: tickSummariesAdded</c> etc.) — clients install one <c>addEventListener</c> per kind for
 /// clean TypeScript narrowing instead of switching on a discriminator inside the JSON payload.
 /// <c>heartbeat</c> on connection-state changes and on 5 s idle timeouts; <c>shutdown</c> when the
 /// engine ends the session.
@@ -48,6 +48,9 @@ public static class ProfilerLiveStream
         await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         var runtime = liveRuntime;
+        // Drain buffered summaries to the existing subscribers BEFORE joining, so this connection does not receive them twice — once in the metadata
+        // snapshot written below, once in the next coalesced batch. See FlushPendingSummariesBeforeSubscribe.
+        runtime.FlushPendingSummariesBeforeSubscribe();
         var (subscriberId, reader) = runtime.Subscribe();
 
         try
@@ -66,6 +69,21 @@ public static class ProfilerLiveStream
             // #805: seed the capture state on connect. Without this a client that subscribes between two transitions
             // would render "not recording" through an entire in-flight window, since deltas only fire on change.
             await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "captureStateChanged", CaptureState: runtime.CaptureState), ct);
+            // #1083: and the realm capability, for the same reason one field over — this one learned the hard way.
+            //
+            // An attach session earns SessionCapability.Realms from its own stream, and the runtime announces it with a
+            // single `capabilitiesChanged` delta on the transition. The first per-realm record lands within the first
+            // ticks of attaching, which is BEFORE the browser has opened this stream: the delta went to no subscribers,
+            // and because it fires exactly once it never came again. The client kept the capability set it was handed at
+            // attach, so the Realms view stayed absent from the View menu and the palette over a session the server had
+            // already granted it to — observed live, after the same bug had been "fixed" once at the server end.
+            //
+            // Replaying it here is what makes the announcement independent of arrival order: a late subscriber, a
+            // reconnect and a second tab all learn it.
+            if (runtime.HasRealmTelemetry)
+            {
+                await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "capabilitiesChanged"), ct);
+            }
             await WriteEventAsync(ctx, new LiveStreamEventDto(Kind: "heartbeat", Status: runtime.ConnectionStatus), ct);
 
             await DrainLoopAsync(ctx, reader, runtime, ct);

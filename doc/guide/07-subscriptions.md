@@ -108,10 +108,10 @@ That is the whole projection. What each attribute means:
 | `[Heading]` | an angle field | the angle, only when it turned past a tolerance |
 | `[Owner(kind?)]` | a component field | the field **only to the session that controls the entity** |
 
-- **Codecs.** With no `CodecKind` a field travels under its type's default (`byte` → `U8`, `int` → `I32`, `float` → `F32`, an enum →
-  packed bits wide enough for its names, `EntityId` → an entity reference). Name one to quantize: `CodecKind.Quant` with `Min`, `Max` and
-  `Bits`, `F16`, `Unorm`, `Varu`… A `long` or `double` has **no** default — the generator asks you to choose, because no 64-bit value
-  reaches the wire without a decision (`Saturate = true` clamps it on purpose).
+- **Codecs.** With no `CodecKind` a field travels exactly, under its type's own codec (`byte` → `U8`, `int` → `I32`, `long` → `I64`,
+  `ulong` → `U64`, `float` → `F32`, `double` → `F64`, a `Point3F` → three `F32`s, an enum → packed bits wide enough for its names, `EntityId`
+  → an entity reference). Name one to spend fewer bytes: `CodecKind.Quant` with `Min`, `Max` and `Bits`, `F16`, `Unorm`, `Varu`… A codec
+  narrower than the type needs `Saturate = true`, which clamps on purpose and counts every clamp.
 - **Change groups.** A record carries only the groups that changed, so a health change does not resend a faction. Fields with no `Group`
   share the default one.
 - **Motion segments** make movement cheap: a client receives a start point, a velocity and a start tick, and extrapolates. The engine sends
@@ -286,7 +286,9 @@ foreach (var cluster in clusters)
 
 // Or for an entity reached by id — a command's target:
 var target = ctx.Transaction.OpenMut(id);
-target.Write(Character.Ham).Health -= damage;
+var hamCopy = target.Read(Character.Ham);
+hamCopy.Health -= damage;
+target.Set(Character.Ham, hamCopy);
 ctx.Subscriptions.Replicate(in target);
 ```
 
@@ -351,8 +353,11 @@ internal sealed class CommandSystem : CallbackSystem
         foreach (ref readonly var move in subs.Commands<MoveTo>())
         {
             if (!_characters.TryGetValue(move.Session, out var me)) continue;
-            ctx.Transaction.OpenMut(me).Write(Character.Intent).Target =
+            var opened = ctx.Transaction.OpenMut(me);
+            var intent = opened.Read(Character.Intent);
+            intent.Target =
                 new Point2F { X = move.Value.X, Y = move.Value.Y };
+            opened.Set(Character.Intent, intent);
         }
 
         foreach (ref readonly var attack in subs.Commands<Attack>())
@@ -367,7 +372,9 @@ internal sealed class CommandSystem : CallbackSystem
             }
 
             var victim = ctx.Transaction.OpenMut(target);
-            victim.Write(Character.Ham).Health -= 10;
+            var ham = victim.Read(Character.Ham);
+            ham.Health -= 10;
+            victim.Set(Character.Ham, ham);
             subs.Replicate(in victim);
         }
     }

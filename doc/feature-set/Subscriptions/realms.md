@@ -56,7 +56,7 @@ ctx.Subscriptions.Enter(godSession, new RealmId(1));             // a camera wit
 
 - A session holds, hears and resolves only its own realm (SUB-28); a switch is one published `RESET|REALM` (SUB-29); a positioned value is encoded
   and decoded with exactly one realm's frame (SUB-30).
-- An entity moving between realms leaves one and enters the other with a new network identity.
+- An entity moving between realms leaves one and enters the other keeping its network identity (SUB-09, #1081). Sessions following it across see the same netId on both sides; sessions in the source realm see a leave.
 - A realm's position width is the replication block layout's (24 bits); a realm without `Replication` takes no session.
 - Not built: `At(realm, position)` (a fixed anchor is realm 0), `Follow(entity)`, `SessionsIn(realm)`, the `RealmClosed` session event, per-realm
   position widths.

@@ -1,0 +1,209 @@
+{
+  "description": "varu64 (W32) at every length edge, 2\u2077\u1D4F \u2212 1 and 2\u2077\u1D4F for k = 1..9, to the ten-byte 2\u2076\u2074 \u2212 1.",
+  "codec": {
+    "t": "varu64"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "000000000000007f"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "000000000000007f"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000080"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "0000000000000080"
+      ]
+    },
+    {
+      "input": [
+        "0000000000003fff"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "0000000000003fff"
+      ]
+    },
+    {
+      "input": [
+        "0000000000004000"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "0000000000004000"
+      ]
+    },
+    {
+      "input": [
+        "00000000001fffff"
+      ],
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "00000000001fffff"
+      ]
+    },
+    {
+      "input": [
+        "0000000000200000"
+      ],
+      "offset": 12,
+      "length": 4,
+      "decoded": [
+        "0000000000200000"
+      ]
+    },
+    {
+      "input": [
+        "000000000fffffff"
+      ],
+      "offset": 16,
+      "length": 4,
+      "decoded": [
+        "000000000fffffff"
+      ]
+    },
+    {
+      "input": [
+        "0000000010000000"
+      ],
+      "offset": 20,
+      "length": 5,
+      "decoded": [
+        "0000000010000000"
+      ]
+    },
+    {
+      "input": [
+        "00000007ffffffff"
+      ],
+      "offset": 25,
+      "length": 5,
+      "decoded": [
+        "00000007ffffffff"
+      ]
+    },
+    {
+      "input": [
+        "0000000800000000"
+      ],
+      "offset": 30,
+      "length": 6,
+      "decoded": [
+        "0000000800000000"
+      ]
+    },
+    {
+      "input": [
+        "000003ffffffffff"
+      ],
+      "offset": 36,
+      "length": 6,
+      "decoded": [
+        "000003ffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "0000040000000000"
+      ],
+      "offset": 42,
+      "length": 7,
+      "decoded": [
+        "0000040000000000"
+      ]
+    },
+    {
+      "input": [
+        "0001ffffffffffff"
+      ],
+      "offset": 49,
+      "length": 7,
+      "decoded": [
+        "0001ffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "0002000000000000"
+      ],
+      "offset": 56,
+      "length": 8,
+      "decoded": [
+        "0002000000000000"
+      ]
+    },
+    {
+      "input": [
+        "00ffffffffffffff"
+      ],
+      "offset": 64,
+      "length": 8,
+      "decoded": [
+        "00ffffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "0100000000000000"
+      ],
+      "offset": 72,
+      "length": 9,
+      "decoded": [
+        "0100000000000000"
+      ]
+    },
+    {
+      "input": [
+        "7fffffffffffffff"
+      ],
+      "offset": 81,
+      "length": 9,
+      "decoded": [
+        "7fffffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 90,
+      "length": 10,
+      "decoded": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "ffffffffffffffff"
+      ],
+      "offset": 100,
+      "length": 10,
+      "decoded": [
+        "ffffffffffffffff"
+      ]
+    }
+  ]
+}

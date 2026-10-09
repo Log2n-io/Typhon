@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
+import { readRealmRates } from '@/panels/Realms/realmRatesReading';
+import { activeRealmScope, useRealmScopeStore } from '@/stores/useRealmScopeStore';
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import { GaugeId } from '@/libs/profiler/model/types';
 import type { GaugeSeries, SpatialTickTelemetry } from '@/libs/profiler/model/traceModel';
 import {
@@ -10,7 +13,12 @@ import {
   detectRepairPin,
   latestSampleFor,
   ratePerSecond,
+  readController,
+  readQueryEfficiency,
+  readRealmShapes,
   readTightness,
+  realmRunStateName,
+  windowGrowth,
 } from './spatialReadings';
 
 /**
@@ -25,24 +33,87 @@ import {
  * <b>Two clocks.</b> The per-tick figures are labelled with the tick they came from. Where a trend is more useful than an instant the
  * panel differentiates over the window instead of showing one arbitrary tick as if it were a rate.
  *
- * <b>Zero means zero.</b> No counter is ever rendered as "—" or "unknown". The one place the panel says something other than a number
- * is where the ENGINE makes a distinction: a tightness mean over zero samples is "no cluster was written", which is a fact about the
- * tick and not a missing measurement.
+ * <b>Zero means zero — on THIS panel, and the qualifier is new.</b> Every counter here comes from the per-archetype record, which is emitted on every
+ * tick the subtree is on, so a number is always a measurement and none is rendered as "—" or "unknown". The one place the panel says something other than
+ * a number is where the ENGINE makes a distinction: a tightness mean over zero samples is "no cluster was written", which is a fact about the tick and not
+ * a missing measurement.
+ *
+ * <b>That does not generalise to the per-REALM rates</b>, and the Realms panel is right to render "—" where this one does not. Kind 70 is emitted only for
+ * realms the fence touched, so an absent row is a measured silence and a zero would claim the realm was measured and found idle. The difference is not a
+ * style choice between two surfaces: it is whether the record on which each is built is gated.
  */
 export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
-  const sessionKind = useSessionStore((s) => s.kind);
-  const sessionId = useSessionStore((s) => s.sessionId);
-  const { windowedTicks, gaugeData, hasData } = useLiveGaugeData(sessionKind === 'attach' ? sessionId : null);
+  // Not `kind === 'attach'`: a captured profile and a watching database session both carry these records and are both
+  // `kind === 'open'`, so a kind test showed this panel empty over every capture ever taken. See `useTelemetrySession`.
+  const { sessionId, hasTelemetry } = useTelemetrySession();
+  const { windowedTicks, gaugeData, hasData } = useLiveGaugeData(sessionId);
 
   const archetypeIds = useMemo(() => archetypeIdsIn(windowedTicks), [windowedTicks]);
+  // Read the archetype table out of the store rather than through `useProfilerNameMaps`, which issues its own
+  // TanStack query for metadata the Init SSE frame already delivered — an extra fetch for data in hand, and it drags
+  // a QueryClientProvider into every test that renders this panel. Selecting `metadata?.archetypes` rather than
+  // `metadata` matters: the DTO's identity flips on every live batch as tick summaries are appended, and subscribing
+  // to the whole thing would re-render this panel at the batch rate for a table that never changes.
+  const archetypes = useProfilerSessionStore((s) => s.metadata?.archetypes);
+  const archetypeNames = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const a of archetypes ?? []) {
+      if (a.name) {
+        m.set(Number(a.archetypeId), a.name);
+      }
+    }
+    return m;
+  }, [archetypes]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const archetypeId = selectedId !== null && archetypeIds.includes(selectedId) ? selectedId : archetypeIds[0] ?? null;
 
-  if (sessionKind !== 'attach') {
+  // All nine readings in ONE memo keyed on the window and the selected archetype. Each is a full walk of the window, and
+  // the component re-renders far more often than the window changes — the store's `metadata` identity flips on every live
+  // batch, so an unmemoized body re-walked the window about sixty times a second to produce the same numbers. The sibling
+  // Subscriptions panel memoizes the equivalent set; this one did not.
+  //
+  // ABOVE the cold-state returns below, because a hook after an early return is called on some renders and not others —
+  // `react-hooks/rules-of-hooks` rejects it and React would mis-pair the hook state. With no archetype selected the key is
+  // -1, which no archetype carries, so every helper returns its empty reading; nothing below the guards reads them then.
+  // The global realm scope. Null when unscoped or unlinked, and then this panel behaves exactly as it did before the
+  // scope existed — which is the store's own contract, not a courtesy.
+  const scopedRealm = useRealmScopeStore((s) => activeRealmScope(s));
+
+  // ONLY the two window rates can be narrowed, because only they have a per-realm twin on the wire. Everything else in
+  // this panel — the latest sample, the efficiency block, the repair queue, the controller state — is archetype-wide
+  // in the engine and has no realm dimension at all. Narrowing what can be narrowed and leaving the rest silently
+  // archetype-wide would be the worst of both, so the banner below says which is which.
+  const scopedRates = useMemo(
+    () => (scopedRealm == null || archetypeId == null ? null : readRealmRates(windowedTicks, archetypeId)),
+    [scopedRealm, archetypeId, windowedTicks],
+  );
+  const scopedRow = scopedRealm == null ? null : scopedRates?.rows.find((r) => r.realmId === scopedRealm) ?? null;
+
+  const {
+    sample, identity, repairPin, migrationsPerSec, driftersPerSec, efficiency, evictedInWindow, realms, rebasesInWindow,
+  } = useMemo(() => {
+    const id = archetypeId ?? -1;
+    return {
+      sample: latestSampleFor(windowedTicks, id),
+      identity: checkDrifterIdentity(windowedTicks, id),
+      repairPin: detectRepairPin(windowedTicks, id),
+      migrationsPerSec: ratePerSecond(windowedTicks, id, (r) => r.migrations),
+      driftersPerSec: ratePerSecond(windowedTicks, id, (r) => r.driftersDetected),
+      // #944 — the appended controller half. Efficiency is a WINDOW sum (the field's own instruction) while the controller's
+      // state is read off the latest record: one is a cost over time, the other is where the controller stands right now.
+      efficiency: readQueryEfficiency(windowedTicks, id),
+      evictedInWindow: windowGrowth(windowedTicks, id, (r) => r.repairQueueEvicted),
+      realms: readRealmShapes(windowedTicks, id),
+      rebasesInWindow: windowGrowth(windowedTicks, id, (r) => r.efficiencyRebases),
+    };
+  }, [windowedTicks, archetypeId]);
+
+  if (!hasTelemetry) {
     return (
       <ColdState>
-        Spatial Maintenance is available in <b>Attach</b> sessions only. Its counters are produced by the tick fence and reset every
-        tick, so they exist only while an engine is running. Open <i>Connect → Attach</i> and point it at a live engine.
+        Spatial Maintenance reads counters the tick fence produces, so it needs a session that carries them: a live engine, or a
+        database with a capture attached. Open <i>Connect → Attach</i> to watch one, or attach a profile to this database to read a
+        recorded run.
       </ColdState>
     );
   }
@@ -56,14 +127,22 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
     );
   }
 
-  const sample = latestSampleFor(windowedTicks, archetypeId);
-  const identity = checkDrifterIdentity(windowedTicks, archetypeId);
-  const repairPin = detectRepairPin(windowedTicks, archetypeId);
-  const migrationsPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.migrations);
-  const driftersPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.driftersDetected);
-
   return (
     <div className="flex h-full w-full flex-col overflow-auto bg-background" data-testid="spatial-maintenance">
+      {scopedRealm != null && (
+        // Says exactly what the scope did and did NOT do. Only the two window rates have a per-realm twin on the wire;
+        // every other figure here is archetype-wide in the engine and has no realm dimension to narrow to. A banner
+        // claiming the panel is "showing realm N" would be false about most of what is on screen.
+        <p
+          className="border-b bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+          data-testid="spatial-maintenance-realm-scope"
+        >
+          Scoped to <b>realm {scopedRealm}</b>: the two window rates below are that realm's alone
+          {scopedRow == null && <> — and it reported no work in this window, so they read zero</>}. Everything else on
+          this panel is archetype-wide — the engine owns those counters per archetype, not per realm.
+        </p>
+      )}
+
       <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-fs-sm" data-testid="spatial-maintenance-header">
         <span className="text-muted-foreground">Archetype</span>
         <select
@@ -72,7 +151,13 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
           value={archetypeId}
           onChange={(e) => setSelectedId(Number(e.target.value))}
         >
-          {archetypeIds.map((id) => <option key={id} value={id}>#{id}</option>)}
+          {/* Named, with the id kept beside it. The id alone is meaningless to whoever reads this panel, and the name is
+              available in an attach session since the engine started pushing its archetype table over the Init frame
+              (#WB-01) — `ProjectArchetypes` builds these from `reader.ArchetypeDefinitions`. Falls back to the bare id
+              for an engine that sends no schema, which is the same session shape that hides the Schema Explorer. */}
+          {archetypeIds.map((id) => (
+            <option key={id} value={id}>{archetypeNames.get(id) ? `${archetypeNames.get(id)} (#${id})` : `#${id}`}</option>
+          ))}
         </select>
         {/* The tick is named, never implied. A per-tick counter without the tick it came from is not a reading. */}
         <span className="ml-auto font-mono text-muted-foreground" data-testid="spatial-maintenance-tick">
@@ -88,13 +173,18 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             row={sample.row}
             identity={identity}
             repairPin={repairPin}
+            efficiency={efficiency}
           />
 
           <Group title="Crossing" testId="spatial-group-crossing" hint="An entity left its cell. Correctness — never refused.">
             <Stat label="Migrations" value={sample.row.migrations} />
             <Stat label="Hysteresis absorbed" value={sample.row.hysteresisAbsorbed} />
             <Stat label="Crossings queued" value={sample.row.crossingsQueued} />
-            <Stat label="Migrations/s (window)" value={migrationsPerSec} decimals={1} />
+            <Stat
+              label={scopedRealm == null ? 'Migrations/s (window)' : `Migrations/s (realm ${scopedRealm})`}
+              value={scopedRealm == null ? migrationsPerSec : scopedRow?.migrationsPerSec ?? 0}
+              decimals={1}
+            />
           </Group>
 
           <Group title="Relocation" testId="spatial-group-relocation" hint="Intra-cell drift. Quality — the budget may refuse it.">
@@ -106,7 +196,11 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             <Stat label="— no candidate" value={sample.row.driftersUnplacedNoCandidate} />
             <Stat label="Spilled" value={sample.row.driftersSpilled} />
             <Stat label="Pins rejected" value={sample.row.pinsRejected} />
-            <Stat label="Drifters/s (window)" value={driftersPerSec} decimals={1} />
+            <Stat
+              label={scopedRealm == null ? 'Drifters/s (window)' : `Drifters/s (realm ${scopedRealm})`}
+              value={scopedRealm == null ? driftersPerSec : scopedRow?.driftersPerSec ?? 0}
+              decimals={1}
+            />
           </Group>
 
           <Group title="Repair" testId="spatial-group-repair" hint="A cell's worst clusters, Morton re-sorted. Whole units only.">
@@ -124,11 +218,51 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             <FenceSpan gaugeSeries={gaugeData.gaugeSeries} migrationCpuMs={sample.row.migrationCpuMs} tickNumber={sample.tickNumber} />
           </Group>
 
+          <Group
+            title="Controller"
+            testId="spatial-group-controller"
+            hint="What the budget above was DERIVED from: the queries' efficiency decides the share of the configured budget the fence may spend."
+          >
+            <Stat label="Budget configured" value={sample.row.budgetConfiguredMs} decimals={3} unit="ms"
+              hint="The ReclusterBudgetMs ceiling. Repeated in every record because an attach stream carries no configuration." />
+            <Stat label="Budget granted" value={sample.row.budgetGrantedMs} decimals={3} unit="ms"
+              hint="Configured x the share the efficiency earned. 'Budget committed' above is what the repair path then spent of it." />
+            <Stat label="Tolerance" value={sample.row.efficiencyTolerance} decimals={2}
+              hint="QueryEfficiencyTolerance. ZERO MEANS THE CONTROLLER IS OFF, not that it tolerates everything." />
+            <Stat label="Candidates/hit (now)" value={sample.row.candidatesPerHitSmoothed} decimals={2} hint="Smoothed — the controller's input." />
+            <Stat label="Candidates/hit (best)" value={sample.row.candidatesPerHitBest} decimals={2}
+              hint="The set point: the lowest smoothed value since the last re-base." />
+            <Stat label="Ticks at whole budget" value={sample.row.ticksAtWholeBudget}
+              hint="Consecutive. The re-base comes the tick after EfficiencyRebaseTicks of them." />
+            <Stat label="Re-bases (window)" value={rebasesInWindow}
+              hint="Differentiated over the window — the raw counter is cumulative since the cluster state was created." />
+            <Stat label="Measured cost" value={sample.row.measuredNsPerEntity} decimals={1} unit="ns/entity"
+              hint="The per-entity migration cost the budget was actually spent against." />
+            <Stat label="Drift-target boost" value={sample.row.driftTargetBoost} decimals={2} unit="x"
+              hint="The throttle's multiplier on the drift target. 1 is none; at its cap, relocation detection is off." />
+          </Group>
+
+          <Group
+            title="Repair health"
+            testId="spatial-group-repair-health"
+            hint="Whether the repair path is working or merely surviving: what cooled off, what the valve forced through, what fell off the queue."
+          >
+            <Stat label="Cells cooling" value={sample.row.repairCellsCooling}
+              hint="Waiting out RepairCooldownTicks after a repair. A level, not a rate." />
+            <Stat label="Valve fires" value={sample.row.repairValveFires}
+              hint="Units admitted PAST the budget. A steady non-zero here with units pinned at one is the budget not working." />
+            <Stat label="Entities repaired" value={sample.row.repairedEntities} />
+            <Stat label="Queue evicted (window)" value={evictedInWindow}
+              hint="Candidates dropped at the queue cap, differentiated over the window. Non-zero means repair demand exceeds the queue." />
+          </Group>
+
           <Group title="Structure" testId="spatial-group-structure" hint="What the partition looks like right now.">
             <Stat label="Active clusters" value={sample.row.activeClusters} />
             <Stat label="Cell-tree promotions" value={sample.row.cellTreePromotions} />
             <Stat label="Cell-tree demotions" value={sample.row.cellTreeDemotions} />
           </Group>
+
+          <Realms reading={realms} />
 
           <GridOccupancy gaugeSeries={gaugeData.gaugeSeries} />
         </>
@@ -140,13 +274,15 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
 // ── The three derived readings ───────────────────────────────────────────────────────────────────────────────────
 
 function DerivedReadings({
-  row, identity, repairPin,
+  row, identity, repairPin, efficiency,
 }: {
   row: SpatialTickTelemetry;
   identity: ReturnType<typeof checkDrifterIdentity>;
   repairPin: ReturnType<typeof detectRepairPin>;
+  efficiency: ReturnType<typeof readQueryEfficiency>;
 }) {
   const tightness = readTightness(row);
+  const controller = readController(row);
 
   return (
     <div className="flex flex-col gap-2 border-b border-border p-3" data-testid="spatial-readings">
@@ -189,6 +325,25 @@ function DerivedReadings({
         note={repairPin.pinned
           ? 'Pinned at one while units are being refused — the signature of a budget the planner cannot spend, where the single unit each tick is the safety valve rather than the budget working.'
           : 'Watches for a unit count pinned at 1 across budgets while units are refused.'}
+      />
+
+      {/* 4 — #944: the controller, as a verdict. The nine numbers in the Controller block below are only readable against
+          the one question they answer: is the fence being given the budget its query efficiency has earned? */}
+      <Reading
+        testId="spatial-reading-controller"
+        title="Budget controller"
+        ok={!controller.active || !controller.hasSignal ? null : controller.grantedShare >= 0.999 === controller.withinTolerance}
+        detail={!controller.active
+          ? 'QueryEfficiencyTolerance is 0 — the controller is off and the fence always receives the whole configured budget.'
+          : !controller.hasSignal
+            ? `No efficiency signal this tick (the queries did not hit enough to steer by), so the grant is being held at `
+              + `${(controller.grantedShare * 100).toFixed(0)}% rather than decided.`
+            : `granted ${(controller.grantedShare * 100).toFixed(0)}% of ${controller.configuredMs.toFixed(3)} ms — `
+              + `candidates/hit ${controller.smoothed.toFixed(2)} against a best of ${controller.best.toFixed(2)} `
+              + `(${controller.distanceFromBest.toFixed(2)}x, tolerance ${controller.tolerance.toFixed(2)})`}
+        note={controller.rebasedThisTick
+          ? 'This tick RE-BASED the best: the controller accepted the current cost as the new set point, having spent EfficiencyRebaseTicks at the whole budget without recovering the old one.'
+          : `Window cost: ${efficiency.candidatesPerHit.toFixed(2)} candidates per hit over ${efficiency.samples.toLocaleString()} tick(s) — summed, never averaged.`}
       />
     </div>
   );
@@ -305,6 +460,101 @@ function GridOccupancy({ gaugeSeries }: { gaugeSeries: Map<GaugeId, GaugeSeries>
 }
 
 // ── Layout primitives ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The per-realm shape table (#WB-05, kind 67).
+ *
+ * <b>Shape, not rates, and the block says so.</b> A realm owns its grid, its cell size and its maintenance budget since
+ * #1050, so "is spatial healthy" became a per-realm question — a thrashing 50 m dungeon is invisible behind a calm 16 km
+ * planet. What is per-realm in the engine TODAY is the shape; the per-tick counters are owned per archetype, one set for
+ * every realm, so this table cannot show them and the footer says which figures are summed instead of leaving a reader
+ * to assume the rows account for everything.
+ *
+ * <b>Runnable realms only.</b> A dormant realm sends no row, which is why the census is printed beside the count: "3 of
+ * 1 188" is a fact about the engine, while four rows with no denominator reads as four realms existing.
+ */
+function Realms({ reading }: { reading: ReturnType<typeof readRealmShapes> }) {
+  if (reading.tickNumber === null) {
+    return (
+      <div className="border-b border-border p-3" data-testid="spatial-group-realms">
+        <div className="text-fs-sm font-medium text-foreground">Realms</div>
+        <div className="mt-1 text-fs-xs text-muted-foreground">
+          No realm rows in the window. An engine with one realm still emits a row for it, so this means the per-realm
+          telemetry flag is off (<code>Spatial:ClusterMigration:RealmTelemetry</code>) or no realm was runnable.
+        </div>
+      </div>
+    );
+  }
+
+  const hidden = Math.max(0, reading.presentRealms - reading.rows.length);
+  return (
+    <div className="border-b border-border p-3" data-testid="spatial-group-realms">
+      <div className="text-fs-sm font-medium text-foreground">Realms</div>
+      <div className="mb-2 text-fs-xs text-muted-foreground" data-testid="spatial-realms-census">
+        {`${reading.rows.length.toLocaleString()} runnable of ${reading.presentRealms.toLocaleString()} this archetype lives in`}
+        {hidden > 0 ? ` — ${hidden.toLocaleString()} not runnable, so not shown` : ''}
+        {` (tick ${reading.tickNumber.toLocaleString()})`}
+      </div>
+      <table className="w-full text-fs-xs" data-testid="spatial-realms-table">
+        <thead className="text-muted-foreground">
+          <tr className="text-left">
+            <th className="font-normal">realm</th>
+            <th className="font-normal">state</th>
+            <th className="font-normal text-right">÷</th>
+            <th className="font-normal text-right">cell</th>
+            <th className="font-normal text-right">cells</th>
+            <th className="font-normal text-right">clusters</th>
+            <th className="font-normal text-right">reach</th>
+            <th className="font-normal text-right">escaped</th>
+            <th className="font-normal text-right">promoted</th>
+            <th className="font-normal text-right">blocked</th>
+            {/* "declared", not "budget". Maintenance is budgeted per archetype from realm 0's grid, so a realm's configured
+                value is what it asks for and not what it gets — a column reading "budget" would be presenting the ceiling a
+                grant was measured against, which is a different number and lives on the archetype row. */}
+            <th className="font-normal text-right">budget&nbsp;(decl)</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono text-foreground">
+          {reading.rows.map((r) => (
+            <tr key={r.realmId} data-testid={`spatial-realm-row-${r.realmId}`}>
+              <td>#{r.realmId}</td>
+              <td className="font-sans text-muted-foreground">{realmRunStateName(r.runState)}</td>
+              <td className="text-right">{r.divisor}</td>
+              <td className="text-right">{r.cellSize.toLocaleString(undefined, { maximumFractionDigits: 1 })} m</td>
+              <td className="text-right">{r.cellCount.toLocaleString()}{r.gridDepth > 1 ? ' ³' : ''}</td>
+              <td className="text-right">{r.clusters.toLocaleString()}</td>
+              {/* Reach in CELLS, with the metres beside it. The raw value is not a reading: 180 m is nothing in a 1 km
+                  realm and means the broadphase has stopped pruning in a 64 m one. */}
+              <td className={`text-right ${r.reachBlown ? 'text-amber-300' : ''}`} title={`${r.clusterReach.toFixed(1)} m`}>
+                {r.reachInCells.toLocaleString(undefined, { maximumFractionDigits: 2 })}×
+              </td>
+              <td className="text-right">{r.escapedClusters.toLocaleString()}</td>
+              <td className="text-right">{r.promotedCells.toLocaleString()}</td>
+              <td className="text-right">{r.blockedCells.toLocaleString()}</td>
+              <td
+                className={`text-right ${Math.abs(r.budgetConfiguredMs - reading.enforcedBudgetMs) > 0.01 ? 'text-amber-300' : ''}`}
+                title={`declares ${r.budgetConfiguredMs.toFixed(2)} ms; the engine enforces ${reading.enforcedBudgetMs.toFixed(2)} ms for the whole archetype`}
+              >
+                {r.budgetConfiguredMs.toFixed(2)} ms
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mt-2 text-fs-xs text-muted-foreground" data-testid="spatial-realms-footer">
+        Shape only. Migrations, repair units, budget spent and the tightness means are owned per archetype in the engine —
+        one set of counters for every realm — so the blocks above are sums across these rows, not one realm's work.
+        {' '}
+        <b>budget (decl)</b> is each realm&apos;s declaration; the engine enforces{' '}
+        <span className="font-mono">{reading.enforcedBudgetMs.toFixed(2)} ms</span> for the whole archetype, from realm 0&apos;s
+        grid.
+        {reading.someRealmDeclaresADifferentBudget
+          ? ' A realm highlighted above declares a budget that is not the one being enforced for it.'
+          : ''}
+      </div>
+    </div>
+  );
+}
 
 function Group({ title, testId, hint, children }: {
   title: string; testId: string; hint: string; children: React.ReactNode;

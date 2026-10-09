@@ -94,7 +94,7 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
 ## ⚠️ Guarantees & limits
 
 - `configure` is optional on every `Add*` call — omit it to run on defaults (256 MiB page cache;
-  WAL in `./wal`; `UseFUA = true`; etc.). The page cache has an 8 MiB minimum floor; running near it
+  WAL in `{bundle}/wal` inside the `.typhon` bundle; `UseFUA = true`; etc.). The page cache has an 8 MiB minimum floor; running near it
   risks `PageCacheBackpressureTimeout`, so a below-recommended size logs a startup warning.
 - Options are read once, effectively at `BuildServiceProvider()` for singletons — mutating an
   already-resolved `IOptions<T>.Value` afterward has no effect on a running engine.

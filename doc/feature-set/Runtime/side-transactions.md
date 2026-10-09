@@ -44,10 +44,12 @@ protected override void Execute(TickContext ctx)
     var buyerMut = tradeTx.OpenMut(trade.BuyerId);
     var sellerMut = tradeTx.OpenMut(trade.SellerId);
 
-    ref var bw = ref buyerMut.Write(Player.Wallet);
-    ref var sw = ref sellerMut.Write(Player.Wallet);
+    var bw = buyerMut.Read(Player.Wallet);
+    var sw = sellerMut.Read(Player.Wallet);
     bw.Gold -= trade.Price;
+    buyerMut.Set(Player.Wallet, bw);
     sw.Gold += trade.Price;
+    sellerMut.Set(Player.Wallet, sw);
 
     tradeTx.Commit(); // FUA WAL flush — durable now, even if the rest of the tick is lost
 }

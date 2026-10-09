@@ -135,6 +135,40 @@ describe('worldSchemaFromCatalog', () => {
   });
 });
 
+describe('FrameApplier on the exact wire (W32, W33)', () => {
+  it('stores 64-bit values exactly in bigint columns, counts per slot, and hands them to events and SELF', () => {
+    const exact = CatalogPlan.compile(parseCatalog(goldenBin('catalog-exact')));
+    const audits: { amount: bigint | undefined; corner: number[] }[] = [];
+    const applier = new FrameApplier(exact, {
+      onEvent: (event: EventRecord) => {
+        audits.push({ amount: event.integer64('amount'), corner: [0, 1, 2].map((i) => event.number('corner', i)) });
+      },
+    });
+    applier.apply(goldenBin('tick-exact'));
+
+    const vault = applier.world.archetypeStore(exact.archetypeByName('Vault')!.idx);
+    const at = (netId: number): number => slot(applier, netId);
+    const balance = vault.field64('balance');
+    const id = vault.field64('id');
+    expect(balance).toBeInstanceOf(BigUint64Array);
+    expect(id).toBeInstanceOf(BigInt64Array);
+    // The state records swapped the two entities' money groups: netId 1 now holds the second value set.
+    expect(balance[at(1)]).toBe(2n ** 64n - 1n);
+    expect(balance[at(2)]).toBe(2n ** 64n - 1n);
+    expect(vault.field64('delta')[at(1)]).toBe(-(2n ** 53n) - 1n);
+    expect(id[at(1)]).toBe(-(2n ** 63n));
+    expect(id[at(2)]).toBe(-1n);
+    // netId 2's state carried the shape group: the first value set's box, six f32 components per slot.
+    const box = vault.field('box');
+    expect(Array.from(box.subarray(6 * at(2), 6 * at(2) + 6))).toEqual([-1, -2, -3, 1, 2, 3.5]);
+
+    expect(audits).toEqual([{ amount: -(2n ** 53n) - 1n, corner: [1, Infinity, -2.5] }]);
+    expect(applier.selfState.integer64('pin')).toBe(0x8000_0000_0000_0001n);
+    expect(applier.selfState.number('scale', 1)).toBe(-Number.MIN_VALUE);
+    expect(applier.world.anomalies).toBe(0);
+  });
+});
+
 describe('FrameApplier', () => {
   it('keeps slots stable: a slot freed in a frame is reused only in a later one', () => {
     const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
@@ -667,6 +701,89 @@ describe('FrameApplier', () => {
       0,
     ]);
     expect(heldAtChange).toEqual([0, 0]);
+  });
+
+  it('fires onReset for a RESET that changes no realm, which is the one onRealmChanged cannot see', () => {
+    // The hazard is netId reuse, and it does not need a realm change to bite: a profile or variant switch resets the
+    // store and re-enters different entities under the same dense ids, in the same realm. A consumer listening only to
+    // onRealmChanged keeps a selection through it and resolves it to a stranger.
+    const resets: number[] = [];
+    const realmChanges: string[] = [];
+    const applier: FrameApplier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
+      // What the store held when the reset fired: nothing, whatever the frame goes on to carry.
+      onReset: () => {
+        resets.push(applier.world.entityCount);
+      },
+      onRealmChanged: () => {
+        realmChanges.push('changed');
+      },
+    });
+
+    applier.apply(beacons(1, [1, 2, 3]));
+    expect(applier.world.entityCount).toBe(3);
+    expect(resets).toEqual([]);
+
+    applier.apply(
+      frame({
+        tick: 2,
+        flags: TickFlags.Reset,
+        write: (w) => {
+          writeRealmBlock(w, KITCHEN);
+          writeEntitiesBlock(w, 2, beacon, [beaconEnter(1)], [], [], [], KITCHEN);
+        },
+      }),
+    );
+
+    expect([resets, realmChanges, applier.world.entityCount]).toEqual([[0], [], 1]);
+  });
+
+  it('has already cleared SELF when it fires, because that is the field a consumer re-reads its subject from', () => {
+    // A session anchored on an entity learns which entity from SELF, and a consumer that reads it inside the callback
+    // must not be handed the PREVIOUS anchor's. `beginTick` clears it one line above the call; nothing else pinned
+    // that ordering, and the whole of the demo client's spectate feature rests on it.
+    let selfAtReset = -1;
+    const applier: FrameApplier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
+      onReset: () => {
+        selfAtReset = applier.selfState.netId;
+      },
+    });
+
+    applier.apply(
+      frame({
+        tick: 1,
+        write: (w) => {
+          writeSelfBlock(w, beacon, 77, 0, 0, {}, KITCHEN);
+        },
+      }),
+    );
+    expect(applier.selfState.netId).toBe(77);
+
+    applier.apply(frame({ tick: 2, flags: TickFlags.Reset, write: () => {} }));
+    expect(selfAtReset).toBe(0);
+  });
+
+  it('fires onReset BEFORE onRealmChanged on a crossing, so the consumer drops its netIds before it is told where it is', () => {
+    const order: string[] = [];
+    const applier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
+      onReset: () => order.push('reset'),
+      onRealmChanged: () => order.push('realm'),
+    });
+    const elsewhere = new RealmFrame(9, 1, 0, 0, 16, 64, false, [0, 0, 0], [1024, 512, 64]);
+
+    applier.apply(
+      frame({
+        tick: 1,
+        flags: TickFlags.Reset,
+        write: (w) => {
+          writeRealmBlock(w, elsewhere);
+        },
+      }),
+    );
+
+    expect(order).toEqual(['reset', 'realm']);
   });
 
   it('applies AGG to a three-axis grid, laid over a deep realm, whose counts exist only once a block arrived', () => {

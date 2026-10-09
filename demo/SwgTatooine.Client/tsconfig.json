@@ -18,6 +18,7 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "resolveJsonModule": true,
     "types": ["vite/client"],
     "paths": {
       "@typhondb/client": ["../../src/Typhon.Client.TypeScript/src/index.ts"]

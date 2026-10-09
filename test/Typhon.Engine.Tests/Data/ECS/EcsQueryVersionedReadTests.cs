@@ -59,7 +59,10 @@ class EcsQueryVersionedReadTests : TestBase<EcsQueryVersionedReadTests>
         // Mutate A: 100 -> 42 in its own committed transaction.
         using (var tx = dbe.CreateQuickTransaction())
         {
-            tx.OpenMut(a).Write(Q504Arch.Data).Value = 42;
+            var entity = tx.OpenMut(a);
+            var data = entity.Read(Q504Arch.Data);
+            data.Value = 42;
+            entity.Set(Q504Arch.Data, data);
             tx.Commit();
         }
 

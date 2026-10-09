@@ -117,8 +117,8 @@ internal sealed class ComponentInfo
     /// component per transaction.
     /// </para>
     /// <para>
-    /// The accessors are overwritten, never disposed: the owning transaction flushed them before it was reset, and a read-only one never flushes — which is
-    /// exactly what dropping the entry did before recycling existed.
+    /// The accessors are overwritten, never disposed: the owning transaction, read-only or not, flushed them in its <c>Dispose</c> before it was reset, which
+    /// released every slot reference they held (PS-19).
     /// </para>
     /// </remarks>
     internal void Bind(int componentTypeId, ComponentTable table, ChangeSet changeSet)

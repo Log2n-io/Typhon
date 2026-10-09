@@ -10,7 +10,9 @@ namespace Typhon.Workbench.Dtos.Profiler;
 /// so it never appears in the JSON payload.
 /// <list type="bullet">
 ///   <item><c>metadata</c> — <see cref="Metadata"/> non-null. Full snapshot, emitted on connect / reconnect.</item>
-///   <item><c>tickSummaryAdded</c> — <see cref="TickSummary"/> non-null. One per tick the builder finalizes.</item>
+///   <item><c>tickSummariesAdded</c> — <see cref="TickSummaries"/> non-null. Every tick the builder finalized in the
+///     last 100 ms, in order. Coalesced rather than one frame per tick because one frame per tick is one frame per
+///     engine tick (48.8/s at <c>--hz 50</c>), and each one re-rendered the client's profiler tree.</item>
 ///   <item><c>chunkAdded</c> — <see cref="ChunkEntry"/> non-null. One per chunk the builder flushes.</item>
 ///   <item><c>threadInfoAdded</c> — <see cref="ThreadInfo"/> non-null. One per (slot, name) pair as workers claim slots.</item>
 ///   <item><c>globalMetricsUpdated</c> — <see cref="GlobalMetrics"/> non-null. ~1 Hz coalesced.</item>
@@ -21,7 +23,7 @@ namespace Typhon.Workbench.Dtos.Profiler;
 public record LiveStreamEventDto(
     [property: JsonIgnore] string Kind,
     ProfilerMetadataDto Metadata = null,
-    TickSummaryDto TickSummary = null,
+    IReadOnlyList<TickSummaryDto> TickSummaries = null,
     ChunkManifestEntryDto ChunkEntry = null,
     GlobalMetricsDto GlobalMetrics = null,
     ThreadInfoDto ThreadInfo = null,

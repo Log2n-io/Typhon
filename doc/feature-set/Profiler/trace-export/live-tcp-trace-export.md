@@ -19,8 +19,9 @@ produced, with no file round-trip and no restart required.
 ## ⚙️ How it works (in brief)
 
 `TcpExporter` listens on one TCP port — IPv4 loopback unless told otherwise — and accepts a single client at a
-time. On connect it sends an Init frame (the same header + metadata tables as the file format) and then a stream
-of Block frames, one per drained batch,
+time. On connect it sends an Init frame (the same header + metadata tables as the file format, schema included — component layouts, archetype
+composition, the index catalog, the runtime config, the event-queue catalog and a resource-graph snapshot, so a viewer can name what it is watching)
+and then a stream of Block frames, one per drained batch,
 LZ4-compressed the same way as file export. It also re-sends a small catch-up frame — currently-claimed thread
 names — about once a second, so a viewer that attaches mid-session still gets correct lane labels. Sends are
 non-blocking: a frame that can't be written immediately is dropped rather than stalling the exporter thread. On

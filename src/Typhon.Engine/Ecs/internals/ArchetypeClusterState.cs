@@ -530,6 +530,35 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Prep-time snapshot of <see cref="WrittenSlotUnion"/> — the value Finalize reads when choosing which columns to emit.</summary>
     internal int FenceWrittenSlots;
 
+    /// <summary>
+    /// QFENCE-01: whether the indexes of component slot <paramref name="componentSlot"/> may hold keys their entities have left since the last fence.
+    /// Some entity must be marked in <see cref="ClusterShadowBitmap"/>, and one of three things true — the same three the fence's shadow drain gates on
+    /// (<c>DrainClusterShadowSlots</c>), for the same reasons:
+    /// <list type="bullet">
+    /// <item>the slot was written (<see cref="WrittenSlotUnion"/>, <see cref="AllSlotsWritten"/> included);</item>
+    /// <item>a slot was released this tick (<see cref="SlotReleasesThisTick"/>): a destroy after a write to ANY component leaves this one's index entries
+    /// for the fence, on a slot a spawn may already have reused;</item>
+    /// <item>the union is empty while entities are marked: a path that does not maintain the union (a pure-Transient archetype's writes) — a
+    /// contradiction, answered by doing the work.</item>
+    /// </list>
+    /// False lets a query trust this component's tree keys: a tick that only moves positions costs an index query on another component nothing.
+    /// </summary>
+    /// <remarks>
+    /// The union is reset at the fence's Prep, and the release count and the bitmap at its end, inside the fence window. Under the runtime no query runs
+    /// there — every system has completed (EW-01). A host driving <c>WriteTickFence</c> itself must not query concurrently with it: the fence's index
+    /// writers skip OLC validation in that window, which already makes a concurrent query unsafe.
+    /// </remarks>
+    internal bool MayHaveFenceStaleKeys(int componentSlot)
+    {
+        if (ClusterShadowBitmap is not { AnyTestAndSetSinceClear: true })
+        {
+            return false;
+        }
+
+        var written = Volatile.Read(ref WrittenSlotUnion);
+        return written == 0 || (written & (1 << componentSlot)) != 0 || Volatile.Read(ref SlotReleasesThisTick) != 0;
+    }
+
     /// <summary>Dirty cluster count (per-word non-zero count) at the end of Prep. Used for telemetry only.</summary>
     internal int FenceDirtyClusterCount;
 
@@ -807,6 +836,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         var cells = 0;
         var run = 0;
         var runCell = 0L;
+        // The prefix is sorted with the realm in the key's HIGH half, so a realm's requests are one run and a realm change is necessarily a cell change
+        // too — the fold rides the cell branch below and needs no test of its own.
+        var fold = default(RealmFold);
+        var foldRealm = -1;
         for (var i = 0; i < count; i++)
         {
             ref readonly var request = ref PendingMigrations[i];
@@ -817,15 +850,31 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             if (run == 0 || request.DestCellIdentity != runCell)
             {
+                if (request.DestRealm != foldRealm)
+                {
+                    foldRealm = request.DestRealm;
+                    // CREATES the realm's state if this is the first time it has ever received a crossing, which is legitimate HERE and nowhere later: this
+                    // runs on the Prep tail, serial per archetype, a few lines before PreSizeDestinationRealms creates exactly the same set for exactly the
+                    // same requests. MD-02's prohibition is on a MIGRATE slice creating it. Looking it up without creating would leave a realm's first tick
+                    // of arrivals counted archetype-wide and attributed to nobody, which is the identity SO-03 exists to keep.
+                    fold.Switch(RealmSpatialForFold(foldRealm));
+                }
+
                 runCell = request.DestCellIdentity;
                 run = 0;
                 cells++;
+                fold.T.ArrivalCellsTouched++;
             }
 
             run++;
             largest = Math.Max(largest, run);
+            if (run > fold.T.LargestArrivalRun)
+            {
+                fold.T.LargestArrivalRun = run;
+            }
         }
 
+        fold.Flush();
         LastTickLargestArrivalRun = largest;
         LastTickArrivalCellsTouched = cells;
     }
@@ -1940,7 +1989,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// handed back out.
     /// </summary>
     /// <remarks>
-    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> keeps a free list — so without this a brand-new cluster inherits whatever the previous occupant of
+    /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> reuses freed ids — so without this a brand-new cluster inherits whatever the previous occupant of
     /// that id left behind. That defeats <see cref="FreshClusterStaysUnknown"/> entirely: the fresh-cluster claim skips the fold precisely so the gate denies
     /// until the slot has contents, and it can only deny if the entry actually holds the sentinel. Concretely — cluster 7 drains with born=100, died=120 and
     /// is freed; a spawn at TSN 500 gets id 7 back and release-stores occupancy bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both
@@ -2137,6 +2186,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// cell+hysteresis boundary. Drained at fence by <see cref="DatabaseEngine.DetectClusterMigrations"/>. Indexed by clusterChunkId.
     /// </summary>
     internal ulong[] ClusterMigrationPendingSlots;
+
+    /// <summary>
+    /// The pending slots this fence's drain TOOK from <see cref="ClusterMigrationPendingSlots"/>, per cluster: what the dirty-slot scan (step b) skips as
+    /// already handled, now that the drain zeroes the pending mask as it reads it (CC-02). Fence-private — written by the drain, read by the scan's slices,
+    /// reset by <see cref="ClearAabbRefreshBookkeeping"/>. Sized lazily by the drain.
+    /// </summary>
+    internal ulong[] ClusterMigrationTakenSlots = [];
 
     /// <summary>
     /// Per-cluster destination cell key for the migration batch in <see cref="ClusterMigrationPendingSlots"/>. <c>-1</c> when no migration is pending.
@@ -3253,7 +3309,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     private static void WriteRealmKeyOf<TKey>(ref EntityRefMut entity, ushort realm, int componentTypeId, int keyOffset) where TKey : unmanaged
     {
-        ref var value = ref entity.Write(new Comp<TKey>(componentTypeId));
+        ref var value = ref entity.WriteRef(new Comp<TKey>(componentTypeId));
         Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<TKey, byte>(ref value), keyOffset), realm);
     }
 
@@ -3359,6 +3415,34 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Zero the per-realm half of this archetype's per-tick counters. Called from the fence's reset block, beside the archetype-wide <c>LastTick*</c> stores
+    /// it partitions.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A flag per realm, not a list of touched realms.</b> The counters are flushed from parallel workers, so a shared list of "realms touched this
+    /// tick" would need a lock — new synchronisation, on the fence's hot path, purely for bookkeeping. A byte in each realm's own block costs the flush
+    /// nothing (it is already writing that cache line) and turns the reset into one load per PRESENT realm plus stores only where there is something to
+    /// clear. Present realms are the ones this archetype has state in, created lazily, not every realm the engine has registered.</para>
+    /// <para><b>Not a generation stamp either.</b> A stamp ("these counters are zero unless their tick matches") moves a comparison onto every READ in the
+    /// fold — the hot path — to save stores on the cold one. That is the trade the wrong way round.</para>
+    /// <para><b>Plain stores, like every other counter in that block.</b> What orders this reset against the worker publications that follow is the fence
+    /// phase barrier, not a release on the store; <c>DatabaseEngine.TickFence</c> records that reasoning for the archetype-wide counters, and giving the
+    /// per-realm copies a different discipline would imply a distinction that does not exist.</para>
+    /// </remarks>
+    internal void ResetRealmTickCounters()
+    {
+        foreach (var rs in PresentRealmSpatial)
+        {
+            if (rs == null || rs.Counters.F.Touched == 0)
+            {
+                continue;
+            }
+
+            rs.Counters.F = default;
+        }
+    }
+
+    /// <summary>
     /// Grows the per-realm table to hold ids below <paramref name="count"/> (Realms D5, a run-time registration). Before the realm is published, so a
     /// reader that finds the realm finds its slot; the old array stays valid for readers that loaded it.
     /// </summary>
@@ -3453,6 +3537,35 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             _finalizeLock.Exit();
         }
+    }
+
+    /// <summary>
+    /// The realm's state for a per-realm COUNTER fold, or null when this archetype has no realm table at all. Distinct from
+    /// <see cref="GetOrCreateRealmSpatial"/> because telemetry must never be the reason a lookup throws: an archetype with no spatial index never allocates
+    /// <c>RealmSpatial</c>, and a fold reaching it then has nothing to attribute to — which is the correct answer, not an error. Every other caller wants
+    /// the throwing form, because for them a missing table means the fence is running against state that was supposed to exist.
+    /// </summary>
+    internal RealmArchetypeSpatial RealmSpatialForFold(int realm)
+    {
+        var byRealm = RealmSpatial;
+        if (byRealm == null || (uint)realm >= (uint)byRealm.Length)
+        {
+            return null;
+        }
+
+        // The fast path never creates, so the common case neither throws nor takes a latch.
+        var existing = Volatile.Read(ref byRealm[realm]);
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        // Creation is reached only on a realm's FIRST tick of arrivals. Inside a parallel Migrate slice it is forbidden outright (MD-02) and
+        // GetOrCreateRealmSpatial would THROW — which a counter fold may never do on the tick path — so the fold declines instead and the count goes
+        // archetype-wide but unattributed, which is the divergence SO-03 already names. Every caller today is on the Prep tail, where creating is exactly
+        // what PreSizeDestinationRealms does for the same requests moments later; this guard is what keeps a future caller from turning telemetry into a
+        // fence abort.
+        return InMigrateSlice ? null : GetOrCreateRealmSpatial((ushort)realm);
     }
 
     /// <summary>The body of <see cref="GetOrCreateRealmSpatial"/>, for a caller already holding <c>_finalizeLock</c>.</summary>
@@ -3581,7 +3694,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     ///   <item><see cref="RecomputeDirtyClusterAabbs"/> iterates <see cref="ClusterProcessBitmap"/>
     ///         (sparse) instead of <see cref="ActiveClusterIds"/> (full).</item>
     /// </list>
-    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Write</c> will cause those mutations to be invisible
+    /// Setting this on an archetype whose spatial field is mutated via raw <c>GetSpan</c> / <c>OpenMut + Set</c> will cause those mutations to be invisible
     /// to the engine's spatial maintenance — only set when you've migrated ALL spatial writers to <c>WriteSpatial</c>.
     /// Default <c>false</c>: legacy behaviour (full scan), safe for any caller.
     /// </summary>
@@ -3770,11 +3883,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen).
-    /// Scans cluster occupancy bitmaps to rebuild <see cref="ActiveClusterIds"/> and <see cref="FreeClusterHead"/>.
+    /// Create an ArchetypeClusterState from an existing persisted segment (database reopen). Rebuilds <see cref="ActiveClusterIds"/> and
+    /// <see cref="FreeClusterHead"/> from <paramref name="summary"/> when one fits the segment, reading nothing; otherwise by scanning every cluster's
+    /// occupancy word.
     /// </summary>
+    /// <param name="layout">Precomputed cluster layout (shared by both segments).</param>
+    /// <param name="segment">The persisted PersistentStore cluster segment.</param>
+    /// <param name="transientSegment">Fresh TransientStore segment for Transient components. Default (null) if no Transient.</param>
+    /// <param name="transientStore">TransientStore instance to keep alive. Null if no Transient.</param>
+    /// <param name="summary">
+    /// What the last clean close recorded for this segment (<see cref="ManagedPagedMMF.TakeClusterSummary"/>), or <c>null</c>. The scan is what a healthy
+    /// open must not do (#1143): it reads one page per cluster page, most of a database's file.
+    /// </param>
     public static ArchetypeClusterState CreateFromExisting(ArchetypeClusterInfo layout, ChunkBasedSegment<PersistentStore> segment,
-        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null)
+        ChunkBasedSegment<TransientStore> transientSegment = null, TransientStore? transientStore = null, ClusterListSummary summary = null)
     {
         Debug.Assert(segment != null || transientSegment != null, "At least one cluster segment must be provided");
         var capacity = segment?.ChunkCapacity ?? transientSegment.ChunkCapacity;
@@ -3795,8 +3917,79 @@ internal sealed unsafe partial class ArchetypeClusterState
             _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
 
-        state.RebuildActiveList();
+        if (!state.TryLoadActiveList(summary))
+        {
+            state.RebuildActiveList();
+        }
+
         return state;
+    }
+
+    /// <summary>Whether <see cref="CreateFromExisting"/> took the active-cluster list from the close's summary rather than by reading the clusters.</summary>
+    internal bool ActiveListLoadedFromSummary { get; private set; }
+
+    /// <summary>
+    /// Rebuilds the active list from <paramref name="summary"/> when it describes this state's cluster segment and every id fits the segment; reads no
+    /// page. Ids are taken through <see cref="AddToActiveList"/> in ascending order, so the state is the one <see cref="RebuildActiveList"/> would build.
+    /// </summary>
+    private bool TryLoadActiveList(ClusterListSummary summary)
+    {
+        var segment = ClusterSegment;
+        if (summary == null || segment == null || summary.RootPageIndex != segment.RootPageIndex)
+        {
+            return false;
+        }
+
+        // Parse guarantees ascending ids from 1 and a head among them; what it cannot know is the segment. A list longer than the allocated count or an id
+        // past the capacity describes some other segment, and is refused rather than trusted.
+        var ids = summary.ActiveClusterIds;
+        if (ids.Length > segment.AllocatedChunkCount || (ids.Length > 0 && ids[^1] >= segment.ChunkCapacity))
+        {
+            return false;
+        }
+
+        ActiveClusterCount = 0;
+        for (var i = 0; i < ids.Length; i++)
+        {
+            AddToActiveList(ids[i]);
+        }
+
+        FreeClusterHead = summary.FreeClusterHead;
+        ActiveListLoadedFromSummary = true;
+        return true;
+    }
+
+    /// <summary>
+    /// The active-cluster list a clean close records for the next open (<see cref="ClusterListSummary"/>), or <c>null</c> when there is none to record
+    /// faithfully: no persistent cluster segment, drained clusters the fence has not freed yet, or a list that is not a set. A <c>null</c> costs that
+    /// archetype a scan at the next open, never data.
+    /// </summary>
+    /// <remarks>Reads no page: the list is the running engine's own. The close calls it with nothing spawning, destroying or draining.</remarks>
+    internal ClusterListSummary CaptureClusterSummary()
+    {
+        var segment = ClusterSegment;
+        if (segment == null || _drainedCount != 0)
+        {
+            return null;
+        }
+
+        var ids = ActiveClusterIds.AsSpan(0, ActiveClusterCount).ToArray();
+        Array.Sort(ids);
+        for (var i = 0; i < ids.Length; i++)
+        {
+            if (ids[i] < 1 || (i > 0 && ids[i] == ids[i - 1]))
+            {
+                return null;
+            }
+        }
+
+        var head = FreeClusterHead;
+        if (head != -1 && Array.BinarySearch(ids, head) < 0)
+        {
+            head = -1;
+        }
+
+        return new ClusterListSummary(segment.RootPageIndex, head, ids);
     }
 
     /// <summary>
@@ -4276,6 +4469,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             // Wave-2 K5. Rare by design (a stale pin), so an Interlocked increment on the rejection path costs nothing on the tick that matters.
             Interlocked.Increment(ref LastTickPinsRejected);
+            BumpPinsRejected(grid);
             return false;
         }
 
@@ -4288,6 +4482,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (slot < 0)
         {
             Interlocked.Increment(ref LastTickPinsRejected);   // wave-2 K5: the pinned cluster was live but full
+            BumpPinsRejected(grid);
             return false;
         }
 
@@ -4297,6 +4492,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         return true;
     }
 
+
+    /// <summary>The realm's share of <see cref="LastTickPinsRejected"/>. A rejection is rare by design, so this takes the realm lookup rather than a run
+    /// fold — there is no sequence of same-realm rejections to amortise one over.</summary>
+    private void BumpPinsRejected(SpatialGrid grid)
+    {
+        var rs = SpatialOf(grid);
+        if (!ReferenceEquals(rs, RealmArchetypeSpatial.None))
+        {
+            RealmFold.Bump(rs, ref rs.Counters.F.PinsRejected);
+        }
+    }
 
     /// <summary>Non-full clusters examined per placement before the best seen is taken. Bounds the scan on a cell holding hundreds of clusters.</summary>
     internal const int PlacementScanLimit = 64;
@@ -5965,6 +6171,23 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Flags a spatial write that did not go through <c>WriteSpatial</c> as the barrier would have: shrink axes, the slot's pending migration bit, the
+    /// cluster's process bit — in that order, which is the one <see cref="ClearAabbRefreshBookkeeping"/> relies on (pending before process bit).
+    /// </summary>
+    /// <remarks>
+    /// The dirty scan finds such a write on its own; a barrier-only archetype's fence runs none, so without this flag the move is never seen. Raised by
+    /// <c>Teleport</c> when it writes, and again by the commit that PUBLISHES a staged write (Commit discipline): a fence between the two consumes the first
+    /// flag against the old value and drops it, and only the second one carries the value that landed (CC-02).
+    /// </remarks>
+    internal void FlagOutOfBarrierSpatialWrite(int clusterChunkId, int slotIndex)
+    {
+        FlagShrinkAxes(clusterChunkId, 0x3F);
+        FlagMigration(clusterChunkId, 1UL << slotIndex, -1);
+        MigrationHint++;
+        SetClusterProcessBit(clusterChunkId);
+    }
+
+    /// <summary>
     /// Set <paramref name="clusterChunkId"/>'s bit in <see cref="ClusterProcessBitmap"/> — the signal the AABB refresh consumes (CA-02, CA-04).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -6874,6 +7097,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         var clusterRealmMap = ClusterRealmMap;
         var frameRealm = -1;
         var f = default(AabbRealmFrame);
+        // Outlives the frame deliberately: `f` is REPLACED on every realm change, so a tally living inside it would be discarded at exactly the moment it
+        // has to be published. The fold rides the same branch and owns when that happens.
+        var fold = default(RealmFold);
         var targets = default(CellTargetResolver);
         var slotCapacity = BitOperations.PopCount(Layout.FullMask);
         var flatField = SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F
@@ -6932,6 +7158,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var clusterRealm = clusterRealmMap[chunkId];
                     if (clusterRealm != frameRealm)
                     {
+                        // Closes the OUTGOING realm's run before the frame that holds it is overwritten.
+                        fold.Switch(RealmSpatial[clusterRealm]);
                         frameRealm = clusterRealm;
                         f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], nominateRepairs);
                         targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
@@ -6963,7 +7191,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     {
                         f.Grid.CellOrigin(cellKey, out var shrinkOriginX, out var shrinkOriginY, out var shrinkOriginZ);
                         fresh = RecomputeClusterAabb(chunkId, ref accessor, shrinkOriginX, shrinkOriginY, shrinkOriginZ, out var clusterSlots);
-                        slotsScanned += clusterSlots;
+                        fold.T.SlotsScanned += clusterSlots;
                         if (float.IsPositiveInfinity(fresh.MinX))
                         {
                             continue;
@@ -7038,8 +7266,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var repairGated = targets.RepairExtent > 0f && maxAxisExtent > targets.RepairExtent;
                     var driftGated = (!repairGated || targets.ConstantMode) && targets.DriftExtent > 0f && maxAxisExtent > targets.DriftExtent;
 
-                    clustersScanned++;
-                    tightness.Note(f.OutlierGuardActive, maxAxisExtent, f.InverseCellSize, targets.PackingBound);
+                    fold.T.ClustersScanned++;
+                    fold.T.NoteTightness(f.OutlierGuardActive, maxAxisExtent, f.InverseCellSize, targets.PackingBound);
                     if (repairGated)
                     {
                         repairNominationBuffer.Add(new RepairNomination(f.Grid.Realm.Value, cellKey, maxAxisExtent * f.InverseCellSize));
@@ -7047,11 +7275,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     if (driftGated)
                     {
-                        driftGatedClusters++;
+                        fold.T.DriftGatedClusters++;
                     }
                     else if (!repairGated && f.DriftTargetExtent > 0f && maxAxisExtent > f.DriftTargetExtent)
                     {
-                        driftSuppressedByDensity++;
+                        fold.T.DriftSuppressedByDensity++;
                     }
 
                     if (!guardFires && !driftGated)
@@ -7071,8 +7299,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     {
                         var beforeDrift = outlierBuffer.Count;
                         DetectDriftersInCluster(chunkId, cellKey, in fresh, f.Grid, ref accessor, in centres, guardClaimed, outlierBuffer,
-                            candidateScratch, targets.DriftExtent, ref driftersDetected, ref driftAbsorbed, ref driftersUnplaced,
-                            ref driftersUnplacedNoCandidate, ref driftersSpilled);
+                            candidateScratch, targets.DriftExtent, ref fold.T.DriftersDetected, ref fold.T.DriftAbsorbed, ref fold.T.DriftersUnplaced,
+                            ref fold.T.DriftersUnplacedNoCandidate, ref fold.T.DriftersSpilled);
                         NoteDriftNominations(outlierBuffer.Count - beforeDrift);
                     }
                 }
@@ -7110,6 +7338,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var clusterRealm = clusterRealmMap[chunkId];
                 if (clusterRealm != frameRealm)
                 {
+                    // Closes the OUTGOING realm's run before the frame that holds it is overwritten.
+                    fold.Switch(RealmSpatial[clusterRealm]);
                     frameRealm = clusterRealm;
                     f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], nominateRepairs);
                     targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
@@ -7157,7 +7387,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     f.Grid.CellOrigin(cellKey, out var dirtyOriginX, out var dirtyOriginY, out var dirtyOriginZ);
                     fresh = RecomputeClusterAabb(chunkId, ref accessor, dirtyOriginX, dirtyOriginY, dirtyOriginZ, out var clusterSlots);
-                    slotsScanned += clusterSlots;
+                    fold.T.SlotsScanned += clusterSlots;
                 }
                 else
                 {
@@ -7262,15 +7492,15 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var activeMaxAxisExtent = MaxAxisExtent(in fresh);
                 var activeRepairGated = targets.RepairExtent > 0f && activeMaxAxisExtent > targets.RepairExtent;
                 var driftGated = (!activeRepairGated || targets.ConstantMode) && targets.DriftExtent > 0f && activeMaxAxisExtent > targets.DriftExtent;
-                clustersScanned++;
-                tightness.Note(f.OutlierGuardActive, activeMaxAxisExtent, f.InverseCellSize, targets.PackingBound);
+                fold.T.ClustersScanned++;
+                fold.T.NoteTightness(f.OutlierGuardActive, activeMaxAxisExtent, f.InverseCellSize, targets.PackingBound);
                 if (driftGated)
                 {
-                    driftGatedClusters++;
+                    fold.T.DriftGatedClusters++;
                 }
                 else if (!activeRepairGated && f.DriftTargetExtent > 0f && activeMaxAxisExtent > f.DriftTargetExtent)
                 {
-                    driftSuppressedByDensity++;
+                    fold.T.DriftSuppressedByDensity++;
                 }
 
                 if (!guardFires && !driftGated)
@@ -7290,12 +7520,35 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     var beforeDrift = outlierBuffer.Count;
                     DetectDriftersInCluster(chunkId, cellKey, in fresh, f.Grid, ref accessor, in centres, guardClaimed, outlierBuffer,
-                        candidateScratch, targets.DriftExtent, ref driftersDetected, ref driftAbsorbed, ref driftersUnplaced,
-                        ref driftersUnplacedNoCandidate, ref driftersSpilled);
+                        candidateScratch, targets.DriftExtent, ref fold.T.DriftersDetected, ref fold.T.DriftAbsorbed, ref fold.T.DriftersUnplaced,
+                        ref fold.T.DriftersUnplacedNoCandidate, ref fold.T.DriftersSpilled);
                     NoteDriftNominations(outlierBuffer.Count - beforeDrift);
                 }
             }
         }
+
+        // The last realm the slice touched has no successor to trigger the branch above, so its run is closed here. Outside the if/else, because either arm
+        // may have been the one that ran.
+        fold.Flush();
+
+        // The archetype-wide counters are fed from the slice's own totals, exactly as before this was partitioned: the fold ADDS an attribution, it does not
+        // move one, and the two agreeing is what SO-03 makes checkable.
+        ref var sliceTotals = ref fold.Slice;
+        clustersScanned = sliceTotals.ClustersScanned;
+        slotsScanned = sliceTotals.SlotsScanned;
+        driftersDetected = sliceTotals.DriftersDetected;
+        driftAbsorbed = sliceTotals.DriftAbsorbed;
+        driftersUnplaced = sliceTotals.DriftersUnplaced;
+        driftGatedClusters = sliceTotals.DriftGatedClusters;
+        driftSuppressedByDensity = sliceTotals.DriftSuppressedByDensity;
+        driftersUnplacedNoCandidate = sliceTotals.DriftersUnplacedNoCandidate;
+        driftersSpilled = sliceTotals.DriftersSpilled;
+        tightness = new ClusterTightnessSample
+        {
+            Samples = sliceTotals.TightnessSamples,
+            SumExtentRatio = sliceTotals.TightnessExtentSum,
+            SumPackingBound = sliceTotals.TightnessBoundSum,
+        };
     }
 
     /// <summary>
@@ -8331,13 +8584,18 @@ internal sealed unsafe partial class ArchetypeClusterState
         return bitmap != null && (uint)wordIdx < (uint)bitmap.Length && (bitmap[wordIdx] & (1L << (chunkId & 63))) != 0;
     }
 
+    /// <summary>Test seam: runs at the top of <see cref="ClearAabbRefreshBookkeeping"/>, inside the fence, after the tick's flags were consumed.</summary>
+    internal Action BeforeBookkeepingClearProbe;
+
     /// <summary>
     /// Clear the write-time bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>,
-    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick. Single-threaded — called once per archetype from
+    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick — only what this fence consumed (CC-02). Single-threaded — called once per archetype from
     /// <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all AABB slices finished.
     /// </summary>
     internal void ClearAabbRefreshBookkeeping()
     {
+        BeforeBookkeepingClearProbe?.Invoke();
+
         // BEFORE the early return, and that ordering is load-bearing: an archetype with no process bitmap still hands out spans, and a flag that is never
         // cleared turns one GetSpan call into an unconditional full walk for the rest of the process. Cleared here rather than at the top of Prep because
         // GetSpan is called by SYSTEMS, which run before the fence — clearing on entry would discard the very signal the refresh is meant to consume.
@@ -8367,31 +8625,66 @@ internal sealed unsafe partial class ArchetypeClusterState
         AabbMovedTicks++;
         AabbMovedActiveClusters += ActiveClusterCount;
 
+        // Only what this fence consumed is cleared. The drain TOOK each cluster's pending bits (DrainPreFlaggedMigrations), so a pending bit still here was
+        // set after it — by another thread's transaction committing while the fence ran, or by this fence's own outlier pass, which defers to the next
+        // tick. Such a cluster keeps its process bit, its destination hint and its shrink axes: zeroing them with plain stores, as this did, wiped a flag
+        // nobody had seen, and on a barrier-only archetype nothing else would ever find the move (CC-02).
+        //
+        // Ordered against a concurrent writer by the writer's own order — pending bits first (FlagMigration), process bit after (SetClusterProcessBit),
+        // both interlocked: the word is taken before the pending bits are read, so either the writer's pending bits are seen here and the process bit is
+        // put back, or they land after the read and the writer's own process bit lands after the take.
+        var pending = ClusterMigrationPendingSlots;
         for (var wordIdx = 0; wordIdx < ClusterProcessBitmap.Length; wordIdx++)
         {
-            var word = ClusterProcessBitmap[wordIdx];
+            var word = Interlocked.Exchange(ref ClusterProcessBitmap[wordIdx], 0L);
             if (word == 0)
             {
                 continue;
             }
 
+            var keep = 0L;
             while (word != 0)
             {
+                var bit = word & -word;
                 var chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
                 word &= word - 1;
-                if (ClusterMigrationPendingSlots != null && chunkId < ClusterMigrationPendingSlots.Length)
+                if (chunkId < ClusterMigrationTakenSlots.Length)
                 {
-                    ClusterMigrationPendingSlots[chunkId] = 0;
+                    ClusterMigrationTakenSlots[chunkId] = 0;
+                }
+
+                if (pending != null && chunkId < pending.Length)
+                {
+                    if (Volatile.Read(ref pending[chunkId]) != 0)
+                    {
+                        keep |= bit;
+                        continue;
+                    }
+
                     ClusterMigrationDestCellKeys[chunkId] = -1;
                 }
+
                 if (ClusterShrinkPendingAxes != null && chunkId < ClusterShrinkPendingAxes.Length)
                 {
                     ClusterShrinkPendingAxes[chunkId] = 0;
                 }
             }
-            ClusterProcessBitmap[wordIdx] = 0;
+
+            if (keep != 0)
+            {
+                Interlocked.Or(ref ClusterProcessBitmap[wordIdx], keep);
+                Interlocked.Increment(ref _flagsCarriedOver);
+            }
         }
     }
+
+    private long _flagsCarriedOver;
+
+    /// <summary>
+    /// Process-bitmap words whose clusters kept migration flags across a fence's clear because they were flagged after the fence consumed its own (CC-02):
+    /// another thread's write committed while the fence ran, or the fence's outlier pass deferring to the next tick. Cumulative.
+    /// </summary>
+    internal long FlagsCarriedOver => Volatile.Read(ref _flagsCarriedOver);
 
     /// <summary>
     /// Safety valve for the "Max Cluster AABB Extent" invariant from design doc 01-spatial-clusters.md (issue #230 Phase 3 closure of Phase 1 gap). Scans a
@@ -8679,6 +8972,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // after a resize — both silent.
         Interlocked.Increment(ref rs.PromotedCellCount);
         Interlocked.Increment(ref LastTickCellTreePromotions);   // same reachability as the line above, so the same atomicity
+        RealmFold.Bump(rs, ref rs.Counters.F.CellTreePromotions);
         if (cellKey >= 0)
         {
             (rs.PromotedCells ??= []).Add(cellKey);
@@ -8923,6 +9217,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 DemoteCellHalf(rs, slot, isStatic);
                 promoted.RemoveAt(i);
                 LastTickCellTreeDemotions++;   // serial: FinalizeArchetypeFence is the only caller of this pass
+                RealmFold.Bump(rs, ref rs.Counters.F.CellTreeDemotions);
 
                 // Back on the blocked list, because the cell is back to a linear half that still holds enough clusters to promote. The only other way
                 // onto that list is a cluster JOINING the cell, and a cell just demoted for looseness need never receive another one — so without this a
@@ -10175,6 +10470,44 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Marks every cluster that holds entities as holding values its zone maps never saw (#1151). Called once, at the end of an open, after every path that
+    /// fills a cluster without widening a zone map: the load itself, the schema-migration rebuild (<c>RebuildClusterFromChains</c>) and WAL replay
+    /// (<c>RecoveryApplier</c>).
+    /// </summary>
+    /// <remarks>
+    /// Zone maps are not persisted and the open does not scan the data to rebuild them, so a cluster holding entities after an open holds values its maps
+    /// never saw. Marked Unknown it is never pruned, and a later widen cannot narrow it to the one value it carries and hide the cluster's other rows from
+    /// scans. A recompute at the tick fence bounds it again. Transient slots too: the Transient columns of a reopened cluster hold defaults nothing widened
+    /// in. Marking where the maps are built (<c>InitializeIndexes</c>) was too early: recovery and the migration rebuild fill clusters after it.
+    /// </remarks>
+    internal void MarkActiveClustersZoneMapsUnknown()
+    {
+        var activeIds = ReadActiveClusterList(out var activeCount);
+        if (activeCount > 0)
+        {
+            MarkZoneMapsUnknown(IndexSlots, activeIds.AsSpan(0, activeCount));
+            MarkZoneMapsUnknown(TransientIndexSlots, activeIds.AsSpan(0, activeCount));
+        }
+    }
+
+    private static void MarkZoneMapsUnknown<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ReadOnlySpan<int> clusterChunkIds) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return;
+        }
+
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            var fields = ixSlots[s].Fields;
+            for (var f = 0; f < (fields?.Length ?? 0); f++)
+            {
+                fields[f].ZoneMap?.MarkUnknown(clusterChunkIds);
+            }
+        }
+    }
+
+    /// <summary>
     /// Builds one component slot's index metadata + B+Trees against <paramref name="defaultSegment"/> / <paramref name="string64Segment"/>.
     /// </summary>
     /// <remarks>
@@ -10275,6 +10608,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var chunkId = ActiveClusterIds[c];
                 var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
                 var occupancy = *(ulong*)clusterBase;
+                var wroteElementIds = false;
 
                 while (occupancy != 0)
                 {
@@ -10321,9 +10655,16 @@ internal sealed unsafe partial class ArchetypeClusterState
                             if (field.AllowMultiple)
                             {
                                 *(int*)(clusterBase + Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
+                                wroteElementIds = true;
                             }
                         }
                     }
+                }
+
+                // The element ids went in through a clean mapping: record the page, or an eviction reloads the stale ids (PS-10).
+                if (wroteElementIds)
+                {
+                    NoteClusterPageModified(chunkId);
                 }
             }
         }

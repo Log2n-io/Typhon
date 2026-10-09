@@ -36,7 +36,10 @@ var soldier = tx.Spawn<Unit>(Unit.Health.Set(new Health { Current = 100, Max = 1
 tx.Commit();                                   // allocates the entity's first revision-chain chunk
 
 using var hit = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
-hit.OpenMut(soldier).Write(Unit.Health).Current -= 25;
+var target = hit.OpenMut(soldier);
+var health = target.Read(Unit.Health);
+health.Current -= 25;
+target.Set(Unit.Health, health);
 hit.Commit();                                  // appends a new revision entry into the same chain
 ```
 

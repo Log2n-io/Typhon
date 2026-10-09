@@ -143,6 +143,21 @@ describe('ReconnectingClient', () => {
     expect(graceMs).toBe(60_000);
   });
 
+  it('keeps the resume token through an attempt that failed before WELCOME, while its grace lasts', () => {
+    const token = resumeToken(5);
+    const h = harness();
+    h.client.start();
+    accept(welcomeMessage({ resumeToken: token }));
+
+    FakeSocket.latest.serverClose(CloseCode.InternalError, '');
+    h.timers.advance(100);
+    // Attempt 1 never opens: no session, no token in its close.
+    FakeSocket.latest.serverClose(1006, '', false);
+    h.timers.advance(200);
+    FakeSocket.latest.open();
+    expect(Array.from(parseHello(FakeSocket.latest.sent[0]!).resumeToken)).toEqual(Array.from(token));
+  });
+
   it('drops a resume token whose grace ran out before the next attempt', () => {
     const token = resumeToken(5);
     // A backoff longer than the catalog's 60 s grace: by the time the client comes back, the token is stale.

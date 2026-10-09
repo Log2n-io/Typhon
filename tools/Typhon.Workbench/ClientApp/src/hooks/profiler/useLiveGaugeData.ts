@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import { aggregateGaugeData, type GaugeSeries, type GcEvent, type GcSuspensionEvent, type MemoryAllocEventData, type OffCpuStore, type TickData } from '@/libs/profiler/model/traceModel';
 import type { GaugeId } from '@/libs/profiler/model/types';
 import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
+import { selectEffectiveScope, useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import { useLiveStreamSession } from '@/stores/useSessionStore';
 
 /**
  * Live-attach gauge feed for the Engine Health panel (#377 Stage 4 Phase 2). Rides the existing
@@ -55,27 +57,54 @@ const EMPTY: LiveGaugeData = {
   hasData: false,
 };
 
+/**
+ * The window a panel reads, and — since #1083 — which end of the stream it is anchored to.
+ *
+ * **Following the head is right only while the session is live AND the global scope is linked.** Linked means follow;
+ * a live stream's head is what there is to follow. Two cases were being answered as if they were that one:
+ *
+ * - a **replayed capture** has no head to chase, and its view range IS the scrub control, so pinning it to the last
+ *   recorded tick made every panel show the end of the file and nothing else;
+ * - an **unlinked** scope is the app's own freeze affordance (GAP-11), so a panel that keeps tracking the head after
+ *   the user pinned a moment is ignoring the one control provided for holding it still.
+ *
+ * Live and linked keeps the previous behaviour exactly — the last `windowMs` measured back from the newest tick —
+ * because the rates computed over this window (per-second migrations, drifters, window growth) are only meaningful
+ * over a bounded span, and widening it silently would change every number a panel reports.
+ */
+function resolveWindow(
+  ticks: readonly TickData[],
+  windowMs: number,
+  followHead: boolean,
+  scope: { startUs: number; endUs: number },
+): { startUs: number; endUs: number } {
+  // Pin the window's right edge to the latest tick's `endUs` so the panel tracks the head of the stream, regardless of
+  // wall-clock vs. trace-clock skew. (Wall-clock would drift when the engine pauses or the laptop sleeps.)
+  const headEndUs = ticks[ticks.length - 1].endUs;
+  if (followHead || !(scope.endUs > scope.startUs)) {
+    return { startUs: headEndUs - windowMs * 1000, endUs: headEndUs };
+  }
+  return { startUs: scope.startUs, endUs: scope.endUs };
+}
+
 export function useLiveGaugeData(sessionId: string | null, windowMs: number = 60_000): LiveGaugeData {
   // Live mode (#289) — the chunk cache keeps the manifest's tail resident so the recent window is always loaded.
   const { ticks } = useProfilerCache(sessionId, true);
+  const isLive = useLiveStreamSession();
+  const scopeLinked = useProfilerViewStore((s) => s.scopeLinked);
+  const scope = useProfilerViewStore(selectEffectiveScope);
+  const followHead = isLive && scopeLinked;
 
   return useMemo(() => {
     if (!sessionId || ticks.length === 0) return EMPTY;
 
-    // Pin the window's right edge to the latest tick's `endUs` so the panel always tracks the head
-    // of the stream, regardless of wall-clock vs. trace-clock skew. (Wall-clock would drift when the
-    // engine pauses or the laptop sleeps.)
-    const lastTick = ticks[ticks.length - 1];
-    const windowEndUs = lastTick.endUs;
-    const windowStartUs = windowEndUs - windowMs * 1000;
+    const { startUs: windowStartUs, endUs: windowEndUs } = resolveWindow(ticks, windowMs, followHead, scope);
 
-    // Binary search would be O(log N) but ticks are sorted and N is ~60 — linear from the tail is cache-friendlier.
-    let firstIn = ticks.length;
-    for (let i = ticks.length - 1; i >= 0; i--) {
-      if (ticks[i].endUs < windowStartUs) break;
-      firstIn = i;
-    }
-    const windowed = ticks.slice(firstIn);
+    // A tick is in the window when it OVERLAPS it — a range is not a containment test, and a scrubbed range narrower
+    // than one tick must still select that tick rather than nothing.
+    const windowed = ticks.filter((t) => t.endUs >= windowStartUs && t.startUs <= windowEndUs);
+    // Never answer "no data" because a scope fell between two ticks: that reads as an idle engine, which is a claim
+    // several of these panels make for real.
     if (windowed.length === 0) return EMPTY;
 
     const agg = aggregateGaugeData(windowed as TickData[]);
@@ -95,5 +124,5 @@ export function useLiveGaugeData(sessionId: string | null, windowMs: number = 60
     };
     // `ticks` is the assembled array — reference flips whenever `entriesVersion` bumps in the cache.
     // That is the correct dependency: any chunk arrival re-runs aggregation.
-  }, [sessionId, ticks, windowMs]);
+  }, [sessionId, ticks, windowMs, followHead, scope]);
 }

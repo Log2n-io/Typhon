@@ -10,8 +10,8 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Typhon.Generators;
 
 /// <summary>
-/// Incremental source generator that emits <c>Refs</c> / <c>MutRefs</c> ref structs and
-/// <c>ReadAll</c> / <c>ReadWriteAll</c> static methods for each <c>[Archetype]</c> class.
+/// Incremental source generator that emits a <c>Values</c> struct and <c>ReadAll</c> / <c>WriteAll</c> static methods for each <c>[Archetype]</c>
+/// class: every component copied out, or set from a copy (#1199).
 /// </summary>
 [Generator(LanguageNames.CSharp)]
 public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
@@ -308,61 +308,46 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         string memberIndent = indent + "    ";
         string fieldIndent = memberIndent + "    ";
 
-        // ── Refs (read-only) ──
-        sb.Append(memberIndent).Append("/// <summary>Read-only zero-copy component refs for ")
+        // ── Values: one copy per component (#1199 — the point-access API hands out values, never references into a page) ──
+        sb.Append(memberIndent).Append("/// <summary>A copy of every component of ")
           .Append(model.ClassName).Append(" (").Append(model.AllCompFields.Length).AppendLine(" components).</summary>");
-        sb.Append(memberIndent).AppendLine("public ref struct Refs");
+        sb.Append(memberIndent).AppendLine("public struct Values");
         sb.Append(memberIndent).AppendLine("{");
         foreach (var field in model.AllCompFields)
         {
-            sb.Append(fieldIndent).Append("public ref readonly ").Append(field.ComponentTypeFullName)
-              .Append(" ").Append(field.FieldName).AppendLine(";");
-        }
-        sb.Append(memberIndent).AppendLine("}");
-        sb.AppendLine();
-
-        // ── MutRefs (mutable) ──
-        sb.Append(memberIndent).Append("/// <summary>Mutable zero-copy component refs for ")
-          .Append(model.ClassName).Append(" (").Append(model.AllCompFields.Length).AppendLine(" components).</summary>");
-        sb.Append(memberIndent).AppendLine("public ref struct MutRefs");
-        sb.Append(memberIndent).AppendLine("{");
-        foreach (var field in model.AllCompFields)
-        {
-            sb.Append(fieldIndent).Append("public ref ").Append(field.ComponentTypeFullName)
+            sb.Append(fieldIndent).Append("public ").Append(field.ComponentTypeFullName)
               .Append(" ").Append(field.FieldName).AppendLine(";");
         }
         sb.Append(memberIndent).AppendLine("}");
         sb.AppendLine();
 
         // ── ReadAll ──
-        sb.Append(memberIndent).AppendLine("/// <summary>Open entity read-only and return all component refs. Zero-copy.</summary>");
+        sb.Append(memberIndent).AppendLine("/// <summary>Open the entity read-only and return a copy of every component.</summary>");
         sb.Append(memberIndent).AppendLine(
-            "public static Refs ReadAll(global::Typhon.Engine.Transaction tx, global::Typhon.Engine.EntityId id)");
+            "public static Values ReadAll(global::Typhon.Engine.Transaction tx, global::Typhon.Engine.EntityId id)");
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(fieldIndent).AppendLine("var entity = tx.Open(id);");
-        sb.Append(fieldIndent).AppendLine("var r = new Refs();");
+        sb.Append(fieldIndent).AppendLine("var v = new Values();");
         foreach (var field in model.AllCompFields)
         {
-            sb.Append(fieldIndent).Append("r.").Append(field.FieldName).Append(" = ref entity.Read(")
+            sb.Append(fieldIndent).Append("v.").Append(field.FieldName).Append(" = entity.Read(")
               .Append(field.DeclaringClassFullName).Append(".").Append(field.FieldName).AppendLine(");");
         }
-        sb.Append(fieldIndent).AppendLine("return r;");
+        sb.Append(fieldIndent).AppendLine("return v;");
         sb.Append(memberIndent).AppendLine("}");
         sb.AppendLine();
 
-        // ── ReadWriteAll ──
-        sb.Append(memberIndent).AppendLine("/// <summary>Open entity for mutation and return all mutable component refs. Zero-copy.</summary>");
+        // ── WriteAll ──
+        sb.Append(memberIndent).AppendLine("/// <summary>Open the entity for mutation and set every component from <paramref name=\"values\"/>.</summary>");
         sb.Append(memberIndent).AppendLine(
-            "public static MutRefs ReadWriteAll(global::Typhon.Engine.Transaction tx, global::Typhon.Engine.EntityId id)");
+            "public static void WriteAll(global::Typhon.Engine.Transaction tx, global::Typhon.Engine.EntityId id, in Values values)");
         sb.Append(memberIndent).AppendLine("{");
         sb.Append(fieldIndent).AppendLine("var entity = tx.OpenMut(id);");
-        sb.Append(fieldIndent).AppendLine("var r = new MutRefs();");
         foreach (var field in model.AllCompFields)
         {
-            sb.Append(fieldIndent).Append("r.").Append(field.FieldName).Append(" = ref entity.Write(")
-              .Append(field.DeclaringClassFullName).Append(".").Append(field.FieldName).AppendLine(");");
+            sb.Append(fieldIndent).Append("entity.Set(").Append(field.DeclaringClassFullName).Append(".").Append(field.FieldName)
+              .Append(", in values.").Append(field.FieldName).AppendLine(");");
         }
-        sb.Append(fieldIndent).AppendLine("return r;");
         sb.Append(memberIndent).AppendLine("}");
         sb.AppendLine();
 

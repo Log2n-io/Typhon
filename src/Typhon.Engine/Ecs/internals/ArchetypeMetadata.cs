@@ -115,6 +115,12 @@ internal class ArchetypeMetadata
     internal byte TransientSlotCount;
 
     /// <summary>
+    /// The slot of the component carrying the archetype's <c>[RealmKey]</c>, as a bit; 0 for an archetype without one. Set once its spatial state has
+    /// resolved the key. <c>EntityRefMut.Set</c> tests it to validate a realm change at the call (RM-05).
+    /// </summary>
+    internal ushort RealmKeySlotMask;
+
+    /// <summary>
     /// Bitmask of the slots whose secondary-index maintenance runs at the TICK FENCE rather than at commit, under <see cref="CommitDiscipline.TickFence"/>
     /// — every slot that is neither Versioned (always commit-scoped) nor beyond <see cref="ComponentCount"/>. Under
     /// <see cref="CommitDiscipline.Commit"/> the SingleVersion members move to the commit path too, so callers narrow this further; see

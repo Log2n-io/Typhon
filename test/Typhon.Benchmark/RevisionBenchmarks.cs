@@ -91,9 +91,10 @@ public class RevisionBenchmarks
         {
             using var t = _dbe.CreateQuickTransaction();
             var entity = t.OpenMut(_tenVersionEntity);
-            ref var comp = ref entity.Write(RevArch.Rev);
+            var comp = entity.Read(RevArch.Rev);
             comp.Value = i;
             comp.Timestamp = i;
+            entity.Set(RevArch.Rev, comp);
             t.Commit();
         }
 
@@ -108,9 +109,10 @@ public class RevisionBenchmarks
         {
             using var t = _dbe.CreateQuickTransaction();
             var entity = t.OpenMut(_fiftyVersionEntity);
-            ref var comp = ref entity.Write(RevArch.Rev);
+            var comp = entity.Read(RevArch.Rev);
             comp.Value = i;
             comp.Timestamp = i;
+            entity.Set(RevArch.Rev, comp);
             t.Commit();
         }
     }

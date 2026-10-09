@@ -119,8 +119,9 @@ class ClusterAabbRefreshDirtyGateTests : TestBase<ClusterAabbRefreshDirtyGateTes
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(ids[0]);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 12f, MinY = 12f, MaxX = 12f, MaxY = 12f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 
@@ -156,8 +157,9 @@ class ClusterAabbRefreshDirtyGateTests : TestBase<ClusterAabbRefreshDirtyGateTes
         using (var tx = dbe.CreateQuickTransaction())
         {
             var eref = tx.OpenMut(far);
-            ref var pos = ref eref.Write(ClMigUnit.Pos);
+            var pos = eref.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = 14f, MinY = 14f, MaxX = 14f, MaxY = 14f };
+            eref.Set(ClMigUnit.Pos, pos);
             tx.Commit();
         }
 

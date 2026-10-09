@@ -94,6 +94,41 @@ class PlanConsistencyTests(unittest.TestCase):
         self.assertNotIn("\r", text)                       # the committed format, on every OS
         self.assertTrue(text.endswith("\n"))
 
+    # ── gated passes ────────────────────────────────────────────────────────
+    # A gated category must be excluded from the shards and selected by exactly one pass. Get that wrong and the test
+    # runs bare in a shard — where it fails for the reason its flag exists, which reads as a code regression.
+
+    def test_every_gated_category_is_excluded_from_the_shards(self):
+        p = plan(["N.A"])
+        for _, category, _, _ in shard.GATED_PASSES:
+            self.assertIn(f"(Category!={category})", p[1]["filter"], f"shard filter must exclude {category}")
+            self.assertIn(f"(Category!={category})", p[0]["filter"], f"the catch-all must exclude {category}")
+
+    def test_a_gated_pass_selects_its_own_category_and_honours_the_never_run_tiers(self):
+        for _, category, _, _ in shard.GATED_PASSES:
+            flt = shard.gated_filter(category)
+            self.assertIn(f"(Category={category})", flt)
+            # The one filter in the run that forgot GATE_EXCLUDED would be how a quarantined test sneaks back in — the
+            # same reasoning the Sensitive pass's filter carries.
+            for tier in shard.GATE_EXCLUDED:
+                self.assertIn(f"(Category!={tier})", flt, f"{category}'s pass must still exclude {tier}")
+
+    def test_gated_passes_have_distinct_labels_and_categories(self):
+        labels = [label for label, _, _, _ in shard.GATED_PASSES]
+        categories = [c for _, c, _, _ in shard.GATED_PASSES]
+        self.assertEqual(len(labels), len(set(labels)), "two passes with one label would overwrite each other's trx")
+        self.assertEqual(len(categories), len(set(categories)), "a category in two passes would run its tests twice")
+        # 'S' is the serial quiet pass and 'R<n>' the retries; a collision would silently replace another pass's results.
+        for label in labels:
+            self.assertNotEqual(label, "S", "'S' is the serial quiet pass's label")
+            self.assertFalse(label.startswith("R"), "'R*' is reserved for the retry passes")
+
+    def test_a_gated_pass_sets_at_least_one_environment_variable(self):
+        # A pass with no env is a pass with no reason to exist: its tests would run identically in a shard.
+        for label, category, env, why in shard.GATED_PASSES:
+            self.assertTrue(env, f"gated pass {label} ({category}) sets no environment")
+            self.assertTrue(why, f"gated pass {label} does not say why it exists")
+
     def test_sync_refuses_lists_that_are_themselves_inconsistent(self):
         p = plan(["N.A"], ["N.A"])
         with tempfile.TemporaryDirectory() as tmp:

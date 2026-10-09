@@ -20,7 +20,7 @@ namespace Typhon.Engine;
 /// on a field, captured or passed to another thread, which is the compiler enforcing the per-worker discipline instead of documentation asking for it.
 /// </para>
 /// <para>
-/// <b>What applies.</b> <see cref="Profile"/>, <see cref="Control"/>, <see cref="SetBudget"/> and <see cref="Kick"/> take effect.
+/// <b>What applies.</b> <see cref="Profile"/>, <see cref="Control"/>, <see cref="Follow"/>, <see cref="SetBudget"/> and <see cref="Kick"/> take effect.
 /// <see cref="Observe"/>, <see cref="Unobserve"/> and <see cref="SetSources"/> throw here, at the call site, naming the phase that builds them — the shape is
 /// complete now so that an application written against it never has to be revisited when the verb it wanted starts working.
 /// </para>
@@ -105,6 +105,36 @@ public readonly ref struct SessionRequest
     public SessionRequest Control(EntityId entity)
     {
         _segment.Add(_session, SessionRequestKind.Control, (long)entity.RawValue, null);
+        return this;
+    }
+
+    /// <summary>
+    /// Points the session's viewpoint — its centre and its realm — at an entity it does not control.
+    /// </summary>
+    /// <param name="entity">The entity to follow, or <see cref="EntityId.Null"/> to go back to the profile's own anchor.</param>
+    /// <returns>This request, so several may be chained.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Following is not controlling, and that is the whole point of the verb</b> (12-realms § 2.2 Q5). <see cref="Control"/> makes the session that
+    /// entity's: it receives the entity's <c>SELF</c> block and its owner fields, which are its private data. <see cref="Follow"/> gives the session the
+    /// entity's <b>position and realm and nothing else</b> — what a spectator, a GM camera or a replay viewer needs, and what an application that reached for
+    /// <see cref="Control"/> instead has been quietly sending to whoever was watching.
+    /// </para>
+    /// <para>
+    /// <b>It overrides the profile's own anchor</b> rather than requiring one: a profile declared <c>AroundControlled()</c> or <c>Bind(e)</c> follows this
+    /// entity while it is set, and a profile with no anchor at all gains one. On a <c>World</c> or <c>ClientRegion</c> observer, whose geometry is not a
+    /// point, it supplies the realm alone (12-realms § 1.5) — which is how a god camera keeps its own hull and still goes through the door behind the player
+    /// it is watching.
+    /// </para>
+    /// <para>
+    /// <b>A followed entity that goes away behaves as a bound one does</b> (09 § 6): the session keeps the last position and realm it was read at and the
+    /// engine counts a lost follow, until the application follows something else or places the session itself. Where its subject went is the application's
+    /// business, not something the engine should guess.
+    /// </para>
+    /// </remarks>
+    public SessionRequest Follow(EntityId entity)
+    {
+        _segment.Add(_session, SessionRequestKind.Follow, (long)entity.RawValue, null);
         return this;
     }
 

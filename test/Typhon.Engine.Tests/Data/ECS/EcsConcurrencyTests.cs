@@ -94,7 +94,7 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         foreach (var (id, expectedX) in allIds)
         {
             var entity = readTx.Open(id);
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
+            var pos = entity.Read(EcsUnit.Position);
             Assert.That(pos.X, Is.EqualTo(expectedX));
         }
     }
@@ -127,8 +127,8 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         {
             using var t = dbe.CreateQuickTransaction();
             var entity = t.Open(id);
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
-            ref readonly var vel = ref entity.Read(EcsUnit.Velocity);
+            var pos = entity.Read(EcsUnit.Position);
+            var vel = entity.Read(EcsUnit.Velocity);
 
             if (pos.X != 42 || pos.Y != 43 || pos.Z != 44)
             {
@@ -165,20 +165,22 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         // Open a read transaction BEFORE the write (snapshot at current TSN)
         using var readerTx = dbe.CreateQuickTransaction();
         var beforeEntity = readerTx.Open(id);
-        ref readonly var beforePos = ref beforeEntity.Read(EcsUnit.Position);
+        var beforePos = beforeEntity.Read(EcsUnit.Position);
         Assert.That(beforePos.X, Is.EqualTo(100f));
 
         // Write new value and commit on another transaction
         using (var writerTx = dbe.CreateQuickTransaction())
         {
             var mut = writerTx.OpenMut(id);
-            mut.Write(EcsUnit.Position).X = 999;
+            var position = mut.Read(EcsUnit.Position);
+            position.X = 999;
+            mut.Set(EcsUnit.Position, position);
             writerTx.Commit();
         }
 
         // Reader should still see old value (MVCC snapshot isolation)
         var afterEntity = readerTx.Open(id);
-        ref readonly var afterPos = ref afterEntity.Read(EcsUnit.Position);
+        var afterPos = afterEntity.Read(EcsUnit.Position);
         Assert.That(afterPos.X, Is.EqualTo(100f), "Reader with older TSN should see pre-write value (MVCC)");
     }
 
@@ -309,7 +311,7 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         using var readerTx = dbe.CreateQuickTransaction();
         Assert.That(readerTx.IsAlive(id), Is.True);
         var entity = readerTx.Open(id);
-        ref readonly var pos1 = ref entity.Read(EcsUnit.Position);
+        var pos1 = entity.Read(EcsUnit.Position);
         Assert.That(pos1.X, Is.EqualTo(77f));
 
         // Destroy on another transaction and commit
@@ -322,7 +324,7 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         // Reader with older TSN should still see the entity alive (MVCC)
         Assert.That(readerTx.IsAlive(id), Is.True, "Reader with older TSN should still see entity alive");
         var entity2 = readerTx.Open(id);
-        ref readonly var pos2 = ref entity2.Read(EcsUnit.Position);
+        var pos2 = entity2.Read(EcsUnit.Position);
         Assert.That(pos2.X, Is.EqualTo(77f), "Reader should still read correct data after concurrent destroy");
 
         // New transaction should see it dead
@@ -357,10 +359,14 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
 
         // Both write to the same entity
         var e1 = tx1.OpenMut(id);
-        e1.Write(EcsUnit.Position).X = 100;
+        var position = e1.Read(EcsUnit.Position);
+        position.X = 100;
+        e1.Set(EcsUnit.Position, position);
 
         var e2 = tx2.OpenMut(id);
-        e2.Write(EcsUnit.Position).X = 200;
+        var positionCopy = e2.Read(EcsUnit.Position);
+        positionCopy.X = 200;
+        e2.Set(EcsUnit.Position, positionCopy);
 
         // Both commits succeed — ECS uses revision chains, last writer's revision becomes head
         bool first = tx1.Commit();
@@ -373,7 +379,7 @@ class EcsConcurrencyTests : TestBase<EcsConcurrencyTests>
         using (var verifyTx = dbe.CreateQuickTransaction())
         {
             var entity = verifyTx.Open(id);
-            ref readonly var pos = ref entity.Read(EcsUnit.Position);
+            var pos = entity.Read(EcsUnit.Position);
             Assert.That(pos.X, Is.EqualTo(200f), "Value should reflect last committer (tx2)");
         }
     }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -57,11 +58,26 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     // tick N's fence or blocks step, moved aside at N's BeginProjectTick, released at N+1's. Locked: a fence's migration slices and a commit's inline block
     // release reach it from other threads.
     private readonly Lock _orphanedLock = new();
+
+    // Identities kept for entities that crossed into a realm whose destination cluster had no block yet (#1081): entity → (netId, blocks steps left). The
+    // projection that first gives such an entity an identity, in any cluster of any realm, takes this one instead of a new one; an unclaimed one is released
+    // when its steps run out. Keyed by entity, not by (cluster, slot): the entity may move again before its new realm has a block for it.
+    private readonly Lock _arrivalLock = new();
+    private readonly Dictionary<ulong, (uint NetId, int StepsLeft)> _arrivals = [];
+    private int _arrivalCount;
+
+    // How many blocks steps a kept identity waits to be claimed. A follower's switch activates the realm in the crossing tick's prologue and its blocks exist
+    // from the next blocks step, so one is what that path needs; the rest covers a realm served at a divided rate or a bootstrap spread over ticks.
+    private const int ArrivalSteps = 8;
     private List<uint> _orphaned = [];
     private List<uint> _orphanedPrevious = [];
 
     // The list being released, outside the lock; touched by the track alone, then kept as the next tick's empty list.
     private List<uint> _orphanedSpare = [];
+
+    // The orphaned identities whose referrers the reverse index has not re-pushed yet: each is taken once, by the next blocks step (13 § 5).
+    private List<uint> _orphanedForReferences = [];
+    private List<uint> _orphanedForReferencesSpare = [];
     private long _orphanReleaseFaults;
 
     private long _blocksProjected;
@@ -128,7 +144,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// charging: they are visible here, but nothing yet refuses to grow them.
     /// </para>
     /// </remarks>
-    public int EstimatedMemorySize
+    public long EstimatedMemorySize
     {
         get
         {
@@ -226,6 +242,305 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     /// <summary>This archetype's plan index, for the push path's events.</summary>
     internal int PushArchetypeIndex;
+
+    /// <summary>Where a wide section's reference sits in an entry: which of the slot's three regions, and the byte offset inside it.</summary>
+    internal readonly struct WideRef
+    {
+        public const byte Hot = 0;
+        public const byte Cold = 1;
+        public const byte Owner = 2;
+
+        public byte Region { get; init; }
+
+        public int Offset { get; init; }
+    }
+
+    private WideRef[] _wideRefs = [];
+    private long _wideDeferrals;
+
+    /// <summary>
+    /// The archetype's out-of-line section bodies (13 § 6), or <see langword="null"/> when no section is wide — a scalar archetype pays nothing for it.
+    /// </summary>
+    internal WideBodyArena WideBodies { get; private set; }
+
+    /// <summary>
+    /// Wide bodies the projection could not store — the arena's budget was spent — so the entity kept the bytes it had (or, new, waited a tick). Zero in a
+    /// healthy run; non-zero says the budget is sized behind the text the archetype holds.
+    /// </summary>
+    public long WideDeferrals => Volatile.Read(ref _wideDeferrals);
+
+    /// <summary>Records one wide body the arena could not take.</summary>
+    internal void NoteWideDeferral() => Interlocked.Increment(ref _wideDeferrals);
+
+    /// <summary>
+    /// Creates the arena and records where each wide section's reference sits in an entry, when the plan has any. Once, when the plan is attached.
+    /// </summary>
+    /// <param name="plan">The archetype's compiled plan.</param>
+    /// <param name="allocator">Engine allocator, for the arena's slabs.</param>
+    /// <param name="options">Carries the budget the arena honours.</param>
+    public void AttachWideSections(CompiledProjectionPlan plan, IMemoryAllocator allocator, SubscriptionsOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (!plan.HasWideSections || WideBodies != null)
+        {
+            return;
+        }
+
+        var refs = new List<WideRef>();
+        if (plan.OnEnter.Wide)
+        {
+            refs.Add(new WideRef { Region = WideRef.Cold, Offset = Layout.EnterBodyOffsetInColdEntry + plan.OnEnter.StoredOffset });
+        }
+
+        foreach (var group in plan.Groups)
+        {
+            if (group.Section.Wide)
+            {
+                refs.Add(new WideRef { Region = WideRef.Hot, Offset = Layout.PackedStateOffsetInHotEntry + group.Section.StoredOffset });
+            }
+        }
+
+        foreach (var group in plan.OwnerGroups)
+        {
+            if (group.Section.Wide)
+            {
+                refs.Add(new WideRef { Region = WideRef.Owner, Offset = group.Section.StoredOffset });
+            }
+        }
+
+        _wideRefs = refs.ToArray();
+        WideBodies = new WideBodyArena($"{Id}.Wide", this, allocator, options.StatePoolBudgetBytes);
+    }
+
+    /// <summary>
+    /// What an entry holds outside its own bytes, given back: its wide bodies, and the reverse index's count of the entities its references name — every
+    /// path that ENDS an entry calls this before clearing or overwriting it; a path that MOVES one (a migration, a park) copies the entry instead and must
+    /// not.
+    /// </summary>
+    /// <param name="blockBytes">The block.</param>
+    /// <param name="slot">The slot.</param>
+    /// <param name="worker">
+    /// The projection chunk ending it, whose reference log is its own; <c>-1</c> from the fence or the blocks step, which log under a lock.
+    /// </param>
+    internal void EndEntry(byte* blockBytes, int slot, int worker = -1) =>
+        EndEntryAt(blockBytes + Layout.HotOffset + (slot * Layout.HotStride), blockBytes + Layout.ColdOffset + (slot * Layout.ColdStride),
+            blockBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize), worker);
+
+    /// <summary>As <see cref="EndEntry"/>, for a parked copy: its hot, cold and owner bytes back to back.</summary>
+    private void EndParkedEntry(byte* bytes) => EndEntryAt(bytes, bytes + Layout.HotStride, bytes + Layout.HotStride + Layout.ColdStride, -1);
+
+    private void EndEntryAt(byte* hot, byte* cold, byte* owner, int worker)
+    {
+        // A collection's references are in its stored body, which is about to go: read them back first (13 § 5, W34).
+        if (_collectionReferenceBodies.Length != 0 && References != null)
+        {
+            DropCollectionReferences(hot, owner, worker);
+        }
+
+        var refs = _wideRefs;
+        if (refs.Length != 0)
+        {
+            FreeWideAt(refs, hot, cold, owner);
+        }
+
+        var references = References;
+        if (references == null || Layout.ReferenceBytes == 0)
+        {
+            return;
+        }
+
+        // The netIds this entry's references last named stop counting it as a referrer (13 § 5): without this, a long-lived target would keep every
+        // referrer that ever died while naming it, and the index would grow with churn rather than with what is live.
+        var referrer = ((ReplicationHotEntry*)hot)->Entity.RawValue;
+        var held = cold + Layout.ReferenceOffsetInColdEntry;
+        for (var at = 0; at < Layout.ReferenceBytes; at += sizeof(uint))
+        {
+            var netId = Unsafe.ReadUnaligned<uint>(held + at);
+            if (netId == NetIdAllocator.NoNetId)
+            {
+                continue;
+            }
+
+            if (worker >= 0)
+            {
+                references.Note(worker, netId, referrer, -1);
+            }
+            else
+            {
+                references.NoteShared(netId, referrer, -1);
+            }
+
+            Unsafe.WriteUnaligned(held + at, NetIdAllocator.NoNetId);
+        }
+    }
+
+    /// <summary>
+    /// The runtime's reverse index of references (13 § 5), when any replicated archetype projects one; <see langword="null"/> otherwise, and then nothing
+    /// here logs.
+    /// </summary>
+    internal ReferenceIndex References;
+
+    // ── Collections (W34, 13 § 6.5) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The buffer segment of each collection the plan projects, by <see cref="CompiledCollection.Index"/>.</summary>
+    internal VariableSizedBufferSegmentBase<PersistentStore>[] CollectionSegments = [];
+
+    /// <summary>
+    /// Per public group, the catalog section a stored body decodes with when the group holds a collection whose element names entities; <see langword="null"/>
+    /// for every other group. Owner groups in <see cref="CollectionReferenceOwnerSections"/>.
+    /// </summary>
+    internal SectionPlan[] CollectionReferenceSections = [];
+
+    /// <summary>As <see cref="CollectionReferenceSections"/>, per owner group.</summary>
+    internal SectionPlan[] CollectionReferenceOwnerSections = [];
+
+    private (WideRef At, SectionPlan Section)[] _collectionReferenceBodies = [];
+    private CollectionContext[] _collectionContexts = [];
+    // Per thread, not per state: an entry ends on a projection worker, on a fence slice or in the drain, several of them on one state at once.
+    [ThreadStatic]
+    private static uint[] EndScratch;
+
+    /// <summary>
+    /// Binds the plan's collections to their buffer segments and, where an element names entities, its groups to the catalog sections their stored bodies
+    /// decode with. Once, when the plan is attached; after <see cref="AttachWideSections"/>, whose layout it reads.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A collection's element size disagrees with its buffer segment's.</exception>
+    public void AttachCollections(CompiledProjectionPlan plan, DatabaseEngine engine, ArchetypePlan wire)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (plan.Collections.Length == 0)
+        {
+            return;
+        }
+
+        var segments = new VariableSizedBufferSegmentBase<PersistentStore>[plan.Collections.Length];
+        foreach (var collection in plan.Collections)
+        {
+            var segment = engine.GetComponentCollectionVSBS(collection.ElementType);
+            if (segment.ElementSize != collection.ElementSize)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{plan.Name}' collects {collection.ElementType.Name}, whose buffer holds {segment.ElementSize}-byte elements, " +
+                    $"and its fields were laid out for {collection.ElementSize}: an element struct must be blittable — no bool, no char — for its " +
+                    "offsets to be the buffer's.");
+            }
+
+            segments[collection.Index] = segment;
+        }
+
+        CollectionSegments = segments;
+        CollectionReferenceSections = ReferenceSections(plan.Fields, plan.Groups, wire?.GroupSections);
+        CollectionReferenceOwnerSections = ReferenceSections(plan.OwnerFields, plan.OwnerGroups, wire?.OwnerSections);
+
+        var bodies = new List<(WideRef, SectionPlan)>();
+        for (var g = 0; g < plan.Groups.Length; g++)
+        {
+            if (CollectionReferenceSections[g] != null)
+            {
+                var offset = Layout.PackedStateOffsetInHotEntry + plan.Groups[g].Section.StoredOffset;
+                bodies.Add((new WideRef { Region = WideRef.Hot, Offset = offset }, CollectionReferenceSections[g]));
+            }
+        }
+
+        for (var g = 0; g < plan.OwnerGroups.Length; g++)
+        {
+            if (CollectionReferenceOwnerSections[g] != null)
+            {
+                bodies.Add((new WideRef { Region = WideRef.Owner, Offset = plan.OwnerGroups[g].Section.StoredOffset }, CollectionReferenceOwnerSections[g]));
+            }
+        }
+
+        _collectionReferenceBodies = bodies.ToArray();
+    }
+
+    // The catalog section of each group holding a collection whose element names entities; null for the others.
+    private static SectionPlan[] ReferenceSections(CompiledField[] fields, CompiledGroup[] groups, SectionPlan[] wire)
+    {
+        var sections = new SectionPlan[groups.Length];
+        for (var g = 0; g < groups.Length; g++)
+        {
+            var section = groups[g].Section;
+            for (var i = section.FirstField; i < section.FirstField + section.FieldCount; i++)
+            {
+                if (fields[i].Collection is { HasReferences: true } && wire != null && g < wire.Length)
+                {
+                    sections[g] = wire[g];
+                }
+            }
+        }
+
+        return sections;
+    }
+
+    /// <summary>The collection reader of projection chunk <paramref name="worker"/>; sized by <see cref="BeginProjectTick"/>.</summary>
+    internal CollectionContext CollectionContextFor(int worker) =>
+        (uint)worker < (uint)_collectionContexts.Length ? _collectionContexts[worker] : null;
+
+    // Every netId an ending entry's collections name stops counting it as a referrer, as its held netIds do.
+    private void DropCollectionReferences(byte* hot, byte* owner, int worker)
+    {
+        var referrer = ((ReplicationHotEntry*)hot)->Entity.RawValue;
+        foreach (var (at, section) in _collectionReferenceBodies)
+        {
+            var reference = (at.Region == WideRef.Hot ? hot : owner) + at.Offset;
+            var handle = Unsafe.ReadUnaligned<uint>(reference);
+            var length = Unsafe.ReadUnaligned<uint>(reference + sizeof(uint));
+            if (handle == 0 || WideBodies == null)
+            {
+                continue;
+            }
+
+            var collector = new CollectionReferenceCollector { Buffer = EndScratch ??= new uint[64] };
+            try
+            {
+                var reader = new WireReader(WideBodies.Read(handle, length));
+                FieldCodec.ReadSection(ref reader, section, 0, ref collector);
+            }
+            catch (WireFormatException)
+            {
+                // Bytes this projection wrote and its catalog describes: unreachable, and an entry ending is no place to throw.
+                NoteCollectionDecodeFault();
+                continue;
+            }
+
+            EndScratch = collector.Buffer;
+            for (var i = 0; i < collector.Count; i++)
+            {
+                if (worker >= 0)
+                {
+                    References.Note(worker, collector.Buffer[i], referrer, -1);
+                }
+                else
+                {
+                    References.NoteShared(collector.Buffer[i], referrer, -1);
+                }
+            }
+        }
+    }
+
+    private long _collectionDecodeFaults;
+
+    /// <summary>Stored collection bodies that failed to decode when their references were read back: zero, or the catalog and the encoder disagree.</summary>
+    public long CollectionDecodeFaults => Volatile.Read(ref _collectionDecodeFaults);
+
+    /// <summary>Records one stored collection body that failed to decode.</summary>
+    internal void NoteCollectionDecodeFault() => Interlocked.Increment(ref _collectionDecodeFaults);
+
+    // The entry's regions are block or parked-list memory, native and engine-owned; the references are read and zeroed through the region pointers the
+    // callers already hold, unaligned, and the handles go back under one acquisition of the arena's lock.
+    private void FreeWideAt(WideRef[] refs, byte* hot, byte* cold, byte* owner)
+    {
+        Span<uint> handles = stackalloc uint[refs.Length];
+        for (var i = 0; i < refs.Length; i++)
+        {
+            var region = refs[i].Region == WideRef.Hot ? hot : refs[i].Region == WideRef.Cold ? cold : owner;
+            var reference = region + refs[i].Offset;
+            handles[i] = Unsafe.ReadUnaligned<uint>(reference);
+            Unsafe.WriteUnaligned(reference, 0UL);
+        }
+
+        WideBodies.Free(handles);
+    }
 
     /// <summary>One projection scratch per S1 chunk.</summary>
     public ProjectionScratchSet Scratch => _scratch;
@@ -365,21 +680,35 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.NothingToCarry;
         }
 
-        // A move across realms (R4.5). The entry is in the source realm's frame — its codes, its v̂ and its encoded bytes name places there — so it is not
-        // carried: the source realm's sessions are told the entity left (a leave in that realm, decoded with its frame), its identity goes back, and the
-        // destination initialises a fresh entry in its own frame the first time it is projected — an arrival like a spawn. A deviation from 03 § 2, which
-        // carries the identity across: re-issuing it costs a client nothing, since a session that follows the entity across switches with a RESET.
+        // A move across realms (03 § 2, SUB-09). The source realm's sessions are told the entity left — a leave filed in that realm and decoded with its
+        // frame — but its identity is KEPT: the entry is carried like any other, marked realm-arrived, and the destination's next projection re-initializes
+        // it in its own frame (codes, v̂, enter bytes, every group stamped, segment epoch bumped) under the same netId. A session following the entity
+        // across therefore sees its own entity keep its name, and so does every other entity that crosses.
+        //
+        // It used to orphan the entry and release the identity instead, on the premise that a follower's RESET made re-issuing it free. #1081 is the
+        // evidence it is not: the follower's client lost its own entity's identity at every door, and every crossing entity was renamed.
         var realms = _attachedTo != null ? Volatile.Read(ref _attachedTo.ClusterRealmMap) : null;
         if (realms != null && (uint)dstChunkId < (uint)realms.Length && realms[dstChunkId] != source->Realm)
         {
+            var crossing = (ReplicationHotEntry*)hotSource;
             if (Push != null)
             {
-                Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
+                LeftRealm(source, coldSource, crossing->NetId);
             }
 
-            ClearEntry(srcBytes, srcSlot);
             Interlocked.Increment(ref _entriesLeftRealm);
-            return ReplicationMigrationOutcome.NothingToCarry;
+            if (!Directory.TryGetBlock(dstChunkId, out _))
+            {
+                // The destination realm has no block for it yet — typically the realm a follower is switching into, whose blocks exist from the next blocks
+                // step. The entry is in the wrong frame anyway and is re-initialized whatever happens, so it is not parked: only its identity is kept, by
+                // entity, for whichever projection describes it first.
+                KeepArrival(crossing->Entity.RawValue, crossing->NetId);
+                EndEntry(srcBytes, srcSlot);
+                ClearEntry(srcBytes, srcSlot);
+                return ReplicationMigrationOutcome.NothingToCarry;
+            }
+
+            crossing->Flags |= ProjectionPass.FlagRealmArrived;
         }
 
         if (Directory.TryGetBlock(dstChunkId, out var destination))
@@ -394,6 +723,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 }
             }
 
+            // The entry being overwritten ends here; the arriving one's bodies move with its references.
+            EndEntry(dstBytes, dstSlot);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
 
@@ -416,10 +747,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.Carried;
         }
 
-        if (!Park(dstChunkId, dstSlot, hotSource, coldSource))
+        var ownerSource = Layout.OwnerEntrySize > 0 ? srcBytes + Layout.OwnerOffset + (srcSlot * Layout.OwnerEntrySize) : null;
+        if (!Park(dstChunkId, dstSlot, hotSource, coldSource, ownerSource))
         {
             // Counted as a DROP, not a park. Reporting it as parked would break the one identity that reveals the disposal window happening at all:
             // everything parked is either written by the drain or counted as dropped.
+            EndEntry(srcBytes, srcSlot);
             ClearEntry(srcBytes, srcSlot);
             return ReplicationMigrationOutcome.NothingToCarry;
         }
@@ -454,8 +787,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <param name="slot">The destination slot.</param>
     /// <param name="hot">The hot entry's bytes.</param>
     /// <param name="cold">The cold entry's bytes.</param>
+    /// <param name="owner">The owner entry's bytes, or <see langword="null"/> when the archetype declares no owner fields.</param>
     /// <returns><see langword="false"/> when the entry could not be kept, which makes it a DROP rather than a park.</returns>
-    private bool Park(int chunkId, int slot, byte* hot, byte* cold)
+    /// <remarks>
+    /// The owner entry is parked with the rest. It was not, while the drain copied <see cref="ReplicationBlockLayout.OwnerEntrySize"/> bytes from past the
+    /// parked hot and cold ones — another entry's bytes, or past the list's buffer for the last one — and the entity's own owner state was lost.
+    /// </remarks>
+    private bool Park(int chunkId, int slot, byte* hot, byte* cold, byte* owner)
     {
         lock (_parkLock)
         {
@@ -468,8 +806,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 return false;
             }
 
-            _parked ??= new ParkedEntryList(Layout.HotStride + Layout.ColdStride);
-            return _parked.Add(chunkId, slot, hot, Layout.HotStride, cold, Layout.ColdStride);
+            _parked ??= new ParkedEntryList(Layout.HotStride + Layout.ColdStride + Layout.OwnerEntrySize);
+            return _parked.Add(chunkId, slot, hot, Layout.HotStride, cold, Layout.ColdStride, owner, Layout.OwnerEntrySize);
         }
     }
 
@@ -535,6 +873,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     }
                 }
 
+                EndEntry(dstBytes, slot);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
                 if (Layout.OwnerEntrySize > 0)
@@ -558,13 +897,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
                     if (droppedId != NetIdAllocator.NoNetId)
                     {
-                        // A parked entry never crossed realms (R4.5 leaves those before they park): its realm is its destination cluster's.
+                        // A parked entry never crossed realms — a crossing whose destination has no block keeps its identity instead of parking
+                        // (KeepArrival) — so its realm is its destination cluster's.
                         var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
                         var realm = map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
                         Orphaned(null, bytes + Layout.HotStride, droppedId, 2, realm);
                     }
                 }
 
+                EndParkedEntry(bytes);
                 Interlocked.Increment(ref _parkedDropped);
             }
         }
@@ -607,11 +948,24 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         ObjectDisposedException.ThrowIf(_disposed, this);
         ProjectCursor[ProjectCursorSlot] = 0;
 
+        AgeArrivals();
         ReleaseOrphaned();
 
         // The cold estimate is the pushed slots' blocks, an upper bound on the identities this tick can need: an entity gets one only when its entry has none,
         // and only a pushed slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
+
+        if (CollectionSegments.Length != 0 && _collectionContexts.Length < workers)
+        {
+            var contexts = new CollectionContext[workers];
+            Array.Copy(_collectionContexts, contexts, _collectionContexts.Length);
+            for (var i = _collectionContexts.Length; i < workers; i++)
+            {
+                contexts[i] = new CollectionContext(this, CollectionSegments.Length);
+            }
+
+            _collectionContexts = contexts;
+        }
 
         // Every identity a lease can hand out this tick is at or below the high-water mark the refill just moved: reserved here, bound from the chunks.
         EntityIndex?.Reserve(NetIds.HighWaterMark);
@@ -638,9 +992,119 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // block: its caller names the realm.
         var push = Push.Hub == null ? Push : Push.Hub.For(block == null ? parkedRealm : block->Realm);
         push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
+        ReleaseIdentity(netId);
+    }
+
+    /// <summary>
+    /// An entity left <paramref name="block"/>'s realm for another (03 § 2): that realm's sessions are told it left, decoded in that realm's frame, and its
+    /// identity is KEPT — the entry goes with the entity. Counted as a realm orphan (cause 3) on the source realm's replication.
+    /// </summary>
+    private void LeftRealm(ReplicationBlockHeader* block, byte* cold, uint netId)
+    {
+        var push = Push.Hub == null ? Push : Push.Hub.For(block->Realm);
+        push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, 3);
+    }
+
+    /// <summary>Keeps <paramref name="netId"/> for <paramref name="entity"/>, which crossed into a realm with no block for it yet (#1081). Fence slices, in parallel.</summary>
+    private void KeepArrival(ulong entity, uint netId)
+    {
+        if (netId == NetIdAllocator.NoNetId)
+        {
+            return;
+        }
+
+        lock (_arrivalLock)
+        {
+            // An entity crosses at most once per fence, so a second entry for it is a defect; the older identity is released rather than stranded.
+            if (_arrivals.Remove(entity, out var older))
+            {
+                ReleaseIdentity(older.NetId);
+            }
+
+            _arrivals[entity] = (netId, ArrivalSteps);
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    /// <summary>Whether any kept identity is waiting: the projection's lock-free check before it looks one up.</summary>
+    internal bool HasArrivals => Volatile.Read(ref _arrivalCount) != 0;
+
+    /// <summary>Takes the identity kept for <paramref name="entity"/>, if any. Projection chunks, in parallel.</summary>
+    internal bool TryTakeArrival(ulong entity, out uint netId)
+    {
+        lock (_arrivalLock)
+        {
+            if (_arrivals.Remove(entity, out var kept))
+            {
+                Volatile.Write(ref _arrivalCount, _arrivals.Count);
+                netId = kept.NetId;
+                return true;
+            }
+        }
+
+        netId = NetIdAllocator.NoNetId;
+        return false;
+    }
+
+    /// <summary>Puts back an identity a projection took but could not use (a deferred initialization), with the steps it had.</summary>
+    internal void ReturnArrival(ulong entity, uint netId)
+    {
+        lock (_arrivalLock)
+        {
+            _arrivals[entity] = (netId, ArrivalSteps);
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    /// <summary>Serial, at the blocks step: one step off every kept identity, and those whose steps ran out released — nobody claimed them.</summary>
+    private void AgeArrivals()
+    {
+        if (!HasArrivals)
+        {
+            return;
+        }
+
+        lock (_arrivalLock)
+        {
+            // Keys first, then the updates: a dictionary is not written while it is enumerated.
+            _arrivalScratch.Clear();
+            _arrivalScratch.AddRange(_arrivals.Keys);
+            foreach (var entity in _arrivalScratch)
+            {
+                var kept = _arrivals[entity];
+                if (kept.StepsLeft > 1)
+                {
+                    _arrivals[entity] = (kept.NetId, kept.StepsLeft - 1);
+                    continue;
+                }
+
+                _arrivals.Remove(entity);
+                ReleaseIdentity(kept.NetId);
+                Interlocked.Increment(ref _arrivalsExpired);
+            }
+
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    private long _arrivalsExpired;
+    private readonly List<ulong> _arrivalScratch = [];
+
+    /// <summary>Kept identities nobody claimed in time, released (#1081). Non-zero is an entity that crossed into a realm nobody entered.</summary>
+    public long ArrivalsExpired => Volatile.Read(ref _arrivalsExpired);
+
+    /// <summary>Hands an identity back at the next blocks step, and re-pushes its referrers then (13 § 5).</summary>
+    private void ReleaseIdentity(uint netId)
+    {
         lock (_orphanedLock)
         {
             _orphaned.Add(netId);
+
+            // The referrers of an orphaned identity are re-pushed at the next blocks step, like those of one the projection released (13 § 5).
+            if (References != null)
+            {
+                _orphanedForReferences.Add(netId);
+            }
         }
     }
 
@@ -703,8 +1167,24 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return;
         }
 
+        AgeArrivals();
         ReleaseOrphaned();
         _netIdLeases.FlushReleases(NetIds);
+    }
+
+    /// <summary>
+    /// The identities orphaned since the last call, for the reverse index to re-push their referrers; the list is valid until the next call. Serial, at
+    /// the blocks step.
+    /// </summary>
+    internal List<uint> TakeOrphanedForReferences()
+    {
+        _orphanedForReferencesSpare.Clear();
+        lock (_orphanedLock)
+        {
+            (_orphanedForReferences, _orphanedForReferencesSpare) = (_orphanedForReferencesSpare, _orphanedForReferences);
+        }
+
+        return _orphanedForReferencesSpare;
     }
 
     /// <summary>Orphaned identities the allocator refused to release — already free. Zero when every orphan names a live identity once.</summary>
@@ -740,6 +1220,41 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     /// <summary>Records that a worker's identity lease ran dry and one entity was deferred to the next tick.</summary>
     public void NoteNetIdStarvation() => Interlocked.Increment(ref _netIdStarvations);
+
+    // One counter per projected field row (public fields, then owner fields, as the code scratch lays them out). Sized once at Start, so counting allocates
+    // nothing on the tick path; a clamp is rare, so the Interlocked add is paid only when one happened.
+    private long[] _fieldClamps = [];
+
+    /// <summary>Sizes the per-field clamp counters to the archetype's projected rows. Called once, when the plan is attached.</summary>
+    /// <param name="rows">Public fields plus owner fields.</param>
+    public void SizeClampCounters(int rows) => _fieldClamps = new long[Math.Max(0, rows)];
+
+    /// <summary>
+    /// Records that a narrowing column (<c>Saturate()</c>, or an enum read from outside its names) clamped <paramref name="count"/> values this tick.
+    /// </summary>
+    /// <param name="row">The field's row: its index among the public fields, or the public count plus its index among the owner fields.</param>
+    /// <param name="count">Values clamped.</param>
+    /// <remarks>Never throws: a row outside the sized range is dropped, because a counter must not be the thing that fails a tick.</remarks>
+    public void NoteClamps(int row, int count)
+    {
+        var counters = _fieldClamps;
+        if ((uint)row < (uint)counters.Length)
+        {
+            Interlocked.Add(ref counters[row], count);
+        }
+    }
+
+    /// <summary>
+    /// Clamps a field's declared narrowing has performed since the runtime started (design/Subscriptions/13 § 2.3, E-3) — one per projection of an
+    /// out-of-range value, so a value that stays out of range counts again each time its entity is pushed. A rate, not a count of distinct values.
+    /// </summary>
+    /// <param name="row">The field's row, as <see cref="NoteClamps"/> numbers it.</param>
+    /// <returns>The count; 0 for a row that does not exist.</returns>
+    public long ClampsOf(int row)
+    {
+        var counters = _fieldClamps;
+        return (uint)row < (uint)counters.Length ? Volatile.Read(ref counters[row]) : 0;
+    }
 
     /// <summary>Accumulates one block's motion segments, and what the rejected trigger would have emitted over the same block.</summary>
     /// <param name="emitted">Segments this rule emitted.</param>
@@ -942,6 +1457,16 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         if (Push != null && (uint)chunkId < (uint)BlockByChunk.Length)
         {
             BlockByChunk[chunkId] = 0;
+        }
+
+        // A released block's entries end with it: their wide bodies go back before the block does, or they would stay live with nothing naming them; and
+        // their references stop counting them as referrers.
+        if (_wideRefs.Length != 0 || (References != null && (Layout.ReferenceBytes != 0 || _collectionReferenceBodies.Length != 0)))
+        {
+            for (var s = 0; s < Layout.SlotCount; s++)
+            {
+                EndEntry((byte*)block, s);
+            }
         }
 
         Pool.Return(block);

@@ -99,13 +99,15 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         for (var k = 0; k < EntityCount / 4; k++)
         {
             var i = order[k];
-            // Absolute values from the seed, never derived from what Write() hands back: the two arms write through different transaction kinds, and
-            // whether the ref is a copy of the current value or a fresh staging buffer is not this fixture's business.
+            // Absolute values from the seed, never derived from a value read back: the two arms write through different transaction kinds, and
+            // whether a read sees the current value or a fresh staging buffer is not this fixture's business.
             var x = (float)(rng.NextDouble() * (WorldMax - 2f)) + 1f;
             var y = (float)(rng.NextDouble() * (WorldMax - 2f)) + 1f;
-            ref var pos = ref tx.OpenMut(ids[i]).Write(ClMigUnit.Pos);
+            var target = tx.OpenMut(ids[i]);
+            var pos = target.Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y };
             pos.Tag = (k & 1) == 0 ? EntityCount + k : i;
+            target.Set(ClMigUnit.Pos, pos);
         }
     }
 
@@ -258,7 +260,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
         return outcome;
     }
 
-    private static void RunParallel(DatabaseEngine dbe, int workerCount, EntityId[] ids, Outcome outcome)
+    private static void RunParallel(DatabaseEngine dbe, int workerCount, EntityId[] ids, Outcome outcome, Action afterWrites = null)
     {
         var ticks = 0;
         TyphonRuntime runtime = null;
@@ -292,6 +294,17 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                     ApplyWrites(ctx.Transaction, ids);
                 }
             }, after: "Sample");
+            if (afterWrites != null)
+            {
+                // Its own system, so it runs once the Write system's transaction has committed and ended, and before the tick's fence.
+                dag.CallbackSystem("AfterWrites", _ =>
+                {
+                    if (Volatile.Read(ref ticks) == 1)
+                    {
+                        afterWrites();
+                    }
+                }, after: "Write");
+            }
         }, new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = 100, EnableParallelFence = true });
 
         using (runtime)
@@ -375,6 +388,54 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     [Property("CacheSize", 64 * 1024 * 1024)]   // 16 384 spatial entities and their index pages do not fit the 8 MiB default
     [VerifiesRule("CR-01")]
     public void ParallelFence_AtOneWorker_IsNotSliced_AndMatchesTheSerialFence() => AssertArmMatchesSerial(1, expectSlices: false);
+
+    /// <summary>
+    /// The element id a sliced Prep's shadow drain writes into a cluster's tail (the tag's index move, step ③) survives the page cache evicting every page it
+    /// may evict between Prep and Migrate. Unrecorded, the write was lost with the page: Migrate read the old id, its location update named a chunk that no
+    /// longer held the element and was dropped, and the index kept the entity at the slot it had left (#1171).
+    /// </summary>
+    /// <remarks>
+    /// Found because #1143 stopped the open from reading the whole file: the cache stayed cold, the fence's own loads evicted pages, and the fixture's
+    /// second arm lost entries in every run. The eviction here is what made it certain: every Idle page with no writer, no slot reference, no debt and no
+    /// live epoch goes, which is exactly what the cache is allowed to do at that point. The writes record their own pages (#1172), which would keep those
+    /// pages resident whatever the drain did; a checkpoint between the writes and the fence settles those records, so the drain's is the only one left.
+    /// The serial fence cannot stand in for the slices: its drain writes through an accessor that holds a ChangeSet.
+    /// </remarks>
+    [Test]
+    [CancelAfter(120_000)]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("PS-10")]
+    public void AnIndexMoveWrittenByASlice_SurvivesTheCacheEvictingItsPage()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = SetupEngine(scope);
+        var ids = Spawn(dbe);
+        dbe.WriteTickFence(1);
+
+        var evicted = 0;
+        var checkpointed = false;
+        var cs = ClusterStateOf(dbe);
+        ArchetypeClusterState.PrepQueueProbe = (state, _) =>
+        {
+            if (ReferenceEquals(state, cs))
+            {
+                evicted += dbe.MMF.EvictEvictablePagesForTest();
+            }
+        };
+
+        try
+        {
+            RunParallel(dbe, 2, ids, new Outcome(), () => checkpointed = dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)));
+        }
+        finally
+        {
+            ArchetypeClusterState.PrepQueueProbe = null;
+        }
+
+        Assert.That(checkpointed, Is.True, "premise: a checkpoint settled the writes' own records before the fence");
+        Assert.That(evicted, Is.GreaterThan(0), "premise: the cache evicted pages between Prep and Migrate");
+        IndexDataOracle.AssertIndexAgreesWithData<ClMigUnit>(dbe, "after a fence whose cache evicted every evictable page between Prep and Migrate");
+    }
 
     [Test]
     [CancelAfter(120_000)]

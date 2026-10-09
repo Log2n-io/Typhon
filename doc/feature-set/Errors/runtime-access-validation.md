@@ -13,7 +13,7 @@ description: 'Opt-in InvalidAccessException when a system writes a component it 
 
 Typhon's scheduler derives its execution DAG from what each system *declares* it writes
 (`SystemBuilder.Writes<T>()` / `SideWrites<T>()`), not from what the system body actually does. If a
-system's code drifts from its declaration — someone adds a `entity.Write(Comp)` call and forgets the
+system's code drifts from its declaration — someone adds a `entity.Set(Comp, …)` call and forgets the
 matching builder declaration — the scheduler keeps building a DAG from stale information. Nothing about
 that failure is loud: the write still succeeds, but the parallelism/ordering guarantees the scheduler
 computed around the declared set are now silently wrong. This validator turns that drift into an
@@ -21,7 +21,7 @@ immediate, specific exception when the check is switched on, before it ships as 
 
 ## ⚙️ How it works (in brief)
 
-With the check enabled, every `EntityRefMut.Write<T>()` call is checked against the declared `Writes`/`SideWrites`
+With the check enabled, every `EntityRefMut.Set<T>()` call is checked against the declared `Writes`/`SideWrites`
 set of the currently-executing system. A mismatch throws `InvalidAccessException` naming the system, the
 undeclared component type, and everything the system *did* declare. Systems that haven't declared any
 access yet (migration window) are exempt — the check only activates once a system declares at least one
@@ -43,10 +43,12 @@ class ClampSystem : QuerySystem
         foreach (var id in ctx.Entities)
         {
             var entity = ctx.Accessor.OpenMut(id);
-            ref var pos = ref entity.Write(Unit.Position);   // OK: Position is declared
+            var pos = entity.Read(Unit.Position);   // OK: Position is declared
             pos.X = Math.Clamp(pos.X, 0, WorldWidth);
+            entity.Set(Unit.Position, pos);
 
-            ref var vel = ref entity.Write(Unit.Velocity);   // check on: throws InvalidAccessException
+            var vel = entity.Read(Unit.Velocity);
+            entity.Set(Unit.Velocity, vel);   // check on: throws InvalidAccessException
         }                                                    // (Velocity was never declared)
     }
 }

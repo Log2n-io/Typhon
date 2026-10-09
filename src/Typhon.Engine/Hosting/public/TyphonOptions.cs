@@ -94,7 +94,7 @@ public sealed class TyphonOptions
     /// <summary>
     /// Sets the page-cache size in bytes — the discoverable front for <see cref="PagedMMFOptions.DatabaseCacheSize"/>.
     /// The default is 256 MiB; size it for your workload's transaction working set (a cache too small for it hits
-    /// <see cref="PageCacheBackpressureTimeoutException"/>). Must be a multiple of the 8 KiB page size, at least 8 MiB and at most 2 GiB minus one page.
+    /// <see cref="PageCacheBackpressureTimeoutException"/>). Must be a multiple of the 8 KiB page size and at least 8 MiB; no configured maximum beyond 2³¹ − 1 pages — a size the host cannot grant is refused at startup (<see cref="TyphonErrorCode.PageCacheAllocationFailed"/>).
     /// </summary>
     /// <param name="bytes">Cache size in bytes, e.g. <c>512UL * 1024 * 1024</c> for 512 MiB.</param>
     public TyphonOptions PageCacheSize(ulong bytes)

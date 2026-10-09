@@ -28,6 +28,9 @@ internal enum SessionRequestKind : byte
 
     /// <summary>End the session.</summary>
     Kick = 7,
+
+    /// <summary>Point the session's viewpoint at an entity it does not control.</summary>
+    Follow = 8,
 }
 
 /// <summary>
@@ -301,6 +304,9 @@ internal sealed class SessionRequestLog
 
             case SessionRequestKind.Control:
                 return table.SetControlled(session, EntityId.FromRaw(record.Payload));
+
+            case SessionRequestKind.Follow:
+                return table.SetFollowed(session, EntityId.FromRaw(record.Payload));
 
             case SessionRequestKind.SetBudget:
                 return table.SetBudget(session, (int)record.Payload);

@@ -1,4 +1,6 @@
-﻿namespace SwgTatooine;
+﻿using System;
+
+namespace SwgTatooine;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Systems
@@ -26,12 +28,21 @@ internal sealed class CreatureThinkSystem : QuerySystem
         .Parallel()
         .ChunksPerWorker(2f)
         .Reads<CreaturePlacement>()
-        .Reads<CreatureVitals>()
 
-        // The aggro query reads player positions; declared, so Shuttle's and PlayerMove's writes are ordered around it (rule ED-05).
+        // WRITTEN, not read, since SWG-02 moved the revive here: a dead creature's countdown and its return to full health at its lair are mode transitions on
+        // the AI cadence, and leaving them in the combat phase made this the only writer of CreatureVitals in the phase where the player's side of a fight has
+        // to read them.
+        .Writes<CreatureVitals>()
+
+        // The aggro query reads player positions, and the pursuit re-reads its quarry's; declared, so Shuttle's and PlayerMove's writes are ordered around it
+        // (rule ED-05).
         .Reads<PlayerPlacement>()
         .Writes<CreatureBrain>()
         .Writes<CreatureMotion>()
+
+        // The think, move and combat systems all write CreatureTimers and none of them used to say so. Phase order happens to serialize them, so the
+        // omission never bit — but that is the DAG being lucky rather than informed, which is what rule ED-05 is about.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureThinkTick(ctx);
@@ -50,6 +61,10 @@ internal sealed class PlayerThinkSystem : QuerySystem
         .Parallel()
         .ChunksPerWorker(2f)
         .Reads<PlayerPlacement>()
+
+        // Declared, because the loop reads it to decide whether this player is the client's (SWG-01). Ordering against PlayerSessions, which writes it,
+        // currently survives only through the unrelated PlayerMotion edge — which is rule ED-05's definition of the DAG being lucky rather than informed.
+        .Reads<PlayerControl>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
         .Input(() => _bridge.PlayerView);
@@ -72,6 +87,9 @@ internal sealed class CreatureMoveSystem : QuerySystem
         .Reads<CreatureMotion>()
         .Reads<CreatureBrain>()
         .Writes<CreaturePlacement>()
+
+        // Clears CreatureTimers.JustRevived after the teleport home (S0-1); see CreatureThink for why this was missing.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureMoveTick(ctx);
@@ -211,20 +229,23 @@ internal sealed class EconomySystem : QuerySystem
 }
 
 /// <summary>
-/// Creature-side combat: a creature standing in a player's line of fire takes damage, dies, and is revived by its lair.
+/// The creature's side of a fight: one that has closed on its quarry and stopped attacks it, and pushes the damage as an event.
 /// </summary>
 /// <remarks>
-/// <para><b>Why the creature applies the damage to itself rather than the player applying it.</b> A system may only
-/// write components of its OWN input archetype. Reaching across — opening a Creature from a system whose input is
-/// Player, through <c>ctx.Transaction</c>, and writing its vitals — stalls the tick loop outright: the runtime reached
-/// tick 1 and never advanced. That is filed against the engine; here the model is inverted instead, and the inversion is
-/// not a distortion. The spatial query, the range test, the weapon cadence and the health arithmetic are identical; only
-/// which side of the exchange runs the code has moved.</para>
+/// <para><b>It runs no spatial query at all, which is what made SWG-02 cheaper rather than dearer.</b> The system it
+/// replaces asked, once per living creature per weapon cycle, "is a player within 75 m?" — on the order of 850 radius
+/// queries a tick at the faithful baseline — and then took damage from however many it found, whatever those players were
+/// doing (gap G8). A creature that is fighting now knows WHAT it is fighting and reads that entity's position; finding
+/// somebody to fight in the first place is <see cref="CreatureThinkSystem"/>'s 24 m aggro bubble, which is untouched and
+/// is where the negative-case query load the study is about actually lives.</para>
+/// <para><b>It writes nothing outside its own archetype.</b> The damage travels as a <c>CombatEvent</c> to the serial
+/// system in <see cref="SimPhases.Apply"/>, which is the only place a Player is opened and written — so the
+/// cross-archetype write that #907 is open about happens on one thread, by construction.</para>
 /// <para><b>Death is pooled, not structural.</b> A killed creature goes to <see cref="AiMode.Dead"/> and is revived at
 /// its lair after the respawn interval, rather than being destroyed and re-spawned. That is what SWG lairs did anyway —
 /// a lair owns a fixed set of spawn slots — but it does mean this workload exercises cluster-occupancy churn only
 /// through the world build, not per tick. The revive is a TELEPORT back to the lair, which is a large position jump and
-/// does exercise migration and cluster-bound recomputation hard.</para>
+/// does exercise migration and cluster-bound recomputation hard; it is <see cref="CreatureThinkSystem"/>'s now.</para>
 /// </remarks>
 internal sealed class CreatureCombatSystem : QuerySystem
 {
@@ -239,13 +260,118 @@ internal sealed class CreatureCombatSystem : QuerySystem
         .ChunksPerWorker(2f)
         .Reads<CreaturePlacement>()
 
-        // The line-of-fire query reads player positions (rule ED-05: undeclared, PlayerMove would be free to write them while it runs).
+        // The attack's damage, read and never written here — see CreatureThink, which owns the revive and so owns this component.
+        .Reads<CreatureVitals>()
+
+        // The quarry's position, read through its EntityId rather than through a query (rule ED-05: undeclared, PlayerMove would be free to write it while
+        // this runs).
         .Reads<PlayerPlacement>()
-        .Writes<CreatureVitals>()
+
+        // A creature whose quarry has gone drops back to Wander here rather than standing frozen mid-swing until its next decision.
         .Writes<CreatureBrain>()
+
+        // Cycles the weapon; see CreatureThink for why this was once missing.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureCombatTick(ctx);
+}
+
+/// <summary>
+/// The player's side of a fight: a player in <see cref="PlayerActivity.Combat"/> fires at its own target, and at nothing else.
+/// </summary>
+/// <remarks>
+/// <para><b>This is the system that did not exist, and its absence is what gap G8 was.</b> Combat used to be resolved
+/// entirely from the creature's side, so a player's activity, target and weapon were never consulted: standing near a
+/// lair was indistinguishable from attacking it. Here a player that is travelling, idling or roaming does no damage, and
+/// a player whose target has walked out of weapon range does no damage — both counted, because an acceptance criterion
+/// about what does NOT happen cannot be checked against a silent zero.</para>
+/// <para><b>It shares no component with <see cref="CreatureCombatSystem"/> in either direction</b>, which is why the two
+/// run concurrently in one phase: this one writes the shooter's cooldown and target and READS the creature and lair
+/// vitals and placements, and the other does the mirror image. Neither writes what the other reads.</para>
+/// </remarks>
+internal sealed class PlayerCombatSystem : QuerySystem
+{
+    private readonly SimBridge _bridge;
+
+    public PlayerCombatSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("PlayerCombat")
+        .Phase(SimPhases.Resolve)
+        .Parallel()
+        .ChunksPerWorker(2f)
+        .Reads<PlayerPlacement>()
+
+        // Whether this player is fighting at all, and whether a client or the simulation decides for it — the latter settles who may drop a target that
+        // walked away.
+        .Reads<PlayerState>()
+        .Reads<PlayerControl>()
+
+        // The weapon's cooldown and the shooter's own target.
+        .Writes<PlayerVitals>()
+        .Writes<PlayerSession>()
+
+        // What the acquisition query and the target check read: a candidate must be alive, a lair must still belong to a live mission, and both must be within
+        // weapon range of the shooter.
+        .Reads<CreaturePlacement>()
+        .Reads<CreatureVitals>()
+        .Reads<LairPlacement>()
+        .Reads<LairVitals>()
+        .Reads<Lair>()
+        .Input(() => _bridge.PlayerView);
+
+    protected override void Execute(TickContext ctx) => _bridge.PlayerCombatTick(ctx);
+}
+
+/// <summary>
+/// Every effect this tick produced, applied to the entity it names: the demo's only event consumer, and its only writer of a <c>Versioned</c> component.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, because <c>EventQueue.Drain</c> is single-consumer</b> — and that is the bargain rather than the
+/// price. This is the one place in the tick that opens another archetype's entity and writes it, so a single thread is
+/// what makes the #907 shape safe by construction. The volume is bounded by weapon cooldowns, so at the faithful baseline
+/// it is single digits of events a tick.</para>
+/// <para><b>In <see cref="SimPhases.Apply"/> rather than in <see cref="SimPhases.Resolve"/> with the producers</b>, for
+/// the reason set out on that phase: it writes the very components the producers read, and the deriver's in-phase
+/// resolutions would order the producers after it.</para>
+/// <para><b>It writes through the tick's transaction, not a side transaction.</b> That is the whole of why this tick
+/// carries a WAL record and waits for it: a side transaction would commit on its own and the tick would carry nothing.</para>
+/// </remarks>
+internal sealed class CombatResolveSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public CombatResolveSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("CombatResolve")
+        .Phase(SimPhases.Apply)
+
+        // The creature's half of an exchange: health down, a grudge against the shooter, the respawn countdown started.
+        .Writes<CreatureVitals>()
+        .Writes<CreatureBrain>()
+        .Writes<CreatureTimers>()
+
+        // The lair's, which is what lets a destroy mission finish at all.
+        .Writes<LairVitals>()
+        .Reads<Lair>()
+
+        // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
+        .Writes<PlayerVitals>()
+        .Writes<PlayerState>()
+        .Writes<PlayerMotion>()
+        .Writes<PlayerSession>()
+        .Writes<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+
+        // A possessed player is never sent on a mission by the server (SWG-01): two deciders on one entity is the bug that field exists to prevent.
+        .Reads<PlayerControl>()
+
+        // The world's one Versioned component, and the reason this tick has anything to flush.
+        .Writes<Inventory>();
+
+    protected override void Execute(TickContext ctx) => _bridge.CombatResolveTick(ctx);
 }
 
 /// <summary>
@@ -473,4 +599,108 @@ internal sealed class AwarenessSplitSystem : QuerySystem
     }
 
     protected override void Execute(TickContext ctx) => _bridge.AwarenessTick(ctx, _target);
+}
+
+/// <summary>
+/// Everything the tick does about sessions: kicks, counts, profiles, possession and this tick's client intents (SWG-01).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Serial, and in this DAG rather than a replication DAG of its own, for two reasons that are both correctness.</b> Session requests append to an
+/// unsynchronized per-worker segment that no caller can address by its own worker index (#1070), so segment 0 is safe only while one thread writes it — and
+/// applying an intent writes <c>PlayerMotion</c>, which <c>PlayerThink</c> also writes, so the two have to be orderable, which across DAGs they are not
+/// (<c>overview/13-runtime.md</c>: "a cross-DAG <c>.After()</c> edge is a configuration error"). <see cref="TatooineReplication.SessionTick"/>'s remarks
+/// carry the full account.
+/// </para>
+/// <para>
+/// <b>The <c>Input</c> phase, which exists for it</b> — see <c>SimPhases.Input</c>. <c>Shuttle</c> writes the same two player components in <c>Spawn</c>, and
+/// the access deriver refuses two writers of one component in one phase without an explicit edge; a phase of its own says what an edge would only enforce.
+/// </para>
+/// </remarks>
+internal sealed class PlayerSessionSystem : CallbackSystem
+{
+    protected override void Configure(SystemBuilder b) => b
+        .Name("PlayerSessions")
+        .Phase(SimPhases.Input)
+        .Writes<PlayerControl>()
+        .Writes<PlayerMotion>()
+        .Writes<PlayerState>()
+        .Reads<PlayerPlacement>();
+
+    protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
+}
+
+/// <summary>The periodic replication report: cumulative counters, every three hundred ticks.</summary>
+/// <remarks>
+/// In the report phase with every other diagnostic, and separate from <see cref="PlayerSessionSystem"/> because it writes nothing and must not be ordered
+/// against anything. It was the same method until SWG-01, which is how a print ended up in the phase that decides what players do.
+/// </remarks>
+internal sealed class ReplicationReportSystem : CallbackSystem
+{
+    protected override void Configure(SystemBuilder b) => b
+        .Name("ReplicationReport")
+        .Phase(SimPhases.Report)
+
+        // A declaration, because a phase alone does not order a system: AccessDagDeriver skips any pair where either side declares no access, so with none this
+        // was a DAG ROOT — free to run at the head of the tick, concurrently with PlayerSessions and PlayerThink, doing blocking Console I/O on a pool worker.
+        // Reading what the input system writes is what actually puts it last.
+        .Reads<PlayerState>();
+
+    protected override void Execute(TickContext ctx) => TatooineReplication.ReportTick(ctx);
+}
+
+/// <summary>
+/// Counts what is standing in each realm, once every <see cref="SimConfig.RealmCensusHz"/> of a second, for the realm inventory the client polls.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>In the DAG only when this process is serving</b> — added beside <see cref="PlayerSessionSystem"/>, under the same condition. A measurement run must
+/// execute the same code it always did, and a serial walk of every cluster of five archetypes once a second is small enough to disappear into the noise of
+/// one arm and not the other.
+/// </para>
+/// <para>
+/// <b>It reads placements, and says so.</b> It opens no component and touches no field — the count is <c>PopCount</c> of a cluster's occupancy — but it walks
+/// the same clusters the movers write, and a system that declares no access at all is a DAG root free to run at the head of the tick (see
+/// <see cref="ReplicationReportSystem"/>, which learned that the hard way). Declaring the placements it walks is what puts it after them.
+/// </para>
+/// </remarks>
+internal sealed class RealmCensusSystem : CallbackSystem
+{
+    private readonly RealmCensus _census;
+    private readonly int _everyTicks;
+
+    /// <summary>The census to fill, walked once every <paramref name="everyTicks"/> ticks.</summary>
+    internal RealmCensusSystem(RealmCensus census, int everyTicks)
+    {
+        _census = census;
+        _everyTicks = Math.Max(1, everyTicks);
+    }
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("RealmCensus")
+        .Phase(SimPhases.Report)
+        .Reads<PlayerPlacement>()
+        .Reads<NpcPlacement>()
+        .Reads<CreaturePlacement>()
+
+        // The scenery is walked too, so it is declared too. It never moves in this world — SetSpatialBarrierOnly says
+        // so — which makes the omission latent rather than live, and latent by luck is exactly what rule ED-05 and the
+        // note on ReplicationReportSystem above are about.
+        .Reads<StructurePlacement>()
+        .Reads<LairPlacement>();
+
+    protected override void Execute(TickContext ctx)
+    {
+        // The cadence, and the only thing this system does on the other ticks. A viewer polls at 1 Hz; walking every
+        // cluster at 50 Hz to answer it would be fifty times the work for the same document.
+        //
+        // The null check is not defensive noise: this runs unconditionally on the tick path, where a throw takes the
+        // tick thread down, so the one argument it passes on is tested rather than asserted.
+        if (ctx.TickNumber % _everyTicks != 0 || ctx.Transaction == null)
+        {
+            return;
+        }
+
+        _census.Take(ctx.Transaction, ctx.TickNumber);
+    }
 }

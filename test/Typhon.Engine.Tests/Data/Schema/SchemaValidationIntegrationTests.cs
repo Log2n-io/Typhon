@@ -155,7 +155,7 @@ class SchemaValidationIntegrationTests : TestBase<SchemaValidationIntegrationTes
 
             // Verify data is intact
             using var t = dbe.CreateQuickTransaction();
-            ref readonly var comp = ref t.Open(entityId).Read(CompWidenArch.Comp);
+            var comp = t.Open(entityId).Read(CompWidenArch.Comp);
             Assert.That(comp.Score, Is.EqualTo(42));
             Assert.That(comp.Speed, Is.EqualTo(3.14f));
         }

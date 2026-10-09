@@ -15,6 +15,11 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The test project sees internals. The demo has no public-API contract to preserve — it is a workload, not a
+         library — so making a helper public purely so a test can reach it would put the tail in charge of the dog. -->
+    <InternalsVisibleTo Include="SwgTatooine.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
     <!-- The browser door (P1-08). It brings the ASP.NET Core framework reference with it, which is why this Exe needs no Web SDK. -->
     <ProjectReference Include="..\..\src\Typhon.Subscriptions.AspNetCore\Typhon.Subscriptions.AspNetCore.csproj" />
