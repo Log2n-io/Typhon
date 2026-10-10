@@ -618,7 +618,8 @@ internal ref struct ComponentRevisionManager
     /// the caller need not touch the EntityMap.
     /// </returns>
     internal static unsafe bool ScrubChainToHead(ComponentTable ct, int firstChunkId, ref ChunkAccessor<PersistentStore> compRevTableAccessor,
-        ref ChunkAccessor<PersistentStore> compContentAccessor, out long headTsn)
+        ref ChunkAccessor<PersistentStore> compContentAccessor, List<int> droppedContent, HashSet<int> staleContent, out long headTsn,
+        HashSet<int> liveRoots = null)
     {
         headTsn = 0;   // max committed TSN surviving in this chain (0 if no committed head) — fed to NextFreeTSN recovery (RB-05)
         ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
@@ -627,14 +628,23 @@ internal ref struct ComponentRevisionManager
         var commitSequence = firstHeader.CommitSequence;
         var entityPk = firstHeader.EntityPK;
 
+        // A root whose header is none — a torn page — is left as it is: sized from it, the spans below overran the stack (review of #1251).
+        if (!HasRootHeader(ref firstHeader))
+        {
+            return false;
+        }
+
         // (1) Collect every overflow table chunk (the whole chain except the first chunk) by following the NextChunkId
         // linkage. After scrub the head lives alone in the first chunk, so all overflow chunks are freed unconditionally.
         Span<int> overflowChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
         var overflowCount = 0;
         {
+            // ChainLength counts the root: ChainLength - 1 overflow chunks, no more. A torn chain's link past them — its last overflow chunk's page as of
+            // before, naming the chunk it was next to in a previous life — reached another chain's live root, which this freed (#1251). Nor into a live
+            // root within them: a root page as of before a compaction names, as its overflow, the chunk since reused as that root.
             var next = firstHeader.NextChunkId;
-            var guard = chainLength + 4;                                  // cycle guard — a corrupted chain must not loop forever
-            while (next != 0 && guard-- > 0)
+            var capacity = ct.CompRevTableSegment.ChunkCapacity;
+            while (next > 0 && next < capacity && overflowCount < chainLength - 1 && (liveRoots == null || !liveRoots.Contains(next)))
             {
                 overflowChunks[overflowCount++] = next;
                 next = compRevTableAccessor.GetChunk<CompRevStorageHeader>(next).NextChunkId;
@@ -663,10 +673,19 @@ internal ref struct ComponentRevisionManager
                     continue;
                 }
 
-                if (!hasHead || el.TSN > head.TSN)
+                // A later element of the same TSN wins: it is the replay's, appended over a chain the data file holds as of after the transaction while
+                // its content is as of before. The two are the same revision; only the replay's content is the transaction's (#1251).
+                if (!hasHead || el.TSN >= head.TSN)
                 {
                     if (hasHead)
                     {
+                        // The loser of a tie is the torn on-disk element: its content chunk's bytes may be another revision's, and its collection
+                        // buffer ids with them — freed without releasing those; the replay's twin rebuilt the collection.
+                        if (el.TSN == head.TSN && head.ComponentChunkId != 0)
+                        {
+                            staleContent.Add(head.ComponentChunkId);
+                        }
+
                         contentToFree[contentCount++] = head.ComponentChunkId;
                     }
                     head = el;
@@ -679,11 +698,15 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // (3) Free non-head content chunks + all overflow table chunks AFTER the enumerator is disposed (the circular buffer
-        // must not be mutated mid-walk — the use-after-free discipline of CleanUpUnusedEntriesCore).
+        // (3) Free all overflow table chunks AFTER the enumerator is disposed (the circular buffer must not be mutated mid-walk — the use-after-free
+        // discipline of CleanUpUnusedEntriesCore). The non-head content chunks are handed to the caller, which frees each once every chain of the table is
+        // scrubbed, and only if no surviving head names it: a torn element can name a chunk another chain's head holds (#1251).
         for (var i = 0; i < contentCount; i++)
         {
-            FreeCompContentChunk(ct, ref compContentAccessor, contentToFree[i], hasCollections);
+            if (contentToFree[i] != 0)
+            {
+                droppedContent.Add(contentToFree[i]);
+            }
         }
         for (var i = 0; i < overflowCount; i++)
         {
@@ -739,75 +762,160 @@ internal ref struct ComponentRevisionManager
     /// the schema-migration backfill (<c>ComponentTable.PopulateNewIndexes</c>) must not, because a ComponentTable's index is shared by every archetype
     /// holding the component and a filtered backfill would leave the others unindexed (#670).
     /// </remarks>
-    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort? archetypeId = null)
+    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort? archetypeId = null, bool acceptNamedRoots = false,
+        HashSet<int> acceptedNamed = null)
     {
-        var heads = new Dictionary<long, int>();
         if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
         {
-            return heads;
+            return [];
         }
 
-        var segment = table.CompRevTableSegment;
+        return EnumerateVersionedChainHeads(table.CompRevTableSegment, archetypeId, acceptNamedRoots, acceptedNamed);
+    }
+
+    /// <summary>
+    /// The chain roots of a revision segment, keyed by EntityPK: the allocated chunks no other chunk names as its next — and, with
+    /// <paramref name="acceptNamedRoots"/>, a named chunk with a root's header whose EntityPK no unnamed chunk has.
+    /// </summary>
+    /// <remarks>
+    /// The data file holds each page as of its last capture, so a chunk freed by a compaction can still be on disk, allocated and naming as its next a
+    /// chunk the engine has since reused as a live chain's root: excluded, that root lost its entity its chain (#1251). Only the crash rebuild of a
+    /// cluster EntityMap accepts named roots, and it adopts one only for the EntityPK of an entity its clusters hold: an overflow chunk's bytes can read
+    /// as a root's header (its first element's TSN modulo 2^16 as the chain length, its second element as the EntityPK), and walked, scrubbed or reset
+    /// as a root, it corrupted the chain it belongs to (review of #1251). Read through a scan accessor: the segment may be larger than the cache.
+    /// </remarks>
+    /// <param name="segment">The revision segment.</param>
+    /// <param name="archetypeId">The archetype whose roots are returned, or <c>null</c> for every root.</param>
+    /// <param name="acceptNamedRoots">Whether a named chunk with a root's header is its entity's root when no unnamed chunk is.</param>
+    /// <param name="acceptedNamed">When given, receives the named chunks returned.</param>
+    internal static unsafe Dictionary<long, int> EnumerateVersionedChainHeads(ChunkBasedSegment<PersistentStore> segment, ushort? archetypeId,
+        bool acceptNamedRoots, HashSet<int> acceptedNamed = null)
+    {
+        var heads = new Dictionary<long, int>();
         var capacity = segment.ChunkCapacity;
         if (capacity == 0 || segment.AllocatedChunkCount == 0)
         {
             return heads;
         }
 
-        var accessor = segment.CreateChunkAccessor();
-
-        // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
-        var overflowSet = new HashSet<int>();
-        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        var accessor = segment.CreateScanAccessor();
+        try
         {
-            if (!segment.IsChunkAllocated(chunkId))
+            // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
+            var overflowSet = new HashSet<int>();
+            for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                continue;
+                if (!segment.IsChunkAllocated(chunkId))
+                {
+                    continue;
+                }
+
+                var next = accessor.GetChunk<CompRevStorageHeader>(chunkId).NextChunkId;
+                if (next != 0)
+                {
+                    overflowSet.Add(next);
+                }
             }
 
-            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId, true);
-            if (hdr.NextChunkId != 0)
+            // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered); then the named chunks
+            // with a root's header, for the entities left without one.
+            List<(long Pk, int Chunk)> namedRoots = null;
+            for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                overflowSet.Add(hdr.NextChunkId);
+                if (!segment.IsChunkAllocated(chunkId))
+                {
+                    continue;
+                }
+
+                var pk = accessor.GetChunk<CompRevStorageHeader>(chunkId).EntityPK;
+                if (archetypeId.HasValue && EntityId.FromRaw(pk).ArchetypeId != archetypeId.Value)
+                {
+                    continue;
+                }
+
+                if (!overflowSet.Contains(chunkId))
+                {
+                    heads[pk] = chunkId;
+                }
+                else if (acceptNamedRoots && IsChainRoot(ref accessor, segment, chunkId))
+                {
+                    (namedRoots ??= []).Add((pk, chunkId));
+                }
+            }
+
+            if (namedRoots != null)
+            {
+                foreach (var (pk, chunkId) in namedRoots)
+                {
+                    if (heads.TryAdd(pk, chunkId))
+                    {
+                        acceptedNamed?.Add(chunkId);
+                    }
+                }
             }
         }
-
-        // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered).
-        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        finally
         {
-            if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
-            {
-                continue;
-            }
-
-            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
-            var pk = hdr.EntityPK;
-            if (archetypeId.HasValue && EntityId.FromRaw(pk).ArchetypeId != archetypeId.Value)
-            {
-                continue;
-            }
-
-            heads[pk] = chunkId;
+            accessor.Dispose();
         }
 
-        accessor.Dispose();
         return heads;
     }
 
     /// <summary>
     /// Frees every chain lock a crash left held in the data file (PS-20). A capture can copy a held lock word, and only the checkpoint after the release
     /// rewrites it: a crash before that one leaves the hold on disk, its holder gone. Run on a crash open as the table loads — before the HEAD rebuild's
-    /// walks, the log replay's revisions and the scrub, each of which takes chain locks and would wait for the dead holder. Every root is reset, a
-    /// destroyed entity's chain still awaiting release included; a root is dirtied only when its word was set. Single-threaded.
+    /// walks, the log replay's revisions and the scrub, each of which takes chain locks and would wait for the dead holder. Every unnamed chunk is
+    /// reset: a root — a destroyed entity's chain still awaiting release included — or a chunk no chain will link, whose bytes no one reads (an overflow
+    /// chunk whose predecessor's page is as of before its growth). Filtered by a root's header check, a root whose overflow chunk the disk has as free
+    /// kept its hold, and the open failed (review of #1251). A named chunk is left as it is — an overflow chunk's bytes at the lock's offset are an
+    /// element's — and one the EntityMap rebuild adopts as its entity's root is reset as it is adopted (<see cref="ResetChainLocks"/>). A chunk is
+    /// dirtied only when its word was set. Single-threaded.
     /// </summary>
+    /// <returns>The number of chunks whose lock word was set.</returns>
+    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe) =>
+        LockWordRecovery.ResetRootLocks(segment, dbe, ChainLockOffset, sizeof(AccessControlSmall),
+            static (ref ChunkAccessor<PersistentStore> _, ChunkBasedSegment<PersistentStore> _, int _) => true);
+
+    /// <summary>Clears the chain lock words of <paramref name="roots"/>: named chunks a crash open adopted as roots (see above). Single-threaded.</summary>
     /// <returns>The number of roots whose lock word was set.</returns>
-    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
+    internal static unsafe int ResetChainLocks(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe, IEnumerable<int> roots) =>
+        LockWordRecovery.ResetLocks(segment, dbe, ChainLockOffset, sizeof(AccessControlSmall), roots);
+
+    private static readonly int ChainLockOffset = ComputeChainLockOffset();
+
+    private static int ComputeChainLockOffset()
     {
         var header = default(CompRevStorageHeader);
-        var lockOffset = (int)Unsafe.ByteOffset(ref Unsafe.As<CompRevStorageHeader, byte>(ref header),
-            ref Unsafe.As<AccessControlSmall, byte>(ref header.Control));
-        return LockWordRecovery.ResetRootLocks(segment, dbe, lockOffset, sizeof(AccessControlSmall), IsChainRoot);
+        return (int)Unsafe.ByteOffset(ref Unsafe.As<CompRevStorageHeader, byte>(ref header), ref Unsafe.As<AccessControlSmall, byte>(ref header.Control));
     }
+
+    /// <summary>The chunks of <paramref name="candidates"/> with a root's header and links (<see cref="IsChainRoot"/>). Inside an epoch scope.</summary>
+    internal static List<int> FilterChainRoots(ChunkBasedSegment<PersistentStore> segment, IEnumerable<int> candidates)
+    {
+        var roots = new List<int>();
+        var scan = segment.CreateScanAccessor();
+        try
+        {
+            foreach (var chunkId in candidates)
+            {
+                if (IsChainRoot(ref scan, segment, chunkId))
+                {
+                    roots.Add(chunkId);
+                }
+            }
+        }
+        finally
+        {
+            scan.Dispose();
+        }
+
+        return roots;
+    }
+
+    // A root's header, as far as its own bytes tell — what a walk or a scrub of its chain is sized from (IsChainRoot also checks its links).
+    private static bool HasRootHeader(ref CompRevStorageHeader header) => header.ChainLength >= 1 && header.ItemCount >= 0
+        && header.ItemCount <= ComputeRevElementCount(header.ChainLength) && header.FirstItemIndex >= 0;
 
     /// <summary>
     /// Whether an unnamed chunk is a chain root and not an overflow chunk whose predecessor's link a crash lost: a plausible header, and its
@@ -833,6 +941,118 @@ internal ref struct ComponentRevisionManager
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Frees the content chunks the scrub dropped from <paramref name="table"/>'s chains — releasing their collection buffers — except those a surviving
+    /// head names. A chain the data file holds as of after a transaction, its content as of before, names chunks the disk had as free, and the live engine
+    /// may have reused one that another chain holds: freed through the first chain, that other chain's head read whatever took the chunk next (#1251).
+    /// </summary>
+    /// <remarks>A chunk in <paramref name="withoutRelease"/> — taken by the reservation (free on disk), or the content of a torn element a twin replaced —
+    /// is freed without releasing its collection buffers: its bytes may predate it, so the buffer ids it holds are not its own.</remarks>
+    internal static void FreeDroppedContent(ComponentTable table, HashSet<int> roots, List<int> droppedContent, HashSet<int> withoutRelease,
+        ref ChunkAccessor<PersistentStore> revAccessor, ref ChunkAccessor<PersistentStore> contentAccessor)
+    {
+        if (droppedContent.Count == 0)
+        {
+            return;
+        }
+
+        var heads = new HashSet<int>(roots.Count);
+        foreach (var rootChunkId in roots)
+        {
+            revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
+            if (els[0].ComponentChunkId != 0)
+            {
+                heads.Add(els[0].ComponentChunkId);
+            }
+        }
+
+        var freed = new HashSet<int>();
+        var contentSeg = table.ComponentSegment;
+        foreach (var chunkId in droppedContent)
+        {
+            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkAllocated(chunkId))
+            {
+                if (withoutRelease != null && withoutRelease.Contains(chunkId))
+                {
+                    contentSeg.FreeChunk(chunkId);
+                }
+                else
+                {
+                    FreeCompContentChunk(table, ref contentAccessor, chunkId, table.HasCollections);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// On a crash open, before the log replay: marks allocated every chunk the chains of <paramref name="roots"/> — the live records' — name: their overflow
+    /// chunks and their elements' content. A chunk's allocation bit is on its own page, so a chain the data file holds as of after a transaction can name
+    /// chunks the disk has as free; the replay then handed them out again, and two chains shared a chunk — an entity read another's value, or zeros (#1251).
+    /// The scrub and its orphan sweep free what no surviving chain names. An overflow chunk handed out was also cleared: its chain ended early, and the
+    /// replay's next growth of it threw — the crash open failed. Returns the chunks reserved.
+    /// </summary>
+    internal static int ReserveChainChunksAfterCrash(ComponentTable table, IEnumerable<int> roots, HashSet<int> reservedContent)
+    {
+        var revSeg = table.CompRevTableSegment;
+        var contentSeg = table.ComponentSegment;
+        var reserved = 0;
+        var accessor = revSeg.CreateChunkAccessor();
+        try
+        {
+            foreach (var rootChunkId in roots)
+            {
+                ref var header = ref accessor.GetChunk<CompRevStorageHeader>(rootChunkId);
+                if (!HasRootHeader(ref header))
+                {
+                    continue;
+                }
+
+                // Every element slot of every chunk of the chain, read without its lock: a root found by the scan can be an overflow chunk whose bytes at
+                // the lock's offset are an element's, read as a hold (review of #1251). A slot past the chain's items reserves a chunk the orphan sweep
+                // frees again.
+                int length = header.ChainLength, next = header.NextChunkId;
+                accessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> rootElements);
+                reserved += ReserveContent(contentSeg, rootElements, reservedContent);
+                for (var left = length - 1; left > 0 && next > 0 && next < revSeg.ChunkCapacity; left--)
+                {
+                    if (!revSeg.IsChunkAllocated(next))
+                    {
+                        revSeg.ReserveChunk(next);
+                        reserved++;
+                    }
+
+                    var chunk = accessor.GetChunkAsSpan(next);
+                    reserved += ReserveContent(contentSeg, chunk.Slice(sizeof(int)).Cast<byte, CompRevStorageElement>().Slice(0, CompRevCountInNext),
+                        reservedContent);
+                    next = chunk.Cast<byte, int>()[0];
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return reserved;
+    }
+
+    private static int ReserveContent(ChunkBasedSegment<PersistentStore> contentSeg, Span<CompRevStorageElement> elements, HashSet<int> reservedContent)
+    {
+        var reserved = 0;
+        foreach (ref var element in elements)
+        {
+            var cc = element.ComponentChunkId;
+            if (cc > 0 && cc < contentSeg.ChunkCapacity && !contentSeg.IsChunkAllocated(cc))
+            {
+                contentSeg.ReserveChunk(cc);
+                reservedContent.Add(cc);
+                reserved++;
+            }
+        }
+
+        return reserved;
     }
 
     /// <summary>

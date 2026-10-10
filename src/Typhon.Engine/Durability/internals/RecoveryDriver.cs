@@ -406,8 +406,13 @@ internal sealed class RecoveryDriver
             // Spawned AND destroyed within the window → net not-alive: don't insert (and don't create its revision chains), exactly
             // as the live FinalizeSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
             // historical alive-then-dead transition is not observable — absence == dead for IsAlive.
+            //
+            // Not "nothing to do": the data file may hold the entity — a checkpoint that copied its cluster page between the spawn and the destroy — and
+            // the crash path's map, rebuilt from the clusters, then has it alive. The destroy goes through as for a base entity; it is a no-op when the
+            // entity is absent (#1251).
             if (agg.HasDestroy)
             {
+                applier.ApplyDestroyToExisting(entityIdRaw, agg.DestroyTsn);
                 continue;
             }
 

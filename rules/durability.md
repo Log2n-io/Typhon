@@ -418,10 +418,19 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
     build-then-insert. The old text read as a prohibition the code openly breaks, which is worse than silence.
 
 ### AP-12: Apply idempotence `[fatal]`
-  invariant ∀ base B, window W, prefix P ⊆ W: Apply(Apply(B,P), W) ≡ Apply(B, W) — spawn-if-absent, destroy-if-present,
-            absolute EnabledBits, value overwrite, collections folded-then-Set
+  invariant ∀ base B, window W, prefix P ⊆ W: Apply(Apply(B,P), W) ≡ Apply(B, W) — spawn re-applied over a present entity,
+            destroy-if-present (a spawn and its destroy in one window included), absolute EnabledBits, value overwrite, collections
+            folded-then-Set
+  invariant the base B is any subset of a transaction's pages as of after it, the rest as of before (a fuzzy checkpoint's capture):
+            a present entity's spawn is re-applied on fresh chain roots, not taken as applied; an update's replayed element wins the
+            scrub over the on-disk element of the same TSN; no chunk an on-disk chain of a live record names is handed out by the replay;
+            the scrub's roots are the live records' — and, for an archetype the file holds that the open did not load, the chunks with a
+            root's header the scan finds; a named chunk is a root only when a live entity's EntityPK adopts it, and no scrub frees a live
+            root as an overflow chunk (#1251)
   scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
          VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
+         RecoveryApplier.ReapplySpawnedEntityToCluster, ComponentRevisionManager.ScrubChainToHead / FreeDroppedContent /
+         ReserveChainChunksAfterCrash / EnumerateVersionedChainHeads, DatabaseEngine.CollectLiveChainRoots
   ✅ collections clause BUILT (2026-08-11, #389). Was UNBUILT on both sides: AddCollectionDelta had no production caller
      and the driver deferred CollectionDelta apply. Now the emitter logs a collection's full content behind every Slot
      record (Clear + Append x N) and the driver folds it per (EntityId, slot, FieldId), flushing via SetElementsRaw AFTER
@@ -2119,13 +2128,16 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant a crash leaves no time for the rewrite: a crash open frees every chain root's lock word as its table loads, before anything of the open
             takes a chain lock — the cluster HEAD rebuild walks chains, the log replay appends revisions, the scrub walks them all; each would wait for
             the holder that died with the process, and the open would fail. The component-collection segments' buffer roots are freed as those
-            segments load; the index value buffers need nothing, as a crash open recreates every index empty (RB-01). A root is a chunk no other
-            chunk names as its next that its layout's header check accepts — a crash can leave a chunk unnamed that is no root (a chain torn across
-            pages, a buffer's first free chunk), and its bytes at the lock's offset are data. Read through a scan accessor: a segment may outgrow the
-            cache
+            segments load; the index value buffers need nothing, as a crash open recreates every index empty (RB-01). A buffer's root is a chunk
+            no other names as its next that its header check accepts — a buffer's first free chunk is unnamed, and its bytes at the lock's offset
+            are data. A revision segment's is every chunk no other names: a root, or a chunk no chain will link (an overflow chunk whose
+            predecessor's page is as of before its growth), whose bytes no one reads — filtered by a header check, a root whose overflow chunk the
+            disk has as free kept its hold. A named chunk the crash rebuild of an EntityMap adopts as its entity's root is freed as it is adopted
+            (#1251). Read through a scan accessor: a segment may outgrow the cache
   scope: PagedMMF.TakeCaptureTicket, PagedMMF.EndLockHold, PagedMMF.BeginCapture, PagedMMF.EndCapture, PagedMMF.WritePagesForCheckpoint,
          PagedMMF.SavePages, ComponentRevisionManager.ChainLockTicket, ComponentRevisionManager.EndChainLockHold,
-         ComponentRevisionManager.ResetChainLocksAfterCrash, RevisionEnumerator.Dispose, Transaction.PublishComponent,
+         ComponentRevisionManager.ResetChainLocksAfterCrash, ComponentRevisionManager.ResetChainLocks, LockWordRecovery.ResetLocks,
+         RevisionEnumerator.Dispose, Transaction.PublishComponent,
          Transaction.ReleaseRetainedPublishLocks, VariableSizedBufferSegmentBase.LockBuffer, VariableSizedBufferSegmentBase.ReleaseLockOnBuffer,
          VariableSizedBufferSegmentBase.ReadAllElementsRaw, VariableSizedBufferAccessor.Dispose, LockWordRecovery.ResetRootLocks,
          VariableSizedBufferRecovery.ResetRootLocksAfterCrash, DatabaseEngine.ResetCollectionBufferLocksAfterCrash

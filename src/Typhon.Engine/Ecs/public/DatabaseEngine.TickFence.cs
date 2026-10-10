@@ -1694,7 +1694,7 @@ public partial class DatabaseEngine
     /// (slot claim, AABB union, per-cell index update) hit worker-exclusive cells. Source-side mutations (occupancy clear, dirtyBits flip,
     /// cell.EntityCount decrement) use <see cref="System.Threading.Interlocked"/> primitives; rare empty-cluster finalization is serialized via
     /// the per-archetype <see cref="ArchetypeClusterState._finalizeLock"/> through
-    /// <see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool)"/>.
+    /// <see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool, bool)"/>.
     /// </summary>
     /// <remarks>
     /// Callers must ensure (a) <see cref="ArchetypeClusterState.FenceDirtyBits"/> has been pre-sized to at least

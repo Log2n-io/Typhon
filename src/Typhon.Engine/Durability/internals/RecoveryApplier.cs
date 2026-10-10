@@ -78,6 +78,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         _changeSet = new ChangeSet(dbe.MMF);
     }
 
+
     /// <summary>Highest TSN applied — recovery restores NextFreeTSN above this (RB-05).</summary>
     public long MaxTsn => _maxTsn;
 
@@ -198,13 +199,19 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
         byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
-        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
-        {
-            return; // idempotent re-apply
-        }
-
         var clusterState = _engineState.ClusterState;
         var layout = clusterState.Layout;
+
+        // Present (AP-12): the data file holds the entity in its slot — the crash path rebuilds the map from the clusters. Not proof the spawn's data is
+        // there: a checkpoint copies a transaction's pages at different moments, and the cluster page can be from after the spawn while its revision chain
+        // and content are from before. Taken as applied, the entity recovered with every component zeroed (#1251). Its logged values are re-applied in
+        // the slot it holds instead, each Versioned one on a fresh chain root: the old root may name chunks that never reached the disk, and the orphan
+        // sweep after the scrub reclaims it.
+        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
+        {
+            ReapplySpawnedEntityToCluster(entityIdRaw, enabledBits, bornTsn, recordPtr, slots);
+            return;
+        }
 
         // H1: the claim folds bornTsn into the cluster's visibility summary before publishing the occupancy bit — replay must bound the cluster too, or a
         // recovered entity is invisible to the summary.
@@ -283,6 +290,72 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     }
 
     /// <summary>
+    /// A spawn replayed over an entity the data file already holds in a cluster slot: its logged values written there again, each Versioned slot on a fresh
+    /// chain root, the record's birth and enabled bits restored and written back. A SingleVersion collection handle the slot held is not released — on a
+    /// torn page it may be another entity's buffer; a buffer the spawn made and the replay makes again is leaked instead.
+    /// </summary>
+    private void ReapplySpawnedEntityToCluster(long entityIdRaw, ushort enabledBits, long bornTsn, byte* recordPtr, IReadOnlyCollection<SlotData> slots)
+    {
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+        var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+
+        ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
+        header.BornTSN = bornTsn;
+        header.EnabledBits = enabledBits;
+        clusterState.NoteClusterBorn(clusterChunkId, bornTsn);
+
+        if (slots != null)
+        {
+            foreach (var slot in slots)
+            {
+                var slotIndex = slot.SlotIndex;
+                if (slotIndex >= _metadata.ComponentCount)
+                {
+                    continue;
+                }
+
+                var table = _engineState.SlotToComponentTable[slotIndex];
+                if (table.StorageMode == StorageMode.Transient)
+                {
+                    continue;
+                }
+
+                var compSize = layout.ComponentSize(slotIndex);
+                slot.Payload.AsSpan().CopyTo(new Span<byte>(clusterBase + layout.ComponentOffset(slotIndex) + slotIdx * compSize, compSize));
+                if (table.StorageMode == StorageMode.Versioned)
+                {
+                    var vi = layout.SlotToVersionedIndex[slotIndex];
+                    if (vi >= 0)
+                    {
+                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var contentChunkId);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                        _appliedContentChunkBySlot[slotIndex] = contentChunkId;
+                    }
+                }
+            }
+        }
+
+        *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
+        for (int slot = 0; slot < _componentCount; slot++)
+        {
+            ref var word = ref *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot));
+            if ((enabledBits & (1 << slot)) != 0)
+            {
+                word |= 1UL << slotIdx;
+            }
+            else
+            {
+                word &= ~(1UL << slotIdx);
+            }
+        }
+
+        _engineState.EntityMap.Upsert(EntityId.FromRaw(entityIdRaw).EntityKey, recordPtr, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
     /// Applies a committed Destroy to an entity that already exists in the loaded EntityMap (its Spawn is below the checkpoint
     /// frontier, so it is not in the recovery window — only the Destroy is). Sets DiedTSN on the existing record and writes it
     /// back dirty-marked, mirroring the live FlushPendingDestroys archetype-level tombstone. Idempotent: a missing entity is a
@@ -302,6 +375,16 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
+
+        // A cluster entity goes as a live destroy goes once no snapshot reads it — and after a crash none does: its slot released, its record removed,
+        // its chains left to the scrub's orphan sweep. Tombstoned only, it kept its slot for good: the index rebuild indexed it, an index lookup returned a
+        // destroyed entity, and its slot and chains were never reclaimed (#1251).
+        if (_hasClusterAccessor)
+        {
+            ReleaseDestroyedClusterEntity(entityIdRaw, readBuf);
+            return;
+        }
+
         // H1, and NOT with `tsn`. Unlike the commit-path tombstone this replay does NOT call ReleaseSlot — cleanup is deferred to the orphan sweep — so the
         // cluster keeps a SET occupancy bit for a dead entity. The whole died-watermark argument rests on the bit being cleared at destroy: a reader past the
         // last death is exact only because occupancy already reflects it. Fold `tsn` here and every post-recovery reader satisfies `died <= txTsn`, the gate
@@ -309,6 +392,26 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         // replays a below-frontier destroy. VisibilityUnknown denies this cluster until the sweep clears the bit, which is what the pre-#722 sticky flag did.
         _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), ArchetypeClusterState.VisibilityUnknown);
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
+    /// The cluster half of <see cref="ApplyDestroyToExisting"/>: releases the entity's slot — when it still holds the entity: a torn page can show it
+    /// holding another — and removes its record. Its chains, named by no live record, are no root of the scrub: its sweep frees them.
+    /// </summary>
+    private void ReleaseDestroyedClusterEntity(long entityIdRaw, byte* recordPtr)
+    {
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+        var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId);
+        if ((*(ulong*)clusterBase & (1UL << slotIdx)) != 0 && *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) == entityIdRaw)
+        {
+            // Its SingleVersion collection handles are not released: on a torn page they may name buffers that are not its own — leaked instead.
+            clusterState.ReleaseSlot(ref _clusterAccessor, clusterChunkId, slotIdx, _changeSet, releaseCollections: false);
+        }
+
+        _engineState.EntityMap.Remove(EntityId.FromRaw(entityIdRaw).EntityKey, ref _mapAccessor, _changeSet);
     }
 
     /// <summary>

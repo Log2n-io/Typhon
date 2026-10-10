@@ -4935,6 +4935,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         }
 
+        // Before the replay allocates anything: every chunk the on-disk chains name is taken, so the replay never hands one out again (#1251).
+        ReserveChainChunksAfterCrash();
+
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
         var walIO = _injectedWalIo ?? new WalFileIO();
         RecoveryDriver.Result result;
@@ -5919,7 +5922,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Scan this archetype's Versioned revision chains (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads"/>) and insert one EntityRecord per
+    /// Scan this archetype's Versioned revision chains
+    /// (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads(ComponentTable, ushort?, bool, HashSet{int})"/>) and insert one EntityRecord per
     /// chain head into the EntityMap, keyed by entity key with the chain root as each Versioned slot's location. SV / non-Versioned slots get location 0 (no
     /// chain to recover from). Shared by the clean/legacy reopen path (<see cref="RebuildEntityMapsFromPersistedData"/>, <paramref name="duringRebuild"/> =
     /// false) and the crash-recovery rebuild (<see cref="RebuildEntityMapOnCrash"/>, <paramref name="duringRebuild"/> = true, where the map was just emptied
@@ -6466,6 +6470,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Versioned chain heads per slot (compRevFirstChunkId keyed by EntityPK) — the same source the flat rebuild uses for the per-slot location.
         var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
+        var namedHeads = new HashSet<int>[meta.ComponentCount];
         if (meta.VersionedSlotMask != 0 && slotToVi != null)
         {
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -6479,7 +6484,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 if (table?.CompRevTableSegment != null && table.StorageMode == StorageMode.Versioned
                     && table.CompRevTableSegment.ChunkCapacity > 0 && table.CompRevTableSegment.AllocatedChunkCount > 0)
                 {
-                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
+                    namedHeads[slot] = [];
+                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta), acceptNamedRoots: true,
+                        namedHeads[slot]);
                 }
             }
         }
@@ -6547,6 +6554,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             var head = 0;
                             chainHeads[slot]?.TryGetValue(entityPK, out head);
                             ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+
+                            // A root adopted from the named chunks: the lock reset at the table's load leaves named chunks as they are (#1251).
+                            if (head != 0 && namedHeads[slot] != null && namedHeads[slot].Contains(head))
+                            {
+                                ComponentRevisionManager.ResetChainLocks(state.SlotToComponentTable[slot].CompRevTableSegment, this, [head]);
+                            }
                         }
                     }
 
@@ -6572,6 +6585,165 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>Recovery, before the log replay: marks allocated every chunk a Versioned chain names (#1251; see the per-table method).</summary>
+    private void ReserveChainChunksAfterCrash()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        _reservedContentChunks = [];
+        ChainChunksReservedAtOpen = 0;
+
+        // The chains the live records name — a named root among them, adopted by its entity — and every chain the scan finds, named roots included. The
+        // records alone were not enough, nor with the unnamed chunks: the replay then handed out chunks a chain it grows names (market, 10 cycles each: 4 and
+        // 5 in 10 failed against 1 with every chain, one on a chain that ended early; not explained yet, review of #1251). A chunk whose header is none is
+        // skipped by the walk, which takes no lock.
+        foreach (var (table, roots) in CollectLiveChainRoots())
+        {
+            var reserved = _reservedContentChunks[table] = [];
+            roots.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values);
+            ChainChunksReservedAtOpen += ComponentRevisionManager.ReserveChainChunksAfterCrash(table, roots, reserved);
+        }
+    }
+
+    // The content chunks the reservation took, per table: free on disk, so their bytes predate the chunk's allocation and their collection-buffer ids are
+    // stale — the scrub frees them without releasing those (#1251). Recovery only, single-threaded.
+    private Dictionary<ComponentTable, HashSet<int>> _reservedContentChunks;
+
+    /// <summary>
+    /// Chunks named by an on-disk chain and free in its segment's bitmap, reserved by the last crash open before its replay (#1251). Diagnostic.
+    /// </summary>
+    internal int ChainChunksReservedAtOpen { get; private set; }
+
+    /// <summary>
+    /// The chain roots the live entities' records name, per Versioned table — every table of every archetype, empty when no live entity holds it. Before the
+    /// replay, the chains it walks and grows; after it, those the scrub keeps. A table is shared by the archetypes that hold its component, so its roots are
+    /// the union of theirs. The records, not the chain-head scan: the scan keeps one root per entity, and an entity whose spawn the replay re-applied has two
+    /// — the scrub kept the old and swept the one its record names; a destroyed entity's chain has no record, so it is no root and the sweep frees it
+    /// (#1251).
+    /// </summary>
+    private unsafe Dictionary<ComponentTable, HashSet<int>> CollectLiveChainRoots()
+    {
+        var byTable = new Dictionary<ComponentTable, HashSet<int>>();
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            var state = _archetypeStates[meta.ArchetypeId];
+            if (state?.SlotToComponentTable == null)
+            {
+                continue;
+            }
+
+            var any = false;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = state.SlotToComponentTable[slot];
+                if (table?.StorageMode == StorageMode.Versioned && table.CompRevTableSegment != null)
+                {
+                    byTable.TryAdd(table, []);
+                    any = true;
+                }
+            }
+
+            if (!any)
+            {
+                continue;
+            }
+
+            var clusterState = state.ClusterState;
+            var slotToVi = clusterState?.Layout.SlotToVersionedIndex;
+            if (clusterState?.ClusterSegment == null || slotToVi == null)
+            {
+                // A flat archetype: its records hold no cluster to walk — its chains are found by the scan, as its map rebuild finds them.
+                for (var slot = 0; slot < meta.ComponentCount; slot++)
+                {
+                    var table = state.SlotToComponentTable[slot];
+                    if (table != null && byTable.TryGetValue(table, out var flat))
+                    {
+                        flat.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta)).Values);
+                    }
+                }
+
+                continue;
+            }
+
+            var layout = clusterState.Layout;
+            var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
+            var mapAccessor = state.EntityMap.Segment.CreateScanAccessor();
+            try
+            {
+                for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+                {
+                    var clusterChunkId = clusterState.ActiveClusterIds[c];
+                    var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    var occupancy = *(ulong*)clusterBase;
+                    while (occupancy != 0)
+                    {
+                        var slotIndex = BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+                        var entityPk = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                        if (!state.EntityMap.TryGet(EntityId.FromRaw(entityPk).EntityKey, record, ref mapAccessor))
+                        {
+                            continue;
+                        }
+
+                        for (var slot = 0; slot < meta.ComponentCount; slot++)
+                        {
+                            var vi = slotToVi[slot];
+                            var table = state.SlotToComponentTable[slot];
+                            var chainRoot = vi >= 0 ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi) : 0;
+                            if (chainRoot != 0 && table != null && byTable.TryGetValue(table, out var roots))
+                            {
+                                roots.Add(chainRoot);
+                            }
+                        }
+
+                        // The record buffer is reused: the scan accessor may have moved since, so the cluster's base is re-read.
+                        clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    }
+                }
+            }
+            finally
+            {
+                clusterAccessor.Dispose();
+                mapAccessor.Dispose();
+            }
+        }
+
+        // The chains of archetypes the file holds and this open did not load — a tool opening with part of the schema — have no record here: taken as the
+        // scan finds them, with a root's header, not swept with the table's orphans. Those archetypes only: an unnamed chunk can be one no chain links, with
+        // any bytes as its EntityPK — taken as a root for not being loaded, its length sized the scrub's spans (review of #1251).
+        var unloaded = new HashSet<ushort>();
+        if (_persistedArchetypes != null)
+        {
+            foreach (var (_, arch) in _persistedArchetypes.Values)
+            {
+                var routing = arch.RoutingId;
+                if (routing != 0 && routing != NoRoutingId && (routing >= _stateByRouting.Length || _stateByRouting[routing]?.SlotToComponentTable == null))
+                {
+                    unloaded.Add(routing);
+                }
+            }
+        }
+
+        if (unloaded.Count > 0)
+        {
+            foreach (var (table, roots) in byTable)
+            {
+                var candidates = new List<int>();
+                foreach (var (pk, chunkId) in ComponentRevisionManager.EnumerateVersionedChainHeads(table))
+                {
+                    if (unloaded.Contains(EntityId.FromRaw(pk).ArchetypeId))
+                    {
+                        candidates.Add(chunkId);
+                    }
+                }
+
+                roots.UnionWith(ComponentRevisionManager.FilterChainRoots(table.CompRevTableSegment, candidates));
+            }
+        }
+
+        return byTable;
+    }
+
     /// <summary>
     /// Recovery Phase-4 SCRUB (03-recovery.md §6, D1): after the WAL window has been applied, collapse every Versioned revision chain to its HEAD — the
     /// highest-TSN committed element — freeing all older revisions' content chunks and the chain's overflow table chunks. The history horizon resets at
@@ -6579,6 +6751,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
     /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
     /// Invoked only on the crash path (CrashRecoveryAtOpen: WAL segments present and an unclean close); a clean reopen keeps its chains for lazy cleanup.
+    /// Per table, over the roots the live records name (<see cref="CollectLiveChainRoots"/>): a sweep per archetype freed the chains of the other
+    /// archetypes sharing the table (#1251).
     /// </summary>
     private void ScrubVersionedChains()
     {
@@ -6592,49 +6766,45 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long maxRecoveredTsn = 0;
         try
         {
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var (table, roots) in CollectLiveChainRoots())
             {
-                var state = _archetypeStates[meta.ArchetypeId];
-                if (state?.SlotToComponentTable == null)
+                var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
+                var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                try
                 {
-                    continue;
-                }
-
-                for (var slot = 0; slot < meta.ComponentCount; slot++)
-                {
-                    var table = state.SlotToComponentTable[slot];
-
-                    // Shared chain-head scan (same source as the EntityMap rebuild). Empty for null / non-Versioned / empty tables.
-                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
-                    if (heads.Count == 0)
+                    var dropped = new List<int>();
+                    var stale = new HashSet<int>();
+                    foreach (var firstChunkId in roots)
                     {
-                        continue;
-                    }
-
-                    var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
-                    var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
-                    try
-                    {
-                        foreach (var firstChunkId in heads.Values)
+                        ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, dropped, stale, out var headTsn,
+                            roots);
+                        if (headTsn > maxRecoveredTsn)
                         {
-                            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, out var headTsn);
-                            if (headTsn > maxRecoveredTsn)
-                            {
-                                maxRecoveredTsn = headTsn;
-                            }
+                            maxRecoveredTsn = headTsn;
                         }
+                    }
 
-                        // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an
-                        // interrupted pre-crash op — allocated but unreachable from a chain root or a surviving head's content.
-                        ComponentRevisionManager.SweepTableOrphans(table, new HashSet<int>(heads.Values), ref revAccessor);
-                    }
-                    finally
+                    // The dropped content, freed once every head of the table is known: a torn element may name a chunk another head holds (#1251).
+                    if (_reservedContentChunks != null && _reservedContentChunks.TryGetValue(table, out var reserved))
                     {
-                        revAccessor.Dispose();
-                        contentAccessor.Dispose();
+                        stale.UnionWith(reserved);
                     }
+
+                    ComponentRevisionManager.FreeDroppedContent(table, roots, dropped, stale, ref revAccessor, ref contentAccessor);
+
+                    // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an interrupted pre-crash op — allocated but
+                    // unreachable from a chain root or a surviving head's content. A chain no live record names is no root: the replay's destroys, the old
+                    // roots of the spawns it re-applied.
+                    ComponentRevisionManager.SweepTableOrphans(table, roots, ref revAccessor);
+                }
+                finally
+                {
+                    revAccessor.Dispose();
+                    contentAccessor.Dispose();
                 }
             }
+
+            _reservedContentChunks = null;
 
             // Advance the TSN allocator past the newest committed revision found in the persisted chains, so post-recovery readers can see a consolidated
             // revision whose WAL window recovered empty (it would otherwise be MVCC-invisible at a too-low snapshot — RB-05).

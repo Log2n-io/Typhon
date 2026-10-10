@@ -124,7 +124,7 @@ internal sealed class LockWordRecoveryTests : TestBase<LockWordRecoveryTests>
     [Test]
     [VerifiesRule("PS-20")]
     [CancelAfter(10_000)]
-    public void TheChainReset_ClearsAHeldRoot_AndNoOverflowChunk()
+    public unsafe void TheChainReset_ClearsAHeldRoot_AndNoOverflowChunk()
     {
         EntityId id;
         using (var tx = _dbe.CreateQuickTransaction())
@@ -140,11 +140,37 @@ internal sealed class LockWordRecoveryTests : TestBase<LockWordRecoveryTests>
             a.GetChunk<CompRevStorageHeader>(root, true).EnterControlLockForTest();
             return 0;
         });
-        var orphan = Orphan(segment, 4, 4);
+        var overflow = Orphan(segment, 4, 4);
+        Write(segment, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            // Named by another chunk: an overflow chunk, its bytes at the lock's offset an element's.
+            var namer = segment.AllocateChunk(false, a.ChangeSet);
+            var address = a.GetChunkAddress(namer, true);
+            new Span<byte>(address, segment.Stride).Clear();
+            *(int*)address = overflow;
+            return namer;
+        });
 
         Assert.That(ComponentRevisionManager.ResetChainLocksAfterCrash(segment, _dbe), Is.EqualTo(1), "the held root, and only it");
         Assert.That(Write(segment, (ref ChunkAccessor<PersistentStore> a) => a.GetChunk<CompRevStorageHeader>(root).Control.LockedByThreadId), Is.Zero,
             "the root's lock, freed");
-        Assert.That(AllAb(segment, orphan, 4, 4), Is.True, "the orphan's bytes at the lock's offset, untouched");
+        Assert.That(AllAb(segment, overflow, 4, 4), Is.True, "the overflow chunk's bytes at the lock's offset, untouched");
+    }
+
+    /// <summary>
+    /// An allocated chunk nothing names is a root or a chunk no chain will link, its bytes read by no one: reset whatever its header. Filtered by a root's
+    /// header check, a root whose overflow chunk the disk has as free kept its hold (review of #1251).
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-20")]
+    [CancelAfter(10_000)]
+    public void TheChainReset_ClearsAnUnnamedChunk_WhateverItsHeader()
+    {
+        var segment = _dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        var orphan = Orphan(segment, 4, 4);
+
+        Assert.That(ComponentRevisionManager.ResetChainLocksAfterCrash(segment, _dbe), Is.EqualTo(1), "the unnamed chunk");
+        Assert.That(Write(segment, (ref ChunkAccessor<PersistentStore> a) => a.GetChunk<CompRevStorageHeader>(orphan).Control.LockedByThreadId), Is.Zero,
+            "its bytes at the lock's offset, cleared");
     }
 }

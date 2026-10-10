@@ -5638,10 +5638,6 @@ internal sealed unsafe partial class ArchetypeClusterState
         LastRebuildForeignCellSlots = 0;
         LastRebuildForeignRealmSlots = 0;
         LastRebuildRealmKeyReverts = 0;
-        if (ActiveClusterCount == 0)
-        {
-            return;
-        }
 
         // Union of both legacy passes' capacity preconditions, in their original order.
         EnsureClusterCellMapCapacity(PrimarySegmentCapacity);
@@ -5669,7 +5665,13 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         Array.Fill(ClusterSpatialIndexSlot, -1);
 
+        // After the reset, not before it: a recovery whose replay destroyed every entity of the archetype left its cell map and per-cell index naming
+        // clusters it drained, and a reuse of one of those ids then corrupted the cell index (#1251).
         var count = ActiveClusterCount;
+        if (count == 0)
+        {
+            return;
+        }
 
         // The only allocation here that scales with the database: 36 B per cluster (two ints plus a 28 B ClusterSpatialAabb), so ~360 KB at 10 K clusters and
         // ~56 MB — on the LOH — at 1.5 M. Startup-only and freed immediately, but worth stating because it is the figure that would decide whether a very
@@ -10157,8 +10159,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// parallel migration pass completes. Set by the cluster-migration / parallel-fence call sites; default <c>false</c> for single-threaded callers
     /// (<c>Transaction.Destroy</c>, etc.) that can safely finalise inline.
     /// </param>
+    /// <param name="releaseCollections">
+    /// When <c>false</c>, a true destroy does not release the slot's SingleVersion collection buffers: the crash replay, whose slot may come from a
+    /// torn page naming buffers that are not its own, leaks them instead (#1251).
+    /// </param>
     public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null,
-        bool deferFinalize = false)
+        bool deferFinalize = false, bool releaseCollections = true)
     {
         // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
         // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
@@ -10170,7 +10176,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Release SV ComponentCollection buffers held in this slot BEFORE clearing it — but only on a true destroy.
         // Migration passes deferFinalize:true and is a MOVE: the handle was byte-copied to the destination slot, so the
         // buffer must NOT be freed here. SV CC has no revision chain; the cluster slot is the buffer's sole owner.
-        if (!deferFinalize && CollectionSlots != null)
+        if (!deferFinalize && releaseCollections && CollectionSlots != null)
         {
             ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
         }

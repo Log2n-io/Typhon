@@ -837,7 +837,7 @@ public partial class DatabaseEngine
     ///         index is the only index home (rule SH-01), and the entity-level R-Tree it used to point into no longer exists. The SOURCE cluster's
     ///         bound is deliberately left conservative here rather than shrunk in place; the fence's refresh pass retightens it</item>
     ///   <item>Upsert the EntityMap <see cref="ClusterEntityRecordAccessor"/> with the new (chunkId, slot)</item>
-    ///   <item><see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool)"/> on the
+    ///   <item><see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool, bool)"/> on the
     ///         source (clears occupancy, decrements cell.EntityCount, detaches empty clusters)</item>
     ///   <item>Record the dirty-bit transition — clear the source bit (so WAL publish won't serialize a cleared source) and set the destination bit (so the
     ///         destination's new content IS serialized by the subsequent ClusterTickFence WAL publish loop). On the parallel path the transition is appended to

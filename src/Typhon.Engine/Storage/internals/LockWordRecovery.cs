@@ -78,11 +78,49 @@ internal static class LockWordRecovery
             scan.Dispose();
         }
 
+        return Clear(segment, dbe, lockOffset, lockSize, held);
+    }
+
+    /// <summary>
+    /// Clears the lock word at <paramref name="lockOffset"/> in each of <paramref name="roots"/> whose word is set — roots found otherwise than by the
+    /// scan above (a revision segment's named chunks its EntityMap rebuild adopted). Single-threaded; returns the roots whose word was set.
+    /// </summary>
+    internal static unsafe int ResetLocks(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe, int lockOffset, int lockSize, IEnumerable<int> roots)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var held = new List<int>();
+        var scan = segment.CreateScanAccessor();
+        try
+        {
+            foreach (var chunkId in roots)
+            {
+                var word = scan.GetChunkAddress(chunkId) + lockOffset;
+                for (var i = 0; i < lockSize; i++)
+                {
+                    if (word[i] != 0)
+                    {
+                        held.Add(chunkId);
+                        break;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            scan.Dispose();
+        }
+
+        return Clear(segment, dbe, lockOffset, lockSize, held);
+    }
+
+    private static unsafe int Clear(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe, int lockOffset, int lockSize, List<int> held)
+    {
         if (held.Count == 0)
         {
             return 0;
         }
 
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
         var changeSet = dbe.MMF.CreateChangeSet();
         var accessor = segment.CreateChunkAccessor(changeSet);
         try
