@@ -145,10 +145,15 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         }
     }
 
+    /// <summary>
+    /// Gives back one reference to the buffer; the last one frees it, its chunk chains and its root. A reference still held keeps all of it: the root was
+    /// freed whatever the count, under a referent still using it (#1279).
+    /// </summary>
     public void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         // Fetch the root chunk — epoch protects page lifetime
         var unlock = false;
+        var deleted = false;
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
         var ticket = default(PagedMMF.CaptureTicket);
         try
@@ -163,6 +168,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             if (--rh.RefCounter == 0)
             {
                 FreeChunkChains(bufferId, rh.FirstFreeChunkId, ref accessor);
+                deleted = true;
             }
         }
         finally
@@ -173,7 +179,11 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
                 rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
                 ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
             }
-            accessor.Segment.FreeChunk(bufferId);
+
+            if (deleted)
+            {
+                accessor.Segment.FreeChunk(bufferId);
+            }
         }
     }
 

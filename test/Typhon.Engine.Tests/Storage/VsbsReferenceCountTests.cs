@@ -1,0 +1,92 @@
+using Microsoft.Extensions.DependencyInjection;
+using NUnit.Framework;
+using System;
+using Typhon.Engine.Internals;
+
+namespace Typhon.Engine.Tests;
+
+/// <summary>
+/// A variable-sized buffer is reference-counted (<see cref="VariableSizedBufferRootHeader.RefCounter"/>): a copy-on-write shares it, and each referent
+/// gives its reference back. Only the last one may free it.
+/// </summary>
+[TestFixture]
+internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests>
+{
+    private DatabaseEngine _dbe;
+    private VariableSizedBufferSegment<int, PersistentStore> _vsbs;
+
+    [SetUp]
+    public void SetUpSegment()
+    {
+        _dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        _dbe.InitializeArchetypes();
+        _vsbs = _dbe.GetComponentCollectionVSBS<int>();
+    }
+
+    [TearDown]
+    public void TearDownSegment()
+    {
+        _dbe?.Dispose();
+        _dbe = null;
+    }
+
+    private delegate T WithAccessor<out T>(ref ChunkAccessor<PersistentStore> accessor);
+
+    private T Run<T>(WithAccessor<T> action)
+    {
+        using var guard = EpochGuard.Enter(_dbe.EpochManager);
+        var changeSet = _dbe.MMF.CreateChangeSet();
+        var accessor = _vsbs.Segment.CreateChunkAccessor(changeSet);
+        try
+        {
+            return action(ref accessor);
+        }
+        finally
+        {
+            accessor.Dispose();
+            changeSet.ReleaseDirtyMarks();
+        }
+    }
+
+    private int NewBuffer(params int[] values) => Run((ref ChunkAccessor<PersistentStore> a) =>
+    {
+        var buffer = _vsbs.AllocateBuffer(ref a);
+        _vsbs.AddElements(buffer, values, ref a);
+        return buffer;
+    });
+
+    private int[] ReadBack(int buffer) => Run((ref ChunkAccessor<PersistentStore> a) =>
+    {
+        var dest = new int[_vsbs.GetElementCount(buffer, ref a)];
+        _vsbs.ReadAllElements(buffer, dest, ref a);
+        return dest;
+    });
+
+    /// <summary>
+    /// #1279: a delete gives back one reference. It used to free the root whatever the count, so a buffer still shared lost its root under the other
+    /// referent — and kept its element chunks, which only a count of 0 frees.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void ADeleteOfASharedBuffer_KeepsItForTheOtherReference()
+    {
+        var buffer = NewBuffer(1, 2, 3);
+        Assert.That(Run((ref ChunkAccessor<PersistentStore> a) => _vsbs.BufferAddRef(buffer, ref a)), Is.EqualTo(2), "premise: the buffer is shared");
+
+        Run((ref ChunkAccessor<PersistentStore> a) =>
+        {
+            _vsbs.DeleteBuffer(buffer, ref a);
+            return 0;
+        });
+        Assert.That(_vsbs.Segment.IsChunkAllocated(buffer), Is.True, "the root, still referenced, was freed");
+        Assert.That(Run((ref ChunkAccessor<PersistentStore> a) => _vsbs.GetRefCounter(buffer, ref a)), Is.EqualTo(1));
+        Assert.That(ReadBack(buffer), Is.EqualTo(new[] { 1, 2, 3 }), "the other reference's content");
+
+        Run((ref ChunkAccessor<PersistentStore> a) =>
+        {
+            _vsbs.DeleteBuffer(buffer, ref a);
+            return 0;
+        });
+        Assert.That(_vsbs.Segment.IsChunkAllocated(buffer), Is.False, "the last reference's delete frees the root");
+    }
+}
