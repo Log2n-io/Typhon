@@ -1660,9 +1660,15 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-03: AccessEpoch uses CAS-max, never decreases `[correctness]`
   invariant AccessEpoch = max(existing, globalEpoch) via CAS
   invariant AccessEpoch only reset to 0 inside UnlatchPageExclusive
-  scope: PagedMMF.RequestPageEpoch, PagedMMF.UnlatchPageExclusive
+  invariant ∀ holder that keeps an address into a page it unlatched: re-tags the page after the unlatch, its accessor
+            window still holding it (ChunkAccessor.KeepUnderEpoch)
+  scope: PagedMMF.RequestPageEpoch, PagedMMF.UnlatchPageExclusive, ChunkAccessor.KeepUnderEpoch
   on_violation: decreasing epoch makes page appear stale;
     eviction while transaction still holds pointer
+  note: the reset clears every thread's tag, not the unlatcher's alone. A buffer reader keeps its root's address for its
+        life — its shared lock, its capture ticket's slot (PS-20) — and unlatched the root after an unlink: once its
+        window let go of the page, the page left the cache, and the reader's release wrote into whatever page took the
+        memory. The buffer's lock stayed held, and the next writer timed out (#1290).
 
 ### PS-04: DirtyCounter mutations are atomic read-modify-write `[fatal]`
   invariant every DirtyCounter mutation uses an Interlocked RMW (Increment / Decrement / CAS-retry loop)

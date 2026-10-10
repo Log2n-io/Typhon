@@ -1107,12 +1107,15 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         {
             ref var rootChunk = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
 
-            // Try to promote the Buffer from read to read/write because we need to make changes
-            var wcPromote = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
+            // Try to promote the Buffer from read to read/write because we need to make changes. Once, with no wait: a promotion waits for the other
+            // shared holders to leave, and two readers at an empty chunk each waited for the other, out to the lock timeout (#1290). The unlink is
+            // housekeeping: with another reader on the buffer, it is left to a later one.
+            var wcPromote = WaitContext.FromTimeout(TimeSpan.Zero);
             if (rootChunk.Lock.TryPromoteToExclusiveAccess(ref wcPromote))
             {
-                // Try to latch the root chunk for exclusive write access
-                if (_accessor.TryLatchExclusive(_rootChunkId))
+                // Try to latch the root chunk for exclusive write access. Each latch is released by the memory page it took: the window can let go of
+                // a latched page — a run of empty chunks on more pages than it keeps — and an unlatch looked up there found nothing, and left it latched.
+                if (_accessor.TryLatchExclusive(_rootChunkId, out var rootPage))
                 {
                     // Setup our forward link list info
                     var curChunkId  = nextChunkId;
@@ -1128,56 +1131,72 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
                     // To collect an empty chunk we need to latch both the previous and current chunks.
                     // We can't make modifications otherwise
                     // BEWARE: Each successful latch needs its corresponding unlatch call!
-                    if (_accessor.TryLatchExclusive(prevChunkId))
+                    if (_accessor.TryLatchExclusive(prevChunkId, out var prevPage))
                     {
                         // We jump over empty chunks as long as there are some — but never the append cursor. AddElement appends into FirstStoredChunkId
                         // without looking at the chain: unlinked here, the chunk stayed the cursor, so the next appends landed in a chunk no walk reaches,
                         // parked for reuse — and wiped when AddElement or the segment reissued it. An index lost every entry appended after the walk.
                         while ((curChunk != null) && (curChunk->ElementCount == 0) && (curChunkId != rootChunk.FirstStoredChunkId))
                         {
-                            if (_accessor.TryLatchExclusive(curChunkId))
+                            // Another thread holds its page: leave it linked. Retrying it spun with no bound, holding this buffer's lock and two
+                            // latches — two readers each needing a page the other holds spun for good (#1290).
+                            if (!_accessor.TryLatchExclusive(curChunkId, out var curPage))
                             {
-                                // Fix the storage link-list by removing the empty chunk. Marked written: with no change set to register it, the page
-                                // stayed clean, and an eviction dropped the link — leaving the chain on disk through the chunks freed below (#1280).
-                                prevChunk->NextChunkId = curChunk->NextChunkId;
-                                _segment.MarkChunkModified(prevChunkId);
-
-                                // Check if we must free the chunk or link it to the free list
-                                if (rootChunk.TotalFreeChunk > freeChunkThreshold)
-                                {
-                                    _segment.FreeChunk(curChunkId);
-                                }
-                                else
-                                {
-                                    // Link the empty chunk to the rest of the free link-list
-                                    curChunk->NextChunkId = rootChunk.FirstFreeChunkId;
-
-                                    // First empty chunk is pointing to the one we just pop
-                                    rootChunk.FirstFreeChunkId = curChunkId;
-                                    ++rootChunk.TotalFreeChunk;
-                                    _segment.MarkChunkModified(curChunkId);
-                                    _segment.MarkChunkModified(_rootChunkId);
-                                }
-
-                                _accessor.UnlatchExclusive(curChunkId);
+                                break;
                             }
+
+                            // Fix the storage link-list by removing the empty chunk. Marked written: with no change set to register it, the page
+                            // stayed clean, and an eviction dropped the link — leaving the chain on disk through the chunks freed below (#1280).
+                            prevChunk->NextChunkId = curChunk->NextChunkId;
+                            _segment.MarkChunkModified(prevChunkId);
+
+                            // Check if we must free the chunk or link it to the free list
+                            if (rootChunk.TotalFreeChunk > freeChunkThreshold)
+                            {
+                                _segment.FreeChunk(curChunkId);
+                            }
+                            else
+                            {
+                                // Link the empty chunk to the rest of the free link-list
+                                curChunk->NextChunkId = rootChunk.FirstFreeChunkId;
+
+                                // First empty chunk is pointing to the one we just pop
+                                rootChunk.FirstFreeChunkId = curChunkId;
+                                ++rootChunk.TotalFreeChunk;
+                                _segment.MarkChunkModified(curChunkId);
+                                _segment.MarkChunkModified(_rootChunkId);
+                            }
+
+                            _accessor.UnlatchExclusivePage(curPage);
 
                             // Update the new current chunk to be the next in line
                             curChunkId = prevChunk->NextChunkId;
                             curChunk = (curChunkId != 0) ? (VariableSizedBufferChunkHeader*)_accessor.GetChunkAddress(curChunkId) : null;
                         }
 
-                        _accessor.UnlatchExclusive(prevChunkId);
+                        _accessor.UnlatchExclusivePage(prevPage);
                     }
 
                     // Update members needed for the end of the method
                     nextChunkId = curChunkId;
-                    nextChunkAddr = (byte*)curChunk;
 
-                    // Release exclusive latch on root
-                    _accessor.UnlatchExclusive(_rootChunkId);
+                    // Release exclusive latch on root. The unlatch clears the page's epoch tag (PS-03), and this reader keeps the root's address for
+                    // its life — its lock, and its capture ticket's slot: once the window let go of the page, it could leave the cache, and the release
+                    // wrote into whatever page took its memory (#1290). Held in the window across the unlatch, then tagged again, it stays put.
+                    _accessor.GetChunkAddress(_rootChunkId);
+                    _accessor.UnlatchExclusivePage(rootPage);
+                    _accessor.KeepUnderEpoch(_rootChunkId);
+                    nextChunkAddr = nextChunkId != 0 ? _accessor.GetChunkAddress(nextChunkId) : null;
                 }
                 rootChunk.Lock.DemoteFromExclusiveAccess();
+            }
+
+            // Step over what is still empty: the append cursor, or a chunk left linked because another reader shares the buffer or holds its page. A
+            // caller that reads chunk by chunk ends at an empty one — the enumerator does — and missed the elements after it (#1290).
+            while (nextChunkAddr != null && ((VariableSizedBufferChunkHeader*)nextChunkAddr)->ElementCount == 0)
+            {
+                nextChunkId = ((VariableSizedBufferChunkHeader*)nextChunkAddr)->NextChunkId;
+                nextChunkAddr = nextChunkId != 0 ? _accessor.GetChunkAddress(nextChunkId) : null;
             }
         }
 

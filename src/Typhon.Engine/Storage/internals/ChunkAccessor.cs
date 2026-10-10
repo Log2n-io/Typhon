@@ -307,7 +307,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Acquire exclusive latch on an epoch-protected page (Idle → Exclusive).
     /// The chunk must already be loaded into a slot.
     /// </summary>
-    public bool TryLatchExclusive(int chunkId)
+    public bool TryLatchExclusive(int chunkId) => TryLatchExclusive(chunkId, out _);
+
+    /// <summary>
+    /// Acquire exclusive latch on an epoch-protected page (Idle → Exclusive), the memory page latched in <paramref name="memPageIndex"/>. The chunk must
+    /// already be loaded into a slot. <see cref="UnlatchExclusivePage"/> releases it with no window lookup: while latched the page stays in the cache,
+    /// but not in the window, which later fetches can take it out of (#1290).
+    /// </summary>
+    public bool TryLatchExclusive(int chunkId, out int memPageIndex)
     {
         (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
 
@@ -320,15 +327,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
             if (mask != 0)
             {
-                return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
+                memPageIndex = GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask));
+                return _store.TryLatchPageExclusive(memPageIndex);
             }
         }
 
+        memPageIndex = -1;
         return false; // Page not cached
     }
 
     /// <summary>
-    /// Release exclusive latch on an epoch-protected page (Exclusive → Idle).
+    /// Release exclusive latch on an epoch-protected page (Exclusive → Idle). The page must still be in the window: one it has let go of is released
+    /// by its memory page (<see cref="UnlatchExclusivePage"/>).
     /// </summary>
     public void UnlatchExclusive(int chunkId)
     {
@@ -347,6 +357,23 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
                 return;
             }
         }
+
+        Debug.Assert(false, "a latched page the window has let go of: it stays latched — release it by its memory page (#1290)");
+    }
+
+    /// <summary>Release the exclusive latch <see cref="TryLatchExclusive(int, out int)"/> took on <paramref name="memPageIndex"/> (Exclusive → Idle).</summary>
+    public void UnlatchExclusivePage(int memPageIndex) => _store.UnlatchPageExclusive(memPageIndex);
+
+    /// <summary>
+    /// Tags the page of <paramref name="chunkId"/> with the current epoch again. An unlatch clears the tag (PS-03), leaving the page held by the window
+    /// alone, until a later fetch takes its slot: a caller that keeps an address into the page past that tags it again once unlatched, with the window
+    /// still holding it — a buffer reader its root, for its lock and its capture ticket (#1290).
+    /// </summary>
+    internal void KeepUnderEpoch(int chunkId)
+    {
+        (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
+        var tagged = _segment.Store.RequestPageEpoch(_segment.Pages[pageIndex], _epochManager.GlobalEpoch, out _);
+        Debug.Assert(tagged);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

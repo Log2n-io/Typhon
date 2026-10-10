@@ -2,6 +2,9 @@ using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
@@ -318,6 +321,214 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         });
         Assert.That(total, Is.EqualTo(3), "the root's free-list count, read back");
         Assert.That(walked, Is.EqualTo(3), "the free list, read back");
+    }
+
+    /// <summary>
+    /// A buffer of <paramref name="chunks"/> full data chunks of elements 1, 2, …, each on a page of its own: before each chunk, fillers take the rest of
+    /// the page, and are freed once the buffer is built.
+    /// </summary>
+    private (int Buffer, List<(int Chunk, int Count)> Chunks) NewSpreadBuffer(VariableSizedBufferSegment<int, PersistentStore> vsbs, int chunks)
+    {
+        var segment = vsbs.Segment;
+        var fillers = new List<int>();
+        var buffer = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            var id = vsbs.AllocateBuffer(ref a);
+            var value = 1;
+            for (var c = 0; c < chunks; c++)
+            {
+                for (var f = 0; f < segment.ChunkCountPerPage - 1; f++)
+                {
+                    fillers.Add(segment.AllocateChunk(false, a.ChangeSet));
+                }
+
+                for (var i = 0; i < vsbs.ElementCountPerChunk; i++)
+                {
+                    vsbs.AddElement(id, value++, ref a);
+                }
+            }
+
+            return id;
+        });
+        foreach (var filler in fillers)
+        {
+            segment.FreeChunk(filler);
+        }
+
+        var chain = Chain(vsbs, buffer);
+        Assert.That(chain, Has.Count.EqualTo(chunks), "premise: the data chunks");
+        var pages = new HashSet<int>();
+        foreach (var (chunk, _) in chain)
+        {
+            pages.Add(PageOf(segment, chunk));
+        }
+
+        Assert.That(pages, Has.Count.EqualTo(chunks), "premise: a page per data chunk");
+        Assert.That(pages, Does.Not.Contain(PageOf(segment, buffer)), "premise: no data chunk on the root's page");
+        return (buffer, chain);
+    }
+
+    /// <summary>The elements of every chunk of <paramref name="chunks"/> but those of <paramref name="emptied"/>, in chain order.</summary>
+    private static List<int> ElementsBut(List<(int Chunk, int Count)> chunks, int perChunk, Predicate<int> emptied)
+    {
+        var expected = new List<int>();
+        for (var c = 0; c < chunks.Count; c++)
+        {
+            if (!emptied(c))
+            {
+                for (var i = 1; i <= perChunk; i++)
+                {
+                    expected.Add(c * perChunk + i);
+                }
+            }
+        }
+
+        return expected;
+    }
+
+    /// <summary>
+    /// #1290: two readers of one buffer, the first at an empty chunk. Unlinking it needs the buffer's lock exclusive, and a promotion waits for the
+    /// other shared holders to leave — here a reader held by the same thread, elsewhere one waiting on its own promotion: it waited out the 10 s lock
+    /// timeout. The unlink is housekeeping, left to a reader alone on the buffer; and the empty chunk left linked is stepped over, where the enumerator
+    /// ended at it.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TwoReadersAtAnEmptyChunk_NeitherWaitsNorStopsThere()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewBuffer(vsbs, perChunk * 3, i => i);
+        Assert.That(chunks, Has.Count.EqualTo(3), "premise: three data chunks");
+        Empty(vsbs, buffer, chunks[1].Chunk);
+
+        using var guard = EpochGuard.Enter(_dbe.EpochManager);
+        using var other = vsbs.GetReadOnlyAccessor(buffer);
+        var read = new List<int>();
+        var watch = Stopwatch.StartNew();
+        foreach (var v in vsbs.EnumerateBuffer(buffer))
+        {
+            read.Add(v);
+        }
+
+        watch.Stop();
+        Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(2)), "the read, beside another reader");
+        Assert.That(read, Is.EqualTo(ElementsBut(chunks, perChunk, c => c == 1)), "the elements after the empty chunk");
+    }
+
+    /// <summary>
+    /// #1290: a reader unlinking an empty chunk whose page another thread holds latched. It retried the same chunk with no bound, holding the buffer's
+    /// lock exclusive and its root's and predecessor's pages latched: two readers each needing a page the other holds spun for good. It now leaves the
+    /// chunk linked, and reads on.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public unsafe void AReaderAtAnEmptyChunkWhosePageIsLatched_ReadsOn()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewSpreadBuffer(vsbs, 3);
+        Empty(vsbs, buffer, chunks[1].Chunk);
+
+        using var latched = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            using var g = EpochGuard.Enter(_dbe.EpochManager);
+            var a = vsbs.Segment.CreateChunkAccessor();
+            try
+            {
+                a.GetChunkAddress(chunks[1].Chunk);
+                Assert.That(a.TryLatchExclusive(chunks[1].Chunk), Is.True, "premise: the empty chunk's page, latched");
+                latched.Set();
+                release.Wait();
+                a.UnlatchExclusive(chunks[1].Chunk);
+            }
+            finally
+            {
+                a.Dispose();
+            }
+        });
+        Assert.That(latched.Wait(TimeSpan.FromSeconds(10)), Is.True, "premise: the holder latched the page");
+
+        var reader = Task.Run(() => ReadThrough(vsbs, buffer));
+        var finished = reader.Wait(TimeSpan.FromSeconds(2));
+        release.Set();
+        holder.GetAwaiter().GetResult();
+        Assert.That(finished, Is.True, "the read, while the empty chunk's page is latched");
+        Assert.That(reader.GetAwaiter().GetResult(), Is.EqualTo(ElementsBut(chunks, perChunk, c => c == 1)), "the elements after the empty chunk");
+    }
+
+    /// <summary>
+    /// #1290: a run of empty chunks on more pages than the reader's accessor keeps. Fetching them pushed the root's and the predecessor's pages out of
+    /// its window, and their unlatch, which looked the page up there, found nothing and returned: both pages stayed latched for good.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnUnlinkOverMorePagesThanTheReaderKeeps_LeavesNoPageLatched()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewSpreadBuffer(vsbs, 72);
+        for (var c = 1; c <= 70; c++)
+        {
+            Empty(vsbs, buffer, chunks[c].Chunk);
+        }
+
+        var rootSlot = SlotOf(vsbs, buffer);
+        var predecessorSlot = SlotOf(vsbs, chunks[0].Chunk);
+        Assert.That(ReadThrough(vsbs, buffer), Is.EqualTo(ElementsBut(chunks, perChunk, c => c is >= 1 and <= 70)), "the read");
+        Assert.That(Chain(vsbs, buffer), Has.Count.EqualTo(2), "premise: the empty chunks were unlinked");
+        Assert.That(_dbe.MMF.GetPageState(rootSlot), Is.Not.EqualTo(PagedMMF.PageState.Exclusive), "the root's page");
+        Assert.That(_dbe.MMF.GetPageState(predecessorSlot), Is.Not.EqualTo(PagedMMF.PageState.Exclusive), "the predecessor's page");
+    }
+
+    /// <summary>
+    /// #1290: a reader that unlinked a chunk, then read on over more pages than its accessor keeps. The unlatch took the root's page off the epoch,
+    /// and the window it left took the last hold: the page left the cache, and the reader's release of the buffer's lock, through the address it had
+    /// kept, wrote into a page no longer the root's — the lock stayed held.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-03")]
+    [CancelAfter(30_000)]
+    public void AReaderThatUnlinkedAndReadOn_ReleasesTheRootItHolds()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewSpreadBuffer(vsbs, 70);
+        Empty(vsbs, buffer, chunks[1].Chunk);
+        var rootSlot = SlotOf(vsbs, buffer);
+
+        var read = new List<int>();
+        var rootLeftTheCache = false;
+        using (EpochGuard.Enter(_dbe.EpochManager))
+        {
+            var reader = vsbs.GetReadOnlyAccessor(buffer);
+            try
+            {
+                do
+                {
+                    foreach (var v in reader.ReadOnlyElements)
+                    {
+                        read.Add(v);
+                    }
+                }
+                while (reader.NextChunk());
+
+                // The unlink's root write on disk, so its page is clean: evictable as soon as nothing holds it.
+                Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+                _dbe.MMF.EvictEvictablePagesForTest();
+                rootLeftTheCache = _dbe.MMF.GetPageState(rootSlot) == PagedMMF.PageState.Free;
+            }
+            finally
+            {
+                reader.Dispose();
+            }
+        }
+
+        Assert.That(read, Is.EqualTo(ElementsBut(chunks, perChunk, c => c == 1)), "the read");
+        var holds = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => a.GetChunk<VariableSizedBufferRootHeader>(buffer).Lock.SharedUsedCounter);
+        Assert.That(holds, Is.Zero, $"the buffer's shared holds, once its reader is gone (its root's page left the cache under it: {rootLeftTheCache})");
     }
 
     /// <summary>The page of <paramref name="chunk"/> in its segment.</summary>
