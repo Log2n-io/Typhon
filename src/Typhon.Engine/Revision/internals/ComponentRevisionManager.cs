@@ -91,16 +91,23 @@ internal ref struct ComponentRevisionManager
                 ThrowHelper.ThrowLockTimeout("RevisionChain/GetElement", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
-        while (--chunkIndexInChain >= 0)
+        // The walk fetches the overflow chunks, and a fetch can throw — a page-cache back-pressure timeout: the hold is released whatever happens, or the
+        // next writer of the entity waits out its lock timeout (#1278).
+        try
         {
-            curChunkId = nextChunkId;
-            nextChunkId = accessor.GetChunk<int>(nextChunkId);
+            while (--chunkIndexInChain >= 0)
+            {
+                curChunkId = nextChunkId;
+                nextChunkId = accessor.GetChunk<int>(nextChunkId);
+            }
         }
-
-        if (useLock)
+        finally
         {
-            firstHeader.Control.ExitSharedAccess();
-            EndChainLockHold(ref accessor, in ticket);
+            if (useLock)
+            {
+                firstHeader.Control.ExitSharedAccess();
+                EndChainLockHold(ref accessor, in ticket);
+            }
         }
 
         return new ElementRevisionHandle(ref accessor, curChunkId, false, (short)indexInChunk);

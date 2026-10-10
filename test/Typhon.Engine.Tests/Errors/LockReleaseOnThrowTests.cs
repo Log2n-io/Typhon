@@ -170,4 +170,141 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
         entity.Set(MkTraderArch.Wallet, credits);
         Assert.That(write.Commit(), Is.True, "a later write of the entity");
     }
+
+    /// <summary>The root chunk of the entity's <see cref="MkWallet"/> revision chain, from its entity record.</summary>
+    private static unsafe int WalletRootOf(DatabaseEngine dbe, EntityId entityId)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var ct = dbe.GetComponentTable<MkWallet>();
+        var meta = dbe.GetMetaByRouting(entityId.ArchetypeId);
+        var es = dbe._archetypeStates[meta.ArchetypeId];
+        var slot = -1;
+        for (var s = 0; s < meta.ComponentCount; s++)
+        {
+            if (ReferenceEquals(es.SlotToComponentTable[s], ct))
+            {
+                slot = s;
+                break;
+            }
+        }
+
+        var record = stackalloc byte[meta._entityRecordSize];
+        var accessor = es.EntityMap.Segment.CreateChunkAccessor();
+        var found = es.EntityMap.TryGet(entityId.EntityKey, record, ref accessor);
+        accessor.Dispose();
+        Assert.That(found, Is.True, "the entity's record");
+        return meta.IsClusterEligible && es.ClusterState != null
+            ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, es.ClusterState.Layout.SlotToVersionedIndex[slot])
+            : EntityRecordAccessor.GetLocation(record, slot);
+    }
+
+    private static int PageOf(ChunkBasedSegment<PersistentStore> segment, int chunk) =>
+        chunk < segment.ChunkCountRootPage ? 0 : 1 + (chunk - segment.ChunkCountRootPage) / segment.ChunkCountPerPage;
+
+    private static void AddCredit(DatabaseEngine dbe, EntityId id)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var e = tx.OpenMut(id);
+        var wallet = e.Read(MkTraderArch.Wallet);
+        wallet.Credits++;
+        e.Set(MkTraderArch.Wallet, wallet);
+        Assert.That(tx.Commit(), Is.True, "the update");
+    }
+
+    /// <summary>
+    /// <see cref="ComponentRevisionManager.GetRevisionElement"/> walks a chain's overflow chunks under the chain's shared lock when its caller holds none —
+    /// PREPARE's first read of its own entry does. A walk that threw, here a page-cache back-pressure timeout on an overflow chunk's page, left the shared
+    /// hold behind (#1278): the next writer of the entity waited out its lock timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AChainWalkThatThrows_ReleasesTheChainLock()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<MkTrader>();
+        dbe.RegisterComponentFromAccessor<MkWallet>();
+        dbe.InitializeArchetypes();
+        var segment = dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 1 }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 100 }));
+
+            // The rest of the root's page, taken by other chains: the overflow chunk the updates add opens a later page.
+            for (var i = 0; i < segment.ChunkCountPerPage; i++)
+            {
+                tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 2 + i }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 1 }));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var root = WalletRootOf(dbe, id);
+        using (var pin = dbe.CreateReadOnlyTransaction())
+        {
+            // A reader keeps every revision: the root's entries, then an overflow chunk's.
+            for (var i = 0; i < ComponentRevisionManager.CompRevCountInRoot + 1; i++)
+            {
+                AddCredit(dbe, id);
+            }
+
+            // The reader's epoch moved on, as a long reader's does every 128 opens (EP-03): the pages its updates touched are evictable again, once clean.
+            dbe.EpochManager.RefreshScope();
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.MMF.EvictEvictablePagesForTest();
+
+            var saved = TimeoutOptions.Current;
+            var timeouts = saved.Clone();
+            timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(50);
+            timeouts.RevisionChainLockTimeout = TimeSpan.FromMilliseconds(200);
+            TimeoutOptions.Current = timeouts;
+            try
+            {
+                Exception thrown = null;
+                int sharedHolds;
+                using (EpochGuard.Enter(dbe.EpochManager))
+                {
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+                        Assert.That(header.ChainLength, Is.GreaterThan(1), "premise: the chain has an overflow chunk");
+                        Assert.That(PageOf(segment, header.NextChunkId), Is.Not.EqualTo(PageOf(segment, root)),
+                            "premise: the overflow chunk is on another page than the root");
+
+                        // The root in the window: only the walk's fetch of the overflow chunk allocates, and every allocation of this thread fails.
+                        var walker = Environment.CurrentManagedThreadId;
+                        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
+                        try
+                        {
+                            ComponentRevisionManager.GetRevisionElement(ref accessor, root, (short)ComponentRevisionManager.CompRevCountInRoot);
+                        }
+                        catch (Exception e)
+                        {
+                            thrown = e;
+                        }
+                        finally
+                        {
+                            dbe.MMF.ForceBackpressureForTest = null;
+                        }
+
+                        sharedHolds = accessor.GetChunk<CompRevStorageHeader>(root).Control.SharedUsedCounter;
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                    }
+                }
+
+                Assert.That(thrown, Is.InstanceOf<PageCacheBackpressureTimeoutException>(), "premise: the walk threw, fetching the overflow chunk");
+                Assert.That(sharedHolds, Is.Zero, "the chain's shared holds, after the walk threw");
+            }
+            finally
+            {
+                TimeoutOptions.Current = saved;
+            }
+        }
+
+        AddCredit(dbe, id);
+    }
 }
