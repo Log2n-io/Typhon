@@ -92,10 +92,11 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     public int BufferAddRef(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         try
         {
             // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
+            ticket = LockBuffer(ref rh, ref accessor);
 
             return ++rh.RefCounter;
         }
@@ -103,7 +104,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         {
             // Re-fetch rh — defensive, in case future changes add slot-evicting calls in the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -117,10 +118,11 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     public int BufferRelease(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         var deleted = false;
         try
         {
-            LockBuffer(ref rh);
+            ticket = LockBuffer(ref rh, ref accessor);
 
             var newValue = --rh.RefCounter;
             if (newValue == 0)
@@ -135,7 +137,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         {
             // Re-fetch rh — chain traversal may have evicted its slot
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
             if (deleted)
             {
                 accessor.Segment.FreeChunk(bufferId);
@@ -148,12 +150,13 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         // Fetch the root chunk — epoch protects page lifetime
         var unlock = false;
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         try
         {
             // Lock the whole buffer as we are going to update it
             if (!rh.Lock.IsLockedByCurrentThread)
             {
-                LockBuffer(ref rh);
+                ticket = LockBuffer(ref rh, ref accessor);
                 unlock = true;
             }
 
@@ -168,7 +171,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             {
                 // Re-fetch rh — GetChunkAddress calls in the loop may have evicted its slot
                 rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-                ReleaseLockOnBuffer(ref rh);
+                ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
             }
             accessor.Segment.FreeChunk(bufferId);
         }
@@ -280,6 +283,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             ThrowHelper.ThrowInvalidOp($"ReadAllElementsRaw: destination holds {dest.Length} bytes, need {total * ElementSize} for {total} element(s).");
         }
 
+        var ticket = accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
         if (!rh.Lock.EnterSharedAccess(ref wc))
         {
@@ -309,6 +313,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         {
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false);
             rh.Lock.ExitSharedAccess();
+            accessor.Store.EndLockHold(in ticket);
         }
 
         return copied;
@@ -453,17 +458,23 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         }
     }
 
+    /// <summary>
+    /// Takes the buffer's exclusive lock, and the capture ticket the release gives back (PS-20): the lock word is in the root chunk, in a data page, and a
+    /// capture of the page during the hold must not stay on disk held.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void LockBuffer(ref VariableSizedBufferRootHeader rh)
+    internal PagedMMF.CaptureTicket LockBuffer(ref VariableSizedBufferRootHeader rh, ref ChunkAccessor<TStore> accessor)
     {
+        var ticket = accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
+
         // Fast path: uncontended lock — no timestamp syscall needed
-        if (rh.Lock.TryEnterExclusiveAccess())
+        if (!rh.Lock.TryEnterExclusiveAccess())
         {
-            return;
+            // Slow path: contended — create WaitContext for timeout
+            LockBufferSlow(ref rh);
         }
 
-        // Slow path: contended — create WaitContext for timeout
-        LockBufferSlow(ref rh);
+        return ticket;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -475,7 +486,12 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             ThrowHelper.ThrowLockTimeout("SegmentAllocation/LockBuffer", TimeoutOptions.Current.SegmentAllocationLockTimeout);
         }
     }
-    internal void ReleaseLockOnBuffer(ref VariableSizedBufferRootHeader header) => header.Lock.ExitExclusiveAccess();
+    /// <summary>Releases the buffer's exclusive lock, then ends the hold <paramref name="ticket"/> was taken for (PS-20).</summary>
+    internal void ReleaseLockOnBuffer(ref VariableSizedBufferRootHeader header, ref ChunkAccessor<TStore> accessor, in PagedMMF.CaptureTicket ticket)
+    {
+        header.Lock.ExitExclusiveAccess();
+        accessor.Store.EndLockHold(in ticket);
+    }
 }
 
 /// <summary>
@@ -513,11 +529,12 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
 
         try
         {
             // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
+            ticket = LockBuffer(ref rh, ref accessor);
 
             // Detect use-after-free: refCount should be >= 1 for any live buffer.
             // refCount=0 means the buffer was freed via BufferRelease/DeleteBuffer and
@@ -616,7 +633,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted during the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -624,10 +641,11 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         try
         {
             // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
+            ticket = LockBuffer(ref rh, ref accessor);
 
             // Copy structural fields to locals BEFORE any GetChunkAddress/AllocateChunk calls.
             // These calls can evict rh's slot from the 16-slot accessor cache.
@@ -697,7 +715,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted during the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -705,10 +723,11 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         try
         {
             // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
+            ticket = LockBuffer(ref rh, ref accessor);
 
             // Fetch the chunk storing the element — this can evict rh's slot
             var elementChunk = accessor.GetChunkAddress(elementId, true);
@@ -746,7 +765,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -776,7 +795,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         // The acquire sits OUTSIDE the try, and that placement is the point. LockBuffer THROWS on timeout (LockBufferSlow -> ThrowLockTimeout), so acquiring
         // inside the try would run the finally's ExitExclusiveAccess for a lock this thread never took — releasing it out from under whoever actually holds it.
         // DeleteElement has the same shape and the same exposure; it is left alone here rather than changed as a side effect of this work.
-        LockBuffer(ref rh);
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
             // GetChunkAddress can evict rh's slot, exactly as in DeleteElement — nothing below reads rh until the finally re-fetches it.
@@ -800,7 +819,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         finally
         {
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -921,6 +940,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     private int _rootChunkId;
     private unsafe byte* _rootChunkAddr;
     private ChunkAccessor<TStore> _accessor;
+    private PagedMMF.CaptureTicket _ticket;
 
     private int _curChunkId;
     private unsafe byte* _curChunkAddr;
@@ -964,6 +984,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
 
         // Enter read mode
+        _ticket = _accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
         if (!rh.Lock.EnterSharedAccess(ref wc))
         {
@@ -1101,6 +1122,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
         ref var h = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
         h.Lock.ExitSharedAccess();
+        _accessor.Store.EndLockHold(in _ticket);
 
         _accessor.Dispose();
         _rootChunkId = 0;

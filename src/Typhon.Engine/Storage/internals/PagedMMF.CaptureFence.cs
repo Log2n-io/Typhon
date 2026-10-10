@@ -28,7 +28,7 @@ public partial class PagedMMF
     /// that slot for the whole hold. The started count wraps off the top of the word, harmlessly: a hold would have to overlap exactly 2^32 captures to
     /// miss them; the in-flight count never carries into it.</para>
     /// </remarks>
-    internal readonly struct CaptureTicket
+    public readonly struct CaptureTicket
     {
         private readonly int _slotPlusOne;   // 0 in a default ticket, which no hold may end with
         internal readonly long Fence;

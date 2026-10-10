@@ -86,6 +86,12 @@ public readonly unsafe struct PersistentStore : IPageStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkPageModified(int memPageIndex) => _mmf.MarkPageModified(memPageIndex);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public PagedMMF.CaptureTicket TakeCaptureTicket(ref byte lockWord) => _mmf.TakeCaptureTicket(ref lockWord);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void EndLockHold(in PagedMMF.CaptureTicket ticket) => _mmf.EndLockHold(in ticket);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting
     // ═══════════════════════════════════════════════════════════════════════

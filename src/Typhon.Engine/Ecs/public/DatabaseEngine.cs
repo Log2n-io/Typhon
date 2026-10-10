@@ -2554,6 +2554,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 return (VariableSizedBufferSegmentBase<PersistentStore>)Activator.CreateInstance(ctType, segment);
             });
 
+    /// <summary>Buffer locks the crash open found held in the component-collection segments' data file and freed (PS-20). Diagnostic.</summary>
+    internal int CollectionBufferLocksResetAtOpen { get; private set; }
+
+    /// <summary>
+    /// PS-20: a crash can leave a buffer's lock held in the data file, its holder gone. Freed as the segment loads, before anything of this open reads a
+    /// collection. The index value buffers need none of it: a crash open recreates every index empty (RB-01).
+    /// </summary>
+    private unsafe void ResetCollectionBufferLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment)
+    {
+        if (CrashRecoveryAtOpen)
+        {
+            CollectionBufferLocksResetAtOpen += LockWordRecovery.ResetRootLocks(segment, this,
+                (int)Marshal.OffsetOf<VariableSizedBufferRootHeader>(nameof(VariableSizedBufferRootHeader.Lock)), sizeof(AccessControl));
+        }
+    }
+
     unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment<T>() where T : unmanaged =>
         _componentCollectionSegmentByStride.GetOrAdd(
             RoundToStandardStride(Math.Max(sizeof(T) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
@@ -3045,6 +3061,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var stride = RoundToStandardStride(
                     Math.Max(sizeof(FieldR1) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
                 var segment = MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride);
+                ResetCollectionBufferLocksAfterCrash(segment);
                 _componentCollectionSegmentByStride.TryAdd(stride, segment);
             }
         }
@@ -3062,7 +3079,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var collectionSPI = cv.GetInt(1);
             if (collectionSPI != 0 && !_componentCollectionSegmentByStride.ContainsKey(collectionStride))
             {
-                _componentCollectionSegmentByStride.TryAdd(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
+                var segment = MMF.LoadChunkBasedSegment(collectionSPI, collectionStride);
+                ResetCollectionBufferLocksAfterCrash(segment);
+                _componentCollectionSegmentByStride.TryAdd(collectionStride, segment);
             }
         }
 

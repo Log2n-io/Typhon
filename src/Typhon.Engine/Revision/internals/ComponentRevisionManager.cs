@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -793,62 +794,9 @@ internal ref struct ComponentRevisionManager
     /// destroyed entity's chain still awaiting release included; a root is dirtied only when its word was set. Single-threaded.
     /// </summary>
     /// <returns>The number of roots whose lock word was set.</returns>
-    internal static int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
-    {
-        var capacity = segment.ChunkCapacity;
-        if (capacity == 0 || segment.AllocatedChunkCount == 0)
-        {
-            return 0;
-        }
-
-        using var guard = EpochGuard.Enter(dbe.EpochManager);
-        var changeSet = dbe.MMF.CreateChangeSet();
-        var reset = 0;
-        try
-        {
-            var accessor = segment.CreateChunkAccessor(changeSet);
-            try
-            {
-                // The roots are the allocated chunks no other chunk names as its next — EnumerateVersionedChainHeads' two passes.
-                var overflowSet = new HashSet<int>();
-                for (var chunkId = 0; chunkId < capacity; chunkId++)
-                {
-                    if (segment.IsChunkAllocated(chunkId))
-                    {
-                        var next = accessor.GetChunk<CompRevStorageHeader>(chunkId).NextChunkId;
-                        if (next != 0)
-                        {
-                            overflowSet.Add(next);
-                        }
-                    }
-                }
-
-                for (var chunkId = 0; chunkId < capacity; chunkId++)
-                {
-                    if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
-                    {
-                        continue;
-                    }
-
-                    if (Unsafe.As<AccessControlSmall, int>(ref accessor.GetChunk<CompRevStorageHeader>(chunkId).Control) != 0)
-                    {
-                        accessor.GetChunk<CompRevStorageHeader>(chunkId, true).Control = default;
-                        reset++;
-                    }
-                }
-            }
-            finally
-            {
-                accessor.Dispose();
-            }
-        }
-        finally
-        {
-            changeSet.SaveChanges();
-        }
-
-        return reset;
-    }
+    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe) =>
+        LockWordRecovery.ResetRootLocks(segment, dbe, (int)Marshal.OffsetOf<CompRevStorageHeader>(nameof(CompRevStorageHeader.Control)),
+            sizeof(AccessControlSmall));
 
     /// <summary>
     /// Recovery orphan sweep (03-recovery.md §6): after a table's chains have been scrubbed to their heads, free every allocated

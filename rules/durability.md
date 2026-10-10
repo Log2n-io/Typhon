@@ -2101,16 +2101,21 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             free and no one evicts it before. A capture that copied the held word began before the copy, the copy came before the release and the
             release before the post-release read — so the holder sees it, unless it began before the ticket: then the ticket saw it in flight, or it
             had ended before the lock was taken and never saw it held. Acquire and release are interlocked; the two reads are volatile
+  invariant a variable-sized buffer's lock, in its root chunk, is held the same way: the write's exclusive hold (LockBuffer to ReleaseLockOnBuffer),
+            the read accessor's and the raw read's shared ones each take a ticket before and end it after
   invariant a hold no capture overlapped writes nothing: the page stays as clean as the hold found it
   invariant the hold's page stays in its slot while the lock is held (the holder's epoch), so ticket and release read the same slot's word; a
             retained hold (PREPARE to PUBLISH) carries its ticket in the publish entry to whichever path releases it
   invariant a crash leaves no time for the rewrite: a crash open frees every chain root's lock word as its table loads, before anything of the open
             takes a chain lock — the cluster HEAD rebuild walks chains, the log replay appends revisions, the scrub walks them all; each would wait for
-            the holder that died with the process, and the open would fail
+            the holder that died with the process, and the open would fail. The component-collection segments' buffer roots are freed as those
+            segments load; the index value buffers need nothing, as a crash open recreates every index empty (RB-01). A root is a chunk no other
+            chunk names as its next, in both layouts
   scope: PagedMMF.TakeCaptureTicket, PagedMMF.EndLockHold, PagedMMF.BeginCapture, PagedMMF.EndCapture, PagedMMF.WritePagesForCheckpoint,
          PagedMMF.SavePages, ComponentRevisionManager.ChainLockTicket, ComponentRevisionManager.EndChainLockHold,
          ComponentRevisionManager.ResetChainLocksAfterCrash, RevisionEnumerator.Dispose, Transaction.PublishComponent,
-         Transaction.ReleaseRetainedPublishLocks
+         Transaction.ReleaseRetainedPublishLocks, VariableSizedBufferSegmentBase.LockBuffer, VariableSizedBufferSegmentBase.ReleaseLockOnBuffer,
+         VariableSizedBufferAccessor.Dispose, LockWordRecovery.ResetRootLocks, DatabaseEngine.ResetCollectionBufferLocksAfterCrash
   on_violation: the release changes the page in memory only; once the clean page is evicted and read back, the lock is held by no one, for good,
                 and a clean close — which rewrites no clean page — hands it to the next process: every writer of the entity times out on the
                 chain's lock (#1253, MarketHardeningTests at a 64 MiB cache with long readers: chain-lock timeouts within 19 to 56 s of the storm).
@@ -2127,7 +2132,12 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             could have copied, and not the others. Mutations killed: no mark, no in-flight check, no started check, the checkpoint copy or the save
             not bracketed, a save never ending, the reset left to the scrub, the enumerator, the publish, the append, the void, the cleanup, the
             tombstone or the resolution never ending its hold, the retained ticket not carried. Not covered by a test: the shared holds of
-            GetRevisionElement and GetRevisionLocation, the abort path's release of retained locks and the release of a destroyed entity's chain
+            GetRevisionElement and GetRevisionLocation, the abort path's release of retained locks and the release of a destroyed entity's chain.
+            BufferLockWordPersistenceTests [VerifiesRule] — a buffer read held while a neighbour's write leaves the root's page owed and the
+            checkpoint writes it: read back held before the fix, (0, 1) on 3 of 3 runs; now the page stays owed, is rewritten and reads back free;
+            a hold copied before a hard crash is free after recovery and the buffer writable; a write's and a raw read's holds are found under a
+            staged capture. Mutations killed: the write's release, the raw read and the read accessor never ending their holds, no reset at the
+            crash open
 
 ---
 

@@ -132,6 +132,19 @@ public unsafe interface IPageStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     void MarkPageModified(int memPageIndex);
 
+    /// <summary>
+    /// The capture ticket for a hold of the lock <paramref name="lockWord"/> names, inside a cached page: taken before the lock is, given back to
+    /// <see cref="EndLockHold"/> once it is released (PS-20, <see cref="PagedMMF.CaptureTicket"/>).
+    /// </summary>
+    /// <remarks>Transient: an untaken ticket — its pages never reach a disk.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    PagedMMF.CaptureTicket TakeCaptureTicket(ref byte lockWord);
+
+    /// <summary>Ends the hold <paramref name="ticket"/> was taken for, after the lock is released (PS-20).</summary>
+    /// <remarks>Transient: no-op.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    void EndLockHold(in PagedMMF.CaptureTicket ticket);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting
     // Persistent: prevents page eviction while ChunkAccessor slots hold pointers.
