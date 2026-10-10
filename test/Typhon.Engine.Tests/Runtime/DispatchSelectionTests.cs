@@ -716,6 +716,63 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
     }
 
     /// <summary>
+    /// The product claim MEASURED rather than restated: with divisor 2 and cellAmortize 3, each cluster is actually revisited
+    /// every six ticks.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every other DSEL-03 case asserts <c>Amortized == Dt x stride</c>, which is the production formula written twice.</b>
+    /// That family of tests cannot fail for a wrong STRIDE — it can only fail for a formula applied inconsistently — so the
+    /// central claim of the rule, that the step equals the revisit interval, went unverified. This measures the interval from
+    /// the dispatch itself and compares it with the step the system was handed, so the two have to agree about the world
+    /// rather than about each other. It is the test that would have caught taking the max of the strides instead of the
+    /// product, or counting an amortization the selection never applied.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("DSEL-03")]
+    public void TheStepEqualsTheMeasuredRevisitInterval()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var ids = SpawnRow(dbe, 6, SimTier.Tier2);
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<TierUnit>().ToView();
+        var visits = new ConcurrentQueue<(EntityId Entity, long Tick, float Step, float Dt)>();
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+               {
+                   schedule.PublicTrack.DeclareDag("Test").QuerySystem("Both", ctx =>
+                   {
+                       foreach (var id in ctx.Entities)
+                       {
+                           visits.Enqueue((id, ctx.TickNumber, ctx.AmortizedDeltaTime, ctx.DeltaTime));
+                       }
+                   }, input: () => view, parallel: true, tier: SimTier.Tier2, cellAmortize: 3, tickDivisor: 2);
+               }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }))
+        {
+            runtime.Start();
+            // Enough runs that several clusters are visited at least twice: 3 buckets x 2 visits x divisor 2 = 12 ticks, plus slack.
+            WaitFor(() => visits.Select(v => v.Tick).Distinct().Count() >= 10);
+            runtime.Shutdown();
+        }
+
+        var byEntity = visits.GroupBy(v => v.Entity).ToDictionary(g => g.Key, g => g.Select(v => v.Tick).Distinct().OrderBy(t => t).ToArray());
+        Assert.That(byEntity.Keys, Is.SubsetOf(ids));
+
+        var gaps = byEntity.Values.SelectMany(t => t.Skip(1).Select((tick, i) => tick - t[i])).ToArray();
+        Assert.That(gaps, Is.Not.Empty, "no cluster was visited twice, so no interval was measured");
+        Assert.That(gaps, Is.All.EqualTo(6L),
+            "divisor 2 x cellAmortize 3 must revisit a cluster every 6 ticks — the interval the step claims to be");
+
+        // And the step the system was handed over those runs is that interval, in seconds. Measured against the ticks it
+        // actually spans rather than against the formula: a step of 6 periods for a 6-tick interval is the whole rule.
+        var moving = visits.Where(v => v.Dt > 0f).ToArray();
+        Assert.That(moving, Is.Not.Empty);
+        foreach (var visit in moving)
+        {
+            Assert.That(visit.Step, Is.EqualTo(visit.Dt * 6f).Within(1e-5f), $"tick {visit.Tick}: the step must span the 6 ticks just measured");
+        }
+    }
+
+    /// <summary>
     /// The pre-fix behaviour, fed straight to the verifier: <c>AmortizedDeltaTime</c> equal to <c>DeltaTime</c> for a system at divisor 4. That is what every
     /// path did before #1293, and it has to be rejected — a verifier that accepts it would have been green against the bug.
     /// </summary>

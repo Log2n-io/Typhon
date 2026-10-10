@@ -849,10 +849,12 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
          DagScheduler.EffectiveRateDivisor, TickContext.AmortizedDeltaTime, RuntimeSchedule.ValidateRegistration
   on_violation: a system at divisor N integrates at 1/N of real time — movement, decay and timers all run slow, with nothing
                 raised and every test green, because the error is proportional and a fixture that asserts "it moved" still passes
-  verified: DispatchSelectionTests.TickDivisor_ScalesAmortizedDeltaTime, DispatchSelectionTests.TickDivisor_DoesNotScaleDeltaTime,
+  verified: DispatchSelectionTests.TheStepEqualsTheMeasuredRevisitInterval (the interval MEASURED, not the formula restated),
+            DispatchSelectionTests.TickDivisor_ScalesAmortizedDeltaTime, DispatchSelectionTests.TickDivisor_DoesNotScaleDeltaTime,
             DispatchSelectionTests.TickDivisorWithChangeFilter_IsRefusedAtBuild,
             DispatchSelectionTests.ThrottledTickDivisor_ScalesAmortizedDeltaTimeUnderOverload,
-            DispatchSelectionTests.CellAmortizeWithoutATierIndex_DoesNotClaimAStrideItDidNotTake
+            DispatchSelectionTests.CellAmortizeWithoutATierIndex_DoesNotClaimAStrideItDidNotTake,
+            DispatchSelectionTests.TickDivisorAndCellAmortize_StridesMultiply, DispatchSelectionTests.TickDivisor_RunsOnlyOnItsOwnTicks
 
 ### DSEL-04: A tick offset never separates two divided systems the DAG joins `[fatal]` `[silent]` (issue #1294)
   invariant a gated system runs exactly on the ticks where tick mod gate == TickOffset, for EVERY gate it has: TickDivisor
