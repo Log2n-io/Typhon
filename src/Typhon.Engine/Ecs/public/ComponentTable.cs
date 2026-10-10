@@ -201,6 +201,9 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <summary>Segment holding the MVCC revision chains. Non-null only for <see cref="StorageMode.Versioned"/> storage.</summary>
     public ChunkBasedSegment<PersistentStore> CompRevTableSegment { get; private set; }
 
+    /// <summary>Chain locks this table's crash open found held in the data file and freed (PS-20). Diagnostic.</summary>
+    internal int ChainLocksResetAtOpen { get; private set; }
+
     /// <summary>
     /// Surfaces the entity count as <see cref="IResource.Count"/> so the Workbench can render a
     /// live badge on the ComponentTable tree node without a second round-trip.
@@ -538,6 +541,12 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (storageMode == StorageMode.Versioned)
         {
             CompRevTableSegment = mmf.LoadChunkBasedSegment(versionSPI, ComponentRevisionManager.CompRevChunkSize);
+
+            // PS-20: a crash can leave a chain lock held in the data file, its holder gone. Freed here, before anything of this open takes one.
+            if (DBE.CrashRecoveryAtOpen)
+            {
+                ChainLocksResetAtOpen = ComponentRevisionManager.ResetChainLocksAfterCrash(CompRevTableSegment, DBE);
+            }
         }
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);

@@ -60,6 +60,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private ChunkBasedSegment<TStore> _segment;
     private ChangeSet _changeSet;
     private TStore _store;
+
+    /// <summary>The page store this accessor reads through. For a <see cref="PersistentStore"/>, whose state is the MMF it names; a by-value
+    /// <see cref="TransientStore"/> snapshot can be stale (see the remark on its page growth).</summary>
+    internal TStore Store
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => _store;
+    }
     private EpochManager _epochManager;
     private ResolveGeneration _generation;     // bumped when a slot lets go of its page (#1199); null unless a handle resolves through this accessor
 

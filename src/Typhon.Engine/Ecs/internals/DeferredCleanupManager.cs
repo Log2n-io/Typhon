@@ -503,6 +503,7 @@ internal class DeferredCleanupManager
             // Acquire exclusive lock — cleanup restructures the chain, must be serialized with AddCompRev.
             // Use TryEnter: if contended, skip this entry — it will be retried on the next cleanup pass.
             ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            var ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
             if (!header.Control.TryEnterExclusiveAccess())
             {
                 continue;
@@ -517,6 +518,7 @@ internal class DeferredCleanupManager
             {
                 header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 header.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
 
             // A lone tombstone is not freed here, though nothing can read it any more: only an ECS destroy writes tombstones, and the destroyed entity's
@@ -599,6 +601,7 @@ internal class DeferredCleanupManager
                 return ChainRelease.NotThisEntitys;
             }
 
+            var ticket = ComponentRevisionManager.ChainLockTicket(ref accessor, ref header);
             if (!header.Control.TryEnterExclusiveAccess())
             {
                 Interlocked.Increment(ref DestroyedChainsDeferred);
@@ -644,6 +647,7 @@ internal class DeferredCleanupManager
             {
                 header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 header.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref accessor, in ticket);
             }
 
             Interlocked.Increment(ref DestroyedChainsReleased);

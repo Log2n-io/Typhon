@@ -52,6 +52,19 @@ internal ref struct ComponentRevisionManager
 
     }
 
+    /// <summary>
+    /// The capture ticket for a hold of <paramref name="root"/>'s chain lock (PS-20, <see cref="PagedMMF.CaptureTicket"/>): taken before the lock is, and
+    /// given to <see cref="EndChainLockHold"/> once it is released. <paramref name="root"/> is a chunk of the page cache.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static PagedMMF.CaptureTicket ChainLockTicket(ref ChunkAccessor<PersistentStore> accessor, ref CompRevStorageHeader root) =>
+        accessor.Store.Mmf.TakeCaptureTicket(ref Unsafe.As<CompRevStorageHeader, byte>(ref root));
+
+    /// <summary>Ends the chain-lock hold <paramref name="ticket"/> was taken for, after the lock is released (PS-20).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EndChainLockHold(ref ChunkAccessor<PersistentStore> accessor, in PagedMMF.CaptureTicket ticket) =>
+        accessor.Store.Mmf.EndLockHold(in ticket);
+
     internal static ElementRevisionHandle GetRevisionElement(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short revisionIndex)
     {
         ref var firstHeader = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
@@ -67,8 +80,10 @@ internal ref struct ComponentRevisionManager
 
         var curChunkId = nextChunkId;
         var useLock = !firstHeader.Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (useLock)
         {
+            ticket = ChainLockTicket(ref accessor, ref firstHeader);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!firstHeader.Control.EnterSharedAccess(ref wc))
             {
@@ -84,6 +99,7 @@ internal ref struct ComponentRevisionManager
         if (useLock)
         {
             firstHeader.Control.ExitSharedAccess();
+            EndChainLockHold(ref accessor, in ticket);
         }
 
         return new ElementRevisionHandle(ref accessor, curChunkId, false, (short)indexInChunk);
@@ -102,8 +118,10 @@ internal ref struct ComponentRevisionManager
         ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevInfo.CompRevTableFirstChunkId, true);
 
         // Enter exclusive access for the Revision Table (skip if caller already holds the lock)
+        var ticket = default(PagedMMF.CaptureTicket);
         if (!lockAlreadyHeld)
         {
+            ticket = ChainLockTicket(ref compRevTableAccessor, ref firstHeader);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!firstHeader.Control.EnterExclusiveAccess(ref wc))
             {
@@ -161,6 +179,7 @@ internal ref struct ComponentRevisionManager
             if (!lockAlreadyHeld)
             {
                 firstHeader.Control.ExitExclusiveAccess();
+                EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
         }
     }
@@ -180,6 +199,7 @@ internal ref struct ComponentRevisionManager
         ref var accessor = ref info.CompRevTableAccessor;
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
         ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+        var ticket = ChainLockTicket(ref accessor, ref header);
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
         if (!header.Control.EnterExclusiveAccess(ref wc))
         {
@@ -221,6 +241,7 @@ internal ref struct ComponentRevisionManager
         {
             header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
             header.Control.ExitExclusiveAccess();
+            EndChainLockHold(ref accessor, in ticket);
         }
     }
 
@@ -246,8 +267,10 @@ internal ref struct ComponentRevisionManager
         // A rollback run while this thread holds the chain already — a conflict handler, under the lock its commit holds, disposing another transaction
         // that wrote the entity — voids under that lock: waiting for the lock it holds would never end.
         var held = header.Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (!held)
         {
+            ticket = ChainLockTicket(ref accessor, ref header);
             var unbounded = new WaitContext(Deadline.Infinite, default);
             header.Control.EnterExclusiveAccess(ref unbounded);
         }
@@ -269,6 +292,7 @@ internal ref struct ComponentRevisionManager
             {
                 header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 header.Control.ExitExclusiveAccess();
+                EndChainLockHold(ref accessor, in ticket);
             }
         }
     }
@@ -763,6 +787,70 @@ internal ref struct ComponentRevisionManager
     }
 
     /// <summary>
+    /// Frees every chain lock a crash left held in the data file (PS-20). A capture can copy a held lock word, and only the checkpoint after the release
+    /// rewrites it: a crash before that one leaves the hold on disk, its holder gone. Run on a crash open as the table loads — before the HEAD rebuild's
+    /// walks, the log replay's revisions and the scrub, each of which takes chain locks and would wait for the dead holder. Every root is reset, a
+    /// destroyed entity's chain still awaiting release included; a root is dirtied only when its word was set. Single-threaded.
+    /// </summary>
+    /// <returns>The number of roots whose lock word was set.</returns>
+    internal static int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
+    {
+        var capacity = segment.ChunkCapacity;
+        if (capacity == 0 || segment.AllocatedChunkCount == 0)
+        {
+            return 0;
+        }
+
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var changeSet = dbe.MMF.CreateChangeSet();
+        var reset = 0;
+        try
+        {
+            var accessor = segment.CreateChunkAccessor(changeSet);
+            try
+            {
+                // The roots are the allocated chunks no other chunk names as its next — EnumerateVersionedChainHeads' two passes.
+                var overflowSet = new HashSet<int>();
+                for (var chunkId = 0; chunkId < capacity; chunkId++)
+                {
+                    if (segment.IsChunkAllocated(chunkId))
+                    {
+                        var next = accessor.GetChunk<CompRevStorageHeader>(chunkId).NextChunkId;
+                        if (next != 0)
+                        {
+                            overflowSet.Add(next);
+                        }
+                    }
+                }
+
+                for (var chunkId = 0; chunkId < capacity; chunkId++)
+                {
+                    if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
+                    {
+                        continue;
+                    }
+
+                    if (Unsafe.As<AccessControlSmall, int>(ref accessor.GetChunk<CompRevStorageHeader>(chunkId).Control) != 0)
+                    {
+                        accessor.GetChunk<CompRevStorageHeader>(chunkId, true).Control = default;
+                        reset++;
+                    }
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+
+        return reset;
+    }
+
+    /// <summary>
     /// Recovery orphan sweep (03-recovery.md §6): after a table's chains have been scrubbed to their heads, free every allocated
     /// chunk no longer reachable — a revision-table chunk that is not a chain root, or a content chunk that no surviving head
     /// references. These are chunks leaked by pre-crash operations interrupted between allocation and linking. Post-scrub each
@@ -951,8 +1039,10 @@ internal ref struct ComponentRevisionManager
 
         var first = header;
         var useLock = !first->Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (useLock)
         {
+            ticket = ChainLockTicket(ref accessor, ref *first);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!first->Control.EnterSharedAccess(ref wc))
             {
@@ -966,6 +1056,7 @@ internal ref struct ComponentRevisionManager
         if (useLock)
         {
             first->Control.ExitSharedAccess();
+            EndChainLockHold(ref accessor, in ticket);
         }
 
         return (short)indexInChunk;

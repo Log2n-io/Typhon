@@ -121,6 +121,9 @@ public unsafe partial class Transaction : EntityAccessor
         public bool Created;
         public bool LockHeld;
 
+        // The capture ticket of the hold LockHeld says PREPARE retained (PS-20): ended by whichever path releases it.
+        public PagedMMF.CaptureTicket LockTicket;
+
         // Resolved physical location of the committing revision element, captured in PREPARE so PUBLISH reconstructs the handle without a locking walk.
         public int ElementChunkId;
         public bool ElementIsFirst;
@@ -1656,10 +1659,12 @@ public unsafe partial class Transaction : EntityAccessor
         // PUBLISH takes it again for the new entry (AP-05). With a handler the lock is held since PREPARE.
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
         var lockTaken = false;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (!lockHeld)
         {
             dbe?.ChainVoidProbe?.Invoke(info.ComponentTable, firstChunkId);
             ref var lockHeader = ref info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            ticket = ComponentRevisionManager.ChainLockTicket(ref info.CompRevTableAccessor, ref lockHeader);
             var wc = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!lockHeader.Control.EnterExclusiveAccess(ref wc))
             {
@@ -1678,6 +1683,7 @@ public unsafe partial class Transaction : EntityAccessor
             if (lockTaken)
             {
                 info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref info.CompRevTableAccessor, in ticket);
             }
         }
     }
@@ -1850,9 +1856,11 @@ public unsafe partial class Transaction : EntityAccessor
         // AP-01: the lock is RETAINED past Append and released by PublishComponent, so [detect, resolve-against-committed, IsolationFlag clear] is
         // one atomic region — required for concurrent conflict resolution to compose (ConcurrencyConflictTests #8).
         var lockHeld = false;
+        var lockTicket = default(PagedMMF.CaptureTicket);
         if (conflictSolver != null)
         {
             ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            lockTicket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref lockHeader);
             var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
             {
@@ -1962,6 +1970,7 @@ public unsafe partial class Transaction : EntityAccessor
                 LastCommitRevisionIndex = lastCommitRevisionIndex,
                 Created = (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0,
                 LockHeld = lockHeld,
+                LockTicket = lockTicket,
                 ElementChunkId = elementHandle.ChunkId,
                 ElementIsFirst = elementHandle.IsFirst,
                 ElementIndexInChunk = elementHandle.ElementIndex,
@@ -1984,6 +1993,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 lockHeader.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in lockTicket);
             }
         }
 
@@ -2033,8 +2043,10 @@ public unsafe partial class Transaction : EntityAccessor
         // a chain that has a pending entry, and AccessControlSmall gives a waiting writer no preference: an entity read without pause can delay this publish
         // for as long as the reads overlap. It does not deadlock — a reader holds no lock this transaction waits for — but the delay is not bounded.
         var lockTaken = false;
+        var ticket = e.LockTicket;
         if (!e.LockHeld)
         {
+            ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
             var unbounded = new WaitContext(Deadline.Infinite, default);
             header.Control.EnterExclusiveAccess(ref unbounded);
             lockTaken = true;
@@ -2100,6 +2112,7 @@ public unsafe partial class Transaction : EntityAccessor
             if (lockTaken || (e.LockHeld && completed))
             {
                 header.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
         }
     }
@@ -2176,6 +2189,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 ref var lockHeader = ref e.Info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
                 lockHeader.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref e.Info.CompRevTableAccessor, in e.LockTicket);
             }
         }
 

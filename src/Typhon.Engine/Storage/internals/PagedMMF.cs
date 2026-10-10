@@ -640,6 +640,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             MemPages = AllocateCacheBlock(memoryAllocator, this, cacheSize);
             _slots = new PageSlotTable(memoryAllocator, this, pageCount);
             _directory = new PageDirectory(memoryAllocator, this, _slots);
+            AllocateCaptureFence(memoryAllocator, pageCount);
         }
         catch (OutOfMemoryException e)
         {
@@ -1105,6 +1106,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // The table itself is freed with the other child blocks below (base.Dispose); callers arriving later find null (PageSlotTable remarks).
             _slots = null;
             _directory = null;
+            _captureFence = null;
+            _locksHeldThroughCapture = null;
             _memPagesAddr = null;
             _windows = null;
             // Null-safe: an early ctor throw (e.g. the InvalidDatabaseBundle rejection above, raised before the strategy is
@@ -3653,7 +3656,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var genAtCapture = Volatile.Read(ref pi.WritebackGen);
 
             using var staging = stagingPool.Rent();
-            if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex))
+
+            // The copy is the page's image: a lock held while it reads the page goes to disk in it, and its holder learns of it at release (PS-20).
+            BeginCapture(memPageIndex);
+            bool copied;
+            try
+            {
+                copied = CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex);
+            }
+            finally
+            {
+                EndCapture(memPageIndex);
+            }
+
+            if (!copied)
             {
                 // Page has an active writer (via TryLatchPageExclusive) — skip it. The page stays dirty and will be picked up in the next checkpoint cycle.
                 // This prevents deadlock when the writer is blocked on backpressure waiting for THIS checkpoint to free pages.
@@ -3855,6 +3871,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return Task.CompletedTask;
         }
 
+        // These pages are written from live memory, read by the OS at any point until the writes complete: each is a capture of its page from here to the
+        // continuation (PS-20). Ended there, or below if the writes cannot be issued.
+        for (int i = 0; i < normalPages.Length; i++)
+        {
+            BeginCapture(normalPages[i]);
+        }
+
         // Stamp every page (file page 0 is the file header, a different format, so it is left alone): bump its ChangeRevision, then stamp identity
         // and checksum so the on-disk copy is self-consistent (CP-07 equivalent for SavePages).
         var filePages = new int[normalPages.Length];
@@ -3893,13 +3916,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         var tasks = new Task[operations.Count];
-        for (int i = 0; i < operations.Count; i++)
+        var issued = 0;
+        try
         {
-            tasks[i] = SavePageInternal(operations[i].memPageIndex, operations[i].length).AsTask();
+            for (; issued < operations.Count; issued++)
+            {
+                tasks[issued] = SavePageInternal(operations[issued].memPageIndex, operations[issued].length).AsTask();
+            }
+        }
+        catch
+        {
+            // The writes already issued still read their pages: their captures end when they complete.
+            Task.WhenAll(tasks.AsSpan(0, issued)).ContinueWith(t =>
+            {
+                _ = t.Exception;   // the throw below reports the failure; an issued write's own is read here, not left unobserved
+                EndCaptures(normalPages);
+            });
+            throw;
         }
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(_ =>
         {
+            EndCaptures(normalPages);
+
             // CP-03: fsync data file before decrementing DirtyCounter.
             // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,
             // risking stale reload after eviction if the OS hasn't flushed to stable media.
@@ -3955,6 +3994,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         runs.Add((start, length));
+    }
+
+    private void EndCaptures(int[] memPageIndices)
+    {
+        for (var i = 0; i < memPageIndices.Length; i++)
+        {
+            EndCapture(memPageIndices[i]);
+        }
     }
 
     internal ValueTask SavePageInternal(int firstMemPageIndex, int length)

@@ -16,6 +16,7 @@ internal ref struct RevisionEnumerator : IDisposable
     private ref int _nextChunkId;
     private readonly bool _exclusiveAccess;
     private readonly bool _ownsLock;
+    private readonly PagedMMF.CaptureTicket _ticket;
     private bool _hasLopped;
     private short _revisionIndex;
 
@@ -79,6 +80,8 @@ internal ref struct RevisionEnumerator : IDisposable
         _ownsLock = !_header.Control.IsLockedByCurrentThread;
         if (_ownsLock)
         {
+            _ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref _header);
+
             // The budget is the caller's — the infinite PTA context, a fresh per-call one — or, on the transactional path, composed only if the
             // uncontended attempt fails (CX-06). Either way it is only consulted under contention.
             if (budgetOwner != null)
@@ -156,6 +159,7 @@ internal ref struct RevisionEnumerator : IDisposable
         if (_ownsLock)
         {
             _header.Control.Exit(_exclusiveAccess);
+            ComponentRevisionManager.EndChainLockHold(ref _compRevTableAccessor, in _ticket);
         }
     }
 }
