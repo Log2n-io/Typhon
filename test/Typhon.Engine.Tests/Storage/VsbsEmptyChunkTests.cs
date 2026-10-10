@@ -78,6 +78,21 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         }
     }
 
+    /// <summary>The cache slot holding <paramref name="chunk"/>.</summary>
+    private unsafe int SlotOf<T>(VariableSizedBufferSegment<T, PersistentStore> vsbs, int chunk) where T : unmanaged
+    {
+        using var guard = EpochGuard.Enter(_dbe.EpochManager);
+        var accessor = vsbs.Segment.CreateChunkAccessor();
+        try
+        {
+            return _dbe.MMF.MemPageIndexOf(accessor.GetChunkAddress(chunk));
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
     /// <summary>A buffer of <paramref name="count"/> elements 1, 2, …, and its data chunks, in chain order.</summary>
     private (int Buffer, List<(int Chunk, int Count)> Chunks) NewBuffer<T>(VariableSizedBufferSegment<T, PersistentStore> vsbs, int count, Func<int, T> value)
         where T : unmanaged
@@ -169,4 +184,83 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         Assert.That(read, Is.EquivalentTo(expected), "the elements of the other chunks");
         Assert.That(Chain(vsbs, buffer).ConvertAll(c => c.Chunk), Does.Not.Contain(chunks[1].Chunk), "the empty chunk was unlinked");
     }
+
+    /// <summary>
+    /// #1280: the reader's unlinks go through an accessor with no change set, so they leave their pages clean, unless something else makes them owed —
+    /// as a chunk freed on the same page does. Here the predecessor's link is on one page and the freed chunks on the next: the free reaches the disk,
+    /// the link does not, and the chain read back links freed chunks — chunks the segment can hand to another buffer.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AReadersUnlinks_ReachTheDisk()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<long>();
+        var segment = vsbs.Segment;
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewBuffer(vsbs, vsbs.ElementCountRootChunk + perChunk * 200, i => (long)i);
+        Assert.That(chunks, Has.Count.EqualTo(200), "premise: two hundred data chunks");
+        var boundary = chunks.FindIndex(c => PageOf(segment, c.Chunk) != PageOf(segment, chunks[0].Chunk));
+        Assert.That(boundary, Is.InRange(90, 180), "premise: the chunks cross a page boundary, past round one");
+
+        // Round one fills the buffer's free list past its threshold, so the next unlinks free their chunks instead of parking them.
+        for (var i = 1; i <= 80; i++)
+        {
+            Empty(vsbs, buffer, chunks[i].Chunk);
+        }
+
+        ReadThrough(vsbs, buffer);
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: round one is on disk");
+
+        // Round two: the chunks just past the boundary. Their predecessor, on the page before, gets the only write of the unlink on that page.
+        for (var i = boundary; i < boundary + 10; i++)
+        {
+            Empty(vsbs, buffer, chunks[i].Chunk);
+        }
+
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the emptied chunks are on disk");
+        ReadThrough(vsbs, buffer);
+        for (var i = boundary; i < boundary + 10; i++)
+        {
+            Assert.That(segment.IsChunkAllocated(chunks[i].Chunk), Is.False, $"premise: the reader freed chunk {chunks[i].Chunk}");
+        }
+
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        var predecessorSlot = SlotOf(vsbs, chunks[boundary - 1].Chunk);
+        Assert.That(_dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages were evicted");
+        Assert.That(_dbe.MMF.GetPageState(predecessorSlot), Is.EqualTo(PagedMMF.PageState.Free), "premise: the predecessor's page left the cache");
+        var chain = Chain(vsbs, buffer).ConvertAll(c => c.Chunk);
+        Assert.That(chain, Has.None.Matches<int>(c => !segment.IsChunkAllocated(c)), "the chain read back links a freed chunk");
+    }
+
+    /// <summary>
+    /// A reader's own read is no write: it holds nothing that keeps the checkpoint off a page. The reader used to fetch every chunk it stepped onto as
+    /// dirty — through an accessor with no change set, a mark that registered nothing but the page's active-writer count — so a page owed by someone
+    /// else could not be written while the reader was open, and a forced checkpoint never completed (#1277, #1280).
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void AnOpenReader_DoesNotHoldOffTheCheckpoint()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var (buffer, chunks) = NewBuffer(vsbs, vsbs.ElementCountPerChunk * 2, i => i);
+        var (other, otherChunks) = NewBuffer(vsbs, 1, i => i);
+        Assert.That(PageOf(vsbs.Segment, otherChunks[0].Chunk), Is.EqualTo(PageOf(vsbs.Segment, chunks[1].Chunk)), "premise: the two buffers share a page");
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the buffers are on disk");
+
+        using var guard = EpochGuard.Enter(_dbe.EpochManager);
+        using var reader = vsbs.GetReadOnlyAccessor(buffer);
+        Assert.That(reader.NextChunk(), Is.True, "premise: the reader stepped onto the second data chunk");
+
+        // Another buffer's write leaves that page owed.
+        Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            vsbs.AddElement(other, 1_000, ref a);
+            return 0;
+        });
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "the checkpoint, while the reader is open");
+    }
+
+    /// <summary>The page of <paramref name="chunk"/> in its segment.</summary>
+    private static int PageOf(ChunkBasedSegment<PersistentStore> segment, int chunk) =>
+        chunk < segment.ChunkCountRootPage ? 0 : 1 + (chunk - segment.ChunkCountRootPage) / segment.ChunkCountPerPage;
 }

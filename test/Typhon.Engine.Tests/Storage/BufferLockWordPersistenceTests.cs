@@ -103,8 +103,8 @@ class BufferLockWordPersistenceTests : TestBase<BufferLockWordPersistenceTests>
 
     /// <summary>
     /// A buffer whose root is the last chunk of its page, holding one element, and a neighbour root on the same page. The collection stride leaves a root
-    /// no room for elements, so they land on the next page: a reader steps onto that chunk and marks its page as being written, which keeps the
-    /// checkpoint off that page — not off the root's.
+    /// no room for elements, so they land on the next page. Until #1280 a reader marked the chunk it stepped onto as being written, which kept the
+    /// checkpoint off that page; the root's page, apart, was the one captured.
     /// </summary>
     private static (int Buffer, int Neighbour) BufferAtAPageEnd(DatabaseEngine dbe, VariableSizedBufferSegment<int, PersistentStore> vsbs)
     {

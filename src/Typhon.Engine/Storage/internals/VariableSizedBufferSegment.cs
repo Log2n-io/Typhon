@@ -122,6 +122,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         try
         {
             var newValue = --rh.RefCounter;
+            accessor.Segment.MarkChunkModified(bufferId);   // owed even through an accessor with no change set, as the cleanup's is (#1280)
             if (newValue == 0)
             {
                 // Chain cleanup inline — do NOT call DeleteBuffer here, it would double-decrement RefCounter.
@@ -1023,8 +1024,9 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
             return false;
         }
 
-        // Fetch the new chunk
-        var nextChunkAddr = _accessor.GetChunkAddress(nextChunkId, true);
+        // Fetch the new chunk — a read: fetched dirty, through this accessor (no change set, usually), it marked the page as being written for the
+        // reader's whole life, which kept the checkpoint off it, and registered nothing (#1280). An unlink below marks what it writes.
+        var nextChunkAddr = _accessor.GetChunkAddress(nextChunkId);
         var nextChunkElementCount = ((VariableSizedBufferChunkHeader*)nextChunkAddr)->ElementCount;
 
         // Check if the chunk is empty, then try to remove it from the storage list
@@ -1062,8 +1064,10 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
                         {
                             if (_accessor.TryLatchExclusive(curChunkId))
                             {
-                                // Fix the storage link-list by removing the empty chunk
+                                // Fix the storage link-list by removing the empty chunk. Marked written: with no change set to register it, the page
+                                // stayed clean, and an eviction dropped the link — leaving the chain on disk through the chunks freed below (#1280).
                                 prevChunk->NextChunkId = curChunk->NextChunkId;
+                                _segment.MarkChunkModified(prevChunkId);
 
                                 // Check if we must free the chunk or link it to the free list
                                 if (rootChunk.TotalFreeChunk > freeChunkThreshold)
@@ -1078,6 +1082,8 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
                                     // First empty chunk is pointing to the one we just pop
                                     rootChunk.FirstFreeChunkId = curChunkId;
                                     ++rootChunk.TotalFreeChunk;
+                                    _segment.MarkChunkModified(curChunkId);
+                                    _segment.MarkChunkModified(_rootChunkId);
                                 }
 
                                 _accessor.UnlatchExclusive(curChunkId);
@@ -1085,7 +1091,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
                             // Update the new current chunk to be the next in line
                             curChunkId = prevChunk->NextChunkId;
-                            curChunk = (curChunkId != 0) ? (VariableSizedBufferChunkHeader*)_accessor.GetChunkAddress(curChunkId, true) : null;
+                            curChunk = (curChunkId != 0) ? (VariableSizedBufferChunkHeader*)_accessor.GetChunkAddress(curChunkId) : null;
                         }
 
                         _accessor.UnlatchExclusive(prevChunkId);

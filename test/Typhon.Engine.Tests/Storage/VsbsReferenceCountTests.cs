@@ -89,4 +89,34 @@ internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests
         });
         Assert.That(_vsbs.Segment.IsChunkAllocated(buffer), Is.False, "the last reference's delete frees the root");
     }
+
+    /// <summary>
+    /// #1280: a release through an accessor with no change set — the deferred cleanup's — decremented the count in a page it never made owed. Evicted
+    /// clean and read back, the count was one too high, and the buffer could never be freed.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void AReleaseWithoutAChangeSet_ReachesTheDisk()
+    {
+        var buffer = NewBuffer(1, 2, 3);
+        Run((ref ChunkAccessor<PersistentStore> a) => _vsbs.BufferAddRef(buffer, ref a));
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the count of 2 is on disk");
+
+        using (EpochGuard.Enter(_dbe.EpochManager))
+        {
+            var accessor = _vsbs.Segment.CreateChunkAccessor();
+            try
+            {
+                Assert.That(_vsbs.BufferRelease(buffer, ref accessor), Is.EqualTo(1), "premise: one reference left");
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        Assert.That(_dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages were evicted");
+        Assert.That(Run((ref ChunkAccessor<PersistentStore> a) => _vsbs.GetRefCounter(buffer, ref a)), Is.EqualTo(1), "the count, read back from disk");
+    }
 }
