@@ -535,6 +535,134 @@ class ChainLockWordPersistenceTests : TestBase<ChainLockWordPersistenceTests>
     }
 
     /// <summary>
+    /// An element lookup past the root's entries walks to an overflow chunk under the chain's shared lock, when its caller holds none — the recovery
+    /// replay's lookup does: that hold is ticketed. (GetRevisionLocation's own hold is never taken: its one caller, AddCompRev, holds the chain's lock.)
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-20")]
+    [CancelAfter(20_000)]
+    public void AnElementLookupPastTheRoot_EndsItsHold()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnTrader(dbe, 1);
+        var root = WalletRootOf(dbe, id);
+        var slot = SlotOf(dbe, root);
+
+        // A reader opened first keeps every later revision: the chain grows past the root's entries.
+        using var pin = dbe.CreateReadOnlyTransaction();
+        for (var k = 0; k < 4; k++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var e = tx.OpenMut(id);
+            var wallet = e.Read(MkTraderArch.Wallet);
+            wallet.Credits++;
+            e.Set(MkTraderArch.Wallet, wallet);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var depth = dbe.EpochManager.EnterScope();
+        try
+        {
+            var accessor = dbe.GetComponentTable<MkWallet>().CompRevTableSegment.CreateChunkAccessor();
+            try
+            {
+                ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+                var index = (short)(header.FirstItemIndex + header.ItemCount - 1);
+                Assert.That(index, Is.GreaterThanOrEqualTo((short)ComponentRevisionManager.CompRevCountInRoot), "premise: the newest entry is past the root");
+
+                var before = BeginStagedCapture(dbe, slot);
+                _ = ComponentRevisionManager.GetRevisionElement(ref accessor, root, index);
+                Assert.That(EndStagedCapture(dbe, slot, before), Is.EqualTo(1), "the lookup's hold");
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+        finally
+        {
+            dbe.EpochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
+    /// A conflict-handler commit that fails in PREPARE after another entity's PREPARE retained its chain's lock gives that lock back on its abort path
+    /// (ReleaseRetainedPublishLocks), the failing entity's own in its PREPARE, and the terminal rollback voids both entries under their locks: every hold
+    /// is ticketed.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-20")]
+    [CancelAfter(20_000)]
+    public void AnAbortedCommitsRetainedLocks_EndTheirHolds()
+    {
+        using var dbe = SetupEngine();
+        var a = SpawnTrader(dbe, 1);
+        var b = SpawnTrader(dbe, 2);
+        var slot = SlotOf(dbe, WalletRootOf(dbe, a));
+        Assert.That(SlotOf(dbe, WalletRootOf(dbe, b)), Is.EqualTo(slot), "premise: both chains' roots are in one page");
+
+        var prepared = 0;
+        dbe.PrepareRetainedLockProbe = () =>
+        {
+            if (++prepared == 2)
+            {
+                throw new InvalidOperationException("probe");
+            }
+        };
+        long overlapped;
+        try
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            foreach (var id in new[] { a, b })
+            {
+                var e = tx.OpenMut(id);
+                var wallet = e.Read(MkTraderArch.Wallet);
+                wallet.Credits++;
+                e.Set(MkTraderArch.Wallet, wallet);
+            }
+
+            var before = BeginStagedCapture(dbe, slot);
+            Assert.That(() => tx.Commit((ref ConcurrencyConflictSolver _) => { }), Throws.Exception, "premise: the second PREPARE throws");
+            overlapped = EndStagedCapture(dbe, slot, before);
+        }
+        finally
+        {
+            dbe.PrepareRetainedLockProbe = null;
+        }
+
+        Assert.That(prepared, Is.EqualTo(2), "premise: both entities reached PREPARE");
+        Assert.That(overlapped, Is.EqualTo(4), "the retained lock released on the abort path, the failing PREPARE's, and the terminal rollback's two voids");
+        Assert.That(LockWord(dbe, WalletRootOf(dbe, a)), Is.EqualTo((0, 0)));
+        Assert.That(LockWord(dbe, WalletRootOf(dbe, b)), Is.EqualTo((0, 0)));
+    }
+
+    /// <summary>
+    /// A destroyed entity's chain is released, under its lock, by the cleanup that runs once no snapshot can read it — here the destroy's own commit:
+    /// that hold is ticketed with the others of the commit.
+    /// </summary>
+    [Test]
+    [VerifiesRule("PS-20")]
+    [CancelAfter(20_000)]
+    public void ADestroyedChainsRelease_EndsItsHold()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnTrader(dbe, 1);
+        var slot = SlotOf(dbe, WalletRootOf(dbe, id));
+
+        var released = dbe.DeferredCleanupManager.DestroyedChainsReleased;
+        var before = BeginStagedCapture(dbe, slot);
+        using (var destroy = dbe.CreateQuickTransaction())
+        {
+            destroy.Destroy(id);
+            Assert.That(destroy.Commit(), Is.True);
+        }
+
+        var overlapped = EndStagedCapture(dbe, slot, before);
+        Assert.That(dbe.DeferredCleanupManager.DestroyedChainsReleased - released, Is.GreaterThan(0), "premise: the commit released the chain");
+        Assert.That(overlapped, Is.EqualTo(4), "the commit's holds on the chain, the release's among them");
+    }
+
+    /// <summary>
     /// The fence itself, case by case: a capture of the holder's slot that could have copied the hold — in flight at the ticket, or started since — has
     /// the page marked; one that ended before the ticket, or a capture of another slot, does not. A capture between the ticket and an acquire that had to
     /// wait marks too: a rewrite more than needed, never one missed.

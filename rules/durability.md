@@ -2138,8 +2138,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             cleanup, a destroy's tombstone and a last-writer-wins resolution are found under a staged capture; the fence marks the holds a capture
             could have copied, and not the others. Mutations killed: no mark, no in-flight check, no started check, the checkpoint copy or the save
             not bracketed, a save never ending, the reset left to the scrub, the enumerator, the publish, the append, the void, the cleanup, the
-            tombstone or the resolution never ending its hold, the retained ticket not carried. Not covered by a test: the shared holds of
-            GetRevisionElement and GetRevisionLocation, the abort path's release of retained locks and the release of a destroyed entity's chain.
+            tombstone or the resolution never ending its hold, the retained ticket not carried; and, since #1284, an element lookup past the root,
+            the abort path's release of retained locks and a destroyed chain's release never ending theirs. GetRevisionLocation's own hold is
+            never taken: its one caller, AddCompRev, holds the chain's lock.
             BufferLockWordPersistenceTests [VerifiesRule] — a buffer read held while a neighbour's write leaves the root's page owed and the
             checkpoint writes it: read back held before the fix, (0, 1) on 3 of 3 runs; now the page stays owed, is rewritten and reads back free;
             a hold copied before a hard crash is free after recovery and the buffer writable; a write's and a raw read's holds are found under a
