@@ -949,6 +949,14 @@ internal ref struct ComponentRevisionManager
                 // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
                 var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId)
                     .Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
+
+                // 0: the field never got a buffer. Released, it decremented the reserved chunk 0 as a reference count, under chunk 0's exclusive lock —
+                // the crash-open scrub's path, which then waited on whatever hold the data file had kept on chunk 0 (#1291).
+                if (bufferId == 0)
+                {
+                    continue;
+                }
+
                 var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
                 f.Vsbs.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();

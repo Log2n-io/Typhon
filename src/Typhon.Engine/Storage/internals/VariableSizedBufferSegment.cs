@@ -140,6 +140,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
     public int BufferAddRef(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
+        Debug.Assert(bufferId != 0, "buffer id 0 is no buffer: the caller skips it (#1291)");
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
         // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
         var ticket = LockBuffer(ref rh, ref accessor);
@@ -164,6 +165,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
     public int BufferRelease(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
+        Debug.Assert(bufferId != 0, "buffer id 0 is no buffer: the caller skips it (#1291)");
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
         // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
         var ticket = LockBuffer(ref rh, ref accessor);
@@ -1013,6 +1015,11 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     {
         get
         {
+            if (_rootChunkAddr == null)
+            {
+                return 0;
+            }
+
             ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
             return rh.TotalCount;
         }
@@ -1022,6 +1029,11 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     {
         get
         {
+            if (_rootChunkAddr == null)
+            {
+                return 0;
+            }
+
             ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
             return rh.RefCounter;
         }
@@ -1033,6 +1045,13 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         _segment = owner.Segment;
         _rootHeaderTotalSize = owner.RootHeaderTotalSize;
         _rootChunkId = rootChunkId;
+
+        // Buffer id 0 is "no buffer" — a collection never added to: an empty reader, which touches nothing. Chunk 0 is the segment's reserved sentinel;
+        // the shared hold this took on it was never given back, and a release of id 0 then waited on the leaked holds for its exclusive lock (#1291).
+        if (rootChunkId == 0)
+        {
+            return;
+        }
 
         _accessor = _segment.CreateChunkAccessor(changeSet);
 
@@ -1060,6 +1079,11 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
     unsafe public bool NextChunk()
     {
+        if (_curChunkAddr == null)
+        {
+            return false;
+        }
+
         // Read next chunk from the current header
         var nextChunkId = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->NextChunkId;
         var prevChunkId = _curChunkId;
