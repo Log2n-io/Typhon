@@ -1027,32 +1027,44 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             var epoch = guard.Epoch;
 
             RequestPageEpoch(0, epoch, out var memPageIdx);
-            var latched = TryLatchPageExclusive(memPageIdx);
-            Debug.Assert(latched, "TryLatchPageExclusive failed on the meta page during PersistMetaNow");
+            // Not latched: another thread holds the meta page — unlatching it in the finally below would release that thread's latch.
+            if (!TryLatchPageExclusive(memPageIdx))
+            {
+                ThrowHelper.ThrowInvalidOp("PersistMetaNow: the meta page is latched by another thread");
+            }
 
-            byte* pageAddr = GetMemPageAddress(memPageIdx);
-            var pageSpan = new Span<byte>(pageAddr, PageSize);
+            // Unlatched whatever happens: a throw below (an oversized bootstrap, an I/O error) left the meta page latched, and every later meta writer —
+            // the checkpoint's LSN flip among them — failed to latch it (#1292).
+            int targetSlot;
+            ulong nextGen;
+            try
+            {
+                byte* pageAddr = GetMemPageAddress(memPageIdx);
+                var pageSpan = new Span<byte>(pageAddr, PageSize);
 
-            // Serialize the bootstrap into the in-memory meta page, then stamp the next generation + CRC. The meta page
-            // is CRC'd now (unlike the v1 root page, which was checksum-exempt) — the CRC is the torn-slot detector.
-            Bootstrap.WriteTo(pageAddr + BootstrapStreamOffset, PageSize - BootstrapStreamOffset);
+                // Serialize the bootstrap into the in-memory meta page, then stamp the next generation + CRC. The meta page
+                // is CRC'd now (unlike the v1 root page, which was checksum-exempt) — the CRC is the torn-slot detector.
+                Bootstrap.WriteTo(pageAddr + BootstrapStreamOffset, PageSize - BootstrapStreamOffset);
 
-            var nextGen = _metaGeneration + 1;
-            PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
+                nextGen = _metaGeneration + 1;
+                PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
 
-            // The meta page is the one page that CANNOT carry a per-sector footer: its metadata region holds the root
-            // identity header, and the bootstrap stream starts immediately after and runs to the end of the page, so the
-            // footer's bytes are occupied by real content. Clear the declaration explicitly rather than relying on it
-            // never having been set — a stray value there would make a reader verify this page the wrong way.
-            PageSectorFooter.ClearGeometry(pageSpan);
-            StampPageForWrite(pageSpan, MetaSlotA);
+                // The meta page is the one page that CANNOT carry a per-sector footer: its metadata region holds the root
+                // identity header, and the bootstrap stream starts immediately after and runs to the end of the page, so the
+                // footer's bytes are occupied by real content. Clear the declaration explicitly rather than relying on it
+                // never having been set — a stray value there would make a reader verify this page the wrong way.
+                PageSectorFooter.ClearGeometry(pageSpan);
+                StampPageForWrite(pageSpan, MetaSlotA);
 
-            // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
-            var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
-            WritePageDirect(targetSlot, pageSpan);
-            FlushToDisk();
-
-            UnlatchPageExclusive(memPageIdx);
+                // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
+                targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
+                WritePageDirect(targetSlot, pageSpan);
+                FlushToDisk();
+            }
+            finally
+            {
+                UnlatchPageExclusive(memPageIdx);
+            }
 
             _metaCurrentSlot = targetSlot;
             _metaGeneration = nextGen;

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Engine.Internals;
@@ -196,6 +197,130 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
         return meta.IsClusterEligible && es.ClusterState != null
             ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, es.ClusterState.Layout.SlotToVersionedIndex[slot])
             : EntityRecordAccessor.GetLocation(record, slot);
+    }
+
+    /// <summary>
+    /// A buffer reader unlinking empty chunks fetches each next one with the buffer's lock promoted and the root's and predecessor's pages latched. A
+    /// fetch that threw — a back-pressure timeout here — left both pages latched for good and the lock exclusive, so every later user of the buffer
+    /// timed out (#1290 review).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public unsafe void AnUnlinkThatThrows_LeavesNoPageLatchedAndTheBufferFree()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.InitializeArchetypes();
+        var vsbs = dbe.GetComponentCollectionVSBS<int>();
+        var segment = vsbs.Segment;
+
+        // Four full data chunks, a page each (fillers take the rest of each page), the middle two emptied.
+        var chunks = new List<int>();
+        var fillers = new List<int>();
+        var buffer = Run(dbe, vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            var id = vsbs.AllocateBuffer(ref a);
+            var value = 1;
+            for (var c = 0; c < 4; c++)
+            {
+                for (var f = 0; f < segment.ChunkCountPerPage - 1; f++)
+                {
+                    fillers.Add(segment.AllocateChunk(false, a.ChangeSet));
+                }
+
+                for (var i = 0; i < vsbs.ElementCountPerChunk; i++)
+                {
+                    var chunk = vsbs.AddElement(id, value++, ref a);
+                    if (chunk != id && !chunks.Contains(chunk))
+                    {
+                        chunks.Add(chunk);
+                    }
+                }
+            }
+
+            foreach (var emptied in new[] { chunks[1], chunks[2] })
+            {
+                var header = (VariableSizedBufferChunkHeader*)a.GetChunkAddress(emptied);
+                var elements = (int*)((byte*)header + sizeof(VariableSizedBufferChunkHeader));
+                var values = new int[header->ElementCount];
+                for (var i = 0; i < values.Length; i++)
+                {
+                    values[i] = elements[i];
+                }
+
+                foreach (var v in values)
+                {
+                    vsbs.DeleteElement(id, emptied, v, ref a);
+                }
+            }
+
+            return id;
+        });
+        foreach (var filler in fillers)
+        {
+            segment.FreeChunk(filler);
+        }
+
+        Assert.That(chunks, Has.Count.EqualTo(4), "premise: four data chunks");
+        Assert.That(PageOf(segment, chunks[2]), Is.Not.EqualTo(PageOf(segment, chunks[1])), "premise: the second empty chunk on a page of its own");
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+
+        var saved = TimeoutOptions.Current;
+        var timeouts = saved.Clone();
+        timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(50);
+        TimeoutOptions.Current = timeouts;
+        try
+        {
+            Exception thrown = null;
+            int rootSlot, prevSlot;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                // The root, the first chunk and the first empty one tagged under this scope; every other clean page evicted — the second empty one's too.
+                var touch = segment.CreateChunkAccessor();
+                rootSlot = dbe.MMF.MemPageIndexOf(touch.GetChunkAddress(buffer));
+                prevSlot = dbe.MMF.MemPageIndexOf(touch.GetChunkAddress(chunks[0]));
+                touch.GetChunkAddress(chunks[1]);
+                touch.Dispose();
+                dbe.MMF.EvictEvictablePagesForTest();
+
+                var reader = vsbs.GetReadOnlyAccessor(buffer);
+                try
+                {
+                    var walker = Environment.CurrentManagedThreadId;
+                    dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
+                    try
+                    {
+                        reader.NextChunk();
+                    }
+                    catch (Exception e)
+                    {
+                        thrown = e;
+                    }
+                    finally
+                    {
+                        dbe.MMF.ForceBackpressureForTest = null;
+                    }
+                }
+                finally
+                {
+                    reader.Dispose();
+                }
+            }
+
+            Assert.That(thrown, Is.InstanceOf<PageCacheBackpressureTimeoutException>(), "premise: the unlink threw, fetching the second empty chunk");
+            Assert.That(dbe.MMF.GetPageState(rootSlot), Is.Not.EqualTo(PagedMMF.PageState.Exclusive), "the root's page");
+            Assert.That(dbe.MMF.GetPageState(prevSlot), Is.Not.EqualTo(PagedMMF.PageState.Exclusive), "the predecessor's page");
+            var (owner, shared) = Run(dbe, vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+            {
+                ref var rh = ref a.GetChunk<VariableSizedBufferRootHeader>(buffer);
+                return (rh.Lock.LockedByThreadId, rh.Lock.SharedUsedCounter);
+            });
+            Assert.That(owner, Is.Zero, "the buffer's lock, exclusively held by nobody");
+            Assert.That(shared, Is.Zero, "the buffer's shared holds");
+        }
+        finally
+        {
+            TimeoutOptions.Current = saved;
+        }
     }
 
     private static int PageOf(ChunkBasedSegment<PersistentStore> segment, int chunk) =>

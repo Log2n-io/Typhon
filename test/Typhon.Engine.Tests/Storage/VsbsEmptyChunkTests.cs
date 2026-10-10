@@ -489,7 +489,6 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
     /// kept, wrote into a page no longer the root's — the lock stayed held.
     /// </summary>
     [Test]
-    [VerifiesRule("PS-03")]
     [CancelAfter(30_000)]
     public void AReaderThatUnlinkedAndReadOn_ReleasesTheRootItHolds()
     {
@@ -527,8 +526,9 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         }
 
         Assert.That(read, Is.EqualTo(ElementsBut(chunks, perChunk, c => c == 1)), "the read");
+        Assert.That(rootLeftTheCache, Is.False, "the root's page, while its reader holds it");
         var holds = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => a.GetChunk<VariableSizedBufferRootHeader>(buffer).Lock.SharedUsedCounter);
-        Assert.That(holds, Is.Zero, $"the buffer's shared holds, once its reader is gone (its root's page left the cache under it: {rootLeftTheCache})");
+        Assert.That(holds, Is.Zero, "the buffer's shared holds, once its reader is gone");
     }
 
     /// <summary>The page of <paramref name="chunk"/> in its segment.</summary>

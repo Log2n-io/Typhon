@@ -190,49 +190,94 @@ public class BootstrapDictionary
         };
     }
 
+    // Every access locks it. Run-time registrations (a realm, the grid config, the schema version, the seed revision, the occupancy map's growth) write
+    // entries while the checkpoint serializes the dictionary into the meta page: a key added mid-enumeration threw inside the meta page's latch, and
+    // the checkpoint went fatal (#1292). Cold: a handful of accesses per registration or checkpoint.
     private readonly Dictionary<string, Value> _entries = new();
 
     /// <summary>Number of entries in the dictionary.</summary>
-    public int Count => _entries.Count;
+    public int Count
+    {
+        get
+        {
+            lock (_entries)
+            {
+                return _entries.Count;
+            }
+        }
+    }
 
-    /// <summary>All keys in the dictionary.</summary>
-    public IEnumerable<string> Keys => _entries.Keys;
+    /// <summary>All keys in the dictionary, a snapshot.</summary>
+    public IEnumerable<string> Keys
+    {
+        get
+        {
+            lock (_entries)
+            {
+                return [.. _entries.Keys];
+            }
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Read/Write API
     // ═══════════════════════════════════════════════════════════════════════
 
-    public void Set(string key, Value value) => _entries[key] = value;
+    public void Set(string key, Value value)
+    {
+        lock (_entries)
+        {
+            _entries[key] = value;
+        }
+    }
 
-    public bool TryGet(string key, out Value value) => _entries.TryGetValue(key, out value);
+    public bool TryGet(string key, out Value value)
+    {
+        lock (_entries)
+        {
+            return _entries.TryGetValue(key, out value);
+        }
+    }
 
-    public Value Get(string key) => _entries.TryGetValue(key, out var value) ? value : throw new KeyNotFoundException($"Bootstrap key '{key}' not found");
+    public Value Get(string key) => TryGet(key, out var value) ? value : throw new KeyNotFoundException($"Bootstrap key '{key}' not found");
 
-    public bool ContainsKey(string key) => _entries.ContainsKey(key);
+    public bool ContainsKey(string key) => TryGet(key, out _);
 
-    public void Remove(string key) => _entries.Remove(key);
+    public void Remove(string key)
+    {
+        lock (_entries)
+        {
+            _entries.Remove(key);
+        }
+    }
 
-    public void Clear() => _entries.Clear();
+    public void Clear()
+    {
+        lock (_entries)
+        {
+            _entries.Clear();
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Convenience setters
     // ═══════════════════════════════════════════════════════════════════════
 
-    public void SetBool(string key, bool value) => _entries[key] = Value.FromBool(value);
-    public void SetInt(string key, int value) => _entries[key] = Value.FromInt(value);
-    public void SetLong(string key, long value) => _entries[key] = Value.FromLong(value);
-    public void SetDateTime(string key, DateTime value) => _entries[key] = Value.FromDateTime(value);
-    public void SetString(string key, string value) => _entries[key] = Value.FromString(value);
+    public void SetBool(string key, bool value) => Set(key, Value.FromBool(value));
+    public void SetInt(string key, int value) => Set(key, Value.FromInt(value));
+    public void SetLong(string key, long value) => Set(key, Value.FromLong(value));
+    public void SetDateTime(string key, DateTime value) => Set(key, Value.FromDateTime(value));
+    public void SetString(string key, string value) => Set(key, Value.FromString(value));
 
     // ═══════════════════════════════════════════════════════════════════════
     // Convenience getters (with defaults)
     // ═══════════════════════════════════════════════════════════════════════
 
-    public int GetInt(string key, int defaultValue = 0) => _entries.TryGetValue(key, out var v) ? v.AsInt : defaultValue;
+    public int GetInt(string key, int defaultValue = 0) => TryGet(key, out var v) ? v.AsInt : defaultValue;
 
-    public long GetLong(string key, long defaultValue = 0) => _entries.TryGetValue(key, out var v) ? v.AsLong : defaultValue;
+    public long GetLong(string key, long defaultValue = 0) => TryGet(key, out var v) ? v.AsLong : defaultValue;
 
-    public bool GetBool(string key, bool defaultValue = false) => _entries.TryGetValue(key, out var v) ? v.AsBool : defaultValue;
+    public bool GetBool(string key, bool defaultValue = false) => TryGet(key, out var v) ? v.AsBool : defaultValue;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Serialization — write to byte stream
@@ -243,6 +288,14 @@ public class BootstrapDictionary
     /// [StreamLength:2B] [entries...] [0xFF]
     /// </summary>
     public unsafe int WriteTo(byte* dest, int maxBytes)
+    {
+        lock (_entries)
+        {
+            return WriteToLocked(dest, maxBytes);
+        }
+    }
+
+    private unsafe int WriteToLocked(byte* dest, int maxBytes)
     {
         byte* start = dest;
         byte* limit = dest + maxBytes - 1;  // reserve 1 byte for 0xFF sentinel
@@ -292,6 +345,14 @@ public class BootstrapDictionary
     /// <summary>Calculate the total serialized size in bytes.</summary>
     public int CalculateSize()
     {
+        lock (_entries)
+        {
+            return CalculateSizeLocked();
+        }
+    }
+
+    private int CalculateSizeLocked()
+    {
         int size = 2 + 1; // 2B header + 1B sentinel
         foreach (var kvp in _entries)
         {
@@ -310,6 +371,14 @@ public class BootstrapDictionary
     /// Deserialize the dictionary from a byte stream. Clears existing entries.
     /// </summary>
     public unsafe void ReadFrom(byte* src, int maxBytes)
+    {
+        lock (_entries)
+        {
+            ReadFromLocked(src, maxBytes);
+        }
+    }
+
+    private unsafe void ReadFromLocked(byte* src, int maxBytes)
     {
         _entries.Clear();
 
