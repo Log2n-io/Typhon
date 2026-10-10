@@ -41,10 +41,22 @@ export const MAX_EYE_DISTANCE_M = 30;
 export const DEFAULT_THIRD_PERSON_M = 4;
 
 /**
- * How fast the view settles. Looser than the map camera's 14: a followed entity changes heading abruptly — an NPC
- * turning a corner, a creature snapping to a new target — and a stiff camera makes that a jolt in the viewer's neck.
+ * How fast the view settles when SPECTATING. Looser than the map camera's 14: a followed entity changes heading abruptly
+ * — an NPC turning a corner, a creature snapping to a new target — and a stiff camera makes that a jolt in the viewer's
+ * neck.
  */
 const SMOOTHING_PER_SECOND = 6;
+
+/**
+ * How fast the view settles when the subject is the viewer's OWN avatar.
+ *
+ * <b>Nearly rigid, because the lag is not smoothing here — it is input latency.</b> At 6 per second the anchor trails the
+ * subject with a time constant near 170 ms, which is what a spectator wants and is exactly wrong for a player: it is added
+ * on top of the round trip and the interpolation delay, so pressing a key appeared to do nothing for an appreciable moment
+ * and releasing one appeared to coast. A third-person camera is bolted to its character; what should ease is the LOOK, not
+ * the position, and `goalYaw`/`goalPitch` still do.
+ */
+const PLAYER_SMOOTHING_PER_SECOND = 40;
 
 /**
  * How many points along the pull-back ray are tested against the ground. Eight is enough for a 30 m ray over terrain whose
@@ -129,6 +141,14 @@ export class EyeCamera {
    * one caller sets a player's starting distance once per avatar; everything after that is the viewer's wheel through
    * {@link zoomBy}, which is why this does not need to be called per frame and must not be.
    */
+  /**
+   * Whether the subject is the viewer's own avatar, and so whether the rig is bolted to it.
+   *
+   * Set by the app when a playing session takes the camera; false for a god camera riding a selection. See
+   * {@link PLAYER_SMOOTHING_PER_SECOND}.
+   */
+  rigid = false;
+
   setDistance(metres: number): void {
     this.goalDistance = clamp(metres, 0, MAX_EYE_DISTANCE_M);
   }
@@ -157,10 +177,15 @@ export class EyeCamera {
    * @param dtSeconds Elapsed seconds.
    */
   update(dtSeconds: number): void {
-    const k = 1 - Math.exp(-SMOOTHING_PER_SECOND * Math.max(0, dtSeconds));
-    this.anchorX += (this.subjectX - this.anchorX) * k;
-    this.anchorY += (this.subjectY - this.anchorY) * k;
-    this.anchorZ += (this.subjectZ - this.anchorZ) * k;
+    const dt = Math.max(0, dtSeconds);
+
+    // The POSITION follows at the subject's own rate — rigid for your avatar, eased for somebody else's — while the look
+    // always eases, because a jolt in the view is a jolt in the viewer's neck whoever is being watched.
+    const follow = 1 - Math.exp(-(this.rigid ? PLAYER_SMOOTHING_PER_SECOND : SMOOTHING_PER_SECOND) * dt);
+    const k = 1 - Math.exp(-SMOOTHING_PER_SECOND * dt);
+    this.anchorX += (this.subjectX - this.anchorX) * follow;
+    this.anchorY += (this.subjectY - this.anchorY) * follow;
+    this.anchorZ += (this.subjectZ - this.anchorZ) * follow;
     this.yaw += (this.goalYaw - this.yaw) * k;
     this.pitch += (this.goalPitch - this.pitch) * k;
     this.distance += (this.goalDistance - this.distance) * k;

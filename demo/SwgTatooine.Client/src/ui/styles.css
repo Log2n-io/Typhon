@@ -1,5 +1,12 @@
 :root {
   --panel-bg: rgba(24, 22, 20, 0.82);
+  /*
+   * The OPAQUE panel, for surfaces with no world behind them. `--panel-bg` is translucent on purpose — a HUD panel should
+   * show the world through it — but the login screen is drawn over the page's sand background with the viewport
+   * unmounted, and a translucent dark over sand composites to a muddy mid-tone that neither the label grey nor the
+   * button text can be read against.
+   */
+  --panel-solid: #1b1917;
   --panel-fg: #eee6d8;
   --muted: #b3a894;
   --accent: #f0b43c;
@@ -479,11 +486,12 @@ button.active {
   gap: 6px;
   width: 100%;
   max-width: 320px;
-  background: var(--panel);
+  background: var(--panel-solid);
+  color: var(--panel-fg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 18px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
 .login-card h1 {
@@ -503,10 +511,15 @@ button.active {
 .login-card input {
   font: inherit;
   padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(0, 0, 0, 0.35);
   border: 1px solid var(--border);
   border-radius: 4px;
-  color: inherit;
+  color: var(--panel-fg);
+}
+
+.login-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .login-actions {
@@ -567,6 +580,9 @@ button.active {
 }
 
 .kicked {
+  /* `.panel` is absolutely positioned for the HUD, which would take this out of the scrim's centring flow. */
+  position: static;
+  background: var(--panel-solid);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -577,7 +593,7 @@ button.active {
 
 .kicked-reason {
   margin: 0;
-  color: var(--text);
+  color: var(--panel-fg);
   line-height: 1.4;
 }
 

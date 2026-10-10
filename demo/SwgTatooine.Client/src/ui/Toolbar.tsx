@@ -21,6 +21,36 @@ const LIVE = sourceKindFrom(window.location.search) === 'live';
  * which archetypes exist, in which order, and which of them the far tier counts. Before the first frame the client's own
  * known archetypes stand in, so the panel is never empty.
  */
+/**
+ * What the controls do in the mode the viewer is actually in.
+ *
+ * <b>One line described the god camera whatever was on screen.</b> In third person W/A/S/D walk the avatar and do not pan
+ * anything, the wheel pulls the camera back rather than zooming a map, and a click names a target rather than opening an
+ * inspector — so the panel was telling a player the opposite of what their hands were doing.
+ */
+function controlHint(playing: boolean, cameraMode: 'god' | 'eye'): string {
+  if (cameraMode !== 'eye') {
+    return 'Drag: pan · Right-drag: orbit · Wheel: zoom · WASD/QE/RF · Click: inspect';
+  }
+
+  return playing
+    ? 'WASD: walk · Shift: walk slowly · Drag: look · Wheel: pull back · Click: target'
+    : 'Drag: look · Wheel: pull back · Q/E: turn · R/F: tilt · Click: inspect';
+}
+
+/** What the camera button offers, which is a different thing for a player and for a god camera. */
+function cameraButtonTitle(playing: boolean, cameraMode: 'god' | 'eye', selectedNetId: number): string {
+  if (playing) {
+    return cameraMode === 'eye'
+      ? 'Leave your avatar and fly the map freely. Your character stays where it is, and the world is still served around it.'
+      : 'Go back behind your own character. Drag to look, wheel to pull back over its shoulder.';
+  }
+
+  return selectedNetId === 0
+    ? 'Select an entity first — eye view rides one.'
+    : "Stand in the world, in the selected entity's eyes. Drag to look, wheel to pull back over its shoulder. You cannot drive it: this is spectating.";
+}
+
 export function Toolbar() {
   const ui = useUi();
 
@@ -337,18 +367,19 @@ export function Toolbar() {
             Labels
           </button>
           <button
-            className={ui.cameraMode === 'eye' ? 'active' : ''}
-            disabled={ui.selectedNetId === 0}
-            title={
-              ui.selectedNetId === 0
-                ? 'Select an entity first — eye view rides one.'
-                : "Stand in the world, in the selected entity's eyes. Drag to look, wheel to pull back over its shoulder. You cannot drive it: this is spectating."
-            }
+            // Highlighted only for a god camera, where it is a MODE you are in — "eye view, on the selection". For a
+            // player it is a switch that names where it takes you, and a switch that is also lit reads as a state you
+            // cannot tell the direction of.
+            className={!ui.playing && ui.cameraMode === 'eye' ? 'active' : ''}
+            // A player's eye view rides its own avatar, so a selection is not what makes it available. Testing the
+            // selection alone left a logged-in player with no way back to the god camera at all.
+            disabled={ui.selectedNetId === 0 && !ui.playing}
+            title={cameraButtonTitle(ui.playing, ui.cameraMode, ui.selectedNetId)}
             onClick={() => {
               ui.setCameraMode(ui.cameraMode === 'eye' ? 'god' : 'eye');
             }}
           >
-            Eye view
+            {ui.playing ? (ui.cameraMode === 'eye' ? 'God camera' : 'Third person') : 'Eye view'}
           </button>
           <button
             className={ui.showDebug ? 'active' : ''}
@@ -367,7 +398,7 @@ export function Toolbar() {
         </div>
       </section>
 
-      <div className="hint">Drag: pan · Right-drag: orbit · Wheel: zoom · WASD/QE/RF · Click: inspect</div>
+      <div className="hint">{controlHint(ui.playing, ui.cameraMode)}</div>
     </div>
   );
 }

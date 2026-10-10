@@ -26,7 +26,7 @@ import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { DataSource, EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
-import { AGG_GRID, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
+import { AGG_GRID, FASTEST_TICK_PERIOD_MS, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import { EntityLayer, type FrameView, type PickHit, type PickRay } from '../render/entity-layer';
@@ -161,6 +161,31 @@ class MutableFrameView implements FrameView {
  * One frame: advance the clock → apply held keys, follow the selection → move the camera → pick the render origin →
  * update the view matrices → evaluate, cull and pack every layer → attack lines, ground, labels → Babylon draws.
  */
+/**
+ * What the render clock is told, and the one value here that is not a default.
+ *
+ * <b>`minDelayMs` is the floor on the interpolation buffer, and the SDK's 150 ms is a floor for the internet, not for
+ * this.</b> The clock already computes `period + p95(jitter)`, which is the honest answer — one tick, plus however
+ * unevenly frames actually arrive — and then clamps it up to 150. On a server on the same machine the measured answer is
+ * about one tick and the clamp was the whole delay: 150 ms of latency added to every key press and every release, on top
+ * of the round trip, for jitter that was not there.
+ *
+ * The floor is the FASTEST period this client supports, not the one it happens to have been compiled with, because the
+ * clock's own formula already produces the right answer: `period + p95(jitter)`, where the period is the server's real one
+ * once `Clock.onPeriodChange` has been seeded from the catalog. A floor set from a guessed rate is the binding constraint
+ * whenever the guess is too slow — which is what kept a 25 Hz server on a 100 ms buffer it did not need.
+ *
+ * `initialDelayMs` stays at two of the DEFAULT period: it applies only until the first frames arrive, and being generous
+ * there costs one settling second and avoids a visible snap on a connection that turns out to be jittery.
+ *
+ * Passed by the APP rather than changed in the SDK: a default that suits one deployment is not a default.
+ */
+const CLOCK_OPTIONS = {
+  tickPeriodMs: TICK_PERIOD_MS,
+  minDelayMs: FASTEST_TICK_PERIOD_MS,
+  initialDelayMs: 2 * TICK_PERIOD_MS,
+};
+
 export class ClientApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly createSource: SourceFactory;
@@ -342,7 +367,7 @@ export class ClientApp {
 
     this.world = new WorldStore(SWG_SCHEMA);
     this.grid = new AggregateGrid(AGG_GRID);
-    this.clock = new Clock({ tickPeriodMs: TICK_PERIOD_MS });
+    this.clock = new Clock(CLOCK_OPTIONS);
     this.archetypes = resolveArchetypes(SWG_SCHEMA);
     this.layers = this.buildLayers();
     this.bindLayers();
@@ -375,7 +400,11 @@ export class ClientApp {
         },
       },
       this.eyeCamera,
-      () => useUi.getState().cameraMode === 'eye' && useUi.getState().selectedNetId !== 0,
+      // Eye mode IS the condition — no second opinion about what makes it legal. `setCameraMode` already refuses eye
+      // without a subject, and a player's subject is its avatar rather than a selection, so re-testing the selection here
+      // routed every wheel and drag of a playing session to the MAP camera: the look controls silently drove a camera
+      // that was not on screen, which reads as a dead mouse wheel.
+      () => useUi.getState().cameraMode === 'eye',
     );
 
     // Observer callbacks run after the frame's draw and before its paint: resizing the canvas there would paint it blank.
@@ -548,7 +577,7 @@ export class ClientApp {
 
     // What the last session was told is not this one's to show: a reconnect or a source change starts the room empty.
     useChat.getState().clear();
-    this.clock = new Clock({ tickPeriodMs: TICK_PERIOD_MS });
+    this.clock = new Clock(CLOCK_OPTIONS);
 
     // The world the context offers is the one a source that does not own its own fills — the mock. A live connection can
     // only size its store from the server's catalog, which arrives with the WELCOME, so it hands one back later instead
@@ -973,21 +1002,38 @@ export class ClientApp {
     // label on the player's own avatar, because the eye subject was evaluated second and overwrote it.
     const haveEyeSubject = playing ? this.locateEyeSubject(eyeNetId) : hasSelection;
 
+    // The store's camera actions need to know this session has an avatar to ride: eye mode is legal without a selection
+    // for a player and not for a god camera, and `select(0)` must not drop a player out of third person. Published on
+    // change only — this runs every frame and the store is one React subscribes to.
+    if (ui.playing !== playing) {
+      ui.setPlaying(playing);
+      ui = useUi.getState();
+    }
+
     // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
     // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
     // ONCE, so the camera-mode button and the wheel still belong to the viewer afterwards.
+    //
+    // <b>The latch closes only if the mode actually took.</b> It used to be set before the request and the request was
+    // refused — `setCameraMode('eye')` dropped it because the session had no selection — so the one chance to enter third
+    // person was spent on a call that did nothing, and a logged-in player sat in the god camera for the whole session.
+    // Reading the mode back costs one store read on the frames before it succeeds and none after.
     if (playing && haveEyeSubject && !this.playerCameraReady) {
-      this.playerCameraReady = true;
       this.eyeCamera.setDistance(DEFAULT_THIRD_PERSON_M);
       if (ui.cameraMode !== 'eye') {
         ui.setCameraMode('eye');
         ui = useUi.getState();
       }
+
+      this.playerCameraReady = ui.cameraMode === 'eye';
     }
 
     // Eye mode rides that subject; without one there is nothing to ride, so it falls back to the map rather than
     // stranding the viewer at the origin (CLI3D-10).
     const inEye = ui.cameraMode === 'eye' && haveEyeSubject;
+
+    // Bolted to your own avatar, eased when watching somebody else's — see EyeCamera.rigid.
+    this.eyeCamera.rigid = playing;
     if (inEye) {
       // A god camera rides its selection, so the two slots hold the same subject and either would do; a player's camera
       // must read the eye slot, which is the only one holding the avatar.

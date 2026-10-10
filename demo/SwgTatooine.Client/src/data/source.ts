@@ -553,6 +553,7 @@ export class TyphonSource implements DataSource {
     // each changes the session's whole view; a dropped step is answered by the next one 16 ms later, and a client that
     // reacted to one would flicker on every rate limit.
     this.commands?.enqueue(this.moveToCommand, { x, z });
+    this.sendPending();
   }
 
   /** @inheritdoc */
@@ -562,6 +563,47 @@ export class TyphonSource implements DataSource {
     }
 
     this.commands?.enqueue(this.moveDirCommand, { heading, speedClass });
+    this.sendPending();
+  }
+
+  /**
+   * Sends whatever is queued, now.
+   *
+   * @remarks
+   * <b>Called on every enqueue of a movement verb, and not only from `onTick`, which is where the whole batch used to be
+   * sent.</b> Flushing only when a server frame ARRIVES means an intent produced just after one waits most of a tick
+   * period before it is even put on the wire — latency the client adds to itself, on top of the round trip and the
+   * interpolation delay, and paid twice per press because the stop waits the same way. The press is the event; the send
+   * belongs to it.
+   *
+   * Cheap to call repeatedly: `CommandQueue.flush` writes nothing when the queue is empty, and the movement verbs are
+   * already suppressed to a change plus a periodic refresh by `player-intent`. Does nothing before the first frame, when
+   * there is no applied tick to stamp a batch with.
+   */
+  private sendPending(): void {
+    const applier = this.applier;
+    const connection = this.client.connection;
+    if (applier === null || connection === null) {
+      return;
+    }
+
+    // NOTHING may be sent before the first applied frame, and this guard is the whole reason the old code was safe: the
+    // flush used to live in `onTick`, which by definition runs after `WELCOME`. Sending on the enqueue instead reaches a
+    // socket that is open but has not finished its handshake, and the server closes the session with
+    // "message type 0x4 before WELCOME" — which cost a whole debugging round, because the symptom is a session that
+    // silently receives nothing rather than an error at the call site.
+    if (this.ticks === 0) {
+      return;
+    }
+
+    // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
+    this.commands?.flush(
+      applier.tick,
+      (bytes) => {
+        connection.send(bytes);
+      },
+      applier.realmFrame,
+    );
   }
 
   /** @inheritdoc */
@@ -571,6 +613,7 @@ export class TyphonSource implements DataSource {
     }
 
     this.commands?.enqueue(this.setTargetCommand, { netId });
+    this.sendPending();
   }
 
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
@@ -656,6 +699,22 @@ export class TyphonSource implements DataSource {
         this.onDebug(subType, data, offset, length);
       },
     });
+    // ── The server's real tick period, before a single frame is interpolated ────────────────────────────────────────
+    //
+    // The clock is constructed from a COMPILED-IN period, because it exists before any connection. It then learns the real
+    // one only from a `PERIOD` field, which the server sends when the period CHANGES — so a server that simply runs at a
+    // different rate than this client assumed never corrects it, and the clock maps every tick to the wrong instant for
+    // the whole session. At `--hz 25` against an assumed 10 Hz that is a timeline running 2.5x too slow: render time
+    // falls behind, snaps forward, and entities move in jumps rather than lines. It is not a dropped-message problem,
+    // which is what it looks like.
+    //
+    // The catalog carries it, and the catalog is in hand here, before the first frame. Seeded through the same entry
+    // point a later change would use: with no pieces recorded yet it simply becomes the base period.
+    const periodMs = plan.catalog.tick.periodUs / 1000;
+    if (periodMs > 0) {
+      this.options.clock.onPeriodChange(0, periodMs);
+    }
+
     this.attack = plan.eventByName('Attack');
     this.chat = plan.eventByName('Chat');
 
@@ -787,17 +846,7 @@ export class TyphonSource implements DataSource {
 
     // One batch a frame, sharing its client tick — the newest applied server tick (§ 10).
     region?.poll();
-    const connection = this.client.connection;
-    if (connection !== null) {
-      // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
-      this.commands?.flush(
-        applier.tick,
-        (bytes) => {
-          connection.send(bytes);
-        },
-        applier.realmFrame,
-      );
-    }
+    this.sendPending();
   }
 
   private onEvent(event: EventRecord): void {

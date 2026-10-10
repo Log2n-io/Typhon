@@ -27,11 +27,27 @@ const GROUPS = ['state', 'vitals'];
 /** Ground positions: 2D on the wire, x and z in the world. */
 const MOVING = { kind: 'motion', dims: 2 } as const;
 
-/** Server tick period (10 Hz, Core3-faithful). */
+/** The server's DEFAULT tick period (10 Hz, Core3-faithful). The real one comes from the catalog; see below. */
 export const TICK_PERIOD_MS = 100;
 
+/**
+ * The shortest tick period this client is built to interpolate, in milliseconds.
+ *
+ * <b>It sizes the segment ring, and sizing that from the wrong period is why a faster server stuttered.</b>
+ * `WorldStore` keeps `ceil(maxRenderDelayMs / period) + 2` segments per entity — enough history that render time, which
+ * runs behind the newest frame, always lands inside a segment it still holds. The period is the SERVER's, and the server's
+ * is `--hz`: at the 10 Hz this file assumed, five segments; at 25 Hz, ten. Sized for 10 Hz and fed 25, the ring wrapped
+ * and overwrote the segment render time was about to need, so entities jumped between positions instead of moving
+ * between them — the faster the server, the worse it got, which is the opposite of what anyone expects from raising the
+ * tick rate.
+ *
+ * Sized for the fastest rather than resolved at connect because the ring is allocated with the store, before any catalog
+ * has arrived. 20 ms covers every rate up to 50 Hz; the cost is segments held and not used by a slower server.
+ */
+export const FASTEST_TICK_PERIOD_MS = 20;
+
 export const SWG_SCHEMA: WorldSchema = {
-  tickPeriodUs: TICK_PERIOD_MS * 1000,
+  tickPeriodUs: FASTEST_TICK_PERIOD_MS * 1000,
   archetypes: [
     {
       index: Archetype.WorldObject,

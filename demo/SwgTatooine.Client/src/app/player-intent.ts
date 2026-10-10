@@ -71,11 +71,19 @@ export function movementIntent(keys: ReadonlySet<string>, yaw: number): MoveInte
     return asked ? { heading: yaw, speedClass: SpeedClass.stop } : null;
   }
 
-  // The camera's basis in the ground plane: forward is (cos yaw, sin yaw), right is that turned a quarter turn.
+  // The camera's basis in the ground plane, and it has to be the EYE CAMERA's, not a convention invented here.
+  //
+  // `EyeCamera.updateEye` pulls the eye BACKWARD along `(-sin yaw, -cos yaw)`, so the direction it looks is
+  // `(sin yaw, cos yaw)` — Babylon's left-handed reading of `rotation.y`, which is what the renderer is given. Right is
+  // that turned a quarter turn the way the screen means it: `(cos yaw, -sin yaw)`.
+  //
+  // This was `(cos yaw, sin yaw)` for forward, which is the same vector rotated 90°, so every key moved the avatar a
+  // quarter turn away from where the viewer was looking — W walked to screen-right at yaw 0. Nothing caught it because
+  // the cases below asserted the wrong convention as confidently as the code implemented it.
   const cos = Math.cos(yaw);
   const sin = Math.sin(yaw);
-  const dx = forward * cos - right * sin;
-  const dz = forward * sin + right * cos;
+  const dx = forward * sin + right * cos;
+  const dz = forward * cos - right * sin;
 
   return {
     heading: Math.atan2(dz, dx),

@@ -39,7 +39,23 @@ export function needsAccount(search: string): boolean {
     return false;
   }
 
-  return new URLSearchParams(search).get('as') !== 'god';
+  return !godRequested(search);
+}
+
+/**
+ * Whether the URL asks for the anonymous god camera.
+ *
+ * @param search `window.location.search`.
+ * @returns Whether to connect with no token at all.
+ *
+ * @remarks
+ * <b>It has to suppress the stored grant, not merely skip the login screen.</b> The session's KIND is decided by whether a
+ * token is presented, so `?as=god` in a tab that already had one connected as a `player` carrying it — and after a server
+ * restart that token is signed with a key that no longer exists, so the session was refused and nothing streamed at all.
+ * The one tool that has to work on a box nobody has an account on was the one asking for an account.
+ */
+export function godRequested(search: string): boolean {
+  return new URLSearchParams(search).get('as') === 'god';
 }
 
 /** The mock's ceiling: it clamps nothing, so this is only how far the slider goes. */
@@ -127,7 +143,10 @@ export function Viewport() {
 
   // The token the session will present. In the dependency list below, so logging in as somebody else tears the session
   // down and builds a new one rather than leaving a socket authenticated as the previous account.
-  const token = useSessionStore((s) => s.grant?.token ?? null);
+  // `?as=god` means NO token, whatever is in storage: see godRequested. Read from the URL this page was opened with, which
+  // cannot change without a reload, so this is a constant for the life of the component.
+  const anonymous = godRequested(window.location.search);
+  const token = useSessionStore((s) => (anonymous ? null : (s.grant?.token ?? null)));
   const noteClosed = useSessionStore((s) => s.noteClosed);
 
   useEffect(() => {

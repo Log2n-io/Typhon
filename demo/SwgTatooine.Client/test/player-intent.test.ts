@@ -13,25 +13,46 @@ describe('movementIntent', () => {
     expect(movementIntent(held(), 0)).toBeNull();
   });
 
-  it('sends forward along the camera facing', () => {
-    // Facing +X: W is +X, which is heading 0 in the frame the server integrates in.
-    expect(movementIntent(held('KeyW'), 0)?.heading).toBeCloseTo(0, 6);
+  /**
+   * <b>The basis is the EYE CAMERA's, and these cases are derived from it rather than asserted independently.</b>
+   * `EyeCamera.updateEye` pulls the eye backward along `(-sin yaw, -cos yaw)`, so it LOOKS along `(sin yaw, cos yaw)` —
+   * Babylon's left-handed reading of `rotation.y` — and screen-right is `(cos yaw, -sin yaw)`. The first version of both
+   * this file and the code under test used `(cos yaw, sin yaw)` for forward, which is the same vector a quarter turn
+   * away, so W walked the avatar to screen-right and the cases agreed with it. Stating the camera's convention here is
+   * what stops that happening again.
+   */
+  /** Where the camera is looking at this yaw, as a heading the server would integrate. */
+  const facing = (yaw: number): number => Math.atan2(Math.cos(yaw), Math.sin(yaw));
 
-    // Facing +Z (90°): W is +Z.
-    expect(deg(movementIntent(held('KeyW'), Math.PI / 2)!.heading)).toBeCloseTo(90, 4);
+  it('sends forward along the camera facing', () => {
+    // Yaw 0: the camera looks down +Z, so W is +Z, which is heading 90° in the frame the server integrates in.
+    expect(deg(movementIntent(held('KeyW'), 0)!.heading)).toBeCloseTo(90, 4);
+
+    // A quarter turn of the camera turns the walk by the same quarter turn.
+    expect(deg(movementIntent(held('KeyW'), Math.PI / 2)!.heading)).toBeCloseTo(0, 4);
 
     // And a facing that is not an axis, so the case is not passing on symmetry alone.
-    expect(deg(movementIntent(held('KeyW'), 0.4)!.heading)).toBeCloseTo(deg(0.4), 4);
+    expect(deg(movementIntent(held('KeyW'), 0.4)!.heading)).toBeCloseTo(deg(facing(0.4)), 4);
   });
 
   it('sends backward as the opposite heading', () => {
     const back = movementIntent(held('KeyS'), 0)!;
-    expect(Math.abs(deg(back.heading))).toBeCloseTo(180, 4);
+    expect(deg(back.heading)).toBeCloseTo(-90, 4);
   });
 
   it('turns strafe into a heading a quarter turn from the facing', () => {
-    expect(deg(movementIntent(held('KeyD'), 0)!.heading)).toBeCloseTo(90, 4);
-    expect(deg(movementIntent(held('KeyA'), 0)!.heading)).toBeCloseTo(-90, 4);
+    // Yaw 0 looks down +Z, so screen-right is +X (heading 0) and left is -X.
+    expect(deg(movementIntent(held('KeyD'), 0)!.heading)).toBeCloseTo(0, 4);
+    expect(Math.abs(deg(movementIntent(held('KeyA'), 0)!.heading))).toBeCloseTo(180, 4);
+  });
+
+  /**
+   * The property that matters more than any single axis: the walk is always the camera's facing, turned by whatever the
+   * key means relative to the screen. Checked at several yaws so a basis that is merely rotated cannot satisfy it.
+   */
+  it.each([0, 0.4, 1.2, Math.PI / 2, 2.9, -1.1])('walks exactly where the camera looks at yaw %s', (yaw) => {
+    const w = movementIntent(held('KeyW'), yaw)!.heading;
+    expect(Math.abs(Math.atan2(Math.sin(w - facing(yaw)), Math.cos(w - facing(yaw))))).toBeLessThan(1e-6);
   });
 
   /**
@@ -40,11 +61,14 @@ describe('movementIntent', () => {
    * destination and the class is the only thing that sets the pace. This pins the 45 degrees that proves the vector was
    * normalised by `atan2` rather than added.
    */
-  it('gives a diagonal 45 degrees and the same speed class as a straight line', () => {
+  it('gives a diagonal 45 degrees from each of its parts, and the same speed class', () => {
     const diagonal = movementIntent(held('KeyW', 'KeyD'), 0)!;
     const straight = movementIntent(held('KeyW'), 0)!;
+    const strafe = movementIntent(held('KeyD'), 0)!;
 
-    expect(deg(diagonal.heading)).toBeCloseTo(45, 4);
+    const between = (a: number, b: number): number => Math.abs(deg(Math.atan2(Math.sin(a - b), Math.cos(a - b))));
+    expect(between(diagonal.heading, straight.heading)).toBeCloseTo(45, 4);
+    expect(between(diagonal.heading, strafe.heading)).toBeCloseTo(45, 4);
     expect(diagonal.speedClass).toBe(straight.speedClass);
   });
 

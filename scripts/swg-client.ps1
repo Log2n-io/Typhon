@@ -22,6 +22,14 @@
     Bounded by the replication cell: at the demo's 64 m cell the engine refuses anything over 3072 m, and says so
     precisely. 3000 is the largest round number that fits.
 
+.PARAMETER ServerArgs
+    Everything else, passed through to the server verbatim (--hz, --interiors, --persist, …).
+
+    Declared FIRST, at Position 0, for the reason swg-serve.ps1 documents: every other parameter here is implicitly
+    positional, so a pass-through token offered anywhere else binds to one of them. Without this parameter at all,
+    `--hz 25` bound "--hz" to -Port and failed with "Cannot convert value "--hz" to type "System.Int32"" — which names
+    the parameter it landed on and not the one you wanted, and reads as a bug in the flag rather than a missing feature.
+
 .PARAMETER Rebuild
     Rebuild the client even when `dist` is already there.
 
@@ -37,12 +45,18 @@
     The address the profiler port binds. Loopback when unset — a routable address publishes your telemetry.
 
 .EXAMPLE
+    ./scripts/swg-client.ps1 --hz 25 -Pop 2.0
+    Serves at 25 Hz with ten times the default population. Pass-through flags come FIRST.
+
+.EXAMPLE
     ./scripts/swg-client.ps1
     ./scripts/swg-client.ps1 -Port 8090 -Pop 1.0
     ./scripts/swg-client.ps1 -Live 9100          # then attach the Workbench to 127.0.0.1:9100
 #>
 [CmdletBinding()]
 param(
+    [Parameter(Position = 0, ValueFromRemainingArguments)]
+    [string[]] $ServerArgs = @(),
     [int]    $Port        = 8080,
     [double] $Pop         = 0.2,
     [double] $GodRegion   = 3000,
@@ -91,5 +105,5 @@ Write-Host "  http://localhost:$Port" -ForegroundColor Green
 Write-Host "  http://localhost:$Port/?source=mock   (the browser-side mock, no engine)" -ForegroundColor DarkGray
 Write-Host ''
 
-& $exe --serve $Port --pop $Pop --god-region $GodRegion --db-dir $db
+& $exe --serve $Port --pop $Pop --god-region $GodRegion --db-dir $db @ServerArgs
 exit $LASTEXITCODE

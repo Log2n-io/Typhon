@@ -386,6 +386,26 @@ describe('Connection refusals', () => {
     expect(h.ticks).toHaveLength(0);
   });
 
+  /**
+   * A refused admission arrives as a KICK before WELCOME, because the server answers HELLO with it and never opens the
+   * session. Treating that as "a message before WELCOME" replaced the server's own code and sentence with a protocol
+   * error, so an application could not tell an expired token from a full house — and the one code it acts on, "not
+   * authenticated", never reached it. A tab holding a token the server would not accept therefore kept it and could not
+   * recover by reconnecting.
+   */
+  it("reports a KICK that arrives before WELCOME with the server's own code and reason", () => {
+    const h = harness();
+    h.connection.connect();
+    h.socket().open();
+    h.socket().deliver(kickMessage(CloseCode.AuthenticationRejected, 'log in again'));
+    expect(h.kicks).toEqual([{ code: CloseCode.AuthenticationRejected, reason: 'log in again' }]);
+
+    // The close frame that follows may carry anything; the KICK is the reason — exactly as it is once open.
+    h.socket().serverClose(CloseCode.Normal, '', true);
+    expect(h.closes[0]!.code).toBe(CloseCode.AuthenticationRejected);
+    expect(h.closes[0]!.local).toBe(false);
+  });
+
   it('sends nothing before WELCOME: a client sends COMMANDS, PING and BYE, and only once open', () => {
     const h = harness();
     h.connection.connect();

@@ -58,6 +58,14 @@ export interface UiState {
   readonly terrainPixelError: number;
   /** `god` looks down on the world; `eye` stands in it, riding the selection (CLI3D-10). */
   readonly cameraMode: 'god' | 'eye';
+  /**
+   * Whether this session drives an avatar of its own (A10).
+   *
+   * <b>Eye mode needs something to ride, and since A10 that is no longer only the selection.</b> A god camera rides what
+   * it has selected; a PLAYER rides its own avatar and typically has no selection at all. Without this flag the camera
+   * actions below could only ask "is something selected", and so refused a player eye mode outright.
+   */
+  readonly playing: boolean;
   readonly showLabels: boolean;
   readonly showAttacks: boolean;
   /** Per archetype NAME; an archetype the user has not touched is visible. */
@@ -100,6 +108,8 @@ export interface UiState {
   /** Sets the terrain's screen-space error budget, in pixels. */
   readonly setTerrainPixelError: (pixels: number) => void;
   readonly setCameraMode: (mode: 'god' | 'eye') => void;
+  /** Tells the store this session has an avatar to ride; see {@link UiState.playing}. */
+  readonly setPlaying: (playing: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
   readonly toggleLayer: (name: string) => void;
@@ -128,6 +138,7 @@ export const useUi = create<UiState>()((set) => ({
   showDebug: false,
   terrainPixelError: 2,
   cameraMode: 'god',
+  playing: false,
   showLabels: true,
   showAttacks: true,
   layers: {},
@@ -169,13 +180,20 @@ export const useUi = create<UiState>()((set) => ({
     set({ showDebug });
   },
   setCameraMode: (cameraMode) => {
-    // Eye mode rides the selection, so entering it without one would strand the camera. Entering follow too is what
-    // makes it read as "I am this creature" rather than "I am standing where it was".
+    // Eye mode needs a subject, so entering it without one would strand the camera. A selection is one subject; a
+    // player's own avatar is the other, and that second case is what A10 added.
+    //
+    // Refusing on the selection ALONE is what left a logged-in player in the god camera: a player has an avatar and no
+    // selection, so the one request that mattered was dropped silently. Entering follow too is what makes it read as
+    // "I am this creature" rather than "I am standing where it was".
     set((s) =>
-      cameraMode === 'eye' && s.selectedNetId === 0
+      cameraMode === 'eye' && s.selectedNetId === 0 && !s.playing
         ? {}
         : { cameraMode, follow: cameraMode === 'eye' ? true : s.follow },
     );
+  },
+  setPlaying: (playing) => {
+    set({ playing });
   },
   setShowLabels: (showLabels) => {
     set({ showLabels });
@@ -195,10 +213,14 @@ export const useUi = create<UiState>()((set) => ({
   select: (selectedNetId) => {
     // One `set`, so one re-render. Losing the selection must leave eye mode — there is nothing left to ride — and doing
     // that in its own `set` first made every subscriber render twice for one click.
+    //
+    // UNLESS this session is playing, in which case the eye camera is on its own avatar and the selection was never what
+    // it rode. A9 makes clicking empty ground a legitimate way to clear the target, and without this a player would be
+    // thrown out of third person for doing it.
     set((s) => ({
       selectedNetId,
       follow: selectedNetId === 0 ? false : s.follow,
-      cameraMode: selectedNetId === 0 ? 'god' : s.cameraMode,
+      cameraMode: selectedNetId === 0 && !s.playing ? 'god' : s.cameraMode,
     }));
   },
   setFollow: (follow) => {
