@@ -237,14 +237,14 @@ The cycle never persists never-durable bytes (CK-02) and never advances past a p
 |---|---|---|
 | 1 | **Barrier** — flush the WAL and capture `barrierLsn = DurableLsn`, the durable frontier for this cycle. | CK-01 |
 | 2 | **Collect dirty pages** — `CollectDirtyMemPageIndices()` returns the cache slots with DirtyCounter > 0. | |
-| 3 | **Capture + write (coverage passes, in batches)** — for each page: seqlock-snapshot into a staging buffer (CRC stamped on the copy), **skip** a page with a writer in flight (ACW > 0). Written pages are collected in batches of up to 8 192 pages or 100 ms of writing, whichever comes first. Before each batch's `fsync`, the WAL is flushed through `LastPublishedLsn` (`flush2`); after the fsync, DirtyCounters are decremented — writeback debt falls incrementally, one batch at a time, so writers blocked on backpressure wait for one batch, not the whole pass. Skipped pages are retried for up to `MaxCoveragePasses`. | CK-02, CK-15 |
+| 3 | **Capture + write (coverage passes, in batches)** — for each page: seqlock-snapshot into a staging buffer (CRC stamped on the copy), **skip** a page with a writer in flight (ACW > 0). Written pages are collected in batches of up to 8 192 pages or 100 ms of writing, whichever comes first. Before each batch's `fsync`, the WAL is flushed through `LastPublishedLsn` (`flush2`); after the fsync, `MarkCaptured` is called for each written page — `CapturedGen` advances to match the page's captured generation, clearing its writeback debt incrementally, one batch at a time, so writers blocked on backpressure wait for one batch, not the whole pass. `DirtyCounter` is never touched by the checkpoint (PS-05). Skipped pages are retried for up to `MaxCoveragePasses`. | CK-02, CK-15 |
 | 4 | **Coverage gate** — only if the skip list is empty: advance the checkpoint. A page still skipped after the passes holds `CheckpointLSN` back until a later cycle captures it. | CK-03 |
 | 5 | **Advance `CheckpointLSN`** — `DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn)` writes the watermark block to the meta-pair's **alternate** slot (gen+1, CRC, fsync); the generation flip is the cycle's atomic commit point. | CK-05 |
 | 6 | **Recycle** — `SegmentManager.MarkReclaimable(trimLsn)` deletes sealed segments below the persisted checkpoint, where `trimLsn = Min(checkpointLsn, lastTickFenceLsn)` so TickFence-only data isn't lost. | CK-04 |
 
 There is **no FPI-bitmap reset step**, because Typhon writes no full-page images ([§6](#6-torn-page-safety-no-fpi)). The cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` ([§8](#8-uow-state-machine)).
 
-A **flush-only cycle** (`FlushOnlyCycle` — capture + write + DC-decrement, *no* barrier/gate/meta-flip/recycle) keeps the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08).
+A **flush-only cycle** (`FlushOnlyCycle` — capture + write + `MarkCaptured`, *no* barrier/gate/meta-flip/recycle) keeps the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08).
 
 ### A/B slot-pairing — the doublewrite-free torn-write net (CK-05)
 
