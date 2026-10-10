@@ -667,21 +667,28 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
                 var isRoot = bufferId == curChunkId;
                 var chunkCapacity = isRoot ? ElementCountRootChunk : ElementCountPerChunk;
 
-                // If we reached capacity, get a new chunk
+                // If we reached capacity, get a new chunk — as AddElement does (#884), which this method had not caught up with (#1289).
                 if (curChunkHeader.ElementCount == chunkCapacity)
                 {
-                    // Take a free chunk or allocate a new one
+                    var previousChunkId = curChunkId;
+                    int nextFreeChunkId;
+
+                    // Take a free chunk or allocate a new one. The free list chains through NextChunkId: its head's successor is read before the
+                    // re-initialisation below zeroes it — read after, it was always 0, and every free chunk behind the head was orphaned.
                     if (firstFreeChunkId != 0)
                     {
                         curChunkId = firstFreeChunkId;
                         --totalFreeChunk;
+                        nextFreeChunkId = Unsafe.AsRef<VariableSizedBufferChunkHeader>(accessor.GetChunkAddress(curChunkId, true)).NextChunkId;
                     }
                     else
                     {
                         curChunkId = accessor.Segment.AllocateChunk(false, accessor.ChangeSet);
+                        nextFreeChunkId = 0;
                     }
 
-                    curChunkHeader.NextChunkId = curChunkId;
+                    // Link the previous chunk through a freshly resolved address: both branches above can evict its slot from this accessor's window.
+                    Unsafe.AsRef<VariableSizedBufferChunkHeader>(accessor.GetChunkAddress(previousChunkId, true)).NextChunkId = curChunkId;
 
                     // Fetch the new chunk
                     curChunkAddr = accessor.GetChunkAddress(curChunkId, true);
@@ -689,12 +696,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
                     curChunkHeader.ElementCount = 0;
                     curChunkHeader.NextChunkId = 0;
+                    firstFreeChunkId = nextFreeChunkId;
 
-                    // Update local: the free chunk we took has no next free (just zeroed above)
-                    firstFreeChunkId = curChunkHeader.NextChunkId;
-
-                    // Update root and capacity as we switched to a new chunk
                     isRoot = bufferId == curChunkId;
+                    chunkCapacity = isRoot ? ElementCountRootChunk : ElementCountPerChunk;
                 }
 
                 var copyLength = Math.Min(chunkCapacity - curChunkHeader.ElementCount, itemsLeftToCopy);
@@ -704,6 +709,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
                 totalCount += copyLength;
                 curChunkHeader.ElementCount += copyLength;
+                curSourceIndex += copyLength;
                 itemsLeftToCopy -= copyLength;
             }
 
