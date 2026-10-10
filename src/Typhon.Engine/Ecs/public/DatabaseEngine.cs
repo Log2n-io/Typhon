@@ -850,6 +850,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public ushort ArchetypeIdOf<TArch>() where TArch : Archetype<TArch> => RoutingIdForCatalog(Archetype<TArch>.CatalogId);
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
+    private readonly object _componentCollectionSegmentCreation = new();   // one creation at a time: each saves the bootstrap's map (#1283)
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
     private MigrationRegistry _migrationRegistry;
 
@@ -2571,16 +2572,52 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment<T>() where T : unmanaged =>
-        _componentCollectionSegmentByStride.GetOrAdd(
-            RoundToStandardStride(Math.Max(sizeof(T) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, null, 
-                StorageSegmentKind.ComponentCollection));
+        GetComponentCollectionSegment(sizeof(T));
 
-    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment(int itemSize, ChangeSet changeSet = null) =>
-        _componentCollectionSegmentByStride.GetOrAdd(
-            RoundToStandardStride(Math.Max(itemSize * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, changeSet, 
-                StorageSegmentKind.ComponentCollection));
+    /// <summary>
+    /// The component-collection segment for items of <paramref name="itemSize"/> bytes, created on first use. A created segment is made durable at once,
+    /// its pages first, then the bootstrap's stride → root map that the open finds it through (#1283). The map used to reach the disk only at a clean
+    /// close: a crash in the session that created the segment left the reopen without it, and every collection of that stride read back empty — data a
+    /// checkpoint had already made durable. <paramref name="changeSet"/> is not used: the creation is a structural write of its own.
+    /// </summary>
+    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment(int itemSize, ChangeSet changeSet = null)
+    {
+        var stride = RoundToStandardStride(Math.Max(itemSize * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
+        if (_componentCollectionSegmentByStride.TryGetValue(stride, out var segment))
+        {
+            return segment;
+        }
+
+        lock (_componentCollectionSegmentCreation)
+        {
+            if (_componentCollectionSegmentByStride.TryGetValue(stride, out segment))
+            {
+                return segment;
+            }
+
+            var creation = MMF.CreateChangeSet();
+            segment = MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, creation,
+                StorageSegmentKind.ComponentCollection);
+            creation.SaveChanges();
+            _componentCollectionSegmentByStride[stride] = segment;
+            WriteCollectionSegmentMap();
+            MMF.SaveBootstrap();
+            return segment;
+        }
+    }
+
+    /// <summary>Writes the component-collection segments' stride → root-page map into the bootstrap; the caller saves it.</summary>
+    private void WriteCollectionSegmentMap()
+    {
+        var collections = _componentCollectionSegmentByStride;
+        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
+        var collectionIndex = 0;
+        foreach (var kv in collections)
+        {
+            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
+            collectionIndex++;
+        }
+    }
 
     // Create the first revision of the system schema
     private unsafe void CreateSystemSchemaR1()
@@ -3172,15 +3209,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Persist every component-collection segment (stride → root page). Only FieldR1 had a dedicated key before; the rest (e.g. the String64 collection
         // backing ArchetypeR1.ComponentNames) were re-allocated fresh on reopen, orphaning the originals — a page leak that also left those pages Unknown in
-        // storage introspection. Persisting the whole pool lets the reopen reload them in place.
-        var collections = _componentCollectionSegmentByStride;
-        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
-        var collectionIndex = 0;
-        foreach (var kv in collections)
-        {
-            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
-            collectionIndex++;
-        }
+        // storage introspection. Persisting the whole pool lets the reopen reload them in place. A segment's creation saves the map already (#1283); this
+        // is the same map, rewritten with the rest of the state.
+        WriteCollectionSegmentMap();
 
         MMF.SaveBootstrap(cs);
 

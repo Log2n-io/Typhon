@@ -182,8 +182,8 @@ class BufferLockWordPersistenceTests : TestBase<BufferLockWordPersistenceTests>
 
     /// <summary>
     /// A crash leaves no time for the rewrite: the hold the checkpoint copied is what the data file keeps. The crash open frees the collection buffers'
-    /// locks as their segments load, and the buffer takes a write again. The segment is made known to the file by a clean close first — a collection
-    /// segment's root reaches the bootstrap only there.
+    /// locks as their segments load, and the buffer takes a write again. A clean close first leaves the buffer in a database the crashed session
+    /// reopened, as a long-lived one would be.
     /// </summary>
     [Test]
     [VerifiesRule("PS-20")]

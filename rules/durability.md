@@ -764,6 +764,9 @@ CK-08 (flush-only cycles) are later increments.
             on an unrelated field having changed. Runs at cycle START (before the durability barrier) so the SPI update's WAL
             records and dirty `ArchetypeR1` pages ride THIS cycle's barrier + page flush — the pointer becomes durable together
             with the data it points at
+  invariant a component-collection segment's pointer — the bootstrap's stride → root-page map — is durable from the segment's creation: its pages are
+            saved, then the map, before any collection data can be written into it, so no checkpoint consolidates a collection the open cannot
+            find (#1283)
   rationale: a checkpoint's job is a self-contained durable base. Persisting the data pages but not the pointer leaves the base
              durable-but-UNREACHABLE: on reopen `ArchetypeR1.ClusterSegmentSPI == 0` ⇒ the fresh-allocation path runs ⇒ an empty
              cluster (`ActiveClusterCount == 0`) ⇒ the EntityMap rebuild walks nothing ⇒ every entity is LOST (#395 Face A).
@@ -775,7 +778,8 @@ CK-08 (flush-only cycles) are later increments.
              than being part of it. That survived only because RB-01 permits a lost index to be rebuilt from cluster data — not
              a defence, since that rebuild is itself broken (#656), leaving a torn cluster-index page neither loud-failed nor
              rebuilt but silently served
-  scope: `CheckpointManager.RunCheckpointCycle` (the `PersistDurableMetadataHook` invocation), `DatabaseEngine.PersistArchetypeState`
+  scope: `CheckpointManager.RunCheckpointCycle` (the `PersistDurableMetadataHook` invocation), `DatabaseEngine.PersistArchetypeState`,
+         `DatabaseEngine.GetComponentCollectionSegment`
          (skip-unchanged + cache writeback), `DatabaseEngine.DropLegacyClusterIndexBootstrapKeys` (retires the pre-#661 home),
          wired at `DatabaseEngine` checkpoint-manager construction. **Includes the recovery seal** (`DatabaseEngine.SealRecovery`,
          itself a `ForceCheckpointAndWait`): `_archetypeSpiPersistArmed` is set BEFORE it, in `RunWalV2Recovery`. It used to be set only
@@ -793,7 +797,10 @@ CK-08 (flush-only cycles) are later increments.
             failure; what is left under test is this rule alone. Pre-fix all three storage shapes reported `scanned=0 applied=0`
             with every entity lost — this rule's `on_violation` sentence, measured;
             ClusterIndexSpiPersistenceTests.Checkpoint_IndexSpiChangedAlone_IsStillPersisted (an index root that changes while
-            every other guard field holds is still written — dropping the index SPIs from the skip test fails it) [VerifiesRule]
+            every other guard field holds is still written — dropping the index SPIs from the skip test fails it) [VerifiesRule];
+            ComponentCollectionCrashTests.ACollectionWhoseSegmentTheCrashedSessionCreated_SurvivesTheCrash [VerifiesRule] — a collection
+            checkpointed in the session that created its segment, then a hard crash: before the fix the reopen allocated a fresh segment
+            (root 140 for the data's 79) and the collection read back empty, 3 of 3
 
 ### CK-11: The page cache is drained on dirty-page pressure, not only on the clock `[fatal]`
   invariant a cycle runs as soon as writeback debt reaches ResourceOptions.CheckpointDirtyPageThresholdPercent of the
