@@ -1492,8 +1492,8 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     /// <summary>
     /// The same torn grow, the old tail's page on the disk torn as well: its first sector — the header, the incarnation, the link to nothing — as of the
     /// checkpoint, the rest not. The completion took the suspect page for one the grow had not written and initialized it empty, clearing its suspicion:
-    /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn page that is this segment's is kept and stays
-    /// suspect; the suspect resolution then refuses the open over the live chunks it backs (RB-04).
+    /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn disagreeing page that is this segment's is not
+    /// completed: the segment is refused, as before the completion existed.
     /// </summary>
     [Test]
     [VerifiesRule("CS-08")]
@@ -1547,12 +1547,133 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         var thrown = Assert.Catch(() => RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>()),
             "the open over a torn page backing checkpointed chunks");
         var e = thrown;
-        while (e is not CorruptionException && e?.InnerException != null)
+        while (e is not InvalidOperationException && e?.InnerException != null)
         {
             e = e.InnerException;
         }
 
-        Assert.That(e, Is.InstanceOf<CorruptionException>(), $"refused by the suspect resolution (RB-04), not by {thrown.GetType().Name}: {thrown.Message}");
+        Assert.That(e?.Message, Does.Contain("integrity check failed at load"), $"refused by the segment's load, not by {thrown.GetType().Name}: {thrown.Message}");
+    }
+
+    /// <summary>
+    /// A grow's own page torn by the crash, its first sector — this segment's header — on the disk, the rest not, behind an old tail that missed the disk.
+    /// The page holds only what came after the last completed checkpoint's barrier, which the replay brings back: initialized, not kept suspect — kept, the
+    /// suspect resolution refused an open a single power cut had made (review of #1296).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AGrowWhosePageIsTorn_IsCompleted_ThePageInitialized()
+    {
+        var items = new List<EntityId>();
+        int length, grown, torn;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            length = GrowRevisionsAfterACheckpoint(dbe, items);
+            grown = revisions.Length;
+            torn = revisions.Pages[length];
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            WriteFilePage(dbe, torn);
+            dbe.SimulateHardCrash();
+        }
+
+        var path = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BuildDatabasePathFileName();
+        ChaosPageIO.DamagePageOnDisk(path, torn, PageDamageType.TornPage, PagedMMF.PageSize);
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var segment = reopened.GetComponentTable<MkItem>().CompRevTableSegment;
+        Assert.That((reopened.MMF.TornGrowsRepairedAtLoad >= 1, segment.TornGrowPagesReinitialized), Is.EqualTo((true, grown - length)),
+            "the torn grow completed, every page it added initialized — the torn one too");
+        AssertItems(reopened, items);
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A grow whose last page alone missed the disk: every link agrees — the page before it links to it, and it, all zeros, to nothing — so the chain
+    /// check saw no tear, and the page loaded as the disk held it, without the segment's header or incarnation (review of #1296). The crash path checks a
+    /// directory's last page and initializes one the grow had not written.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AGrowWhoseLastPageMissedTheDisk_InitializesIt()
+    {
+        var items = new List<EntityId>();
+        int length, grown;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            length = GrowRevisionsAfterACheckpoint(dbe, items);
+            grown = revisions.Length;
+
+            // The directory, the old tail and every page the grow added but the last.
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            for (var p = length - 1; p < grown - 1; p++)
+            {
+                WriteFilePage(dbe, revisions.Pages[p]);
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var segment = reopened.GetComponentTable<MkItem>().CompRevTableSegment;
+        Assert.That(segment.TornGrowPagesReinitialized, Is.EqualTo(1), "the last page, which the grow had not written, initialized");
+        AssertItems(reopened, items);
+        AssertStorageHealthy(reopened);
+    }
+
+    // Item spawns up to a few chunks short of the revision segment's capacity, a checkpoint, then logged spawns past it: the segment grows after the
+    // checkpoint's barrier. Returns the segment's length before the grow.
+    private static int GrowRevisionsAfterACheckpoint(DatabaseEngine dbe, List<EntityId> items)
+    {
+        var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+        while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < 20; i++)
+            {
+                var no = items.Count;
+                items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the spawns");
+        }
+
+        var length = revisions.Length;
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        using (var uow = dbe.CreateUnitOfWork())
+        {
+            using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+            {
+                for (var i = 0; i < 100; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the logged spawns");
+            }
+
+            uow.Flush();
+        }
+
+        Assert.That(revisions.Length, Is.GreaterThan(length), "premise: the revision segment grew");
+        return length;
+    }
+
+    private static void AssertItems(DatabaseEngine dbe, List<EntityId> items)
+    {
+        using var read = dbe.CreateReadOnlyTransaction();
+        for (var no = 0; no < items.Count; no++)
+        {
+            Assert.That(read.Open(items[no]).Read(MkItemArch.Item).ItemNo, Is.EqualTo(no), $"item {no}");
+        }
     }
 
     /// <summary>

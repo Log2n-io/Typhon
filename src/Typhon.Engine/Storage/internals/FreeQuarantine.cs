@@ -83,8 +83,11 @@ internal sealed class FreeQuarantine
         }
     }
 
-    /// <summary>A cycle that sealed wrote every page it collected: the sealed frees may be freed. True when there are some to free.</summary>
-    internal bool MarkReleasable() => Interlocked.CompareExchange(ref _state, Releasable, Sealed) == Sealed;
+    /// <summary>
+    /// A cycle that sealed wrote every page it collected: the sealed frees may be freed. True when there are some to free — also when a release that
+    /// threw left them releasable: no seal advances that state, and without the worker's signal they waited for another segment's (review).
+    /// </summary>
+    internal bool MarkReleasable() => Interlocked.CompareExchange(ref _state, Releasable, Sealed) is Sealed or Releasable;
 
     /// <summary>
     /// Frees, through <paramref name="free"/>, the sealed chunks a covered cycle made releasable — in chunk order, a page's frees together. Returns how many.

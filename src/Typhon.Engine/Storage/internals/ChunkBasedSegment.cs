@@ -356,7 +356,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
             }
 
             var expected = (i + 1) < length ? pages[i + 1] : 0;
-            if (next != expected && i > 0 && RepairTornGrowAtLoad && DirectoryTrusted() && RepairTornGrow(i))
+            // The last page agreeing — linking to nothing — is checked too: a grow whose last page never reached the disk left it without a header,
+            // its bits another owner's (review of #1296).
+            if ((next != expected || i == length - 1) && i > 0 && RepairTornGrowAtLoad && DirectoryTrusted() && RepairTornGrow(i))
             {
                 // The directory ran ahead of the chain: a grow torn by the crash (#1296). Completed, and this page read again — it may be initialized empty.
                 TornGrowRepaired = true;

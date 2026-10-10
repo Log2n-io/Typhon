@@ -5193,7 +5193,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var capacity = cbs.ChunkCapacity;
             for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                if (!cbs.IsChunkAllocated(chunkId))
+                if (!cbs.IsChunkLive(chunkId))
                 {
                     continue;
                 }

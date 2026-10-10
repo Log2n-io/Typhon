@@ -158,19 +158,18 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// kept, with what it holds, and its link set to the directory's next: the tear may be an old lost write of the link alone, under pages whose data no
     /// log window holds. A page the grow had not written — another incarnation, none, or a torn sector — is initialized empty, as the grow initialized it.
     /// A grow before the last completed checkpoint's barrier was written whole, so such a page came after it: what was committed on it is in the log
-    /// window, the replay brings it back, and a chain or cluster that named a chunk there finds it free. False when the shape is not a torn grow's: a page
-    /// written before incarnations existed whose link is wrong and not 0; or the directory's last page linking on — the chain ahead of the directory, an old
-    /// tail evicted after a grow whose directory append did not reach the disk, which this does not complete (#1299). Single-threaded.
+    /// window, the replay brings it back, and a chain or cluster that named a chunk there finds it free. A torn page past the one that disagrees is such a
+    /// page too — the grow's, written after the barrier — and is initialized; the disagreeing page itself, torn and this segment's, may hold a checkpoint's
+    /// data and is refused (review of #1296). Also called for a directory's last page whose link agrees, 0: one the grow had not written is initialized —
+    /// loaded as it was, it had no header and another owner's bits. False when the shape is not a torn grow's: a page written before incarnations
+    /// existed whose link is wrong and not 0; a torn disagreeing page; or the directory's last page, written, linking on — the chain ahead of the
+    /// directory, which this does not complete (#1299). Single-threaded.
     /// </summary>
     internal bool RepairTornGrow(int at)
     {
         var list = _pageList;
-        if (at + 1 >= list.Count)
-        {
-            return false;
-        }
-
         var pages = new Span<int>(list.Items, 0, list.Count);
+        var last = at + 1 >= pages.Length;
         PageBlockType type;
         RepairPage atPage;
         int link;
@@ -180,9 +179,11 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             _store.RequestPageEpoch(pages[0], epoch, out var rootMemPageIndex);
             type = _store.GetPage(rootMemPageIndex).StructAt<PageBaseHeader>(PageBaseHeader.Offset).Type;
 
-            // The page that disagrees: written, it keeps its bytes and gets its link; never written, it is initialized from here.
+            // The page that disagrees: written, it keeps its bytes and gets its link; never written, it is initialized from here. Torn and this segment's,
+            // it is refused as before the completion existed: patched, it was dirtied, and a cycle before the suspect resolution re-checksummed its torn
+            // bytes for the next open to serve (review).
             atPage = ClassifyForRepair(pages[at], epoch, out link);
-            if (atPage == RepairPage.Legacy && link != 0)
+            if (atPage == RepairPage.TornOurs || (last && atPage != RepairPage.NotWritten) || (atPage == RepairPage.Legacy && link != 0))
             {
                 return false;
             }
@@ -227,15 +228,15 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     private enum RepairPage
     {
         Ours,
+        TornOurs,
         Legacy,
         NotWritten,
     }
 
     /// <summary>
     /// Whether a page of the directory was written as this segment's. A suspect page — its checksum failed — is judged by its first sector, which holds
-    /// the header and the incarnation and reaches the disk whole: this segment's, it is kept and stays suspect, for the suspect resolution to refuse the
-    /// open over the live chunks it backs (RB-04). Taken for unwritten, it was initialized empty and its suspicion cleared: a torn old tail lost the
-    /// chunks a checkpoint had written on it, silently (review of #1296).
+    /// the header and the incarnation and reaches the disk whole: this segment's, it is <see cref="RepairPage.TornOurs"/>. Taken for unwritten at the
+    /// disagreeing page, it was initialized empty and its suspicion cleared: a torn old tail lost the chunks a checkpoint had written on it, silently.
     /// </summary>
     private unsafe RepairPage ClassifyForRepair(int filePageIndex, long epoch, out int link)
     {
@@ -248,8 +249,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         }
 
         var incarnation = SegmentGeometry.ReadIncarnation(new ReadOnlySpan<byte>(page.Address, PagedMMF.PageSize));
-        return incarnation == 0 ? (_incarnation == 0 ? RepairPage.Legacy : RepairPage.NotWritten)
+        var ours = incarnation == 0 ? (_incarnation == 0 ? RepairPage.Legacy : RepairPage.NotWritten)
             : incarnation == _incarnation ? RepairPage.Ours : RepairPage.NotWritten;
+        return ours == RepairPage.Ours && _store is PersistentStore persistent && persistent.Mmf.IsSuspectPage(filePageIndex) ? RepairPage.TornOurs : ours;
     }
 
     private void SetLink(int filePageIndex, int next, long epoch)

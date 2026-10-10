@@ -283,8 +283,9 @@ internal sealed class FreeQuarantineTests : TestBase<FreeQuarantineTests>
             Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "a covered cycle");
         }
 
+        // The worker frees the bitmap bit, then the hold, then gives the bytes back: all three awaited.
         var deadline = Environment.TickCount64 + 5_000;
-        while (Allocated(chunk) && Environment.TickCount64 < deadline)
+        while ((Allocated(chunk) || segment.IsChunkHeld(chunk) || _dbe.MMF.QuarantinedBytes != 0) && Environment.TickCount64 < deadline)
         {
             Thread.Yield();
         }

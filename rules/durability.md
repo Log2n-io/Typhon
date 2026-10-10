@@ -2480,8 +2480,11 @@ of the LSN value).
             written on every page it initializes, SegmentGeometry bytes [58,62)), its segment flag and a valid checksum, initialized empty
             otherwise. A page the grow had not written holds only what came after the last completed checkpoint's barrier, which the replay
             brings back; a page it had written may hold data no log window does — an old lost write of the link alone — and is kept. A suspect
-            page (its checksum failed) is judged by its first sector, which holds the header and the incarnation: this segment's, it is kept and
-            stays suspect, and RB-04 refuses the open over the live chunks it backs — never initialized empty with its suspicion cleared
+            page (its checksum failed) is judged by its first sector, which holds the header and the incarnation. Past the disagreeing page it is the
+            grow's, written after the barrier, and is initialized. The disagreeing page itself, torn and this segment's, may hold a checkpoint's
+            data: the grow is not completed and the segment is refused — never emptied with its suspicion cleared, and never patched, which dirtied
+            it for a cycle to re-checksum its torn bytes. A directory's last page whose link agrees is checked too: one the grow had not written
+            had no header and another owner's bits, and is initialized
   invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap), right after
             the schema and again after the archetypes load, and every page a crash-path segment load finds named: the bitmap on disk may predate
             the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
@@ -2503,7 +2506,7 @@ of the LSN value).
             the disk is completed at a crash open, its pages claimed (without the claims the open's index rebuild took one of them); a grow whose
             first new page missed the disk is completed from that page; a page of another incarnation is initialized; an old lost link over
             checkpointed pages keeps them (initialized empty, the items on them were gone); a torn old tail fails the open loudly (it was emptied,
-            silently) [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
+            silently); a torn page of the grow is initialized and the open completes; an unwritten last page is initialized [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
             (a claim over an unresolved pair failed this reopen). NOT mutation-proven: the directory's
             trust — its trigger, a torn map-extension page, needs a segment past the root's ~2 000 page indices
 
@@ -2739,7 +2742,9 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     NON-rebuildable EntityMap — a non-cluster archetype that still owns a SingleVersion slot) in RecoverySuspect mode is
     recorded suspect, NOT repaired/thrown at load. Post-rebuild resolution: if the page still backs a live (allocated)
     chunk ⟹ the open FAILS LOUDLY with a diagnostic bundle {segment, filePage}; if no live chunk remains (the entity was
-    re-created in-window and scrub freed the old chunk) ⟹ healed. NEVER a silent open over corrupt primary data.
+    re-created in-window and scrub freed the old chunk) ⟹ healed. NEVER a silent open over corrupt primary data. A chunk recovery freed is held
+    (CK-17) and still allocated until the seal: "live" is allocated and not held (ChunkBasedSegment.IsChunkLive), or a page the scrub emptied
+    could never heal
   🔴 DETECTION BOUNDARY (2026-07-28): this net detects a torn page ONLY via CRC mismatch. A page whose tear is
      produced UNDER a valid checksum is outside its reach — it never enters the suspect set, so the loud-fail cannot
      fire. See issue #579 (the seqlock has no memory barriers, so on arm64 the checkpoint can CRC and persist torn
