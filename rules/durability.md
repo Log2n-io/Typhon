@@ -2484,7 +2484,11 @@ of the LSN value).
             grow's, written after the barrier, and is initialized. The disagreeing page itself, torn and this segment's, may hold a checkpoint's
             data: the grow is not completed and the segment is refused — never emptied with its suspicion cleared, and never patched, which dirtied
             it for a cycle to re-checksum its torn bytes. A directory's last page whose link agrees is checked too: one the grow had not written
-            had no header and another owner's bits, and is initialized
+            had no header and another owner's bits, and is initialized. A completion that initialized the page holding chunk 0 (the null id)
+            reserves it again
+  invariant DELIBERATE (#1303): a torn page past the tear is taken for the grow's. Under an old lost link — the double fault — it was a
+            checkpointed page, and its data is lost silently; kept suspect instead, a single torn grow made an open that could not complete. The
+            exact rule needs each page's creation generation
   invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap), right after
             the schema and again after the archetypes load, and every page a crash-path segment load finds named: the bitmap on disk may predate
             the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
@@ -2506,7 +2510,8 @@ of the LSN value).
             the disk is completed at a crash open, its pages claimed (without the claims the open's index rebuild took one of them); a grow whose
             first new page missed the disk is completed from that page; a page of another incarnation is initialized; an old lost link over
             checkpointed pages keeps them (initialized empty, the items on them were gone); a torn old tail fails the open loudly (it was emptied,
-            silently); a torn page of the grow is initialized and the open completes; an unwritten last page is initialized [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
+            silently); a torn page of the grow is initialized and the open completes; an unwritten last page is initialized; chunk 0 is reserved
+            again after its page is initialized [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
             (a claim over an unresolved pair failed this reopen). NOT mutation-proven: the directory's
             trust — its trigger, a torn map-extension page, needs a segment past the root's ~2 000 page indices
 

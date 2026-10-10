@@ -1628,6 +1628,49 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         AssertStorageHealthy(reopened);
     }
 
+    /// <summary>
+    /// A completion that initializes the page holding chunk 0 — the null id, reserved at creation — reserves it again: initialized, its bit was cleared with
+    /// the page's, and the replay could store a revision at "none" (review of #1296). Staged with the page zeroed on the disk, which the completion takes
+    /// for one a grow had not written.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void ACompletionThatInitializesChunkZerosPage_ReservesItAgain()
+    {
+        int page;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (var i = 0; revisions.Length < 3; i++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = -1 - i }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            page = revisions.GetChunkLocation(0).segmentIndex;
+            Assert.That(page, Is.GreaterThan(0), "premise: chunk 0 is on a data page, not the root");
+            page = revisions.Pages[page];
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.SimulateHardCrash();
+        }
+
+        var path = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BuildDatabasePathFileName();
+        ChaosPageIO.DamagePageOnDisk(path, page, PageDamageType.ZeroPage, PagedMMF.PageSize);
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var segment = reopened.GetComponentTable<MkItem>().CompRevTableSegment;
+        Assert.That(segment.TornGrowRepaired, Is.True, "premise: the completion initialized the page");
+        using var guard = EpochGuard.Enter(reopened.EpochManager);
+        Assert.That(segment.IsChunkAllocated(0), Is.True, "chunk 0, reserved again");
+    }
+
     // Item spawns up to a few chunks short of the revision segment's capacity, a checkpoint, then logged spawns past it: the segment grows after the
     // checkpoint's barrier. Returns the segment's length before the grow.
     private static int GrowRevisionsAfterACheckpoint(DatabaseEngine dbe, List<EntityId> items)

@@ -284,6 +284,18 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         }
 
         ScanForAllocatorState(filePageIndex);
+
+        // Chunk 0 is the null id, reserved at creation. A completion that initialized the page holding it cleared its bit with the page's: the replay
+        // could hand it out, and a revision or a component stored at "none" was lost (review of #1296).
+        if (TornGrowRepaired)
+        {
+            using var guard = EpochGuard.Enter(_store.EpochManager);
+            if (!IsChunkAllocated(0))
+            {
+                ReserveChunk(0);
+            }
+        }
+
         return true;
     }
 
