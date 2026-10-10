@@ -24,6 +24,22 @@ export interface FrameView {
   readonly selectedNetId: number;
   /** The planet's ground, for standing entities on it. Flat until the bake lands (`terrain/heightfield.ts`). */
   readonly ground: GroundSampler;
+  /**
+   * One entity whose position comes from somewhere other than the store: the locally predicted avatar (A14), or `null`.
+   *
+   * <b>Overriding here and not only at the camera is the difference between a predicted camera and a predicted BODY.</b> The
+   * mesh of every entity is placed from this loop, so a prediction that only reached the camera would slide the view off a
+   * character still standing where the server last confirmed it — which looks worse than the latency it removes. The cost is
+   * one integer compare per entity per frame, on the one archetype that holds the player.
+   */
+  readonly predicted: PredictedOverride | null;
+}
+
+/** A position substituted for one entity's own during packing. */
+export interface PredictedOverride {
+  readonly netId: number;
+  readonly x: number;
+  readonly z: number;
 }
 
 interface FieldReaders {
@@ -177,16 +193,27 @@ export class LayerPacker {
 
     const dims = store.dims;
     const at = this.placement;
+    // Resolved once per frame, not per entity: the override names a netId and the loop has the slot.
+    const predicted = view.predicted;
+    const predictedNetId = predicted === null ? 0 : predicted.netId;
     for (let i = 0; i < count; i++) {
       const slot = live[i];
       evaluateSlot(store, slot, tick, frac, motion, 0);
       at.read(dims, motion, 0);
-      const rx = at.x - view.originX;
-      const rz = at.z - view.originZ;
+      // A14: the predicted body. The VELOCITY is left authoritative on purpose — it is what the mesh takes its heading from,
+      // and the server's is the one that turns the character to face where it is actually going.
+      const own = predictedNetId !== 0 && netIds[slot] === predictedNetId;
+      const rx = (own ? predicted!.x : at.x) - view.originX;
+      const rz = (own ? predicted!.z : at.z) - view.originZ;
       // Altitude is not offset: the render origin only ever slides along the ground (`05-client.md` § 6). It comes from
       // the SERVER when the catalog carries it (terrain rung (b)) and from this client's own field otherwise — see
       // `altitudeOf`, which is the only place that decision is made.
-      const ry = altitudeOf(fields.ground, slot, at, view.ground);
+      // Sampled at the PREDICTED ground position when the client owns the heightfield, or the predicted body walks a dune at
+      // the height of where the server last confirmed it — a few centimetres, but it reads as the feet sinking. When the
+      // server supplies altitude per entity there is nothing to re-sample and its figure stands.
+      const ry = own && fields.ground === null
+        ? at.y + view.ground.heightAt(predicted!.x, predicted!.z)
+        : altitudeOf(fields.ground, slot, at, view.ground);
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;

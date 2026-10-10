@@ -100,8 +100,6 @@ export const MAX_CHASE_RANGE_M = 75;
 export const LEASH_RADIUS_M = 192;
 export const AWARENESS_RADIUS_M = 192;
 export const WEAPON_RANGE_M = 75;
-export const PLAYER_RUN_SPEED_MPS = 5;
-export const PLAYER_MOUNT_SPEED_MPS = 12;
 
 export const BASELINE_PLAYERS = 320;
 export const BASELINE_PLAYER_STRUCTURES = 2600;

@@ -121,6 +121,11 @@ export class MockSource implements DataSource, LatencyControl {
     return 0;
   }
 
+  /** No SELF block, so no owner field ever arrived — which is what `NaN` means, and it is what stops A14 predicting here. */
+  selfNumber(): number {
+    return NaN;
+  }
+
   /** The mock's own worker stops on demand, so pausing has always worked here. */
   get canPause(): boolean {
     return true;

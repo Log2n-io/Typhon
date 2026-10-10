@@ -149,6 +149,21 @@ export function Hud() {
             <td>Anomalies</td>
             <td>{stats.anomalies}</td>
           </tr>
+          {/* A14. Shown only for a session that predicts: the lead is the removed latency as a distance, and the counters are
+              how a prediction fault announces itself. Any of them climbing is a bug, not a network condition. */}
+          {stats.prediction === null ? null : (
+            <tr>
+              <td title="How far ahead of the server's own figure your body is drawn, and the prediction's three fault counters: snaps, stat fallbacks, unreconciled frames. All three should sit at their warm-up value.">
+                Predict lead
+              </td>
+              <td>
+                {fmt(stats.prediction.leadM, 2)} m
+                {stats.prediction.snaps + stats.prediction.fallbacks > 0
+                  ? ` · ${stats.prediction.snaps} snap / ${stats.prediction.fallbacks} fb`
+                  : ''}
+              </td>
+            </tr>
+          )}
           {repl === null ? null : (
             <>
               <tr>

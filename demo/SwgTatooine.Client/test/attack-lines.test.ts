@@ -21,6 +21,7 @@ const view: FrameView = {
   viewportHeight: 800,
   selectedNetId: 0,
   ground: FLAT_GROUND,
+  predicted: null,
 };
 
 describe('AttackLines (NullEngine)', () => {

@@ -24,12 +24,12 @@ import { meanAndP95, regionDue } from './frame-policy';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
-import type { DataSource, EventSink } from '../data/source';
+import { SpeedClass, type DataSource, type EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
 import { AGG_GRID, FASTEST_TICK_PERIOD_MS, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
-import { EntityLayer, type FrameView, type PickHit, type PickRay } from '../render/entity-layer';
+import { EntityLayer, type FrameView, type PickHit, type PickRay, type PredictedOverride } from '../render/entity-layer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { PlanetProfile } from '../render/planet-profile';
@@ -48,6 +48,7 @@ import { advance, arrived } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { intentChanged, movementIntent, REFRESH_MS, stopAfter, type MoveIntent } from './player-intent';
+import { Predictor, speedForClass } from './predictor';
 import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
@@ -152,6 +153,14 @@ class MutableFrameView implements FrameView {
   viewportHeight = 1;
   selectedNetId = 0;
   ground: GroundSampler = FLAT_GROUND;
+  predicted: PredictedOverride | null = null;
+}
+
+/** Reused each frame so a predicted body costs no allocation; the packer only reads it. */
+class MutablePredictedOverride implements PredictedOverride {
+  netId = 0;
+  x = 0;
+  z = 0;
 }
 
 /**
@@ -198,6 +207,10 @@ export class ClientApp {
   private readonly input: CameraInput;
   private readonly origin = new RenderOrigin();
   private readonly view = new MutableFrameView();
+
+  /** A14: the locally predicted avatar, and the scratch record the packer reads it through. */
+  private readonly predictor = new Predictor();
+  private readonly predictedOverride = new MutablePredictedOverride();
   private readonly groundView = new GroundView();
   /** One per archetype of the CURRENT world's schema, rebuilt when a source brings a different one. */
   private layers: EntityLayer[];
@@ -799,8 +812,55 @@ export class ClientApp {
    * the avatar a stop if it was moving — so switching to the map camera mid-run halts the character instead of leaving it walking
    * off under a camera that is no longer behind it.
    */
+  /**
+   * Starts, steps or stops the avatar's prediction (A14).
+   *
+   * @param netId The avatar to predict, or 0 for "nothing to predict" — a god camera, a spectator, or a session whose intents
+   * the server refuses.
+   * @param nowMs This frame's timestamp.
+   * @param dt Seconds since the previous frame.
+   *
+   * @remarks
+   * <b>Reconciles against {@link eyeX}/{@link eyeZ}, which {@link locateEyeSubject} has just written for this very netId.</b>
+   * Calling {@link evaluate} again would interpolate the same entity a second time per frame, and would overwrite the shared
+   * `eval*` slots that {@link locateSelected} and {@link locateEyeSubject} both read — harmless today only because both copy
+   * their values out first, which is the kind of ordering that holds until someone moves a line.
+   *
+   * The caller passes 0 for anything that is not a player steering its own body, and only passes a netId once
+   * {@link locateEyeSubject} has succeeded for it — so there is always an authority here to reconcile against.
+   */
+  private advancePrediction(netId: number, nowMs: number, dt: number): void {
+    if (netId === 0) {
+      this.predictor.stop();
+      this.predictedSubject = 0;
+      return;
+    }
+
+    if (this.predictedSubject !== netId) {
+      this.predictedSubject = netId;
+      this.predictor.start(nowMs, this.eyeX, this.eyeZ);
+      return;
+    }
+
+    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderDelayMs);
+  }
+
+  /** The netId {@link predictor} is anchored on, so a change of avatar re-anchors instead of integrating from the old one. */
+  private predictedSubject = 0;
+
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
     const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw) : null;
+
+    // A14: the predictor is driven by the CURRENT intent, whether or not this frame sends one. The send is coalesced and rate
+    // limited (REFRESH_MS), so a predictor fed only on sends would stand still for up to a third of a second at a time.
+    if (this.predictor.active) {
+      if (intent === null || intent.speedClass === SpeedClass.stop) {
+        this.predictor.clearIntent();
+      } else {
+        this.predictor.setIntent(intent.heading, speedForClass(intent.speedClass, source.selfNumber('walkMps'), source.selfNumber('runMps')));
+      }
+    }
+
     if (intent === null) {
       // The keys are up. If the avatar was moving it must be TOLD to stop — the server is steering towards a destination a second
       // of travel ahead, so silence lets the character walk on for about five metres after the key came up.
@@ -1033,13 +1093,38 @@ export class ClientApp {
     const inEye = ui.cameraMode === 'eye' && haveEyeSubject;
 
     // Bolted to your own avatar, eased when watching somebody else's — see EyeCamera.rigid.
+    // A9: the held keys, in the camera's frame, as a movement intent.
+    //
+    // <b>Before the camera's own update, and A14 is why.</b> The three are circular: the heading is the eye camera's yaw, the
+    // camera's position follows the predicted body, and the prediction integrates the intent. Something has to be a frame
+    // stale, and the yaw is by far the cheapest: `update` EASES it toward its goal, so reading it here costs one ease step —
+    // a fraction of a degree — where ordering the prediction after the camera instead costs a whole frame of movement latency
+    // on every key press, and ordering the camera after the prediction without this costs a constant 8 cm of camera lag at a
+    // run. Measured latency is 9.4 ms p50 with this order.
+    //
+    // Gated on IN EYE and not merely on playing, because the heading is the eye camera's yaw. A10 leaves the camera-mode button to
+    // the viewer, and in map mode that yaw is whatever it was when the viewer left eye mode — nothing updates it — while W/A/S/D
+    // belong to the map camera's pan. Sending then walked the avatar along a stale facing the person could not see, in response to
+    // keys they were using for something else.
+    if (playing) {
+      this.sendMovementIntent(live, now, inEye);
+    }
+
+    // A14: the predicted avatar, stepped with the intent just computed. Started on the authority the first frame the session
+    // has one, stopped for anything that is not a player steering its own body — a god camera, a spectator, or a session whose
+    // intents the server refuses.
+    this.advancePrediction(playing && haveEyeSubject ? eyeNetId : 0, now, dt);
+
     this.eyeCamera.rigid = playing;
     if (inEye) {
       // A god camera rides its selection, so the two slots hold the same subject and either would do; a player's camera
       // must read the eye slot, which is the only one holding the avatar.
-      const camX = playing ? this.eyeX : this.selectedX;
+      // The PREDICTED position when there is one: the camera and the body must agree, or the view slides off a character
+      // standing where the server last confirmed it.
+      const predicting = playing && this.predictor.active && !ui.showAuthoritative;
+      const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
       const camY = playing ? this.eyeY : this.selectedY;
-      const camZ = playing ? this.eyeZ : this.selectedZ;
+      const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
       if (this.eyeSubject !== eyeNetId) {
         this.eyeSubject = eyeNetId;
         this.eyeCamera.jumpTo(camX, camY, camZ, playing ? this.eyeHeading : this.selectedHeading);
@@ -1050,17 +1135,6 @@ export class ClientApp {
       this.eyeCamera.update(dt);
     } else {
       this.eyeSubject = 0;
-    }
-
-    // A9: the held keys, in the camera's frame, as a movement intent. After the camera has settled this frame, so the
-    // heading is the facing the viewer can actually see rather than the previous frame's.
-    //
-    // Gated on IN EYE and not merely on playing, because the heading is the eye camera's yaw. A10 leaves the camera-mode button to
-    // the viewer, and in map mode that yaw is whatever it was when the viewer left eye mode — nothing updates it — while W/A/S/D
-    // belong to the map camera's pan. Sending then walked the avatar along a stale facing the person could not see, in response to
-    // keys they were using for something else.
-    if (playing) {
-      this.sendMovementIntent(live, now, inEye);
     }
 
     // The map camera orbits the ground under its target, so it needs the terrain height there BEFORE it recomputes its eye.
@@ -1081,6 +1155,18 @@ export class ClientApp {
     view.viewportHeight = this.cssSize.height;
     view.pixelsPerMetre = this.cssSize.height / (2 * Math.tan(cam.fov / 2));
     view.selectedNetId = ui.selectedNetId;
+    if (this.predictor.active && live !== null) {
+      this.predictedOverride.netId = live.selfNetId;
+      this.predictedOverride.x = this.predictor.x;
+      this.predictedOverride.z = this.predictor.z;
+      // The debug toggle renders the SERVER's position instead of the predicted one, so the viewer can A/B the two and watch
+      // the body step back by exactly the lead distance. A side-by-side ghost would need a second mesh instance per frame in
+      // the packer's hot loop; a toggle shows the same quantity for nothing, and arguably more clearly than two meshes 0.3 m
+      // apart. Deviation from `15-client-prediction.md` § 5, recorded there.
+      view.predicted = ui.showAuthoritative ? null : this.predictedOverride;
+    } else {
+      view.predicted = null;
+    }
 
     this.camera.position.set(view.eyeX, view.eyeY, view.eyeZ);
     this.camera.rotation.set(cam.pitch, cam.yaw, 0);
@@ -1407,6 +1493,16 @@ export class ClientApp {
       inspection: ui.selectedNetId === 0 ? null : this.inspect(ui.selectedNetId),
       held: this.world.entityCount,
       anomalies: this.world.anomalies,
+      // A14. The lead is the latency expressed as a distance — the gap between the body on screen and the server's own
+      // figure — and the three counters are how a prediction fault announces itself; see PredictionStats for what each means.
+      prediction: this.predictor.active
+        ? {
+            leadM: Math.hypot(this.predictor.x - this.eyeX, this.predictor.z - this.eyeZ),
+            snaps: this.predictor.snaps,
+            fallbacks: this.predictor.fallbacks,
+            stale: this.predictor.staleReads,
+          }
+        : null,
     });
   }
 

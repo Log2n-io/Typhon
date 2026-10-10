@@ -215,6 +215,17 @@ export interface DataSource {
    */
   readonly canPlay: boolean;
   /**
+   * An owner-only field of the controlled entity (the `SELF` block, W17), or `NaN` when none has arrived.
+   *
+   * <b>`NaN` is the answer, not an error.</b> These are per-player stats — A14 uses `walkMps` and `runMps` to predict the
+   * avatar's own movement — and a client that guessed a speed instead of declining to predict would drift without bound for
+   * as long as the player walked. Callers must test it.
+   *
+   * @param name The field's catalog name.
+   * @returns The value, or `NaN`.
+   */
+  selfNumber(name: string): number;
+  /**
    * Walks the avatar towards a point on the ground (`MoveTo`).
    *
    * <b>A destination, not a velocity, and the server picks the speed.</b> That is what makes a speed hack impossible by
@@ -647,6 +658,11 @@ export class TyphonSource implements DataSource {
   /** The controlled entity's netId, from `SELF`; see {@link DataSource.selfNetId}. */
   get selfNetId(): number {
     return this.applier?.selfState.netId ?? 0;
+  }
+
+  /** An owner-only field of the controlled entity; see {@link DataSource.selfNumber}. */
+  selfNumber(name: string): number {
+    return this.applier?.selfState.number(name) ?? NaN;
   }
 
   /** The realm this session is in, or `null` before its first `REALM` block and after a `REALM(NONE)`. */

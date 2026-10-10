@@ -5,8 +5,6 @@ import {
   LAIR_SPAWN_RADIUS_M,
   LEASH_RADIUS_M,
   MAX_CHASE_RANGE_M,
-  PLAYER_MOUNT_SPEED_MPS,
-  PLAYER_RUN_SPEED_MPS,
   POIS,
   TEMPLATE_AGGRESSIVE,
   TEMPLATE_DAMAGE,
@@ -15,6 +13,7 @@ import {
 import type { SpatialBins } from './bins';
 import { Rng } from './rng';
 import { clampToPlanet, randomWildernessPoint, weightedCity, type MockWorld } from './world';
+import { PLAYER_MOUNT_SPEED_MPS, PLAYER_RUN_SPEED_MPS } from './mock-speeds';
 
 /**
  * The mock simulation: the behaviour of `demo/SwgTatooine/Sim/SimBridge.*.cs`, with the fixes the live-demo design

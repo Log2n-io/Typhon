@@ -117,6 +117,27 @@ export interface FrameStats {
   /** The held entity count the HUD must agree with (M1-3): the store's, not the renderer's. */
   readonly held: number;
   readonly anomalies: number;
+  /** What the local prediction of this session's own avatar is doing, or `null` when nothing is predicted (A14). */
+  readonly prediction: PredictionStats | null;
+}
+
+/**
+ * The prediction's own health, which is the whole reason it is reported.
+ *
+ * <b>Every way this can go wrong is visible in these three numbers and invisible otherwise.</b> A correction loop that
+ * oscillates snaps periodically; a ring too small for the display's refresh rate stops reconciling and climbs `stale`; a
+ * missing speed stat climbs `fallbacks`. The first version of this feature shipped with all three counted and none shown,
+ * and a review found an instability by simulating the file that the running client would have displayed.
+ */
+export interface PredictionStats {
+  /** How far ahead of the server's own figure the displayed body is, metres — the latency, as a distance. */
+  readonly leadM: number;
+  /** Times the prediction was jumped because the error passed what lag can explain. Should stay at 0. */
+  readonly snaps: number;
+  /** Frames that declined to predict for want of a replicated speed. Should stay at 0 after the first `SELF`. */
+  readonly fallbacks: number;
+  /** Frames whose history could not reach the authority's moment, so nothing was reconciled. Should stop climbing after warm-up. */
+  readonly stale: number;
 }
 
 interface StatsState {

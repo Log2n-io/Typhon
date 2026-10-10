@@ -358,6 +358,21 @@ export function Toolbar() {
           >
             Grid
           </button>
+          {/*
+            A14. Offered only to a session that HAS a predicted avatar: for a god camera there is no prediction to contrast
+            with the authority, so the button would toggle nothing — the same rule the camera-mode button follows.
+          */}
+          {ui.playing ? (
+            <button
+              className={ui.showAuthoritative ? 'active' : ''}
+              title="Draw your avatar where the server says it is, instead of where this client predicted. The gap is the latency."
+              onClick={() => {
+                ui.setShowAuthoritative(!ui.showAuthoritative);
+              }}
+            >
+              Server pos
+            </button>
+          ) : null}
           <button
             className={ui.showLabels ? 'active' : ''}
             onClick={() => {

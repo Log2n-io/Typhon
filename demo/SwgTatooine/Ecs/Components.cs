@@ -408,6 +408,31 @@ public struct PlayerMotion
     [Field] public float SpeedMps;
     [Field] public float DestX;
     [Field] public float DestZ;
+
+    /// <summary>
+    /// What this player's WALK is worth, in metres per second — the figure <c>TrySpeedFor</c> grants for
+    /// <see cref="Replication.SpeedClasses.Walk"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Owner-only, and it exists so the client can predict its own avatar (A14).</b> Prediction integrates the server's own rule,
+    /// <c>pos += dir(heading) x speed x dt</c>, and the client sends a speed CLASS rather than a speed — so without this it would not know how fast to start
+    /// moving on the first key press of a session.
+    /// </para>
+    /// <para>
+    /// <b>A replicated stat rather than a constant mirrored in the client, and the difference is the failure mode.</b> A mismatched class VALUE is refused by
+    /// the server and counted, loudly; a mismatched SPEED produces position drift that grows without bound for as long as the player keeps walking. The
+    /// client already shipped one hard-coded figure the server never corrected — a 100 ms tick period — and it cost four separate symptoms.
+    /// </para>
+    /// <para>
+    /// Per player, because that is where this is going: a mount, a buff or a skill modifier changes it for one character and not for the world. Owner-scoped,
+    /// so nobody else's session pays a byte for it.
+    /// </para>
+    /// </remarks>
+    [Field, Owner(CodecKind.F32, Name = "walkMps", Group = "move")] public float WalkMps;
+
+    /// <summary>What this player's RUN is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
+    [Field, Owner(CodecKind.F32, Name = "runMps", Group = "move")] public float RunMps;
 }
 
 /// <summary>A city NPC's shuffle.</summary>

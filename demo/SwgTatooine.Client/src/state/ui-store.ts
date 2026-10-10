@@ -66,6 +66,14 @@ export interface UiState {
    * actions below could only ask "is something selected", and so refused a player eye mode outright.
    */
   readonly playing: boolean;
+  /**
+   * Draw the avatar where the SERVER says it is, rather than where the client predicted (A14).
+   *
+   * <b>A diagnostic, and the answer to a fair objection.</b> Prediction makes the displayed position a fiction, in a demo
+   * whose whole point is that the engine is the authority — so the fiction has to be inspectable. Toggling this steps the body
+   * back by exactly the lead distance, which makes the latency something the demo SHOWS rather than only measures.
+   */
+  readonly showAuthoritative: boolean;
   readonly showLabels: boolean;
   readonly showAttacks: boolean;
   /** Per archetype NAME; an archetype the user has not touched is visible. */
@@ -110,6 +118,7 @@ export interface UiState {
   readonly setCameraMode: (mode: 'god' | 'eye') => void;
   /** Tells the store this session has an avatar to ride; see {@link UiState.playing}. */
   readonly setPlaying: (playing: boolean) => void;
+  readonly setShowAuthoritative: (showAuthoritative: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
   readonly toggleLayer: (name: string) => void;
@@ -139,6 +148,7 @@ export const useUi = create<UiState>()((set) => ({
   terrainPixelError: 2,
   cameraMode: 'god',
   playing: false,
+  showAuthoritative: false,
   showLabels: true,
   showAttacks: true,
   layers: {},
@@ -194,6 +204,9 @@ export const useUi = create<UiState>()((set) => ({
   },
   setPlaying: (playing) => {
     set({ playing });
+  },
+  setShowAuthoritative: (showAuthoritative) => {
+    set({ showAuthoritative });
   },
   setShowLabels: (showLabels) => {
     set({ showLabels });

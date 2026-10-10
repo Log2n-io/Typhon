@@ -658,6 +658,11 @@ public static partial class TatooineReplication
             SpeedMps = 0f,
             DestX = profile.LastPosition.X,
             DestZ = profile.LastPosition.Z,
+            // A14: the speeds this player is entitled to, from the same function the intents go through, so the client predicting its own avatar integrates
+            // the figure the server will. Set at spawn rather than on each intent because the owner group travels on ENTER — a client that had to wait for
+            // its first MoveDir to learn its own run speed would stutter on the first key press of every session.
+            WalkMps = SpeedFor(SpeedClasses.Walk),
+            RunMps = SpeedFor(SpeedClasses.Run),
         };
 
         var vitals = new PlayerVitals

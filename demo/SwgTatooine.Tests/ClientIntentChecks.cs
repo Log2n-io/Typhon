@@ -228,6 +228,51 @@ public sealed class ClientIntentChecks
         });
     }
 
+    /// <summary>
+    /// A14: the avatar carries the speeds its own session is entitled to, and they are the figures the command path grants.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two copies of this mapping would be two speeds, and the one the client integrated would be the one that drifts.</b>
+    /// The client predicts its own movement by running the server's rule, and it sends a speed CLASS rather than a speed — so
+    /// the magnitude has to reach it from here. Asserted against <c>TrySpeedFor</c>'s own output via the commands, not against
+    /// a literal, because a literal in this test would be the third copy.
+    /// </remarks>
+    [Test]
+    public void AnAvatarCarriesTheSpeedsItsSessionIsEntitledTo()
+    {
+        using var world = new Possessed(Config());
+
+        float walk;
+        float run;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var move = tx.For<Player>().Open(world.Entity).Read(Player.Move);
+            walk = move.WalkMps;
+            run = move.RunMps;
+        }
+
+        // What the command path actually grants, observed rather than asserted against a constant: a walk intent, then a run
+        // intent, each read back from the velocity the server set.
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Walk));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the walk to be applied");
+        world.Harness.Ticks(1);
+        var walkPerTick = MathF.Abs(world.Read().VelX);
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the run to be applied");
+        world.Harness.Ticks(1);
+        var runPerTick = MathF.Abs(world.Read().VelX);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(run, Is.GreaterThan(0f), "an avatar with no run speed leaves the client nothing to predict with");
+            Assert.That(walk, Is.GreaterThan(0f).And.LessThan(run), "a walk is slower than a run and not zero");
+            // Steer sets metres per TICK, so the stat is the per-tick step times the rate.
+            Assert.That(walkPerTick * TickRateHz, Is.EqualTo(walk).Within(0.01f), "the walk stat is not what a walk intent is granted");
+            Assert.That(runPerTick * TickRateHz, Is.EqualTo(run).Within(0.01f), "the run stat is not what a run intent is granted");
+        });
+    }
+
     /// <summary>Speed class 0 stops the player, which is why stop is a class rather than a fourth command type.</summary>
     [Test]
     public void SpeedClassZeroStops()

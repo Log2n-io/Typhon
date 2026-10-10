@@ -95,7 +95,16 @@ export class Clock {
     return this.delayCeilingMs;
   }
 
-  /** Current render delay in milliseconds. */
+  /**
+   * Current render delay in milliseconds — how far behind the newest server frame {@link renderTick}/{@link renderFrac} sits.
+   *
+   * <b>A client that predicts its own entity must reconcile against this moment, not against now.</b> The position this clock
+   * evaluates is the authority as of `now − renderDelayMs`, so a predictor comparing it with its CURRENT predicted position
+   * reads the render delay as if it were error — and a corrector that believes it pulls the prediction back at `error / τ`,
+   * which at walking pace is a large fraction of the speed and looks like a smoothing bug rather than a measurement mistake.
+   * Comparing against what was predicted FOR `now − renderDelayMs` leaves the steady state at zero, so only real divergence
+   * moves the correction.
+   */
   get renderDelayMs(): number {
     return this.delayMs;
   }

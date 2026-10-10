@@ -2127,14 +2127,31 @@ public static partial class TatooineReplication
     /// </remarks>
     private static bool TrySpeedFor(byte speedClass, out float speed)
     {
-        switch (speedClass)
+        if (speedClass >= SpeedClasses.Count)
         {
-            case SpeedClasses.Stop: speed = 0f; return true;
-            case SpeedClasses.Walk: speed = TatooineData.PlayerRunSpeedMps * 0.5f; return true;
-            case SpeedClasses.Run: speed = TatooineData.PlayerRunSpeedMps; return true;
-            default: speed = 0f; return false;
+            speed = 0f;
+            return false;
         }
+
+        speed = SpeedFor(speedClass);
+        return true;
     }
+
+    /// <summary>What a class this server GRANTS is worth, in metres per second.</summary>
+    /// <param name="speedClass">A class below <see cref="SpeedClasses.Count"/>.</param>
+    /// <returns>Metres per second; 0 for a class this server does not grant.</returns>
+    /// <remarks>
+    /// The entitlement itself, so <see cref="TrySpeedFor"/> (the command path, which must refuse what it does not grant) and the avatar's replicated
+    /// <c>walkMps</c>/<c>runMps</c> stats (A14, which tell the client what to predict with) cannot disagree about what running is worth. Two copies of this
+    /// mapping would be two speeds, and the one the client integrated would be the one that drifts.
+    /// </remarks>
+    internal static float SpeedFor(byte speedClass) => speedClass switch
+    {
+        SpeedClasses.Stop => 0f,
+        SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f,
+        SpeedClasses.Run => TatooineData.PlayerRunSpeedMps,
+        _ => 0f,
+    };
 
     /// <summary>Clears the intent counters, so one check's refusals do not decide the next one's.</summary>
     /// <remarks>Called from a <c>SetUp</c>, for the reason <see cref="ResetSessionAccounting"/> is. Never from the demo.</remarks>
