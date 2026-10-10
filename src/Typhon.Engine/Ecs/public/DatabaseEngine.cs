@@ -2566,8 +2566,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         if (CrashRecoveryAtOpen)
         {
-            CollectionBufferLocksResetAtOpen += LockWordRecovery.ResetRootLocks(segment, this,
-                (int)Marshal.OffsetOf<VariableSizedBufferRootHeader>(nameof(VariableSizedBufferRootHeader.Lock)), sizeof(AccessControl));
+            CollectionBufferLocksResetAtOpen += VariableSizedBufferRecovery.ResetRootLocksAfterCrash(segment, this);
         }
     }
 
@@ -2599,23 +2598,34 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             segment = MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, creation,
                 StorageSegmentKind.ComponentCollection);
             creation.SaveChanges();
+
+            // The map, the new segment in it, durable before the segment is published: no collection data reaches it before the open can find it. Under
+            // the meta lock, as every writer of the bootstrap must be: the checkpoint thread serializes the dictionary while it advances its LSN.
+            var created = segment;
+            MMF.MutateBootstrapAndPersist(() => WriteCollectionSegmentMap(stride, created));
             _componentCollectionSegmentByStride[stride] = segment;
-            WriteCollectionSegmentMap();
-            MMF.SaveBootstrap();
             return segment;
         }
     }
 
-    /// <summary>Writes the component-collection segments' stride → root-page map into the bootstrap; the caller saves it.</summary>
-    private void WriteCollectionSegmentMap()
+    /// <summary>
+    /// Writes the component-collection segments' stride → root-page map into the bootstrap — <paramref name="pendingSegment"/> too, a segment about to
+    /// be published; the caller saves it.
+    /// </summary>
+    private void WriteCollectionSegmentMap(int pendingStride = 0, ChunkBasedSegment<PersistentStore> pendingSegment = null)
     {
         var collections = _componentCollectionSegmentByStride;
-        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
+        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count + (pendingSegment != null ? 1 : 0));
         var collectionIndex = 0;
         foreach (var kv in collections)
         {
             MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
             collectionIndex++;
+        }
+
+        if (pendingSegment != null)
+        {
+            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(pendingStride, pendingSegment.RootPageIndex));
         }
     }
 

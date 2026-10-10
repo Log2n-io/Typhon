@@ -2117,12 +2117,15 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             takes a chain lock — the cluster HEAD rebuild walks chains, the log replay appends revisions, the scrub walks them all; each would wait for
             the holder that died with the process, and the open would fail. The component-collection segments' buffer roots are freed as those
             segments load; the index value buffers need nothing, as a crash open recreates every index empty (RB-01). A root is a chunk no other
-            chunk names as its next, in both layouts
+            chunk names as its next that its layout's header check accepts — a crash can leave a chunk unnamed that is no root (a chain torn across
+            pages, a buffer's first free chunk), and its bytes at the lock's offset are data. Read through a scan accessor: a segment may outgrow the
+            cache
   scope: PagedMMF.TakeCaptureTicket, PagedMMF.EndLockHold, PagedMMF.BeginCapture, PagedMMF.EndCapture, PagedMMF.WritePagesForCheckpoint,
          PagedMMF.SavePages, ComponentRevisionManager.ChainLockTicket, ComponentRevisionManager.EndChainLockHold,
          ComponentRevisionManager.ResetChainLocksAfterCrash, RevisionEnumerator.Dispose, Transaction.PublishComponent,
          Transaction.ReleaseRetainedPublishLocks, VariableSizedBufferSegmentBase.LockBuffer, VariableSizedBufferSegmentBase.ReleaseLockOnBuffer,
-         VariableSizedBufferAccessor.Dispose, LockWordRecovery.ResetRootLocks, DatabaseEngine.ResetCollectionBufferLocksAfterCrash
+         VariableSizedBufferSegmentBase.ReadAllElementsRaw, VariableSizedBufferAccessor.Dispose, LockWordRecovery.ResetRootLocks,
+         VariableSizedBufferRecovery.ResetRootLocksAfterCrash, DatabaseEngine.ResetCollectionBufferLocksAfterCrash
   on_violation: the release changes the page in memory only; once the clean page is evicted and read back, the lock is held by no one, for good,
                 and a clean close — which rewrites no clean page — hands it to the next process: every writer of the entity times out on the
                 chain's lock (#1253, MarketHardeningTests at a 64 MiB cache with long readers: chain-lock timeouts within 19 to 56 s of the storm).
@@ -2145,7 +2148,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             checkpoint writes it: read back held before the fix, (0, 1) on 3 of 3 runs; now the page stays owed, is rewritten and reads back free;
             a hold copied before a hard crash is free after recovery and the buffer writable; a write's and a raw read's holds are found under a
             staged capture. Mutations killed: the write's release, the raw read and the read accessor never ending their holds, no reset at the
-            crash open
+            crash open. LockWordRecoveryTests [VerifiesRule] — the reset clears a held root and leaves an unnamed data chunk's bytes at the lock's
+            offset untouched, in both layouts; with the root check removed both fail
 
 ---
 

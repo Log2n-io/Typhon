@@ -132,7 +132,9 @@ class BufferLockWordPersistenceTests : TestBase<BufferLockWordPersistenceTests>
         return (buffer, neighbour);
     }
 
-    /// <summary>A reader of the buffer — the read path's own lock site — holds its lock while a neighbour's write leaves the page owed and a checkpoint writes it.</summary>
+    /// <summary>
+    /// A reader of the buffer — the read path's own lock site — holds its lock while a neighbour's write leaves the page owed and a checkpoint writes it.
+    /// </summary>
     private static long ReadDuringACheckpoint(DatabaseEngine dbe, VariableSizedBufferSegment<int, PersistentStore> vsbs, int buffer, int neighbour)
     {
         var before = dbe.MMF.LocksHeldThroughCapture;

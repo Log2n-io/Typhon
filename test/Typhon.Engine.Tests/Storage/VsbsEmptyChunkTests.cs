@@ -260,6 +260,66 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "the checkpoint, while the reader is open");
     }
 
+    /// <summary>
+    /// The unlinks that park empty chunks in the buffer's free list — the root's free-list head and count, each parked chunk's link — reach the disk:
+    /// read back after an eviction, the free list holds what the root counts.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public unsafe void AReadersParkedChunks_ReachTheDisk()
+    {
+        // The root alone at the end of its page, its chunks on the next: the root's free-list writes are the only ones on its page.
+        var vsbs = _dbe.GetComponentCollectionVSBS<long>();
+        var segment = vsbs.Segment;
+        int buffer;
+        while (true)
+        {
+            buffer = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => vsbs.AllocateBuffer(ref a));
+            if (PageOf(segment, buffer) != PageOf(segment, buffer + 1))
+            {
+                break;
+            }
+        }
+
+        Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            for (var i = 1; i <= vsbs.ElementCountRootChunk + vsbs.ElementCountPerChunk * 8; i++)
+            {
+                vsbs.AddElement(buffer, i, ref a);
+            }
+
+            return 0;
+        });
+        var chunks = Chain(vsbs, buffer);
+        Assert.That(PageOf(segment, chunks[0].Chunk), Is.Not.EqualTo(PageOf(segment, buffer)), "premise: the chunks are on another page than the root");
+        for (var i = 1; i <= 3; i++)
+        {
+            Empty(vsbs, buffer, chunks[i].Chunk);
+        }
+
+        // The deletes on disk, so the pages the reader writes are owed by its own marks only.
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the emptied chunks are on disk");
+        ReadThrough(vsbs, buffer);
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        var rootSlot = SlotOf(vsbs, buffer);
+        Assert.That(_dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages were evicted");
+        Assert.That(_dbe.MMF.GetPageState(rootSlot), Is.EqualTo(PagedMMF.PageState.Free), "premise: the root's page left the cache");
+
+        var (total, walked) = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            ref var root = ref a.GetChunk<VariableSizedBufferRootHeader>(buffer);
+            int t = root.TotalFreeChunk, w = 0;
+            for (var chunk = root.FirstFreeChunkId; chunk != 0 && w < 100; chunk = *(int*)a.GetChunkAddress(chunk))
+            {
+                w++;
+            }
+
+            return (t, w);
+        });
+        Assert.That(total, Is.EqualTo(3), "the root's free-list count, read back");
+        Assert.That(walked, Is.EqualTo(3), "the free list, read back");
+    }
+
     /// <summary>The page of <paramref name="chunk"/> in its segment.</summary>
     private static int PageOf(ChunkBasedSegment<PersistentStore> segment, int chunk) =>
         chunk < segment.ChunkCountRootPage ? 0 : 1 + (chunk - segment.ChunkCountRootPage) / segment.ChunkCountPerPage;

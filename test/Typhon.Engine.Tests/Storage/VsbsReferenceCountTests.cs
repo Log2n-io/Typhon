@@ -15,6 +15,13 @@ internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests
     private DatabaseEngine _dbe;
     private VariableSizedBufferSegment<int, PersistentStore> _vsbs;
 
+    // No periodic checkpoint: the only captures are the ones a test makes.
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Resources.CheckpointIntervalMs = int.MaxValue;
+    }
+
     [SetUp]
     public void SetUpSegment()
     {
@@ -47,6 +54,8 @@ internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests
             changeSet.ReleaseDirtyMarks();
         }
     }
+
+    private unsafe int SlotOf(int chunk) => Run((ref ChunkAccessor<PersistentStore> a) => _dbe.MMF.MemPageIndexOf(a.GetChunkAddress(chunk)));
 
     private int NewBuffer(params int[] values) => Run((ref ChunkAccessor<PersistentStore> a) =>
     {
@@ -116,7 +125,9 @@ internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests
         }
 
         Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        var slot = SlotOf(buffer);
         Assert.That(_dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages were evicted");
+        Assert.That(_dbe.MMF.GetPageState(slot), Is.EqualTo(PagedMMF.PageState.Free), "premise: the root's page left the cache");
         Assert.That(Run((ref ChunkAccessor<PersistentStore> a) => _vsbs.GetRefCounter(buffer, ref a)), Is.EqualTo(1), "the count, read back from disk");
     }
 }

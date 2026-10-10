@@ -58,6 +58,7 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
             DefaultCommitTimeout = saved.DefaultCommitTimeout,
             DefaultUowTimeout = saved.DefaultUowTimeout,
             PageCacheBackpressureTimeout = saved.PageCacheBackpressureTimeout,
+            CommitPublishBackpressureTimeout = saved.CommitPublishBackpressureTimeout,
             WalBackPressureTimeout = saved.WalBackPressureTimeout,
         };
         return new Restore(saved);
@@ -154,7 +155,8 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
             var wallet = e.Read(MkTraderArch.Wallet);
             wallet.Credits++;
             e.Set(MkTraderArch.Wallet, wallet);
-            Assert.That(() => tx.Commit((ref ConcurrencyConflictSolver _) => { }), Throws.Exception, "premise: PREPARE throws under the lock");
+            Assert.That(() => tx.Commit((ref ConcurrencyConflictSolver _) => { }), Throws.InvalidOperationException.With.Message.EqualTo("probe"),
+                "premise: PREPARE throws under the lock, from the probe");
         }
         finally
         {

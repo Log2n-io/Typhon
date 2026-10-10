@@ -29,6 +29,55 @@ internal struct VariableSizedBufferRootHeader
     internal void ExitBufferLockForTest() => Lock.ExitExclusiveAccess();
 }
 
+/// <summary>The crash-open reset of a buffer segment's root lock words (PS-20).</summary>
+internal static class VariableSizedBufferRecovery
+{
+    /// <summary>Frees every buffer lock a crash left held in <paramref name="segment"/>'s data file; returns how many were held.</summary>
+    internal static unsafe int ResetRootLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
+    {
+        var header = default(VariableSizedBufferRootHeader);
+        var lockOffset = (int)Unsafe.ByteOffset(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref header),
+            ref Unsafe.As<AccessControl, byte>(ref header.Lock));
+        return LockWordRecovery.ResetRootLocks(segment, dbe, lockOffset, sizeof(AccessControl), IsBufferRoot);
+    }
+
+    /// <summary>
+    /// Whether an unnamed chunk is a buffer's root — not its first free chunk, nor a data chunk whose predecessor's link a crash lost: referenced, and its
+    /// append cursor the root itself or a chunk its chain reaches through allocated chunks.
+    /// </summary>
+    private static unsafe bool IsBufferRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        ref var header = ref scan.GetChunk<VariableSizedBufferRootHeader>(chunkId);
+        int cursor = header.FirstStoredChunkId, next = header.Header.NextChunkId;
+        if (header.RefCounter < 1 || header.TotalCount < 0 || header.TotalFreeChunk < 0)
+        {
+            return false;
+        }
+
+        if (cursor == chunkId)
+        {
+            return true;
+        }
+
+        for (var steps = 0; next != 0 && steps < segment.AllocatedChunkCount; steps++)
+        {
+            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            {
+                return false;
+            }
+
+            if (next == cursor)
+            {
+                return true;
+            }
+
+            next = *(int*)scan.GetChunkAddress(next);
+        }
+
+        return false;
+    }
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct VariableSizedBufferChunkHeader
 {

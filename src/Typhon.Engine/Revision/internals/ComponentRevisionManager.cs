@@ -794,9 +794,39 @@ internal ref struct ComponentRevisionManager
     /// destroyed entity's chain still awaiting release included; a root is dirtied only when its word was set. Single-threaded.
     /// </summary>
     /// <returns>The number of roots whose lock word was set.</returns>
-    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe) =>
-        LockWordRecovery.ResetRootLocks(segment, dbe, (int)Marshal.OffsetOf<CompRevStorageHeader>(nameof(CompRevStorageHeader.Control)),
-            sizeof(AccessControlSmall));
+    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
+    {
+        var header = default(CompRevStorageHeader);
+        var lockOffset = (int)Unsafe.ByteOffset(ref Unsafe.As<CompRevStorageHeader, byte>(ref header),
+            ref Unsafe.As<AccessControlSmall, byte>(ref header.Control));
+        return LockWordRecovery.ResetRootLocks(segment, dbe, lockOffset, sizeof(AccessControlSmall), IsChainRoot);
+    }
+
+    /// <summary>
+    /// Whether an unnamed chunk is a chain root and not an overflow chunk whose predecessor's link a crash lost: a plausible header, and its
+    /// <c>ChainLength - 1</c> links all through allocated chunks.
+    /// </summary>
+    private static unsafe bool IsChainRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        ref var header = ref scan.GetChunk<CompRevStorageHeader>(chunkId);
+        int length = header.ChainLength, items = header.ItemCount, first = header.FirstItemIndex, next = header.NextChunkId;
+        if (length < 1 || length > segment.AllocatedChunkCount || items < 0 || items > ComputeRevElementCount(length) || first < 0 || header.EntityPK == 0)
+        {
+            return false;
+        }
+
+        for (var left = length - 1; left > 0; left--)
+        {
+            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            {
+                return false;
+            }
+
+            next = *(int*)scan.GetChunkAddress(next);
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Recovery orphan sweep (03-recovery.md §6): after a table's chains have been scrubbed to their heads, free every allocated

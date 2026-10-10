@@ -69,6 +69,9 @@ internal sealed class VsbsBulkAppendTests : TestBase<VsbsBulkAppendTests>
             return chain;
         });
 
+    private unsafe int ElementCount<T>(VariableSizedBufferSegment<T, PersistentStore> vsbs, int chunk) where T : unmanaged => Write(vsbs,
+        (ref ChunkAccessor<PersistentStore> a) => ((VariableSizedBufferChunkHeader*)a.GetChunkAddress(chunk))->ElementCount);
+
     /// <summary>A bulk append that fills several chunks puts every element in, in order.</summary>
     [Test]
     [CancelAfter(10_000)]
@@ -108,9 +111,11 @@ internal sealed class VsbsBulkAppendTests : TestBase<VsbsBulkAppendTests>
         });
         var firstDataChunk = Chain(vsbs, source)[0];
         Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => vsbs.DeleteElement(source, firstDataChunk, vsbs.ElementCountRootChunk + 1, ref a));
+        Assert.That(ElementCount(vsbs, firstDataChunk), Is.EqualTo(vsbs.ElementCountPerChunk - 1), "premise: a partly filled data chunk");
 
+        // The clone copies in chain order: the same elements, in the same order.
         var clone = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => vsbs.CloneBuffer(source, ref a));
-        Assert.That(ReadBack(vsbs, clone).OrderBy(v => v), Is.EqualTo(ReadBack(vsbs, source).OrderBy(v => v)));
+        Assert.That(ReadBack(vsbs, clone), Is.EqualTo(ReadBack(vsbs, source)));
     }
 
     /// <summary>

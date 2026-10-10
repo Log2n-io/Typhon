@@ -638,7 +638,7 @@ class ChainLockWordPersistenceTests : TestBase<ChainLockWordPersistenceTests>
 
     /// <summary>
     /// A destroyed entity's chain is released, under its lock, by the cleanup that runs once no snapshot can read it — here the destroy's own commit:
-    /// that hold is ticketed with the others of the commit.
+    /// that hold is ticketed with the others of the commit on the chain.
     /// </summary>
     [Test]
     [VerifiesRule("PS-20")]
@@ -658,8 +658,8 @@ class ChainLockWordPersistenceTests : TestBase<ChainLockWordPersistenceTests>
         }
 
         var overlapped = EndStagedCapture(dbe, slot, before);
-        Assert.That(dbe.DeferredCleanupManager.DestroyedChainsReleased - released, Is.GreaterThan(0), "premise: the commit released the chain");
-        Assert.That(overlapped, Is.EqualTo(4), "the commit's holds on the chain, the release's among them");
+        Assert.That(dbe.DeferredCleanupManager.DestroyedChainsReleased - released, Is.EqualTo(2), "premise: the commit released both chains, the wallet's too");
+        Assert.That(overlapped, Is.EqualTo(4), "the tombstone's append, the publish, the cleanup's compaction and the release — one hold each");
     }
 
     /// <summary>
