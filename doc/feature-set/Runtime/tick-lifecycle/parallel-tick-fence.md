@@ -62,7 +62,7 @@ using var runtime = TyphonRuntime.Create(dbe, schedule => { /* ... */ }, options
   rely on it to drain dirty pages.
 - Chunk sizing targets ~200µs of CPU per chunk; below that floor, per-dispatch overhead (worker wake, page
   cache attach) dominates the chunk's own cost.
-- Per-chunk dirty-page tracking uses a local pooled `ChangeSet`, capped at chunk end — does not change the
+- Per-chunk dirty-page tracking uses a local pooled `ChangeSet`, its marks released at chunk end (via `ReleaseDirtyMarks`) — does not change the
   engine's WAL/checkpoint contract for the rest of the tick.
 - Runs after the user's tick DAG completes and before `UoW.Flush()` — its WAL publishes become durable in the
   same fsync as the tick's other commits, not a tick later.
