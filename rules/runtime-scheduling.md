@@ -824,6 +824,36 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
   on_violation: clusters starved for the life of the process, silently
   verified: DispatchSelectionTests.TickDivisor2_CellAmortize2_EveryClusterVisited
 
+### DSEL-03: A system's integration step is its own revisit interval `[silent]` (issue #1293)
+  invariant AmortizedDeltaTime(S) = DeltaTime x EffectiveRateDivisor(S) x (amortizeApplied(S) ? CellAmortize(S) : 1), on EVERY
+            path that builds a TickContext for a system — the serial query, the parallel non-Versioned chunk, the parallel
+            Versioned chunk, and the chunked callback
+  invariant EffectiveRateDivisor is the spacing the SCHEDULER is enforcing this tick, not the declared TickDivisor alone: a run
+            must pass both rate gates, so under overload a Normal-priority system runs on the ticks divisible by TickDivisor
+            AND by ThrottledTickDivisor — their LCM. (divisor 2, throttled 3) runs every 6 ticks under load, not every 2
+  invariant the amortization factor counts only when the run's selection STRIDED: the bucketing lives on the tier-scoped path,
+            so a system whose EffectiveTier collapsed to All (no grid, no tier index) covers everything every run however it was
+            declared, and the step is then the rate divisor alone. Read from the run's own selection, like the realm stride
+  invariant the PRODUCT of the strides, not the larger: the rate divisors skip whole runs and cellAmortize skips clusters within
+            a run, so a cluster of a (divisor 2, amortize 3) system is revisited every 6 ticks and steps by 6 periods. DSEL-02
+            is what makes the product exact rather than an upper bound — the bucket is keyed on run count, so the divisor
+            cannot alias the rotation into an uneven revisit interval
+  invariant DeltaTime is NOT scaled: it stays the true inter-tick interval, because "how long since the last tick" has one
+            answer for every system whatever its rate (a timeout, a rate limit, telemetry)
+  never a divided system together with a change filter (refused at build, DSEL-01): a filter's dirty set is delivered once, so
+        the skipped ticks' changes are gone rather than deferred
+  note: ShouldRun and a reactive change-filter skip are NOT accounted for. They are the application's decision about one tick
+        rather than a declared rate, and the engine cannot attribute elapsed time to a condition it does not own.
+  scope: TyphonRuntime.AmortizedDeltaTimeFor, TyphonRuntime.ExecuteChunkedCallback, TyphonRuntime.ExecuteChunkWithAccessor,
+         TyphonRuntime.ExecuteChunkWithTransaction, TyphonRuntime.OnSystemStartInternal, TyphonRuntime.SelectDispatchClusters,
+         DagScheduler.EffectiveRateDivisor, TickContext.AmortizedDeltaTime, RuntimeSchedule.ValidateRegistration
+  on_violation: a system at divisor N integrates at 1/N of real time — movement, decay and timers all run slow, with nothing
+                raised and every test green, because the error is proportional and a fixture that asserts "it moved" still passes
+  verified: DispatchSelectionTests.TickDivisor_ScalesAmortizedDeltaTime, DispatchSelectionTests.TickDivisor_DoesNotScaleDeltaTime,
+            DispatchSelectionTests.TickDivisorWithChangeFilter_IsRefusedAtBuild,
+            DispatchSelectionTests.ThrottledTickDivisor_ScalesAmortizedDeltaTimeUnderOverload,
+            DispatchSelectionTests.CellAmortizeWithoutATierIndex_DoesNotClaimAStrideItDidNotTake
+
 ## Module: BIND — QuerySystem ↔ archetype binding
 
 A `QuerySystem` — parallel or not (RT-1, Realms) — is bound to one `ArchetypeClusterState` at runtime construction. That binding decides two things at

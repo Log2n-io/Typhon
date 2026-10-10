@@ -119,14 +119,33 @@ public sealed class SystemDefinition
     public Func<bool> ShouldRun { get; init; }
 
     // ═══════════════════════════════════════════════════════════════
-    // Overload parameters (stored for #201, not enforced yet)
+    // Rate parameters — all enforced in DagScheduler.CheckOverloadSkip
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>System runs every N ticks under normal load. Default: 1 (every tick).</summary>
-    public int TickDivisor { get; set; } = 1;
+    /// <summary>System runs every N ticks, <b>at normal load</b> — this is a declared rate, not an overload response. Default: 1 (every tick).</summary>
+    /// <remarks>
+    /// <para>
+    /// The mechanism for a system that is expensive and does not need to be current — an economy sweep, a slow AI pass — on a tick whose rate is set by
+    /// what the latency-critical systems need. <see cref="ThrottledTickDivisor"/> is the different thing: a rate the system falls back to only under overload.
+    /// </para>
+    /// <para>
+    /// <b>A divided system must integrate by <see cref="TickContext.AmortizedDeltaTime"/>, which is scaled by this</b> —
+    /// <see cref="TickContext.DeltaTime"/> is the tick's own interval and stepping by it advances at <c>1/N</c> of real time, silently (DSEL-03).
+    /// </para>
+    /// <para>
+    /// <b>Do not divide a system that must do work on tick 0.</b> A divided system first runs on the tick its divisor admits, which is not necessarily tick 0.
+    /// That is bounded and harmless for a sweep; for initialisation, use a <see cref="CallbackSystem"/> that runs every tick and returns, or
+    /// <c>OnFirstTick</c>.
+    /// </para>
+    /// <para>
+    /// Refused with a change filter: a filter delivers one tick's dirty set once, so a divided system would drop the changes of every tick it skipped. Use
+    /// <see cref="CellAmortize"/> for "react to changes, but spread the cost".
+    /// </para>
+    /// </remarks>
+    public int TickDivisor { get; internal set; } = 1;
 
     /// <summary>System runs every M ticks under overload. Default: 1 (every tick).</summary>
-    public int ThrottledTickDivisor { get; set; } = 1;
+    public int ThrottledTickDivisor { get; internal set; } = 1;
 
     /// <summary>Whether this system can be shed (dropped entirely) under severe overload.</summary>
     public bool CanShed { get; set; }
@@ -244,9 +263,10 @@ public sealed class SystemDefinition
     /// <summary>
     /// Cell-level amortization denominator (issue #231). When greater than 0, this system processes only <c>1/N</c> of the tier's clusters per run,
     /// rotating through buckets as <c>runCount % N</c> — the system's own run count, so a <c>TickDivisor</c> cannot alias it (DSEL-02).
-    /// The callback's <see cref="TickContext.AmortizedDeltaTime"/> is set to <c>DeltaTime × CellAmortize</c>
-    /// so integrations over the full elapsed time happen in one step. Must be paired with a non-<see cref="SimTier.All"/> <see cref="TierFilter"/>; amortizing
-    /// the full cluster set without tier scoping is rejected at <c>RuntimeSchedule.Build</c>.
+    /// The callback's <see cref="TickContext.AmortizedDeltaTime"/> carries this factor so integrations over the full elapsed time happen in one step — but
+    /// only when the run's selection actually strided, and multiplied by the rate divisors as well (DSEL-03). Must be paired with a
+    /// non-<see cref="SimTier.All"/> <see cref="TierFilter"/>; amortizing the full cluster set without tier scoping is rejected at
+    /// <c>RuntimeSchedule.Build</c>.
     /// </summary>
     public int CellAmortize { get; internal set; }
 

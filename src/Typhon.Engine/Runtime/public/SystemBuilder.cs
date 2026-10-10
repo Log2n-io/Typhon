@@ -252,7 +252,8 @@ public sealed class SystemBuilder
 
     /// <summary>
     /// Set the cell-level amortization denominator (issue #231). When greater than 0, the system processes <c>1/N</c> of the tier's clusters per tick,
-    /// and <see cref="TickContext.AmortizedDeltaTime"/> becomes <c>DeltaTime × N</c>. Requires a non-<see cref="SimTier.All"/> <see cref="Tier"/>.
+    /// and <see cref="TickContext.AmortizedDeltaTime"/> carries the <c>× N</c> — together with the rate divisors, and only on the runs that actually strided
+    /// (DSEL-03). Requires a non-<see cref="SimTier.All"/> <see cref="Tier"/>.
     /// </summary>
     public SystemBuilder CellAmortize(int denominator)
     {

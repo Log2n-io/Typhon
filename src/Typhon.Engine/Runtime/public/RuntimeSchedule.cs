@@ -728,6 +728,30 @@ public sealed class RuntimeSchedule
                 "amortizing would drop the changes of every cluster outside the current bucket.");
         }
 
+        if (reg.TickDivisor < 1)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': tickDivisor must be >= 1 (1 = every tick), got {reg.TickDivisor}.");
+        }
+
+        if (reg.ThrottledTickDivisor < 1)
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': throttledTickDivisor must be >= 1 (1 = every tick), got {reg.ThrottledTickDivisor}.");
+        }
+
+        // RT-1 (DSEL-01), the third member of this family: same reason as cellAmortize above and checkerboard further down. A change filter's input is the
+        // PREVIOUS tick's dirty set, published once by the fence and consumed by the next tick's dispatch. A system that only runs every Nth tick would
+        // therefore see the entities dirtied in the tick before its run and never the N-1 ticks before that — the changes are not deferred, they are gone.
+        // Refused rather than accumulated: a multi-tick dirty set is a second dirty-tracking path, and nothing has asked for one.
+        if (reg.TickDivisor > 1 && reg.ChangeFilter is { Length: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': tickDivisor {reg.TickDivisor} is incompatible with a change filter. A change filter delivers each tick's dirty "
+                + "entities once, so a system that skips ticks drops the changes of every tick it skipped. Use cellAmortize to spread the cost of reacting "
+                + "to changes, or drop the divisor.");
+        }
+
         if (reg.TierFilter != SimTier.All && reg.TierFilter != SimTier.None && reg.Type != SystemType.QuerySystem)
         {
             throw new InvalidOperationException(
