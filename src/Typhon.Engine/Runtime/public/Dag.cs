@@ -103,8 +103,9 @@ public sealed class Dag
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     /// <summary>Registers a CallbackSystem — lightweight single-invocation, no entity input.</summary>
-    public Dag CallbackSystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null, 
-        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
+    public Dag CallbackSystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1,
+        int tickOffset = SystemDefinition.AutoTickOffset, bool canShed = false)
     {
         Track.Schedule.ThrowIfBuilt();
         ArgumentNullException.ThrowIfNull(name);
@@ -121,6 +122,7 @@ public sealed class Dag
             AfterAll = afterAll,
             TickDivisor = tickDivisor,
             ThrottledTickDivisor = throttledTickDivisor,
+            TickOffset = tickOffset,
             CanShed = canShed
         });
         return this;
@@ -129,7 +131,8 @@ public sealed class Dag
     /// <summary>Registers a QuerySystem — single-worker entity iteration.</summary>
     public Dag QuerySystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
         SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
-        int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false, bool parallel = false, bool writesVersioned = false,
+        int tickDivisor = 1, int throttledTickDivisor = 1,
+        int tickOffset = SystemDefinition.AutoTickOffset, bool canShed = false, bool parallel = false, bool writesVersioned = false,
         SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f, int minChunkSize = 0,
         RealmRate realmRate = RealmRate.Divided, RealmId[] realms = null)
     {
@@ -152,6 +155,7 @@ public sealed class Dag
             AfterAll = afterAll,
             TickDivisor = tickDivisor,
             ThrottledTickDivisor = throttledTickDivisor,
+            TickOffset = tickOffset,
             CanShed = canShed,
             Parallel = parallel,
             WritesVersioned = writesVersioned,
@@ -170,7 +174,8 @@ public sealed class Dag
     /// form of <see cref="ChunkedCallbackSystem{TContext, TChunk}"/>: no ambient context, a lambda captures what it needs.
     /// </summary>
     public Dag ChunkedSystem<TChunk>(string name, ChunkPrepare<TChunk> prepare, ChunkExecute<TChunk> execute, string after = null, string[] afterAll = null,
-        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1,
+        int tickOffset = SystemDefinition.AutoTickOffset, bool canShed = false)
         where TChunk : unmanaged
     {
         Track.Schedule.ThrowIfBuilt();
@@ -191,6 +196,7 @@ public sealed class Dag
             AfterAll = afterAll,
             TickDivisor = tickDivisor,
             ThrottledTickDivisor = throttledTickDivisor,
+            TickOffset = tickOffset,
             CanShed = canShed,
             Parallel = true,
             ExplicitChunkCount = 1
@@ -201,7 +207,7 @@ public sealed class Dag
     /// <summary>Registers a PipelineSystem — multi-worker chunk-parallel execution.</summary>
     public Dag PipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, string after = null, string[] afterAll = null,
         SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
-        int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
+        int tickDivisor = 1, int throttledTickDivisor = 1, int tickOffset = SystemDefinition.AutoTickOffset, bool canShed = false)
     {
         Track.Schedule.ThrowIfBuilt();
         ArgumentNullException.ThrowIfNull(name);
@@ -221,6 +227,7 @@ public sealed class Dag
             AfterAll = afterAll,
             TickDivisor = tickDivisor,
             ThrottledTickDivisor = throttledTickDivisor,
+            TickOffset = tickOffset,
             CanShed = canShed
         });
         return this;
@@ -253,6 +260,7 @@ public sealed class Dag
             AfterAll = builder._afterAll,
             TickDivisor = builder._tickDivisor,
             ThrottledTickDivisor = builder._throttledTickDivisor,
+            TickOffset = builder._tickOffset,
             CanShed = builder._canShed,
             InputFactory = builder._inputFactory,
             ChangeFilter = builder._changeFilter,
@@ -290,6 +298,7 @@ public sealed class Dag
             AfterAll = builder._afterAll,
             TickDivisor = builder._tickDivisor,
             ThrottledTickDivisor = builder._throttledTickDivisor,
+            TickOffset = builder._tickOffset,
             CanShed = builder._canShed,
             InputFactory = builder._inputFactory,
             ChangeFilter = builder._changeFilter,
@@ -396,6 +405,7 @@ public sealed class Dag
         public string[] AfterAll;
         public int TickDivisor = 1;
         public int ThrottledTickDivisor = 1;
+        public int TickOffset = SystemDefinition.AutoTickOffset;
         public bool CanShed;
         public Func<ViewBase> InputFactory;
         public Type[] ChangeFilter;

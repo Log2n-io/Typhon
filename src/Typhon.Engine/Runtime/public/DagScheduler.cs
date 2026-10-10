@@ -2554,8 +2554,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         var sys = Systems[sysIdx];
 
-        // Baseline TickDivisor (active even at Normal load)
-        if (sys.TickDivisor > 1 && _currentTickNumber % sys.TickDivisor != 0)
+        // Baseline TickDivisor (active even at Normal load), on the phase the schedule gave this system (DSEL-04).
+        if (sys.TickDivisor > 1 && _currentTickNumber % sys.TickDivisor != sys.TickOffset)
         {
             TyphonEvent.EmitSchedulerOverloadSystemShed((ushort)sysIdx, (byte)_overloadDetector.CurrentLevel, (ushort)sys.TickDivisor, 1);
             return SkipReason.Throttled;
@@ -2574,8 +2574,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return SkipReason.Shed;
         }
 
-        // Level 1+: Throttle Normal-priority systems via ThrottledTickDivisor
-        if (sys.Priority == SystemPriority.Normal && sys.ThrottledTickDivisor > 1 && _currentTickNumber % sys.ThrottledTickDivisor != 0)
+        // Level 1+: Throttle Normal-priority systems via ThrottledTickDivisor, on the same phase the schedule gave this system — without a phase here,
+        // overload re-synchronises every throttled system onto one tick, producing a spike at exactly the moment the server least wants one.
+        //
+        // The offset is used RAW, and that is a property of how it was chosen rather than a convenience: RuntimeSchedule bounds it by the tightest of ALL the
+        // system's gates, so it is already below this divisor and `t = offset` satisfies this congruence. Bounding it by the TickDivisor alone would have
+        // needed `offset % ThrottledTickDivisor` here — a runtime integer division per system on precisely the ticks that are already short of budget.
+        if (sys.Priority == SystemPriority.Normal && sys.ThrottledTickDivisor > 1 && _currentTickNumber % sys.ThrottledTickDivisor != sys.TickOffset)
         {
             TyphonEvent.EmitSchedulerOverloadSystemShed((ushort)sysIdx, (byte)level, (ushort)sys.ThrottledTickDivisor, 1);
             return SkipReason.Throttled;

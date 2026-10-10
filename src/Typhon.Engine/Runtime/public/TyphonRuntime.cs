@@ -607,7 +607,12 @@ public sealed partial class TyphonRuntime : IDisposable
         var systemStats = new SystemStat[systemSums.Length];
         for (var sys = 0; sys < systemStats.Length; sys++)
         {
-            systemStats[sys] = new SystemStat(Scheduler.Systems[sys]?.Name ?? string.Empty, ticks > 0 ? systemSums[sys] / ticks : 0.0);
+            var definition = Scheduler.Systems[sys];
+            systemStats[sys] = new SystemStat(
+                definition?.Name ?? string.Empty,
+                ticks > 0 ? systemSums[sys] / ticks : 0.0,
+                definition?.TickDivisor ?? 1,
+                definition?.TickOffset ?? 0);
         }
 
         var subscriptions = _subscriptionsRuntime;

@@ -144,6 +144,29 @@ public sealed class SystemDefinition
     /// </remarks>
     public int TickDivisor { get; internal set; } = 1;
 
+    /// <summary>The value of <see cref="TickOffset"/> that asks the schedule to choose one. Negative so no real phase can collide with it.</summary>
+    public const int AutoTickOffset = -1;
+
+    /// <summary>Which of its divisor's ticks this system runs on: it runs when <c>tick % TickDivisor == TickOffset</c>. Assigned by the schedule.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why it is not always 0.</b> With every offset at 0, every system sharing a divisor fires on the same tick, so all the slow work in a schedule lands
+    /// together — a periodic spike, which the overload detector then reacts to, making the cost self-inflicted throttling rather than mere jitter.
+    /// <see cref="CellAmortize"/> staggers one system's clusters; this staggers systems against each other.
+    /// </para>
+    /// <para>
+    /// <b>The unit of assignment is the dependency closure, not the system</b> (DSEL-04). Two divided systems the DAG joins keep the same offset, because
+    /// separating them would stop them sharing a tick — survivable for a component read, which the DAG only ever ordered rather than made fresh, and a silent
+    /// break for an event queue, whose drain timing is load-bearing (EQ-04).
+    /// </para>
+    /// <para>
+    /// The offset is below the TIGHTEST of the system's gates, not just <see cref="TickDivisor"/>, so every gate can reach it and none has to reduce it.
+    /// That is also what gives a system declaring only <see cref="ThrottledTickDivisor"/> a phase: without one, every throttle-only system would
+    /// re-synchronise onto phase 0 the moment overload engaged, which is the spike this exists to remove.
+    /// </para>
+    /// </remarks>
+    public int TickOffset { get; internal set; } = AutoTickOffset;
+
     /// <summary>System runs every M ticks under overload. Default: 1 (every tick).</summary>
     public int ThrottledTickDivisor { get; internal set; } = 1;
 

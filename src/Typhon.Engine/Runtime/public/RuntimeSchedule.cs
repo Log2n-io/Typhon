@@ -502,6 +502,7 @@ public sealed class RuntimeSchedule
 
             systems[sysIdx].TickDivisor = reg.TickDivisor;
             systems[sysIdx].ThrottledTickDivisor = reg.ThrottledTickDivisor;
+            systems[sysIdx].TickOffset = reg.TickOffset;
             systems[sysIdx].CanShed = reg.CanShed;
             systems[sysIdx].InputFactory = reg.InputFactory;
             systems[sysIdx].ChangeFilterTypes = reg.ChangeFilter;
@@ -521,6 +522,9 @@ public sealed class RuntimeSchedule
                 systems[sysIdx].Access = reg.Access;
             }
         }
+
+        // Phase 5a (DSEL-04): stagger the divided systems. After Phase 5, which stamped the divisors, and after Phase 3, which computed the edges.
+        AssignTickOffsets(systems);
 
         // Phase 5b: stamp resolved phase + DAG-local phase index + owning DAG id onto each SystemDefinition.
         foreach (var (reg, dag) in allRegs)
@@ -769,6 +773,203 @@ public sealed class RuntimeSchedule
         {
             throw new InvalidOperationException(
                 $"System '{reg.Name}': checkerboard dispatch is incompatible with a change filter — both phases would process every dirty entity.");
+        }
+    }
+
+    /// <summary>
+    /// Gives every divided system a tick phase, so that the slow work in a schedule does not all land on one tick (DSEL-04).
+    /// </summary>
+    /// <param name="systems">The built systems, with their divisors stamped and their <see cref="SystemDefinition.Successors"/> computed.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>One offset per connected component of the rate-gated subgraph, and that is the whole of the correctness argument.</b> Two systems with divisors
+    /// <c>d₁, d₂</c> and offsets <c>o₁, o₂</c> can share a tick only if <c>∃t: t ≡ o₁ (mod d₁) ∧ t ≡ o₂ (mod d₂)</c>, which by the Chinese remainder theorem
+    /// holds exactly when <c>o₁ ≡ o₂ (mod gcd(d₁, d₂))</c>. Giving a whole component ONE offset below the tightest bound any member has satisfies that
+    /// congruence for every edge in it trivially, so co-running is preserved by construction rather than by solving anything at build time.
+    /// </para>
+    /// <para>
+    /// <b>Why co-running has to be preserved at all.</b> For a plain component read, a staggered downstream system would see output a few ticks old — which
+    /// the DAG never promised otherwise, since it orders systems rather than making their inputs fresh. For an event queue it is a silent break: a producer
+    /// and consumer that no longer share a tick change what is in the queue when the drain runs, and drain is single-consumer precisely because its timing
+    /// matters (EQ-04). So the stagger stops at the first dependency edge.
+    /// </para>
+    /// <para>
+    /// <b>Only DIRECT edges union, and that is deliberate.</b> <c>A(÷2) → B(÷1) → C(÷2)</c> leaves A and C in different components, so they may hold
+    /// different phases — which looks like the damage above, one hop removed, and is not, because every relationship whose freshness is DECLARED produces a
+    /// direct edge of its own: <c>AccessDagDeriver</c> emits producer→consumer for <c>WritesEvents ∩ ReadsEvents</c> (ED-05c) and writer→reader for
+    /// <c>Writes ∩ ReadsFresh</c>, whatever phases the two sit in. What is left staggerable is a transitive chain of PLAIN reads, which is exactly what the
+    /// DAG only ever ordered. Unioning through undivided interiors instead would, in any real schedule, collapse nearly everything into one component through
+    /// some every-tick system and leave the stagger doing nothing.
+    /// </para>
+    /// <para>
+    /// <b>Deliberately the simple half of the design space.</b> Assigning per edge by solving the congruence would stagger harder — it could split a component
+    /// whose divisors are coprime — and buys nothing until a real schedule is measurably under-staggered. The component rule is provable in two lines; the
+    /// other is not.
+    /// </para>
+    /// <para>
+    /// Static, from declaration order. The telemetry ring holds every system's measured duration, so balancing offsets by observed cost is right there and is
+    /// refused: it would make the schedule time-varying and non-reproducible, which is the opposite of what a static DAG is for.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">An explicit offset is out of range for its gates, unreachable by its closure, or two in one component disagree.</exception>
+    private static void AssignTickOffsets(SystemDefinition[] systems)
+    {
+        // Union-find over the RATE-GATED systems, joined wherever the DAG joins them. A system with no gate runs every tick and constrains nothing.
+        var parent = new int[systems.Length];
+        for (var i = 0; i < systems.Length; i++)
+        {
+            parent[i] = i;
+        }
+
+        for (var i = 0; i < systems.Length; i++)
+        {
+            if (OffsetBound(systems[i]) == 1)
+            {
+                continue;
+            }
+
+            foreach (var next in systems[i].Successors)
+            {
+                if (OffsetBound(systems[next]) > 1)
+                {
+                    Union(parent, i, next);
+                }
+            }
+        }
+
+        // Per component: the tightest bound any member has, and an explicit request if one was made.
+        var minBound = new int[systems.Length];
+        var requested = new int[systems.Length];
+        var requestedBy = new string[systems.Length];
+        Array.Fill(minBound, int.MaxValue);
+        Array.Fill(requested, SystemDefinition.AutoTickOffset);
+        for (var i = 0; i < systems.Length; i++)
+        {
+            var sys = systems[i];
+            var bound = OffsetBound(sys);
+            if (bound == 1)
+            {
+                // No gate is applied to this system, so an offset would silently do nothing — which is worse for the author than being told.
+                if (sys.TickOffset != SystemDefinition.AutoTickOffset)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{sys.Name}': tickOffset {sys.TickOffset} needs a tickDivisor or throttledTickDivisor above 1 — a system that runs every "
+                        + "tick has no phase to choose, so the offset would be ignored.");
+                }
+
+                sys.TickOffset = 0;
+                continue;
+            }
+
+            var root = Find(parent, i);
+            minBound[root] = Math.Min(minBound[root], bound);
+            if (sys.TickOffset == SystemDefinition.AutoTickOffset)
+            {
+                continue;
+            }
+
+            if (sys.TickOffset < 0 || sys.TickOffset >= bound)
+            {
+                throw new InvalidOperationException(
+                    $"System '{sys.Name}': tickOffset {sys.TickOffset} is outside [0, {bound}) — every gate this system has must be able to reach its phase, "
+                    + $"and the tightest is {bound}, so nothing outside that range can ever be admitted and the system would never run.");
+            }
+
+            if (requested[root] != SystemDefinition.AutoTickOffset && requested[root] != sys.TickOffset)
+            {
+                throw new InvalidOperationException(
+                    $"Systems '{requestedBy[root]}' and '{sys.Name}' are joined in the DAG and ask for different tick offsets ({requested[root]} and "
+                    + $"{sys.TickOffset}). Rate-gated systems the DAG joins share one offset, because separating them stops them running in the same tick — "
+                    + "which changes what an event queue holds when its drain runs. Give them the same offset, or drop the dependency.");
+            }
+
+            requested[root] = sys.TickOffset;
+            requestedBy[root] = sys.Name;
+        }
+
+        // One cursor for the whole schedule, not one per bound: a per-bound cursor puts the first bound-2 component and the first bound-4 component both on
+        // phase 0, which is the pile-up this exists to break. A single cursor spreads them at no cost.
+        var assigned = new int[systems.Length];
+        Array.Fill(assigned, SystemDefinition.AutoTickOffset);
+        var cursor = 0;
+        for (var i = 0; i < systems.Length; i++)
+        {
+            var sys = systems[i];
+            if (OffsetBound(sys) == 1)
+            {
+                continue;
+            }
+
+            var root = Find(parent, i);
+            if (assigned[root] == SystemDefinition.AutoTickOffset)
+            {
+                if (requested[root] != SystemDefinition.AutoTickOffset)
+                {
+                    if (requested[root] >= minBound[root])
+                    {
+                        throw new InvalidOperationException(
+                            $"System '{requestedBy[root]}': tickOffset {requested[root]} is not reachable by every system it is joined to — the tightest "
+                            + $"bound in its dependency closure is {minBound[root]}, so the closure's shared offset must be below that.");
+                    }
+
+                    assigned[root] = requested[root];
+                }
+                else
+                {
+                    assigned[root] = cursor++ % minBound[root];
+                }
+            }
+
+            sys.TickOffset = assigned[root];
+        }
+    }
+
+    /// <summary>
+    /// The exclusive upper bound on a system's tick phase: the tightest of the rate gates it has, or 1 when it has none.
+    /// </summary>
+    /// <param name="sys">The system.</param>
+    /// <returns>The bound; 1 means "no phase applies".</returns>
+    /// <remarks>
+    /// <b>Every gate, not just <see cref="SystemDefinition.TickDivisor"/>, and that is what makes the reduction unnecessary.</b> An offset below BOTH divisors
+    /// is reachable under both — <c>t = offset</c> satisfies each congruence — so no gate ever has to reduce it, and the per-tick integer division that a
+    /// reduction would cost on the throttled path (taken on exactly the ticks already short of budget) does not exist. It also gives the canonical
+    /// "cheap normally, throttled under load" shape a phase: a system declaring only <c>throttledTickDivisor</c> would otherwise have no offset to be
+    /// staggered by, and every such system would re-synchronise onto phase 0 the moment overload engaged — the very spike this is here to remove.
+    /// </remarks>
+    private static int OffsetBound(SystemDefinition sys)
+    {
+        var bound = int.MaxValue;
+        if (sys.TickDivisor > 1)
+        {
+            bound = sys.TickDivisor;
+        }
+
+        if (sys.ThrottledTickDivisor > 1)
+        {
+            bound = Math.Min(bound, sys.ThrottledTickDivisor);
+        }
+
+        return bound == int.MaxValue ? 1 : bound;
+    }
+
+    private static int Find(int[] parent, int i)
+    {
+        while (parent[i] != i)
+        {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+
+        return i;
+    }
+
+    private static void Union(int[] parent, int a, int b)
+    {
+        var ra = Find(parent, a);
+        var rb = Find(parent, b);
+        if (ra != rb)
+        {
+            parent[rb] = ra;
         }
     }
 

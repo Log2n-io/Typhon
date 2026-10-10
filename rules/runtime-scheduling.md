@@ -854,6 +854,56 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
             DispatchSelectionTests.ThrottledTickDivisor_ScalesAmortizedDeltaTimeUnderOverload,
             DispatchSelectionTests.CellAmortizeWithoutATierIndex_DoesNotClaimAStrideItDidNotTake
 
+### DSEL-04: A tick offset never separates two divided systems the DAG joins `[fatal]` `[silent]` (issue #1294)
+  invariant a gated system runs exactly on the ticks where tick mod gate == TickOffset, for EVERY gate it has: TickDivisor
+            always, and ThrottledTickDivisor additionally at OverloadLevel >= 1 for Normal priority. The offset is used raw by
+            both, which is sound because it is bounded by the TIGHTEST gate — so no gate has to reduce it, and the throttled
+            path pays no integer division on ticks already short of budget
+  invariant TickOffset < OffsetBound(S) = min over the gates of S that exceed 1, or 1 when it has none. Bounding by TickDivisor
+            alone would leave a throttle-only system (TickDivisor 1, ThrottledTickDivisor 4) with no phase, so every one of
+            them re-synchronises onto phase 0 when overload engages — the spike this rule exists to remove
+  invariant one offset per connected component of the rate-gated subgraph (nodes: OffsetBound > 1; edges: any DAG edge between
+            two of them), and that offset is below the component's tightest bound so every member can reach it
+  invariant components that requested nothing are spread by ONE cursor over the whole schedule, not one per bound: a per-bound
+            cursor puts the first bound-2 and the first bound-4 component both on phase 0, which is the pile-up being removed
+  invariant co-running is preserved by construction, not by solving: two systems share a tick iff o1 == o2 (mod gcd(d1, d2))
+            (CRT), and one offset common to the component satisfies that for every edge in it trivially
+  invariant assignment is STATIC — decided once at RuntimeSchedule.Build from declaration order, never from measured cost: a
+            schedule whose shape depends on last tick's timings is not a static DAG
+  never an explicit offset outside [0, OffsetBound(S)), one at or above its component's tightest bound, or two disagreeing
+        offsets in one component (all refused at build; the disagreement names both systems, the closure bound names the asker
+        and the bound)
+  never an offset on a system with no gate above 1 (refused at build: no gate would apply it, so it would silently do nothing —
+        and the guard tests against AutoTickOffset, not against 0, or an explicit 0 and an explicit -3 both slip through)
+  why: for a plain component read a staggered consumer sees output a few ticks old, which the DAG never promised otherwise —
+       it orders systems rather than making their inputs fresh. For an EVENT QUEUE it is silent damage: a producer and
+       consumer that stop sharing a tick change what the queue holds when the drain runs, and drain is single-consumer
+       precisely because its timing is load-bearing (EQ-04)
+  note: ONLY DIRECT edges union, and the transitive case is accepted rather than overlooked. A div 2 -> B div 1 -> C div 2
+        leaves A and C in different components, so they may hold different phases. That is sound because every relationship
+        whose freshness is DECLARED carries a direct edge of its own: AccessDagDeriver emits producer->consumer for
+        WritesEvents x ReadsEvents (ED-05c) and writer->reader for Writes x ReadsFresh, whatever phases the two sit in. What
+        is left staggerable is a transitive chain of PLAIN reads, which is what the DAG only ever ordered. The alternative —
+        unioning through undivided interiors — was rejected after measuring its reach: in any real schedule nearly everything
+        is connected through some every-tick system, so it collapses the schedule into one component and the stagger does
+        nothing. A system needing another's output in ITS OWN tick says so with ReadsFresh or a queue, and is then unioned.
+  scope: RuntimeSchedule.AssignTickOffsets, RuntimeSchedule.OffsetBound, DagScheduler.CheckOverloadSkip,
+         SystemDefinition.TickOffset, SystemDefinition.AutoTickOffset, SystemBuilder.TickOffset, SystemStat
+  on_violation: a producer and its consumer never run in the same tick again. The queue drains against a batch assembled on a
+                different tick from the one that filled it, so events are processed late, in the wrong groups, or dropped by an
+                overflow that the paired cadence used to prevent. Nothing raises.
+  verified: TickOffsetTests.NoEdgeInTheGraph_SpansTwoOffsets, TickOffsetTests.SystemsTheDagJoins_KeepOneOffset,
+            TickOffsetTests.AClosuresOffset_IsBelowItsSmallestDivisor,
+            TickOffsetTests.AnOffsetItsThrottledGateCannotReach_IsRefusedAtBuild,
+            TickOffsetTests.AnOffsetBothGatesCanReach_RunsUnderBoth,
+            TickOffsetTests.EachSystemRunsOnItsOwnPhase_AndNeverOnTheOthers,
+            TickOffsetTests.TwoJoinedSystemsAskingForDifferentOffsets_AreRefusedAtBuild,
+            TickOffsetTests.AnEdgeSpanningTwoPhases_IsCaughtByTheVerifier,
+            TickOffsetTests.AQueueBetweenTwoGatedSystems_UnionsThemAcrossAnUndividedMiddle,
+            TickOffsetTests.ATransitivePlainReadPath_MayBeStaggered,
+            TickOffsetTests.AThrottleOnlySystem_StillGetsAPhase,
+            TickOffsetTests.AnOffsetOnAnUngatedSystem_IsRefusedAtBuild
+
 ## Module: BIND — QuerySystem ↔ archetype binding
 
 A `QuerySystem` — parallel or not (RT-1, Realms) — is bound to one `ArchetypeClusterState` at runtime construction. That binding decides two things at

@@ -23,6 +23,7 @@ public sealed class SystemBuilder
     internal Type[] _changeFilter;
     internal int _tickDivisor = 1;
     internal int _throttledTickDivisor = 1;
+    internal int _tickOffset = SystemDefinition.AutoTickOffset;
     internal bool _canShed;
     internal RealmRate _realmRate;
     internal RealmId[] _realms;
@@ -102,6 +103,31 @@ public sealed class SystemBuilder
     public SystemBuilder TickDivisor(int divisor)
     {
         _tickDivisor = divisor;
+        return this;
+    }
+
+    /// <summary>
+    /// Pins which of its divisor's ticks this system runs on, instead of letting the schedule stagger it.
+    /// </summary>
+    /// <param name="offset">A tick phase below the tightest of this system's rate gates — its <c>TickDivisor</c> and its <c>ThrottledTickDivisor</c>.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Normally you do not set this.</b> <c>RuntimeSchedule.Build</c> assigns an offset to every divided system so that the slow work in a schedule does
+    /// not all land on the same tick, and declaring a system should not require knowing what else is in the schedule.
+    /// </para>
+    /// <para>
+    /// The reason to set it is two INDEPENDENT systems that want the same tick because they share a cache-hot working set — the automatic assignment would
+    /// spread them, having no way to know they are related. Systems the DAG already joins need no help: DSEL-04 gives a whole dependency closure one offset.
+    /// </para>
+    /// <para>
+    /// Refused at build when it is out of range for the system's gates, when its closure cannot all reach it, or when it disagrees with another explicit
+    /// offset in the same closure.
+    /// </para>
+    /// </remarks>
+    public SystemBuilder TickOffset(int offset)
+    {
+        _tickOffset = offset;
         return this;
     }
 
@@ -497,6 +523,9 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> TickDivisor(int divisor) { _inner.TickDivisor(divisor); return this; }
     /// <summary>Sets the throttled tick divisor (system runs every Nth tick under overload).</summary>
     public SystemBuilder<TContext> ThrottledTickDivisor(int divisor) { _inner.ThrottledTickDivisor(divisor); return this; }
+
+    /// <inheritdoc cref="SystemBuilder.TickOffset"/>
+    public SystemBuilder<TContext> TickOffset(int offset) { _inner.TickOffset(offset); return this; }
     /// <summary>Sets whether this system can be shed entirely under severe overload.</summary>
     public SystemBuilder<TContext> CanShed(bool value) { _inner.CanShed(value); return this; }
     /// <summary>Enables automatic chunk-parallel execution across workers. QuerySystem only.</summary>
