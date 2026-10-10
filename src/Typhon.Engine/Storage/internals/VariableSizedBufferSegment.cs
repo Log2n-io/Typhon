@@ -1038,8 +1038,9 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
                     var curChunk  = (VariableSizedBufferChunkHeader*)nextChunkAddr;
 
                     // We don't want to chain to the free-list all the empty chunks, would be a waste of space.
-                    // Let's keep to grow the current count by 25%, approximately, with a minimum of 8 free chunks
-                    var epc = _owner.ElementCountRootChunk;
+                    // Let's keep to grow the current count by 25%, approximately, with a minimum of 8 free chunks. Elements over elements PER CHUNK —
+                    // the root's count is 0 for a collection whose root holds only its header, and divided by it, every such read threw (#1285).
+                    var epc = _owner.ElementCountPerChunk;
                     var tc = rootChunk.TotalCount;
                     var freeChunkThreshold = Math.Max(tc / (epc * 4), 8);
 
