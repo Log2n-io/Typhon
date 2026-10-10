@@ -1797,6 +1797,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             LoadSystemSchemaR1();
+
+            // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
+            // pointers here, the archetypes' once their catalog is read (InitializeArchetypesCore).
+            if (CrashRecoveryAtOpen)
+            {
+                ClaimPersistedPagesAtCrashOpen();
+            }
         }
 
         InitializeWalManager();
@@ -1961,6 +1968,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
             }
 
+            // The held frees (CK-17), freed before the final cycle so it writes them freed — on this thread, as the checkpoint thread still writes what their pages
+            // need. A close the engine treats as a crash frees nothing: only the release worker stops. A release that fails leaves the frees held, allocated
+            // and named by nothing: the close then writes no clean-shutdown marker, so the next open is a crash open, whose sweep frees them — marked clean,
+            // they stayed allocated in the file for good (review of CK-17).
+            var freesHeldAtClose = false;
+            try
+            {
+                MMF.EndFreeQuarantine(release: !_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete
+                                               && CommitPipelineFailure == null);
+            }
+            catch (Exception e)
+            {
+                LogCloseDrainFailed(e);
+                freesHeldAtClose = true;
+            }
+
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down
             CheckpointManager?.Dispose();
             CheckpointManager = null;
@@ -1992,7 +2015,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
                 // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
-                if (!SimulateUncleanShutdownForTest)
+                if (!SimulateUncleanShutdownForTest && !freesHeldAtClose)
                 {
                     // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
                     // flushed it, and the flag and the summary's nonce flip together.
@@ -2441,6 +2464,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // agree. The scan below still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier
                 // (LOG-08).
                 CrashRecoveryAtOpen = !_cleanShutdownAtOpen || _options.ForceCrashRecoveryAtOpen;
+
+                // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page
+                // the grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
+                MMF.RepairTornGrowsAtLoad = TolerateTornSegmentsAtOpen;
 
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
@@ -4049,6 +4076,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _archetypeInitIncomplete = false;
 
+        // From here a freed revision or content chunk waits for a checkpoint before reuse (#1251) — a crash open turned it on at its replay.
+        EnableFreeQuarantine();
+
         // The open the marker guards has completed: from here a crash is an ordinary one, whose recovery may replace a torn segment (CS-04). Set at the
         // start of the open (BeginOpenAfterCleanClose) and cleared only now, so an open that dies before this point leaves it for the next one.
         if ((_cleanShutdownAtOpen || _failedOpenAtOpen) && !_failedOpenCleared)
@@ -4180,6 +4210,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
+        if (CrashRecoveryAtOpen)
+        {
+            ClaimPersistedPagesAtCrashOpen();
+        }
 
         // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
         // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
@@ -4892,6 +4926,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (CrashRecoveryAtOpen)
         {
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
+            MMF.RepairTornGrowsAtLoad = false;
         }
 
         // Zone maps last (IXS-08, #1151): the load, the schema-migration rebuild and the WAL replay above all fill clusters without widening a zone map, so
@@ -4937,6 +4972,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Before the replay allocates anything: every chunk the on-disk chains name is taken, so the replay never hands one out again (#1251).
         ReserveChainChunksAfterCrash();
+
+        // Recovery's own frees — the replay's, the scrub's, the sweep's — wait for a checkpoint like any other (CK-17): freed at once, the transactions
+        // after the open reused them while the disk's pages as of before the scrub still named them, and a second crash recovered #1251 again. A seal
+        // that does not complete leaves them held. Past the budget they ask for no cycle: one in the middle of the scrub would write a half-scrubbed
+        // file (review) — the seal's cycle is the recovery's, and the end of the open wires the trigger.
+        EnableFreeQuarantine(askCheckpoints: false);
 
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
         var walIO = _injectedWalIo ?? new WalFileIO();
@@ -5280,8 +5321,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private void SealRecovery(long frontierLsn, long checkpointLsn)
     {
-        if (frontierLsn <= checkpointLsn || CheckpointManager == null)
+        if (CheckpointManager == null)
         {
+            return;
+        }
+
+        if (frontierLsn <= checkpointLsn)
+        {
+            // Nothing replayed, but the scrub and the sweep may have freed: held (CK-17) until a checkpoint writes the pages that stopped naming them.
+            if (MMF.QuarantinedBytes > 0 && CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+            {
+                MMF.DrainReleases();
+
+                // The cycle consolidated the scrub: its TSN watermark with it, as below (#673).
+                PersistNextFreeTsn();
+            }
+
             return;
         }
 
@@ -5293,7 +5348,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         WalManager.SeedDurableLsn(frontierLsn);
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
-        CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30));
+        // Recovery's frees, sealed by this cycle, freed once it covered: the open hands the transactions an allocator that reuses them (CK-17).
+        if (CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+        {
+            MMF.DrainReleases();
+        }
 
         // Persist the TSN watermark AFTER the checkpoint, never before. The recovered revisions carry their ORIGINAL TSNs — RecoveryDriver advanced
         // TransactionChain.NextFreeId past them, and ScrubVersionedChains raises it again for anything a previous consolidating checkpoint left behind (RB-05)
@@ -6072,9 +6131,38 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// proof-gate test can confirm the rebuild — not FPI or the loaded map — is what recovers a torn EntityMap.</summary>
     internal static bool DisableEntityMapRebuildForTest;
 
+
     /// <summary>Test-only kill switch for the crash-path occupancy re-derive (genuineness probe): when set, recovery trusts the persisted occupancy bitmap so a
     /// proof-gate test can confirm the re-derive — not FPI — is what heals a torn occupancy page (<see cref="RederiveOccupancyOnCrash"/>).</summary>
     internal static bool DisableOccupancyRederiveForTest;
+
+    /// <summary>Frees reused at once, as before #1251's quarantine: the A/B switch of its measurements, and the reproduction of what it prevents.</summary>
+    internal static bool DisableFreeQuarantineForTest;
+
+    // A crash open, before it allocates: the occupancy bitmap on disk may predate a segment's grow, and an allocation took the grow's pages for a second
+    // segment before CK-09's re-derive (#1296). The ownership the re-derive adopts, claimed now — bits set, never cleared.
+    private void ClaimPersistedPagesAtCrashOpen() => MMF.ClaimOwnedPagesAtOpen(BuildOwnedPageBitmap(out _, out _));
+
+    // A freed revision or content chunk of a Versioned table waits for a checkpoint before reuse (CK-17); past the budget, held frees ask for one when
+    // askCheckpoints. Idempotent.
+    private void EnableFreeQuarantine(bool askCheckpoints = true)
+    {
+        if (!DisableFreeQuarantineForTest)
+        {
+            if (askCheckpoints)
+            {
+                MMF.FreeQuarantineFull = CheckpointManager.ForceCheckpoint;
+            }
+
+            MMF.EnableFreeQuarantine();
+        }
+    }
+
+    /// <summary>
+    /// Frees every chunk the quarantine holds, as a covered checkpoint cycle frees those sealed at its start (CK-17): for a test that counts allocated
+    /// chunks after a free.
+    /// </summary>
+    internal void ReleaseHeldFreesForTest() => MMF.ReleaseHeldFreesNow();
 
     /// <summary>
     /// Test hook: runs in <c>Transaction.PublishComponent</c> on the committing thread, after the WAL append and before the publication acts, with the
@@ -6596,13 +6684,28 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // records alone were not enough, nor with the unnamed chunks: the replay then handed out chunks a chain it grows names (market, 10 cycles each: 4 and
         // 5 in 10 failed against 1 with every chain, one on a chain that ended early; not explained yet, review of #1251). A chunk whose header is none is
         // skipped by the walk, which takes no lock.
-        foreach (var (table, roots) in CollectLiveChainRoots())
+        ChainsCollapsedAtOpen = 0;
+        var changeSet = MMF.CreateChangeSet();
+        try
         {
-            var reserved = _reservedContentChunks[table] = [];
-            roots.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values);
-            ChainChunksReservedAtOpen += ComponentRevisionManager.ReserveChainChunksAfterCrash(table, roots, reserved);
+            foreach (var (table, roots) in CollectLiveChainRoots())
+            {
+                // Before the union: only the chains the records name (a flat archetype's, as its scan finds them) — a named chunk the scan accepts can be a
+                // live overflow chunk.
+                ChainsCollapsedAtOpen += ComponentRevisionManager.CollapseTornChainsBeforeReplay(table, roots, changeSet);
+                var reserved = _reservedContentChunks[table] = [];
+                roots.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values);
+                ChainChunksReservedAtOpen += ComponentRevisionManager.ReserveChainChunksAfterCrash(table, roots, reserved);
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
         }
     }
+
+    /// <summary>Live chains whose links ended before their length, collapsed by the last crash open before its replay (#1297). Diagnostic.</summary>
+    internal int ChainsCollapsedAtOpen { get; private set; }
 
     // The content chunks the reservation took, per table: free on disk, so their bytes predate the chunk's allocation and their collection-buffer ids are
     // stale — the scrub frees them without releasing those (#1251). Recovery only, single-threaded.

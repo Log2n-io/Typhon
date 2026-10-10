@@ -426,11 +426,15 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             scrub over the on-disk element of the same TSN; no chunk an on-disk chain of a live record names is handed out by the replay;
             the scrub's roots are the live records' — and, for an archetype the file holds that the open did not load, the chunks with a
             root's header the scan finds; a named chunk is a root only when a live entity's EntityPK adopts it, and no scrub frees a live
-            root as an overflow chunk (#1251)
+            root as an overflow chunk; a live chain whose links end before its length (its root's page after a growth, the linking chunk's
+            before), or link to a chunk the disk has as free or to another live record's root, is collapsed to its newest reachable committed
+            revision before the replay, so the replay appends onto a chain it can walk (#1251, #1297). OPEN (#1298): a chain compacted after the
+            barrier and torn the same way had its newest revisions moved into the unreachable chunks, unlogged — with no logged update after the
+            barrier, the collapse keeps an older value
   scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
          VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
          RecoveryApplier.ReapplySpawnedEntityToCluster, ComponentRevisionManager.ScrubChainToHead / FreeDroppedContent /
-         ReserveChainChunksAfterCrash / EnumerateVersionedChainHeads, DatabaseEngine.CollectLiveChainRoots
+         ReserveChainChunksAfterCrash / EnumerateVersionedChainHeads / CollapseTornChainsBeforeReplay, DatabaseEngine.CollectLiveChainRoots
   ✅ collections clause BUILT (2026-08-11, #389). Was UNBUILT on both sides: AddCollectionDelta had no production caller
      and the driver deferred CollectionDelta apply. Now the emitter logs a collection's full content behind every Slot
      record (Clear + Append x N) and the driver folds it per (EntityId, slot, FieldId), flushing via SetElementsRaw AFTER
@@ -984,6 +988,40 @@ CK-08 (flush-only cycles) are later increments.
                 being enough once a pass became many calls on several threads
   verified: CheckpointProtectedPageOrderingTests [VerifiesRule] — a pass is ordered protected first and then by file page, and a plain wave given the
             whole pass leaves every protected page owed and persists none ([RuleMutant]: a wave writing every kind is reported)
+
+### CK-17: A freed chain chunk is reused only once the data file no longer names it `[fatal]` `[silent]`
+  invariant a revision or content chunk of a Versioned table, once freed, stays allocated until a checkpoint cycle that started after the free has
+            written every page it collected (FreeQuarantine): the page that stopped naming the chunk was dirtied before the free, so that cycle wrote
+            it. A crash open holds from the reservation of the on-disk chains on — the replay's, the scrub's and the sweep's frees too — and its seal
+            releases them once covered; a seal that does not complete leaves them held. Any other open holds from the end of InitializeArchetypes
+  invariant a cycle seals the frees made so far before it collects its dirty pages, and marks them releasable only when it was covered (CK-03); a
+            gated cycle leaves them sealed for the next. The release worker frees them — never the checkpoint thread, whose own cycle would wait on
+            the dirty pages the frees make — segment by segment, one that throws leaving the others' to run, and counting what it freed before a
+            throw. The close releases every held free on the disposing thread before its final cycle, which writes them freed; a close the engine
+            treats as a crash releases nothing, and one whose release failed writes no clean-shutdown marker, so the next open's sweep frees them
+  invariant a chunk is held once: a second free of a held chunk, in either generation, is a double free (ChunkBasedSegment.DoubleFreeCount), never a
+            second hold. A chunk the release freed in the bitmap and has not yet stopped holding is not handed out: the allocator gives the bit back
+            and moves to the next page (ChunkBasedSegment.ClaimOnPage). Recovery's chain scans skip held chunks (ChunkBasedSegment.IsChunkLive,
+            which reads the hold before the bitmap: the release frees the bitmap first)
+  invariant a content chunk a rolled-back transaction allocated is freed at once: no committed page ever named it
+  invariant held frees past PagedMMFOptions.FreeQuarantineCacheFraction of the cache ask once for a checkpoint (CheckpointManager.ForceCheckpoint),
+            again only after a release: a trigger, never a cap — and not during a crash open's recovery, whose cycle is its seal: one mid-scrub
+            would write a half-scrubbed file. The hold is never persisted: after a crash a held chunk is still named by the disk's stale pages,
+            which the reservation takes, or by nothing, which the orphan sweep frees
+  invariant OPEN (#1300): a dropped revision's collection buffers are released at once, outside the quarantine
+  scope: FreeQuarantine, ChunkBasedSegment.FreeChunk, ChunkBasedSegment.QuarantineFrees, ChunkBasedSegment.ClaimOnPage, ChunkBasedSegment.IsChunkLive,
+         PagedMMF.SealQuarantinedFrees, PagedMMF.ReleaseQuarantinedFrees, PagedMMF.NoteQuarantined, PagedMMF.EndFreeQuarantine,
+         CheckpointManager.RunCheckpointCycleCore, ComponentTable.QuarantineChainFrees, DatabaseEngine.SealRecovery,
+         DeferredCleanupManager.FreeContentChunk
+  on_violation: a chunk free is not logged, and the data file holds each page as of its last capture: a chain's root as of before its compaction named
+                an overflow chunk another chain had taken, as of after. The market recovered desk traders holding another trader's record, and credits
+                off, in 2 cycles of 10 (#1251)
+  verified: FreeQuarantineTests [VerifiesRule] — held until a covered cycle that started after the free, a gated cycle releases nothing, a second
+            free is counted once, frees racing seals and releases free every chunk exactly once (without the allocator's skip, 2 runs in 6 leak one),
+            the budget asks the checkpoint manager for a cycle, the release worker frees a held chunk after covered cycles (without its signal,
+            nothing does); TornCaptureRecoveryTests [VerifiesRule] — an overflow chunk freed by a compaction is
+            not reused before a checkpoint (with DatabaseEngine.DisableFreeQuarantineForTest the next growth takes it and the first item recovers an
+            old value), recovery's frees are held until its seal covered them, a free held at a clean close is freed in the file
 
 ---
 
@@ -2356,8 +2394,8 @@ of the LSN value).
   on_violation: silent loss of every entity of the archetypes the failed open had not reached, behind a clean flag; or, on the
                 retry, of every entity of a damaged segment
   verified: HealthyOpenTests.AnOpenThatFailsHalfway_ClosesAsACrash_AndLosesNothing (fails the open between two archetypes through
-            DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsReplacedOnlyAfterACrash (the retry
-            of a failed open refuses; after a real crash the segment is replaced, ChunkSegmentsReplacedAsTorn = 1),
+            DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsRefusedOnTheRetry_AndCompletedAfterACrash (the
+            retry of a failed open refuses; after a real crash the chain is completed at load, CS-08, its entities kept — it used to be replaced),
             HealthyOpenTests.AnOpenKilledBeforeItCompletes_LeavesTheMarker_AndTheNextOpenRefusesADamagedSegment,
             HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule]
 
@@ -2427,7 +2465,7 @@ of the LSN value).
   verified: HealthyOpenTests.ACleanReopen_ReadsNoDataPage (disk reads during the open under a tenth of the file),
             HealthyOpenTests.ADatabaseLargerThanItsCache_ReopensCleanly (a cache smaller than one segment) [VerifiesRule]
 
-### CS-08: A segment whose directory and chain disagree is refused unless recovery rebuilds it `[fatal]`
+### CS-08: A segment whose directory and chain disagree is refused unless recovery rebuilds or completes it `[fatal]`
   invariant the open no longer cross-checks each segment's directory against its forward chain (CS-07). Open-time verification at
             Quick depth and deeper does (CHK-SEG-05, counted from pointers its sweep records, compared position by position), and
             refuses the open on a disagreement after a clean close, and after an unclean one for every kind but the three the
@@ -2435,14 +2473,39 @@ of the LSN value).
   invariant the Spine tier, on by default, reads directories only and says so (CHK-SEG-05 skipped). On the crash path a chunk-based
             segment checks its links during the free-chunk scan (ChunkBasedSegment.ScanForAllocatorState); plain logical segments
             (occupancy map, UoW registry) are checked offline only
+  invariant a crash open that may refill from the WAL (TolerateTornSegmentsAtOpen) completes a chunk segment whose chain stops short of its
+            directory — a grow whose directory append reached the disk and whose old tail's link did not (#1296) — instead of refusing or
+            replacing it, when every directory page is a resolved CK-05 pair (a directory torn itself is not trusted to name the pages): the link
+            patched, each following page kept when it carries the segment's incarnation (a random 32-bit value fixed at the segment's creation and
+            written on every page it initializes, SegmentGeometry bytes [58,62)), its segment flag and a valid checksum, initialized empty
+            otherwise. A page the grow had not written holds only what came after the last completed checkpoint's barrier, which the replay
+            brings back; a page it had written may hold data no log window does — an old lost write of the link alone — and is kept. A suspect
+            page (its checksum failed) is judged by its first sector, which holds the header and the incarnation: this segment's, it is kept and
+            stays suspect, and RB-04 refuses the open over the live chunks it backs — never initialized empty with its suspicion cleared
+  invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap), right after
+            the schema and again after the archetypes load, and every page a crash-path segment load finds named: the bitmap on disk may predate
+            the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
+            claim through its resolved CK-05 pair (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
+            the older generation stayed cached and the load found the directory as of before its last grow — the chain ahead of it, refused
+  invariant the opposite tear — the directory's last page linking past it, the chain ahead of the directory — is not completed and is refused
+            as before (#1299)
+  invariant open-time verification at Quick depth and deeper still refuses such a segment of a kind the crash path does not replace: the
+            finding does not say which way the chain disagrees, and the refusal is the conservative reading
   rationale: the check used to run in LogicalSegment.Load on every open, which read every data page (#1143). Moving it offline kept
              its strength only if a finding still refuses what the open used to refuse; rating it a mere divergence would let a
              clean database with a lost write open with pages its segment can no longer address
   scope: DatabaseIntegrityException.RefusesOpen, SegmentChecks.Run, SegmentWalker.WalkSegment, IntegrityScanner.Scan,
-         ChunkBasedSegment.Load
+         ChunkBasedSegment.Load, ChunkBasedSegment.ScanForAllocatorState, LogicalSegment.RepairTornGrow, SegmentGeometry.ReadIncarnation,
+         ManagedPagedMMF.ClaimSegmentPagesAtLoad, ManagedPagedMMF.ClaimOwnedPagesAtOpen, ManagedPagedMMF.EnsureDirectoryPairsResolved
   on_violation: a lost write found offline is ignored by the open, which serves a segment that cannot address all its pages
   verified: IntegrityScannerTests.AShortenedChain_IsFoundAtQuick_AndRefusesTheOpenUnlessRecoveryRebuildsIt [VerifiesRule];
-            IntegrityScannerTests.QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal
+            IntegrityScannerTests.QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal; TornCaptureRecoveryTests — a grow whose old tail missed
+            the disk is completed at a crash open, its pages claimed (without the claims the open's index rebuild took one of them); a grow whose
+            first new page missed the disk is completed from that page; a page of another incarnation is initialized; an old lost link over
+            checkpointed pages keeps them (initialized empty, the items on them were gone); a torn old tail fails the open loudly (it was emptied,
+            silently) [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
+            (a claim over an unresolved pair failed this reopen). NOT mutation-proven: the directory's
+            trust — its trigger, a torn map-extension page, needs a segment past the root's ~2 000 page indices
 
 ---
 

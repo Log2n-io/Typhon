@@ -490,6 +490,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
                 // No Commit — Dispose rolls back.
             }
 
+            dbe.ReleaseHeldFreesForTest();
             var used = table.ComponentSegment.AllocatedChunkCount + table.CompRevTableSegment.AllocatedChunkCount;
             if (round == 0)
             {

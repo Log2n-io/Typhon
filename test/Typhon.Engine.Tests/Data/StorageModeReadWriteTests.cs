@@ -607,6 +607,7 @@ class StorageModeReadWriteTests : TestBase<StorageModeReadWriteTests>
             // Don't commit — triggers rollback
         }
 
+        dbe.ReleaseHeldFreesForTest();
         Assert.That(vTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(vBefore), "Versioned chunks freed on rollback");
         Assert.That(svTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(svBefore), "SV chunks freed on rollback");
         Assert.That(trTable.TransientComponentSegment.AllocatedChunkCount, Is.EqualTo(trBefore), "Transient chunks freed on rollback");

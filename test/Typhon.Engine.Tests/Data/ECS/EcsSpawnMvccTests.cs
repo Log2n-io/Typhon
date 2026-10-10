@@ -153,6 +153,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
             // Don't commit — triggers rollback
         }
 
+        dbe.ReleaseHeldFreesForTest();
         // Both component data chunk AND revision chain chunk should be freed
         Assert.That(posTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(compAllocBefore),
             "Component data chunk freed on rollback");
@@ -417,6 +418,7 @@ class EcsSpawnMvccTests : TestBase<EcsSpawnMvccTests>
             // Don't commit — triggers rollback
         }
 
+        dbe.ReleaseHeldFreesForTest();
         // Rollback should free the copy-on-write chunk
         Assert.That(posTable.ComponentSegment.AllocatedChunkCount, Is.EqualTo(chunksBefore),
             "Rollback should free copy-on-write chunk");

@@ -480,6 +480,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         {
             CompRevTableSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, ComponentRevisionManager.CompRevChunkSize, 
                 changeSet, StorageSegmentKind.Revision);
+            QuarantineChainFrees(mmf);
         }
 
         BuildIndexedFieldInfo(false, changeSet);
@@ -547,6 +548,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             {
                 ChainLocksResetAtOpen = ComponentRevisionManager.ResetChainLocksAfterCrash(CompRevTableSegment, DBE);
             }
+
+            QuarantineChainFrees(mmf);
         }
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
@@ -585,6 +588,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         ComponentSegment = componentSegment;
         CompRevTableSegment = revisionSegment;
+        QuarantineChainFrees(mmf);
 
         BuildIndexedFieldInfo(true, changeSet, newIndexFieldIds);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
@@ -877,6 +881,15 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         ChunkBasedSegment<PersistentStore> segment, ChangeSet changeSet = null)
         => CreateIndexForFieldCore(field, key, load, segment, changeSet);
 
+    /// <summary>
+    /// A Versioned table's revision and content chunks are named by the data file's chains: their frees wait for a checkpoint before reuse (#1251).
+    /// </summary>
+    private void QuarantineChainFrees(PagedMMF mmf)
+    {
+        CompRevTableSegment.QuarantineFrees(mmf);
+        ComponentSegment.QuarantineFrees(mmf);
+    }
+
     /// <summary>Releases the table's owned persistent and transient segments (and the heap-backed transient stores). Idempotent — a second call is a no-op.</summary>
     /// <param name="disposing"><c>true</c> when disposing deterministically; <c>false</c> when running from the finalizer.</param>
     protected override void Dispose(bool disposing)
@@ -889,7 +902,13 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (disposing)
         {
             // Persistent segments
-                    CompRevTableSegment?.Dispose();
+            if (CompRevTableSegment != null)
+            {
+                DBE?.MMF?.UnregisterFreeQuarantine(CompRevTableSegment);
+                DBE?.MMF?.UnregisterFreeQuarantine(ComponentSegment);
+            }
+
+            CompRevTableSegment?.Dispose();
             ComponentSegment?.Dispose();
 
             // Transient segments

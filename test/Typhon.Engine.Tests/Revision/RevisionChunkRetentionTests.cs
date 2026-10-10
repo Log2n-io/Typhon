@@ -22,9 +22,18 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         dbe.InitializeArchetypes();
     }
 
-    private static int TraderChunks(DatabaseEngine dbe) => dbe.GetComponentTable<MkTrader>().CompRevTableSegment.AllocatedChunkCount;
+    // The frees, held until a checkpoint (CK-17), counted as freed.
+    private static int TraderChunks(DatabaseEngine dbe)
+    {
+        dbe.ReleaseHeldFreesForTest();
+        return dbe.GetComponentTable<MkTrader>().CompRevTableSegment.AllocatedChunkCount;
+    }
 
-    private static int WalletChunks(DatabaseEngine dbe) => dbe.GetComponentTable<MkWallet>().CompRevTableSegment.AllocatedChunkCount;
+    private static int WalletChunks(DatabaseEngine dbe)
+    {
+        dbe.ReleaseHeldFreesForTest();
+        return dbe.GetComponentTable<MkWallet>().CompRevTableSegment.AllocatedChunkCount;
+    }
 
     private static EntityId[] SpawnTraders(DatabaseEngine dbe)
     {

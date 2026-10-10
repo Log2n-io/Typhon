@@ -100,6 +100,9 @@ class DestroyRespawnSlotReuseTests : TestBase<DestroyRespawnSlotReuseTests>
             dbe.FlushDeferredCleanups();
             dbe.DeferredCleanupManager.FlushChunkFrees(dbe.EpochManager);
         }
+
+        // The frees, held until a checkpoint (CK-17): counted as freed.
+        dbe.ReleaseHeldFreesForTest();
     }
 
     private static void DestroyAndRespawn(DatabaseEngine dbe, EntityId[] ids, int i, int round, bool readFirst)
@@ -394,6 +397,7 @@ class DestroyRespawnSlotReuseTests : TestBase<DestroyRespawnSlotReuseTests>
 
         tx.Dispose();
         Assert.That(Interlocked.Read(ref segment.DoubleFreeCount) - doubleFreesBefore, Is.Zero, "a spawn's chain root was freed twice");
+        dbe.ReleaseHeldFreesForTest();
         Assert.That(segment.AllocatedChunkCount, Is.EqualTo(revisionsBefore), "the rolled-back spawns' chains");
     }
 

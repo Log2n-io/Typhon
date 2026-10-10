@@ -788,9 +788,21 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
     private bool LoadChunkSegment(ChunkBasedSegment<PersistentStore> segment, int filePageIndex)
     {
+        segment.RepairTornGrowAtLoad = RepairTornGrowsAtLoad;
+        segment.DirectoryPageTrusted = RepairTornGrowsAtLoad ? IsProtectedPage : null;
         if (!segment.Load(filePageIndex, TakeChunkSummary(filePageIndex)))
         {
             return false;
+        }
+
+        if (segment.TornGrowRepaired)
+        {
+            Interlocked.Increment(ref _tornGrowsRepairedAtLoad);
+        }
+
+        if (RepairTornGrowsAtLoad)
+        {
+            ClaimSegmentPagesAtLoad(segment);
         }
 
         if (segment.LoadedFromSummary)
@@ -804,6 +816,74 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
         return true;
     }
+
+    /// <summary>
+    /// Set by a crash open until its recovery completes: a segment whose directory names pages its chain does not reach — a grow whose old tail's link did
+    /// not reach the disk — is completed at load (<see cref="LogicalSegment{TStore}.RepairTornGrow"/>), not refused (#1296). A clean open stays strict.
+    /// </summary>
+    internal bool RepairTornGrowsAtLoad { get; set; }
+
+    private int _tornGrowsRepairedAtLoad;
+    private int _pagesClaimedAtLoad;
+
+    /// <summary>Pages a crash open's loads found named by a segment and free in the occupancy bitmap, and claimed (#1296). Diagnostic.</summary>
+    internal int PagesClaimedAtLoad => Volatile.Read(ref _pagesClaimedAtLoad);
+
+    /// <summary>
+    /// A crash open's load: claims in the occupancy bitmap every page <paramref name="segment"/> names — its directory's pages, the map-extension pages
+    /// and the directory twins. The bitmap on disk is as of its last capture, and a grow after it allocated pages the directory names and the bitmap has
+    /// as free: the open's own allocations — the indexes it recreates, the maps it rebuilds — took them, two segments on one page, before the re-derive at
+    /// the end of the recovery (CK-09) could make the bitmap whole (#1296).
+    /// </summary>
+    private void ClaimSegmentPagesAtLoad(LogicalSegment<PersistentStore> segment)
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var claimed = 0;
+        foreach (var page in segment.Pages)
+        {
+            claimed += ClaimPageAtLoad(page);
+        }
+
+        var directory = new List<int>();
+        segment.CollectDirectoryMapExtensionPages(guard.Epoch, directory);
+        segment.CollectDirectoryTwins(guard.Epoch, directory);
+        foreach (var page in directory)
+        {
+            claimed += ClaimPageAtLoad(page);
+        }
+
+        Interlocked.Add(ref _pagesClaimedAtLoad, claimed);
+    }
+
+    private int ClaimPageAtLoad(int page) => page > 0 && page < _occupancyMap.Capacity && !_occupancyMap.IsSet(page) && _occupancyMap.SetL0(page) ? 1 : 0;
+
+    /// <summary>
+    /// A crash open, before it allocates: claims in the occupancy bitmap every page <paramref name="owned"/> names (the engine's
+    /// <c>BuildOwnedPageBitmap</c>, whose persisted part reads each segment the file holds from its persisted pointer) — the bitmap on disk may predate a
+    /// grow, and the open's first allocations, between one segment's load and the next, took such pages for a second segment (#1296). Sets bits, never
+    /// clears one: CK-09's re-derive at the end of the recovery replaces the bitmap whole. Returns the pages claimed.
+    /// </summary>
+    internal int ClaimOwnedPagesAtOpen(long[] owned)
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var claimed = 0;
+        for (var w = 0; w < owned.Length; w++)
+        {
+            var word = (ulong)owned[w];
+            while (word != 0)
+            {
+                var bit = System.Numerics.BitOperations.TrailingZeroCount(word);
+                word &= word - 1;
+                claimed += ClaimPageAtLoad((w << 6) | bit);
+            }
+        }
+
+        Interlocked.Add(ref _pagesClaimedAtLoad, claimed);
+        return claimed;
+    }
+
+    /// <summary>Segment grows completed at load since the engine opened (<see cref="RepairTornGrowsAtLoad"/>). Diagnostic.</summary>
+    internal int TornGrowsRepairedAtLoad => Volatile.Read(ref _tornGrowsRepairedAtLoad);
 
     /// <summary>
     /// Try to load a segment. Returns false (instead of asserting) if the root page is already registered. When
@@ -1279,6 +1359,24 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// across generations. Both-slots-invalid for any directory page → throws (the segment cannot be loaded).
     /// </summary>
     internal void ResolveDirectoryPairsForLoad(int rootPageIndex)
+    {
+        ResolveDirectoryPairs(rootPageIndex);
+    }
+
+    /// <summary>
+    /// Resolves the CK-05 pairs of a segment's directory that no load has resolved yet, before a read of it through the cache. Read unresolved, a directory
+    /// page comes from its primary slot, which may be the older generation, and stays cached so: the segment's own load later found its directory as of
+    /// before its last grow (review of #1296).
+    /// </summary>
+    internal void EnsureDirectoryPairsResolved(int rootPageIndex)
+    {
+        if (!_pairState.ContainsKey(rootPageIndex))
+        {
+            ResolveDirectoryPairs(rootPageIndex);
+        }
+    }
+
+    private void ResolveDirectoryPairs(int rootPageIndex)
     {
         Span<byte> bufPrimary = new byte[PageSize];
         Span<byte> bufTwin = new byte[PageSize];

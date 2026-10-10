@@ -421,10 +421,16 @@ public class MarketHardeningTests
             .PageCacheSize((ulong)cacheMiB << 20)
             .ConfigureStorage(s => s.VerifyOnOpen = verify));
 
+    [TearDown]
+    public void ResetQuarantineSwitch() => DatabaseEngine.DisableFreeQuarantineForTest = false;
+
     [Test]
     public void AMarketLargerThanItsCache_StaysExactlyCoherent_ThroughAStormAndAReopen()
     {
         _c = Config.FromEnvironment();
+
+        // TYPHON_MKT_NO_QUARANTINE=1: frees reused at once, as before CK-17 — the A/B switch of its measurements, on the same binary.
+        DatabaseEngine.DisableFreeQuarantineForTest = Environment.GetEnvironmentVariable("TYPHON_MKT_NO_QUARANTINE") == "1";
         _errors = new ConcurrentQueue<string>();
         Log(_c.ToString());
         Directory.CreateDirectory(_c.Directory);
@@ -465,6 +471,9 @@ public class MarketHardeningTests
             Log($"revision chunks before the storm: {DescribeRevisionChunks(dbe)}");
             var auditIds = Storm(dbe, traderIds, itemIds, runNo, firstSeq, manifest.TotalCredits, out var lastSeq, out destroyed, out rolledBack);
             Log($"revision chunks after the storm: {DescribeRevisionChunks(dbe)}");
+            Log($"free quarantine (CK-17){(DatabaseEngine.DisableFreeQuarantineForTest ? " OFF" : "")}: {dbe.MMF.QuarantinedBytes / 1048576.0:F1} MiB held now, " +
+                $"peak {dbe.MMF.QuarantinePeakBytes / 1048576.0:F1} MiB of a {dbe.MMF.FreeQuarantineBudgetBytes / 1048576.0:F0} MiB budget, " +
+                $"{dbe.MMF.QuarantineCheckpointRequests:N0} checkpoint(s) asked, {dbe.CheckpointManager.TotalCheckpoints:N0} checkpoint(s) in all");
             AssertNoErrors("during the storm");
             runAudits = auditIds.Count;
 

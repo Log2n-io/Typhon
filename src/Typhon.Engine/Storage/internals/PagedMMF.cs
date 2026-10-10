@@ -578,6 +578,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool IsSuspectPage(int filePageIndex) => _suspectPages.ContainsKey(filePageIndex);
 
+    /// <summary>A suspect page rewritten whole — a crash open's completion of a torn grow initialized it: nothing of its torn bytes is left to resolve.</summary>
+    internal void ClearSuspectPage(int filePageIndex) => _suspectPages.TryRemove(filePageIndex, out _);
+
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
     {
@@ -1094,6 +1097,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Null-conditional Logger throughout: an early ctor throw (e.g. options.Validate at construction, before Logger
             // is assigned) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
             Logger?.LogInformation("Disposing Virtual Disk Manager");
+            // The quarantine's release worker frees chunks in this cache: stopped before it goes (a close ends it earlier, EndFreeQuarantine).
+            StopReleaseWorker();
+            _releaseSignal.Dispose();
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);

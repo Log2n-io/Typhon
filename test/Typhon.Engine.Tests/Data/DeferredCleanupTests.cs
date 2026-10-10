@@ -182,6 +182,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
             cs.SaveChanges();
         }
 
+        dbe.ReleaseHeldFreesForTest();
         Assert.That(table.CompRevTableSegment.IsChunkAllocated(orphanRev), Is.False, "orphan rev chunk must be freed");
         Assert.That(table.ComponentSegment.IsChunkAllocated(orphanContent), Is.False, "orphan content chunk must be freed");
         Assert.That(table.CompRevTableSegment.IsChunkAllocated(rootChunkId), Is.True, "reachable chain root must be kept");

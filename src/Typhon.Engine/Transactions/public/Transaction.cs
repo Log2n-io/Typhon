@@ -1612,7 +1612,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         if (compRevInfo.CurCompContentChunkId != 0)
         {
-            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId, neverCommitted: true);
             compRevInfo.CurCompContentChunkId = 0;
         }
     }

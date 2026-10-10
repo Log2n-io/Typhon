@@ -960,6 +960,9 @@ public partial class DatabaseEngine
 
         try
         {
+            // Through the pair's current slot, as a load reads it: a crash open claims before it loads (#1296), and a read of the primary slot cached the
+            // directory as of before its last grow for the load to find.
+            MMF.EnsureDirectoryPairsResolved(rootPageIndex);
             var store = new PersistentStore(MMF);
             store.RequestPageEpoch(rootPageIndex, epoch, out var memPageIndex);
             var page = store.GetPage(memPageIndex);

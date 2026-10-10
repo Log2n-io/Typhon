@@ -805,7 +805,7 @@ internal ref struct ComponentRevisionManager
             var overflowSet = new HashSet<int>();
             for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                if (!segment.IsChunkAllocated(chunkId))
+                if (!segment.IsChunkLive(chunkId))
                 {
                     continue;
                 }
@@ -822,7 +822,7 @@ internal ref struct ComponentRevisionManager
             List<(long Pk, int Chunk)> namedRoots = null;
             for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                if (!segment.IsChunkAllocated(chunkId))
+                if (!segment.IsChunkLive(chunkId))
                 {
                     continue;
                 }
@@ -932,7 +932,7 @@ internal ref struct ComponentRevisionManager
 
         for (var left = length - 1; left > 0; left--)
         {
-            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkLive(next))
             {
                 return false;
             }
@@ -972,7 +972,7 @@ internal ref struct ComponentRevisionManager
         var contentSeg = table.ComponentSegment;
         foreach (var chunkId in droppedContent)
         {
-            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkAllocated(chunkId))
+            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkLive(chunkId))
             {
                 if (withoutRelease != null && withoutRelease.Contains(chunkId))
                 {
@@ -1038,6 +1038,111 @@ internal ref struct ComponentRevisionManager
         return reserved;
     }
 
+    /// <summary>
+    /// On a crash open, before the log replay: collapses to its newest reachable committed revision each chain of <paramref name="roots"/> — the live
+    /// records' — whose links end before its length. Its root's page reached the disk after a growth, the page of the chunk that links to the new one
+    /// before it: the replay then appended past the last reachable chunk — into a chunk no walk reaches, or the reserved chunk 0 — the scrub kept a stale
+    /// revision, and the next growth threw (#1297). A link to a chunk the disk has as free, or to another live record's root, is torn the same way: the free
+    /// chunk was allocated after the bitmap page's capture, the root's header read as elements made a committed tombstone with a TSN past every replayed
+    /// one. The revisions in the chunks past a torn link were written after the last completed checkpoint's barrier — an allocation before it reached the
+    /// disk with that cycle — so the replay brings them back; a compaction that moved older revisions into fresh chunks after the barrier is the residual
+    /// this cannot repair (#1298). Read through a scan accessor, a collapsed root written through an epoch one. Recovery only, single-threaded; returns the
+    /// chains collapsed.
+    /// </summary>
+    internal static int CollapseTornChainsBeforeReplay(ComponentTable table, HashSet<int> roots, ChangeSet changeSet)
+    {
+        var revSeg = table.CompRevTableSegment;
+        var capacity = revSeg.ChunkCapacity;
+        var reachable = new List<int>();
+        var collapsed = 0;
+        var accessor = revSeg.CreateScanAccessor();
+        var writer = revSeg.CreateChunkAccessor(changeSet);
+        try
+        {
+            foreach (var root in roots)
+            {
+                ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+                if (!HasRootHeader(ref header))
+                {
+                    continue;
+                }
+
+                int length = header.ChainLength, items = header.ItemCount, first = header.FirstItemIndex, next = header.NextChunkId;
+                reachable.Clear();
+                reachable.Add(root);
+                for (var left = length - 1; left > 0; left--)
+                {
+                    if (next <= 0 || next >= capacity || !revSeg.IsChunkAllocated(next) || roots.Contains(next))
+                    {
+                        break;
+                    }
+
+                    reachable.Add(next);
+                    next = accessor.GetChunk<int>(next);
+                }
+
+                if (reachable.Count == length)
+                {
+                    continue;
+                }
+
+                // The newest committed live revision in a reachable chunk.
+                var span = ComputeRevElementCount(length);
+                CompRevStorageElement head = default;
+                var found = false;
+                for (var i = 0; i < items; i++)
+                {
+                    var (chunkInChain, indexInChunk) = CompRevStorageHeader.GetRevisionLocation((first + i) % span);
+                    if (chunkInChain >= reachable.Count)
+                    {
+                        continue;
+                    }
+
+                    var element = ElementOf(ref accessor, reachable[chunkInChain], chunkInChain == 0, indexInChunk);
+                    if (!element.IsVoid && !element.IsolationFlag && (!found || element.TSN >= head.TSN))
+                    {
+                        head = element;
+                        found = true;
+                    }
+                }
+
+                // The root alone holds it — fields one by one, never the whole header, so the lock word is kept (as ScrubChainToHead).
+                writer.GetChunkAsSpan(root, true).Split(out Span<CompRevStorageHeader> h, out Span<CompRevStorageElement> elements);
+                h[0].NextChunkId = 0;
+                h[0].FirstItemIndex = 0;
+                h[0].ChainLength = 1;
+                h[0].ItemCount = 1;
+                h[0].LastCommitRevisionIndex = found ? (short)0 : (short)-1;
+                if (found)
+                {
+                    head.UowId = 0;
+                }
+
+                elements[0] = found ? head : default;
+                collapsed++;
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+            writer.Dispose();
+        }
+
+        return collapsed;
+    }
+
+    private static CompRevStorageElement ElementOf(ref ChunkAccessor<PersistentStore> accessor, int chunkId, bool isRoot, int index)
+    {
+        var chunk = accessor.GetChunkAsSpan(chunkId);
+        if (isRoot)
+        {
+            chunk.Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> rootElements);
+            return rootElements[index];
+        }
+
+        return chunk.Slice(sizeof(int)).Cast<byte, CompRevStorageElement>()[index];
+    }
+
     private static int ReserveContent(ChunkBasedSegment<PersistentStore> contentSeg, Span<CompRevStorageElement> elements, HashSet<int> reservedContent)
     {
         var reserved = 0;
@@ -1089,7 +1194,7 @@ internal ref struct ComponentRevisionManager
         // Free orphan revision-table chunks (allocated, not a chain root).
         for (var chunkId = 0; chunkId < revSeg.ChunkCapacity; chunkId++)
         {
-            if (revSeg.IsChunkAllocated(chunkId) && !reachableRoots.Contains(chunkId))
+            if (revSeg.IsChunkLive(chunkId) && !reachableRoots.Contains(chunkId))
             {
                 revSeg.FreeChunk(chunkId);
             }
@@ -1098,7 +1203,7 @@ internal ref struct ComponentRevisionManager
         // Free orphan content chunks (allocated, referenced by no surviving head).
         for (var chunkId = 0; chunkId < contentSeg.ChunkCapacity; chunkId++)
         {
-            if (contentSeg.IsChunkAllocated(chunkId) && !reachableContent.Contains(chunkId))
+            if (contentSeg.IsChunkLive(chunkId) && !reachableContent.Contains(chunkId))
             {
                 contentSeg.FreeChunk(chunkId);
             }

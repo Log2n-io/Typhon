@@ -56,6 +56,14 @@ public class PagedMMFOptions
     /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>
     public ulong DatabaseCacheSize { get; set; } = DefaultCacheSizeBytes;
+
+    /// <summary>
+    /// The share of <see cref="DatabaseCacheSize"/> that freed revision and content chunks of Versioned components may occupy, held back from reuse, before
+    /// the engine asks for a checkpoint. Default 0.125. A freed chunk is reused only once a checkpoint has written the pages that stopped naming it — until
+    /// then the data file may still name it, and a crash would recover the old owner's chain over the new owner's data (#1251). Held chunks stay allocated:
+    /// lower values checkpoint more often under heavy updates, higher values let segments grow further between checkpoints.
+    /// </summary>
+    public double FreeQuarantineCacheFraction { get; set; } = 0.125;
     /// <summary>
     /// When <c>true</c>, fills a page-cache slot with a recognizable debug pattern when it is assigned. Default <c>false</c>. No longer observable
     /// (PS-14, #1126): a page not read from disk is cleared right after, and a page read from disk is overwritten by the read.

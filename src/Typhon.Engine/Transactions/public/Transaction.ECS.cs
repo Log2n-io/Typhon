@@ -4521,7 +4521,7 @@ public unsafe partial class Transaction
                         if (chunkId > 0)
                         {
                             // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it.
-                            DeferredCleanupManager.FreeContentChunk(table, chunkId);
+                            DeferredCleanupManager.FreeContentChunk(table, chunkId, neverCommitted: true);
                         }
 
                         if (cri.CompRevTableFirstChunkId > 0)
@@ -4569,7 +4569,7 @@ public unsafe partial class Transaction
                             cri.CurCompContentChunkId > 0)
                         {
                             // CC-aware free: release the cloned ComponentCollection buffer of the rolled-back COW chunk (the committed head keeps its own).
-                            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
+                            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId, neverCommitted: true);
                         }
                     }
                 }

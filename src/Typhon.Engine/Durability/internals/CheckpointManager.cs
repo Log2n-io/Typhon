@@ -1062,6 +1062,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
 
+            // The frees made so far wait for this cycle: the pages that stopped naming them were dirtied before them, so this cycle collects and writes
+            // them; only once it has written every page is reusing those chunks safe (#1251).
+            _mmf.SealQuarantinedFrees();
+
             // The whole cycle shares one bounded deadline budget: the write ahead of the hook, the barrier and the write below.
             var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
 
@@ -1168,6 +1172,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
                 DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
+
+                // Every page collected at the start is on disk: the frees sealed then are safe to reuse (#1251).
+                _mmf.ReleaseQuarantinedFrees();
 
                 // Step 8: Recycle WAL segments
                 var segmentManager = _walManager.SegmentManager;

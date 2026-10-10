@@ -378,7 +378,13 @@ internal class DeferredCleanupManager
     /// Frees a content chunk and its associated collection buffers. Used by the deferred chunk free path
     /// (creates its own accessor since the cleanup's accessor is disposed by the time deferred freeing runs).
     /// </summary>
-    internal static void FreeContentChunk(ComponentTable ct, int chunkId)
+    /// <param name="ct">The table.</param>
+    /// <param name="chunkId">The content chunk.</param>
+    /// <param name="neverCommitted">
+    /// The chunk held only a rolled-back transaction's value: freed at once, not held until a checkpoint (CK-17). An element naming it on disk is
+    /// uncommitted, which recovery never reads, and a head that reuses it is protected from the scrub's free of the uncommitted element's content.
+    /// </param>
+    internal static void FreeContentChunk(ComponentTable ct, int chunkId, bool neverCommitted = false)
     {
         if (chunkId == 0)
         {
@@ -392,7 +398,14 @@ internal class DeferredCleanupManager
             accessor.Dispose();
         }
 
-        ct.ComponentSegment.FreeChunk(chunkId);
+        if (neverCommitted)
+        {
+            ct.ComponentSegment.FreeChunkUnheld(chunkId);
+        }
+        else
+        {
+            ct.ComponentSegment.FreeChunk(chunkId);
+        }
     }
 
     /// <summary>
@@ -493,7 +506,7 @@ internal class DeferredCleanupManager
 
             // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
             // all: compacting it would rearrange someone else's revisions (REAP-02).
-            if (!table.CompRevTableSegment.IsChunkAllocated(firstChunkId)
+            if (!table.CompRevTableSegment.IsChunkLive(firstChunkId)
                 || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
             {
                 Interlocked.Increment(ref ForeignChainsSkipped);
@@ -585,7 +598,7 @@ internal class DeferredCleanupManager
         }
 
         var revisions = table.CompRevTableSegment;
-        if (revisions == null || !revisions.IsChunkAllocated(firstChunkId))
+        if (revisions == null || !revisions.IsChunkLive(firstChunkId))
         {
             Interlocked.Increment(ref DestroyedChainsForeign);
             return ChainRelease.NotThisEntitys;

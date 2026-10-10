@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
@@ -65,6 +66,77 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         }
 
         dbe.MMF.SavePages([.. pages]).GetAwaiter().GetResult();
+    }
+
+    /// <summary>Writes the pages holding <paramref name="chunks"/> of <paramref name="segment"/> to the data file, and no other.</summary>
+    private static unsafe void WriteChunkPages(DatabaseEngine dbe, ChunkBasedSegment<PersistentStore> segment, params int[] chunks)
+    {
+        var pages = new HashSet<int>();
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var a = segment.CreateChunkAccessor();
+            try
+            {
+                foreach (var chunk in chunks)
+                {
+                    pages.Add(dbe.MMF.MemPageIndexOf(a.GetChunkAddress(chunk)));
+                }
+            }
+            finally
+            {
+                a.Dispose();
+            }
+        }
+
+        dbe.MMF.SavePages([.. pages]).GetAwaiter().GetResult();
+    }
+
+    /// <summary>Writes the file page <paramref name=filePageIndex/> to the data file, and no other.</summary>
+    private static void WriteFilePage(DatabaseEngine dbe, int filePageIndex)
+    {
+        int memPageIndex;
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            dbe.MMF.RequestPageEpoch(filePageIndex, dbe.EpochManager.GlobalEpoch, out memPageIndex);
+        }
+
+        dbe.MMF.SavePages([memPageIndex]).GetAwaiter().GetResult();
+    }
+
+    private static int OverflowOf(DatabaseEngine dbe, int root)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var a = dbe.GetComponentTable<MkItem>().CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            return a.GetChunk<CompRevStorageHeader>(root).NextChunkId;
+        }
+        finally
+        {
+            a.Dispose();
+        }
+    }
+
+    private static List<int> ChainChunks(DatabaseEngine dbe, int root)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var a = dbe.GetComponentTable<MkItem>().CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            var chunks = new List<int> { root };
+            int length = a.GetChunk<CompRevStorageHeader>(root).ChainLength, next = a.GetChunk<CompRevStorageHeader>(root).NextChunkId;
+            for (var i = 1; i < length && next != 0; i++)
+            {
+                chunks.Add(next);
+                next = a.GetChunk<int>(next);
+            }
+
+            return chunks;
+        }
+        finally
+        {
+            a.Dispose();
+        }
     }
 
     private static DatabaseEngine RegisterMarket(DatabaseEngine dbe)
@@ -1036,6 +1108,869 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         using var read = reopened.CreateReadOnlyTransaction();
         Assert.That(read.IsAlive(id), Is.True, "the item");
         Assert.That(read.Open(id).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(ComponentRevisionManager.CompRevCountInRoot), "the head, the element made newest");
+    }
+
+    /// <summary>
+    /// The market's swapped records, at unit scale: an item's chain grows an overflow chunk, a checkpoint writes both; the chain is compacted, freeing the
+    /// chunk, and another item's chain takes it; that chunk's page reaches the disk, the compacted root's does not. Recovered, the first item's root named
+    /// the other item's elements, and the scrub kept the newest — the other item's value (#1251, step 2.5). With the free held until a checkpoint has
+    /// written the compacted root, the chunk is not reused before the disk stops naming it. Without the hold
+    /// (<see cref="DatabaseEngine.DisableFreeQuarantineForTest"/>) the second item's growth takes the chunk, and the first item recovers an old value,
+    /// its logged update lost.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-17")]
+    [CancelAfter(30_000)]
+    public void AnOverflowChunkFreedByACompaction_IsNotReusedBeforeTheCompactionReachesTheDisk()
+    {
+        var (value, updates) = OverflowReuseScenario(held: true);
+        Assert.That(updates, Is.EqualTo(OverflowReuseMaxUpdates), "the freed chunk, held: not reused before a checkpoint");
+        Assert.That(value, Is.EqualTo(42), "the first item, its own value");
+    }
+
+    /// <summary>The scenario above without the hold: the second item's growth takes the freed chunk, and the first item recovers another value.</summary>
+    [Test]
+    [NonParallelizable]
+    [RuleMutant("CK-17")]
+    [CancelAfter(30_000)]
+    public void Mutant_AFreedOverflowChunkReusedAtOnce_GivesTheOldChainAnotherValue()
+    {
+        DatabaseEngine.DisableFreeQuarantineForTest = true;
+        try
+        {
+            var (value, updates) = OverflowReuseScenario(held: false);
+            Assert.That(updates, Is.LessThan(OverflowReuseMaxUpdates), "without the hold, the second item's growth took the freed chunk");
+            Assert.That(value, Is.Not.EqualTo(42), "and the first item recovered another value");
+        }
+        finally
+        {
+            DatabaseEngine.DisableFreeQuarantineForTest = false;
+        }
+    }
+
+    private const int OverflowReuseMaxUpdates = 100;
+
+    private (long FirstValue, int Updates) OverflowReuseScenario(bool held)
+    {
+        EntityId first, second;
+        int lastSecond;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                first = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = -1 }));
+                second = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 2, OwnerNo = 2, LastTradeSeq = -2 }));
+
+                // A page of other items' roots, so the first item's overflow chunk lands on another page than its root.
+                for (var i = 0; i < revisions.ChunkCountRootPage + revisions.ChunkCountPerPage; i++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 100 + i, OwnerNo = 9, LastTradeSeq = -(100 + i) }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            // A reader keeps the first item's revisions: its chain grows an overflow chunk.
+            var pin = dbe.CreateReadOnlyTransaction();
+            for (var i = 1; i <= ComponentRevisionManager.CompRevCountInRoot; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(first).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = i });
+                Assert.That(tx.Commit(), Is.True, "an update of the first item");
+            }
+
+            var root = ItemRootOf(dbe, first);
+            var overflow = OverflowOf(dbe, root);
+            Assert.That(overflow, Is.Not.Zero, "premise: the first item's chain has an overflow chunk");
+            Assert.That(revisions.GetChunkLocation(overflow).segmentIndex, Is.Not.EqualTo(revisions.GetChunkLocation(root).segmentIndex),
+                "premise: the overflow chunk is on another page than the root");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint: root and overflow on disk");
+
+            // The reader leaves; the next update of the first item compacts its chain, freeing the overflow chunk.
+            pin.Dispose();
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.OpenMut(first).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = 42 });
+                Assert.That(tx.Commit(), Is.True, "the update that compacts");
+            }
+
+            Assert.That(OverflowOf(dbe, root), Is.Zero, "premise: the first item's chain compacted to its root");
+
+            // The compaction's frees wait for the readers of its time; none is left.
+            dbe.DeferredCleanupManager.FlushChunkFrees(dbe.EpochManager);
+            Assert.That(revisions.IsChunkAllocated(overflow), Is.EqualTo(held), "the freed overflow chunk: held, or free at once");
+
+            // Another reader; the second item's chain grows until it takes the freed chunk — the allocator is next-fit, so it comes back to it
+            // only once the chunks after it are taken.
+            var pin2 = dbe.CreateReadOnlyTransaction();
+            var secondRoot = ItemRootOf(dbe, second);
+            var updates = 0;
+            const int MaxUpdates = OverflowReuseMaxUpdates;
+            while (updates < MaxUpdates && !ChainChunks(dbe, secondRoot).Contains(overflow))
+            {
+                updates++;
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(second).Set(MkItemArch.Item, new MkItem { ItemNo = 2, OwnerNo = 2, LastTradeSeq = 1000 + updates });
+                Assert.That(tx.Commit(), Is.True, "an update of the second item");
+            }
+
+
+
+            // The chunk's page reaches the disk; the compacted root's does not.
+            lastSecond = updates;
+            WriteChunkPages(dbe, revisions, overflow);
+            dbe.SimulateHardCrash();
+            try
+            {
+                pin2.Dispose();
+            }
+            catch (Exception)
+            {
+                // The engine is gone under it.
+            }
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        using var read = reopened.CreateReadOnlyTransaction();
+        if (held)
+        {
+            Assert.That(read.Open(second).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(1000 + lastSecond), "the second item");
+            AssertStorageHealthy(reopened);
+        }
+
+        return (read.Open(first).Read(MkItemArch.Item).LastTradeSeq, lastSecond);
+    }
+
+    /// <summary>
+    /// The market's zeroed wallet, at unit scale: an item's chain grows twice under a reader; its root's page reaches the disk after the second growth, the
+    /// first overflow chunk's as of before it — linking to nothing. The replay of the logged updates appended past the chain's last reachable chunk, into
+    /// a chunk no walk reaches (or the reserved chunk 0), and the scrub kept a stale element: the item recovered an old value, or the replay's growth threw
+    /// (#1297). Before the replay, a chain whose links end before its length is collapsed to its newest reachable committed revision.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-12")]
+    [CancelAfter(30_000)]
+    public void AChainWhoseLinkIsOlderThanItsRoot_KeepsTheReplayedUpdates()
+    {
+        EntityId id;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                id = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = -1 }));
+
+                // A page of other items' roots, so the item's overflow chunks land on another page than its root.
+                for (var i = 0; i < revisions.ChunkCountRootPage + revisions.ChunkCountPerPage; i++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 100 + i, OwnerNo = 9, LastTradeSeq = -(100 + i) }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            // A reader keeps every revision: the root's, then one overflow chunk.
+            var pin = dbe.CreateReadOnlyTransaction();
+            var seq = 0;
+            for (var i = 0; i < ComponentRevisionManager.CompRevCountInRoot; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = ++seq });
+                Assert.That(tx.Commit(), Is.True, "an update");
+            }
+
+            var root = ItemRootOf(dbe, id);
+            var first = OverflowOf(dbe, root);
+            Assert.That(first, Is.Not.Zero, "premise: one overflow chunk");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint: the chain of two on disk");
+
+            // The chain grows again — logged, then only the root's page reaches the disk.
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                for (var i = 0; i < ComponentRevisionManager.CompRevCountInNext + 1; i++)
+                {
+                    using var tx = uow.CreateTransaction(CommitDiscipline.Commit);
+                    tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = ++seq });
+                    Assert.That(tx.Commit(), Is.True, "a logged update");
+                }
+
+                uow.Flush();
+            }
+
+            var chain = ChainChunks(dbe, root);
+            Assert.That(chain, Has.Count.EqualTo(3), "premise: the chain grew a second overflow chunk");
+            Assert.That(revisions.GetChunkLocation(first).segmentIndex, Is.Not.EqualTo(revisions.GetChunkLocation(root).segmentIndex),
+                "premise: the first overflow chunk is on another page than the root");
+            WriteChunkPages(dbe, revisions, root);
+            dbe.SimulateHardCrash();
+            try
+            {
+                pin.Dispose();
+            }
+            catch (Exception)
+            {
+                // The engine is gone under it.
+            }
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(reopened.ChainsCollapsedAtOpen, Is.EqualTo(1), "the torn chain, collapsed before the replay");
+        Assert.That((reopened.MMF.QuarantinePeakBytes > 0, reopened.MMF.QuarantinedBytes), Is.EqualTo((true, 0L)),
+            "recovery's frees — the collapsed chain's chunks the sweep gave back — held until the recovery's seal covered them (CK-17)");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            Assert.That(read.Open(id).Read(MkItemArch.Item).LastTradeSeq,
+                Is.EqualTo(ComponentRevisionManager.CompRevCountInRoot + ComponentRevisionManager.CompRevCountInNext + 1), "the item, its last logged update");
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A chain that grew after the last completed checkpoint, its root's page alone on the disk: the root links to a chunk the disk has as free — the
+    /// allocation bit lives on the chunk's own page — whose bytes were never written. Walked as the chain's, the length matched and nothing was collapsed;
+    /// the replay appended behind its zeroed elements — or, its page holding a previous owner's bytes, behind that owner's elements, naming its content. A link
+    /// to a chunk the disk has as free is torn like one past the chain's end (#1297).
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-12")]
+    [CancelAfter(30_000)]
+    public void AChainLinkingToAChunkTheDiskHasAsFree_IsCollapsed()
+    {
+        EntityId id;
+        int seq;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                id = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = -1 }));
+                for (var i = 0; i < revisions.ChunkCountRootPage + revisions.ChunkCountPerPage; i++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 100 + i, OwnerNo = 9, LastTradeSeq = -(100 + i) }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            // A reader keeps every revision: the root fills, no overflow yet.
+            var pin = dbe.CreateReadOnlyTransaction();
+            seq = 0;
+            for (var i = 0; i < ComponentRevisionManager.CompRevCountInRoot - 1; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = ++seq });
+                Assert.That(tx.Commit(), Is.True, "an update");
+            }
+
+            var root = ItemRootOf(dbe, id);
+            Assert.That(OverflowOf(dbe, root), Is.Zero, "premise: the root alone holds the chain");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint: the full root on disk");
+
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                for (var i = 0; i < 2; i++)
+                {
+                    using var tx = uow.CreateTransaction(CommitDiscipline.Commit);
+                    tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 5, OwnerNo = 1, LastTradeSeq = ++seq });
+                    Assert.That(tx.Commit(), Is.True, "a logged update");
+                }
+
+                uow.Flush();
+            }
+
+            var chain = ChainChunks(dbe, root);
+            Assert.That(chain, Has.Count.EqualTo(2), "premise: the chain grew an overflow chunk after the checkpoint");
+            Assert.That(revisions.GetChunkLocation(chain[1]).segmentIndex, Is.Not.EqualTo(revisions.GetChunkLocation(root).segmentIndex),
+                "premise: the overflow chunk is on another page than the root");
+            WriteChunkPages(dbe, revisions, root);
+            dbe.SimulateHardCrash();
+            try
+            {
+                pin.Dispose();
+            }
+            catch (Exception)
+            {
+                // The engine is gone under it.
+            }
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(reopened.ChainsCollapsedAtOpen, Is.EqualTo(1), "the chain linking to a free chunk, collapsed before the replay");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            Assert.That(read.Open(id).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(seq), "the item, its last logged update");
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A segment grow whose directory page reached the disk and whose old tail's page did not — the directory written first, as a checkpoint writes it
+    /// (CK-16): the old tail links to nothing where the directory names the grow's pages. The load's integrity check refused the segment, at every open
+    /// (#1296, the market under a page-write kill). A crash open completes the grow: the link patched, the grow's pages empty, the spawns on them replayed.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void ASegmentGrowWhoseOldTailMissedTheDisk_IsCompletedAtTheCrashOpen()
+    {
+        var items = new List<EntityId>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+
+            // Up to a few chunks short of the segment's capacity, then a checkpoint: on disk, the old tail links to nothing.
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            var length = revisions.Length;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+
+            // Logged spawns past the capacity: the segment grows.
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var no = items.Count;
+                        items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no })));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(revisions.Length, Is.GreaterThan(length), "premise: the revision segment grew");
+
+            // The directory page reaches the disk; the old tail's does not.
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(reopened.MMF.TornGrowsRepairedAtLoad, Is.GreaterThanOrEqualTo(1), "the torn grow, completed at load");
+        Assert.That(reopened.MMF.PagesClaimedAtLoad, Is.GreaterThan(0), "the grow's pages, claimed before the open allocated");
+        Assert.That(LogicalSegmentHeader.Size, Is.EqualTo(16), "the incarnation sits in free header bytes: the page geometry is unchanged");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            for (var no = 0; no < items.Count; no++)
+            {
+                var item = read.Open(items[no]).Read(MkItemArch.Item);
+                Assert.That(item.ItemNo, Is.EqualTo(no), $"item {no}");
+            }
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// The same torn grow, the old tail's page on the disk torn as well: its first sector — the header, the incarnation, the link to nothing — as of the
+    /// checkpoint, the rest not. The completion took the suspect page for one the grow had not written and initialized it empty, clearing its suspicion:
+    /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn page that is this segment's is kept and stays
+    /// suspect; the suspect resolution then refuses the open over the live chunks it backs (RB-04).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void ATornGrowOverATornOldTail_FailsTheOpenLoudly_InsteadOfEmptyingTheTail()
+    {
+        int oldTail;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var no = 0;
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++, no++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            var length = revisions.Length;
+            oldTail = revisions.Pages[length - 1];
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++, no++)
+                    {
+                        tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no }));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(revisions.Length, Is.GreaterThan(length), "premise: the revision segment grew");
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            dbe.SimulateHardCrash();
+        }
+
+        var path = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BuildDatabasePathFileName();
+        ChaosPageIO.DamagePageOnDisk(path, oldTail, PageDamageType.TornPage, PagedMMF.PageSize);
+
+        using var scope2 = ServiceProvider.CreateScope();
+        var thrown = Assert.Catch(() => RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>()),
+            "the open over a torn page backing checkpointed chunks");
+        var e = thrown;
+        while (e is not CorruptionException && e?.InnerException != null)
+        {
+            e = e.InnerException;
+        }
+
+        Assert.That(e, Is.InstanceOf<CorruptionException>(), $"refused by the suspect resolution (RB-04), not by {thrown.GetType().Name}: {thrown.Message}");
+    }
+
+    /// <summary>
+    /// A link lost long before the crash — the data file's page of a segment's second-to-last page links to nothing, the pages after it written and
+    /// checkpointed, the items on them in no log window. Completing the chain must keep those pages: their stamp and their links say they are this
+    /// segment's. Initialized empty, the items on them were gone, with nothing to replay (#1296).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AnOldLostLinkOverCheckpointedPages_KeepsThem()
+    {
+        var items = new List<EntityId>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+
+            // Until the segment's last page holds item roots.
+            bool LastPageHoldsRoots() => revisions.Length > 2
+                && revisions.AllocatedChunkCount > revisions.ChunkCountRootPage + (revisions.Length - 2) * revisions.ChunkCountPerPage + 10;
+            while (!LastPageHoldsRoots())
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint: every item on disk");
+
+            // On disk, the second-to-last page's link lost.
+            var damaged = revisions.Pages[^2];
+            int memPageIndex;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                dbe.MMF.RequestPageEpoch(damaged, dbe.EpochManager.GlobalEpoch, out memPageIndex);
+                dbe.MMF.GetPage(memPageIndex).StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID = 0;
+            }
+
+            dbe.MMF.SavePages([memPageIndex]).GetAwaiter().GetResult();
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(reopened.MMF.TornGrowsRepairedAtLoad, Is.EqualTo(1), "the lost link, completed at load");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            for (var no = 0; no < items.Count; no++)
+            {
+                Assert.That(read.IsAlive(items[no]), Is.True, $"item {no}");
+                Assert.That(read.Open(items[no]).Read(MkItemArch.Item).ItemNo, Is.EqualTo(no), $"item {no}");
+            }
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A chain scrubbed at a crash open that replayed nothing: the scrub frees its overflow chunk. Freed at once, the next transactions reused it while the
+    /// disk's root as of before the scrub still named it — no seal ran, nothing replayed — and a second crash recovered the first item over the other
+    /// item's elements (review of #1251). Held, the chunk waits for a checkpoint that writes the collapsed root.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-17")]
+    [CancelAfter(30_000)]
+    public void AChainScrubbedAtACrashOpen_KeepsItsFreedChunksUntilACheckpointWritesTheScrub()
+    {
+        EntityId first, second;
+        int overflow;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                first = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = -1 }));
+                second = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 2, OwnerNo = 2, LastTradeSeq = -2 }));
+                for (var i = 0; i < revisions.ChunkCountRootPage + revisions.ChunkCountPerPage; i++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 100 + i, OwnerNo = 9, LastTradeSeq = -(100 + i) }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            var pin = dbe.CreateReadOnlyTransaction();
+            for (var i = 1; i <= ComponentRevisionManager.CompRevCountInRoot; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(first).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = i });
+                Assert.That(tx.Commit(), Is.True, "an update of the first item");
+            }
+
+            overflow = OverflowOf(dbe, ItemRootOf(dbe, first));
+            Assert.That(overflow, Is.Not.Zero, "premise: the first item's chain has an overflow chunk");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint: the chain on disk, no log window");
+            dbe.SimulateHardCrash();
+            try
+            {
+                pin.Dispose();
+            }
+            catch (Exception)
+            {
+                // The engine is gone under it.
+            }
+        }
+
+        int lastSecond;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+            Assert.That(OverflowOf(dbe, ItemRootOf(dbe, first)), Is.Zero, "premise: the scrub collapsed the first item's chain");
+
+            // The second item's chain grows until it takes the chunk the scrub freed, if it can.
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var pin = dbe.CreateReadOnlyTransaction();
+            var secondRoot = ItemRootOf(dbe, second);
+            lastSecond = 0;
+            while (lastSecond < 100 && !ChainChunks(dbe, secondRoot).Contains(overflow))
+            {
+                lastSecond++;
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(second).Set(MkItemArch.Item, new MkItem { ItemNo = 2, OwnerNo = 2, LastTradeSeq = 1000 + lastSecond });
+                Assert.That(tx.Commit(), Is.True, "an update of the second item");
+            }
+
+            // The chunk's page reaches the disk, and nothing else.
+            WriteChunkPages(dbe, revisions, overflow);
+            dbe.SimulateHardCrash();
+            try
+            {
+                pin.Dispose();
+            }
+            catch (Exception)
+            {
+                // The engine is gone under it.
+            }
+        }
+
+        using var scope3 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope3.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            Assert.That(read.Open(first).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(ComponentRevisionManager.CompRevCountInRoot),
+                "the first item, its own last value");
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A chain whose root, its page as of a previous life, links within its length into another live record's root, its item count spanning that chunk.
+    /// The walk counted the root as the chain's overflow and read its header as elements — a committed tombstone with a TSN past every replayed one, which
+    /// won the collapse and the scrub: the item was gone (review of #1251). A link into a live root is a tear, and the chain is collapsed before the replay.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-12")]
+    [CancelAfter(30_000)]
+    public unsafe void AChainLinkingIntoAnotherLiveRoot_IsCollapsed_AndBothItemsKeepTheirValues()
+    {
+        EntityId first, second;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                first = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 1, OwnerNo = 7, LastTradeSeq = 41 }));
+                second = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 2, OwnerNo = 8, LastTradeSeq = 42 }));
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    tx.OpenMut(first).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 7, LastTradeSeq = 43 });
+                    Assert.That(tx.Commit(), Is.True, "the logged update");
+                }
+
+                uow.Flush();
+            }
+
+            // On disk, the first item's root as of a previous life: two chunks, its items past the root, its next the second item's root.
+            int firstRoot = ItemRootOf(dbe, first), secondRoot = ItemRootOf(dbe, second);
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                var cs = dbe.MMF.CreateChangeSet();
+                var a = revisions.CreateChunkAccessor(cs);
+                ref var header = ref a.GetChunk<CompRevStorageHeader>(firstRoot, true);
+                header.NextChunkId = secondRoot;
+                header.ChainLength = 2;
+                header.ItemCount = (short)(ComponentRevisionManager.CompRevCountInRoot + 1);
+                a.Dispose();
+                cs.ReleaseDirtyMarks();
+            }
+
+            WriteChunkPages(dbe, revisions, firstRoot);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(reopened.ChainsCollapsedAtOpen, Is.EqualTo(1), "the chain linking into another root, collapsed");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            Assert.That(read.IsAlive(first), Is.True, "the first item");
+            Assert.That(read.Open(first).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(43), "the first item, its logged update");
+            Assert.That(read.Open(second).Read(MkItemArch.Item).LastTradeSeq, Is.EqualTo(42), "the second item");
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A segment grow whose first new page carries the bytes of another segment — a page that segment freed, initialized as its own, its link even the
+    /// directory's next — and missed the disk, the old tail's link lost too. Its segment flag and link say "a segment page"; its incarnation says another
+    /// segment's. Kept, its chunk bitmap was the other segment's. It is initialized empty, and every new page with it (#1296).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public unsafe void AGrowOverAPageOfAnotherIncarnation_InitializesIt()
+    {
+        var items = new List<EntityId>();
+        int grown;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            var length = revisions.Length;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var no = items.Count;
+                        items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no })));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            grown = revisions.Length - length;
+            Assert.That(grown, Is.GreaterThan(0), "premise: the revision segment grew");
+
+            // The first new page, as another segment's page: its incarnation changed in memory, then written with the directory.
+            var firstNew = revisions.Pages[length];
+            int memPageIndex;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                dbe.MMF.RequestPageEpoch(firstNew, dbe.EpochManager.GlobalEpoch, out memPageIndex);
+                var image = new Span<byte>(dbe.MMF.GetPage(memPageIndex).Address, PagedMMF.PageSize);
+                SegmentGeometry.WriteIncarnation(image, SegmentGeometry.ReadIncarnation(image) + 1);
+            }
+
+            dbe.MMF.SavePages([memPageIndex]).GetAwaiter().GetResult();
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var revisionsAfter = reopened.GetComponentTable<MkItem>().CompRevTableSegment;
+        Assert.That(revisionsAfter.TornGrowPagesReinitialized, Is.EqualTo(grown), "every new page initialized empty, the other segment's with them");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            for (var no = 0; no < items.Count; no++)
+            {
+                Assert.That(read.Open(items[no]).Read(MkItemArch.Item).ItemNo, Is.EqualTo(no), $"item {no}");
+            }
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A segment grow whose old tail reached the disk with its new link and whose first new page did not: the tail links on, the page it links to holds
+    /// no segment page at all, and links to nothing. The completion started at the old tail, patched a link into that uninitialized page and left it
+    /// without its header (review of #1296). The page that does not link on is initialized when the grow had not written it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AGrowWhoseFirstNewPageMissedTheDisk_IsCompleted()
+    {
+        var items = new List<EntityId>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            var length = revisions.Length;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var no = items.Count;
+                        items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no })));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(revisions.Length, Is.GreaterThan(length), "premise: the revision segment grew");
+
+            // The directory and the old tail reach the disk, the new pages do not.
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            WriteFilePage(dbe, revisions.Pages[length - 1]);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.MMF.TornGrowsRepairedAtLoad, Is.GreaterThanOrEqualTo(1), "the torn grow, completed at load");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            for (var no = 0; no < items.Count; no++)
+            {
+                Assert.That(read.Open(items[no]).Read(MkItemArch.Item).ItemNo, Is.EqualTo(no), $"item {no}");
+            }
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// A free held at a clean close is freed in the data file: the close releases every held free before its final checkpoint. Held after it, the chunk
+    /// stayed allocated for good — a clean open sweeps nothing (CK-17).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-17")]
+    [CancelAfter(30_000)]
+    public void AFreeHeldAtACleanClose_IsFreedInTheFile()
+    {
+        EntityId id;
+        int overflow;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                id = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = -1 }));
+                Assert.That(tx.Commit(), Is.True, "the spawn");
+            }
+
+            var pin = dbe.CreateReadOnlyTransaction();
+            for (var i = 1; i <= ComponentRevisionManager.CompRevCountInRoot; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = i });
+                Assert.That(tx.Commit(), Is.True, "an update");
+            }
+
+            overflow = OverflowOf(dbe, ItemRootOf(dbe, id));
+            Assert.That(overflow, Is.Not.Zero, "premise: an overflow chunk");
+            pin.Dispose();
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.OpenMut(id).Set(MkItemArch.Item, new MkItem { ItemNo = 1, OwnerNo = 1, LastTradeSeq = 42 });
+                Assert.That(tx.Commit(), Is.True, "the update that compacts");
+            }
+
+            dbe.DeferredCleanupManager.FlushChunkFrees(dbe.EpochManager);
+            Assert.That(dbe.GetComponentTable<MkItem>().CompRevTableSegment.IsChunkHeld(overflow), Is.True, "premise: the freed chunk, held");
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.False, "premise: a clean open");
+        using (EpochGuard.Enter(reopened.EpochManager))
+        {
+            Assert.That(reopened.GetComponentTable<MkItem>().CompRevTableSegment.IsChunkAllocated(overflow), Is.False, "the held chunk, freed in the file");
+        }
     }
 
     /// <summary>
