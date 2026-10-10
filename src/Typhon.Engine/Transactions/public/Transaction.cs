@@ -1857,42 +1857,45 @@ public unsafe partial class Transaction : EntityAccessor
         // one atomic region — required for concurrent conflict resolution to compose (ConcurrencyConflictTests #8).
         var lockHeld = false;
         var lockTicket = default(PagedMMF.CaptureTicket);
-        if (conflictSolver != null)
-        {
-            ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
-            lockTicket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref lockHeader);
-            var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
-            if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
-            {
-                ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
-            }
-            lockHeld = true;
-            lastCommitRevisionIndex = lockHeader.LastCommitRevisionIndex;
-
-            // Re-validate CurRevisionIndex under lock (race-free)
-            var curElement = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-            if (curElement.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
-            {
-                var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(
-                    ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
-                if (fixedIndex < 0)
-                {
-                    ThrowHelper.ThrowInvalidOp("PrepareComponent: revision entry lost after chain compaction");
-                }
-                compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
-            }
-
-            // Relocate if our entry is at or behind LCRI
-            if (lastCommitRevisionIndex >= 0 && compRevInfo.CurRevisionIndex <= lastCommitRevisionIndex)
-            {
-                elementHandle = RelocateRevisionEntry(info, ref compRevInfo, compRev, TSN, UowId);
-            }
-        }
-
         var publishRecorded = false;
         try
         {
+            // Inside the try (#1278): from the lock on, a throw — the re-validation's, the relocation's — reaches the finally, which releases
+            // the lock while no publish entry owns it.
+            if (conflictSolver != null)
+            {
+                ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+                lockTicket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref lockHeader);
+                var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+                if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
+                {
+                    ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
+                }
+                lockHeld = true;
+                _dbe.PrepareRetainedLockProbe?.Invoke();
+                lastCommitRevisionIndex = lockHeader.LastCommitRevisionIndex;
+
+                // Re-validate CurRevisionIndex under lock (race-free)
+                var curElement = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+                if (curElement.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
+                {
+                    var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(
+                        ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
+                    if (fixedIndex < 0)
+                    {
+                        ThrowHelper.ThrowInvalidOp("PrepareComponent: revision entry lost after chain compaction");
+                    }
+                    compRevInfo.CurRevisionIndex = fixedIndex;
+                    elementHandle = compRev.GetRevisionElement(fixedIndex);
+                }
+
+                // Relocate if our entry is at or behind LCRI
+                if (lastCommitRevisionIndex >= 0 && compRevInfo.CurRevisionIndex <= lastCommitRevisionIndex)
+                {
+                    elementHandle = RelocateRevisionEntry(info, ref compRevInfo, compRev, TSN, UowId);
+                }
+            }
+
             DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
                 ref elementHandle, lastCommitRevisionIndex, readCompChunkId, lockHeld, TSN, UowId, _dbe);
 

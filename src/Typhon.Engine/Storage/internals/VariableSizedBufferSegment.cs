@@ -92,12 +92,10 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     public int BufferAddRef(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-        var ticket = default(PagedMMF.CaptureTicket);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            ticket = LockBuffer(ref rh, ref accessor);
-
             return ++rh.RefCounter;
         }
         finally
@@ -118,12 +116,11 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     public int BufferRelease(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-        var ticket = default(PagedMMF.CaptureTicket);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         var deleted = false;
         try
         {
-            ticket = LockBuffer(ref rh, ref accessor);
-
             var newValue = --rh.RefCounter;
             if (newValue == 0)
             {
@@ -539,13 +536,11 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-        var ticket = default(PagedMMF.CaptureTicket);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
 
         try
         {
-            // Lock the whole buffer as we are going to update it
-            ticket = LockBuffer(ref rh, ref accessor);
-
             // Detect use-after-free: refCount should be >= 1 for any live buffer.
             // refCount=0 means the buffer was freed via BufferRelease/DeleteBuffer and
             // the chunk may have been returned to the segment's free pool and reused.
@@ -651,12 +646,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-        var ticket = default(PagedMMF.CaptureTicket);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            ticket = LockBuffer(ref rh, ref accessor);
-
             // Copy structural fields to locals BEFORE any GetChunkAddress/AllocateChunk calls.
             // These calls can evict rh's slot from the 16-slot accessor cache.
             int curChunkId = rh.FirstStoredChunkId;
@@ -733,12 +726,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-        var ticket = default(PagedMMF.CaptureTicket);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            ticket = LockBuffer(ref rh, ref accessor);
-
             // Fetch the chunk storing the element — this can evict rh's slot
             var elementChunk = accessor.GetChunkAddress(elementId, true);
             ref var elementChunkHeader = ref Unsafe.AsRef<VariableSizedBufferChunkHeader>(elementChunk);
@@ -804,7 +795,6 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
         // The acquire sits OUTSIDE the try, and that placement is the point. LockBuffer THROWS on timeout (LockBufferSlow -> ThrowLockTimeout), so acquiring
         // inside the try would run the finally's ExitExclusiveAccess for a lock this thread never took — releasing it out from under whoever actually holds it.
-        // DeleteElement has the same shape and the same exposure; it is left alone here rather than changed as a side effect of this work.
         var ticket = LockBuffer(ref rh, ref accessor);
         try
         {

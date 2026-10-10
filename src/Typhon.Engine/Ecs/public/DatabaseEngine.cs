@@ -6039,6 +6039,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
 
     /// <summary>
+    /// Test hook: runs in <c>Transaction.PrepareComponent</c> on the committing thread right after a conflict-handler commit takes the chain's lock it
+    /// retains to the publish — a throw from it is a throw under that lock (#1278). Per engine. Null in production.
+    /// </summary>
+    internal Action PrepareRetainedLockProbe { get; set; }
+
+    /// <summary>
     /// The failure that stopped this engine's commits: a commit whose records were appended threw before its publish completed (AP-03), so memory holds a
     /// partial publish. Null while the engine commits. Once set, every commit that would write is refused, the checkpoint stays below that commit's
     /// records, and the engine closes as a crash, so the next open replays them. Only reopening clears it.
