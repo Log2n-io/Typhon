@@ -5685,9 +5685,11 @@ internal sealed unsafe partial class ArchetypeClusterState
         var autoWorkers = maxWorkers <= 0;
         Interlocked.Increment(ref RebuildSegmentPassCount);
 
+        // The map reads every cluster once and keeps no address past it: through a scan accessor (EP-02, #1305). Epoch-tagged, a cluster segment larger than
+        // the cache pinned every page it read for the scope — the open's — and the rebuild waited out back-pressure for evictions its own tags forbade.
         if (workers <= 1 || epochManager == null || (autoWorkers && count < ParallelRebuildThreshold))
         {
-            var accessor = ClusterSegment.CreateChunkAccessor();
+            var accessor = ClusterSegment.CreateScanAccessor();
             try
             {
                 for (var i = 0; i < count; i++)
@@ -5730,7 +5732,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var depth = epochManager.EnterScope();
                 try
                 {
-                    var accessor = ClusterSegment.CreateChunkAccessor();
+                    var accessor = ClusterSegment.CreateScanAccessor();
                     try
                     {
                         for (var i = start; i < end; i++)

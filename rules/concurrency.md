@@ -343,7 +343,7 @@ lock ordering and deadlock prevention are still to come.
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
-         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities
+         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
@@ -355,7 +355,8 @@ lock ordering and deadlock prevention are still to come.
             page's bitmap copied under a read pin), a point check through IsChunkAllocatedUnpinned — IsChunkAllocated epoch-tags its bitmap
             page, and a walk asking it of every chunk pinned the segment — and chunk content through a scan accessor: the active-cluster list,
             the chain-head enumeration, the reservation, the collapse, the sweep, the entity-map rebuild's cluster walk and its EnabledBits
-            snapshot. OPEN: the spatial passes (#1305)
+            snapshot, and the spatial layer's rebuild map, serial and parallel (ArchetypeClusterState.RebuildSpatialStateFromData, #1305). Its
+            reduce files a cluster's stray slots through an epoch-tagged accessor of its own: one page per cluster that has strays
   note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
         outside recovery cannot release its pages early — its ChangeSet's marks keep them resident until its unit of work ends,
         which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
@@ -376,6 +377,8 @@ lock ordering and deadlock prevention are still to come.
   verified: ClusterVisibilitySummaryIntegrityTests.TheAudit_OfAnEntityMapLargerThanTheCache_Completes — the integrity check's cluster-visibility
             audit and a transaction's EnumerateArchetypeEntities walk an EntityMap larger than an 8 MiB cache [VerifiesRule]. Each walked it
             through an epoch-tagged accessor, and the market's integrity check timed out once its audit map outgrew 64 MiB; both mutations killed
+  verified: ClusterRebuildMergeTests.TheRebuild_OfAClusterSegmentLargerThanTheCache_Completes — the spatial rebuild of a cluster segment larger than an
+            8 MiB cache, under one epoch scope as the open's, serial and on 4 workers [VerifiesRule]; epoch-tagged again, both time out
 
 ### EP-03: No reference the engine hands out outlives the call that produced it, except a fast-path one within its step `[fatal]`
   invariant the point-access handles hand out values, never references into a page: EntityRef.Read / TryRead / ReadRaw copy the
