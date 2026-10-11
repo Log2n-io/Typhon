@@ -250,6 +250,88 @@ public class EpochManagerTests
             "Dead thread's slot should be reclaimed by finalizer");
     }
 
+    /// <summary>
+    /// A dead thread's slot reclaimed by a live thread (the claim's slow path, once every fresh slot has been handed out), then the dead thread's slot
+    /// handle finalized: the finalizer freed the slot under the live thread — its pin erased, the slot handed to the next claimer, two threads sharing one
+    /// depth (the "depth mismatch" a 32-thread commit loop hit after 256 thread lifetimes).
+    /// </summary>
+    [Test]
+    [CancelAfter(15000)]
+    public void AReclaimedSlot_IsNotFreedByItsDeadOwnersFinalizer()
+    {
+        using var reg = new Typhon.Engine.Internals.EpochThreadRegistry();
+        int RunAndDie(long epoch)
+        {
+            var slot = -1;
+            var t = new Thread(() =>
+            {
+                reg.PinCurrentThread(epoch);
+                slot = reg.CurrentThreadSlotIndexForTest;
+                reg.UnpinCurrentThread(0);
+            });
+            t.Start();
+            t.Join();
+            return slot;
+        }
+
+        // No collection until the live thread has reclaimed the dead one's slot: a finalizer run before it would free the slot the ordinary way.
+        Assert.That(GC.TryStartNoGCRegion(16 * 1024 * 1024), Is.True, "premise: no collection during the reclaim");
+        int deadSlot, liveSlot = -1;
+        Exception liveUnpin = null;
+        using var pinned = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        Thread live;
+        try
+        {
+            deadSlot = RunAndDie(1);
+            reg.ExhaustFreshSlotsForTest();
+            live = new Thread(() =>
+            {
+                reg.PinCurrentThread(5);
+                liveSlot = reg.CurrentThreadSlotIndexForTest;
+                pinned.Set();
+                release.Wait();
+                try
+                {
+                    reg.UnpinCurrentThread(0);
+                }
+                catch (Exception e)
+                {
+                    liveUnpin = e;
+                }
+            });
+            live.Start();
+            pinned.Wait();
+        }
+        finally
+        {
+            if (System.Runtime.GCSettings.LatencyMode == System.Runtime.GCLatencyMode.NoGCRegion)
+            {
+                GC.EndNoGCRegion();
+            }
+        }
+
+        try
+        {
+            Assert.That(liveSlot, Is.EqualTo(deadSlot), "premise: the live thread reclaimed the dead thread's slot");
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            Assert.That(reg.ComputeMinActiveEpoch(100), Is.EqualTo(5), "the live thread's pin was erased by the dead owner's finalizer");
+            Assert.That(RunAndDie(7), Is.Not.EqualTo(liveSlot), "a live thread's slot was handed to another thread");
+        }
+        finally
+        {
+            release.Set();
+            live.Join();
+        }
+
+        Assert.That(liveUnpin, Is.Null, "the live thread's scope depth was corrupted");
+    }
+
     [Test]
     [CancelAfter(30000)]
     public void RegistryExhaustion_ThrowsResourceExhausted()
