@@ -11001,6 +11001,12 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                         // Read HEAD value from content chunk and copy to cluster slot
                         var headChunkId = chainResult.Value.CurCompContentChunkId;
+                        if ((uint)headChunkId >= (uint)engineState.SlotToComponentTable[slot].ComponentSegment.ChunkCapacity)
+                        {
+                            skips.HeadPastSegment++;
+                            continue;
+                        }
+
                         ref var contentAccessor = ref contentAccessors[slot];
                         var srcAddr = contentAccessor.GetChunkAddress(headChunkId);
                         var compSize = Layout.ComponentSize(slot);

@@ -59,8 +59,14 @@ internal struct VersionedHeadRebuildSkips
     /// </remarks>
     public int RootlessUnclassifiable;
 
+    /// <summary>
+    /// The chain's head names a content chunk past its segment's end: on the crash path, a revision on the page of a grow the open ended where the
+    /// directory does (#1299), which the replay brings back. On a clean open, never benign.
+    /// </summary>
+    public int HeadPastSegment;
+
     /// <summary>Total pairs left un-rebuilt by this pass that indicate a DEFECT — <see cref="AbsentByDesign"/> is expected and excluded.</summary>
-    public readonly int Total => EntityNotInMap + ChainRootLost + ChainWalkFailed + RootlessUnclassifiable;
+    public readonly int Total => EntityNotInMap + ChainRootLost + ChainWalkFailed + RootlessUnclassifiable + HeadPastSegment;
 
     /// <summary>Accumulate another pass's counts into this one.</summary>
     public void Add(in VersionedHeadRebuildSkips other)
@@ -69,6 +75,7 @@ internal struct VersionedHeadRebuildSkips
         AbsentByDesign += other.AbsentByDesign;
         ChainRootLost += other.ChainRootLost;
         ChainWalkFailed += other.ChainWalkFailed;
+        HeadPastSegment += other.HeadPastSegment;
         RootlessUnclassifiable += other.RootlessUnclassifiable;
     }
 }

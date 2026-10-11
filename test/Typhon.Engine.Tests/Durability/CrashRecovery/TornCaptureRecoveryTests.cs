@@ -1776,6 +1776,148 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     }
 
     /// <summary>
+    /// #1299: the chain ahead of the directory — the old tail on the disk, linking to the grow's first page, the directory as of before the grow: a cycle
+    /// that caught the grow after taking its pages wrote the tail and not the directory. The crash path refused the segment, and a revision segment's
+    /// refusal fails the open. The grow's pages were never checkpointed, so the chain ends where the directory does and the replay brings back what
+    /// the grow held.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AChainAheadOfItsDirectory_IsEndedWhereTheDirectoryEnds()
+    {
+        var items = new List<EntityId>();
+        int length;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            length = GrowRevisionsAfterACheckpoint(dbe, items);
+
+            // The old tail, its link to the grow's first page with it; not the directory.
+            WriteFilePage(dbe, revisions.Pages[length - 1]);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var segment = reopened.GetComponentTable<MkItem>().CompRevTableSegment;
+        Assert.That(segment.TornGrowChainsTruncated, Is.EqualTo(1), "the chain, ended where the directory ends");
+        AssertItems(reopened, items);
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
+    /// #1299, the double fault: the chain runs ahead of the directory onto a page written as this segment's — a checkpoint wrote it, so its directory
+    /// append was lost long before. That page holds data no log window does: the segment is refused, never ended short of it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AChainAheadOntoAPageWrittenAsTheSegments_IsRefused()
+    {
+        var items = new List<EntityId>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var length = GrowRevisionsAfterACheckpoint(dbe, items);
+
+            // The old tail and the grow's first page, written as the segment's; not the directory.
+            WriteFilePage(dbe, revisions.Pages[length - 1]);
+            WriteFilePage(dbe, revisions.Pages[length]);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        var thrown = Assert.Catch(() => RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>()), "the open over a page the directory lost");
+        var e = thrown;
+        while (e is not InvalidOperationException && e?.InnerException != null)
+        {
+            e = e.InnerException;
+        }
+
+        Assert.That(e?.Message, Does.Contain("integrity check failed at load"), $"refused by the segment's load, not by {thrown.GetType().Name}: {thrown.Message}");
+    }
+
+    /// <summary>
+    /// #1299: a content segment's chain ahead of its directory, ended where the directory ends, while the revision chains on the disk name content chunks
+    /// on the grow's lost page — a page the same cycle wrote after the spawns that allocated there. Past the segment's capacity, the open's HEAD rebuild
+    /// read it and threw; it now skips such a head, and the replay brings the revision back from the log.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AContentChunkPastATruncatedSegment_IsTorn_AndTheReplayBringsItBack()
+    {
+        var items = new List<EntityId>();
+        int length;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var table = dbe.GetComponentTable<MkItem>();
+            var content = table.ComponentSegment;
+            while (content.AllocatedChunkCount < content.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++)
+                {
+                    var no = items.Count;
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            length = content.Length;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+
+            // Two transactions whose spawns interleave, committed in the reverse order: the replay, in log order, hands their content chunks out in
+            // another order than the session did — a stale reference past the end then names another item's content, not its own by luck.
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var first = uow.CreateTransaction(CommitDiscipline.Commit))
+                using (var second = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var no = items.Count;
+                        var tx = (i & 1) == 0 ? first : second;
+                        items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no })));
+                    }
+
+                    Assert.That((second.Commit(), first.Commit()), Is.EqualTo((true, true)), "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(content.Length, Is.GreaterThan(length), "premise: the content segment grew");
+
+            // Every revision and cluster page as memory holds it — live chains naming content on the grow's pages — and the content's old tail; not its
+            // directory.
+            foreach (var page in table.CompRevTableSegment.Pages)
+            {
+                WriteFilePage(dbe, page);
+            }
+
+            foreach (var page in dbe._archetypeStates[Archetype<MkItemArch>.Metadata.ArchetypeId].ClusterState.ClusterSegment.Pages)
+            {
+                WriteFilePage(dbe, page);
+            }
+
+            WriteFilePage(dbe, content.Pages[length - 1]);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.GetComponentTable<MkItem>().ComponentSegment.TornGrowChainsTruncated, Is.EqualTo(1), "premise: the content chain, ended");
+        AssertItems(reopened, items);
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
     /// A completion that initializes the page holding chunk 0 — the null id, reserved at creation — reserves it again: initialized, its bit was cleared with
     /// the page's, and the replay could store a revision at "none" (review of #1296). Staged with the page zeroed on the disk, which the completion takes
     /// for one a grow had not written.

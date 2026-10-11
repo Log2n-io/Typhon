@@ -162,8 +162,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// page too — the grow's, written after the barrier — and is initialized; the disagreeing page itself, torn and this segment's, may hold a checkpoint's
     /// data and is refused (review of #1296). Also called for a directory's last page whose link agrees, 0: one the grow had not written is initialized —
     /// loaded as it was, it had no header and another owner's bits. False when the shape is not a torn grow's: a page written before incarnations
-    /// existed whose link is wrong and not 0; a torn disagreeing page; or the directory's last page, written, linking on — the chain ahead of the
-    /// directory, which this does not complete (#1299). Single-threaded.
+    /// existed whose link is wrong and not 0; a torn disagreeing page; or the directory's last page, written, linking on to a page written as this
+    /// segment's. Linking on to a page that was not, the chain ran ahead of the directory and is ended where the directory ends (#1299). Single-threaded.
     /// </summary>
     internal bool RepairTornGrow(int at)
     {
@@ -183,6 +183,24 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             // it is refused as before the completion existed: patched, it was dirtied, and a cycle before the suspect resolution re-checksummed its torn
             // bytes for the next open to serve (review).
             atPage = ClassifyForRepair(pages[at], epoch, out link);
+
+            // The chain ahead of the directory (#1299): its last page, written as this segment's, links on to a page the directory does not list — a
+            // grow the cycle that wrote the old tail caught after taking its pages, whose directory it had not taken. The page is the grow's, never
+            // checkpointed (the next cycle writes directories first, CK-16): not written as this segment's, what the grow put on it is in the log
+            // window, and the chain ends where the directory does. Written as this segment's, it holds a checkpoint's data — an old lost directory
+            // append — and the segment is refused.
+            if (last && atPage == RepairPage.Ours && link != 0)
+            {
+                if (!NeverWrittenAsOurs(link, epoch))
+                {
+                    return false;
+                }
+
+                SetLink(pages[at], 0, epoch);
+                TornGrowChainsTruncated++;
+                return true;
+            }
+
             if (atPage == RepairPage.TornOurs || (last && atPage != RepairPage.NotWritten) || (atPage == RepairPage.Legacy && link != 0))
             {
                 return false;
@@ -223,6 +241,22 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         TornGrowPagesReinitialized += reinitialized;
         return true;
+    }
+
+    // A page the chain names past the directory: never written as this segment's — past the file's end, or loaded with another incarnation or none.
+    private bool NeverWrittenAsOurs(int filePageIndex, long epoch)
+    {
+        if (filePageIndex < 0)
+        {
+            return false;
+        }
+
+        if (_store is PersistentStore persistent && (long)filePageIndex * PagedMMF.PageSize >= persistent.Mmf.FileSize)
+        {
+            return true;
+        }
+
+        return ClassifyForRepair(filePageIndex, epoch, out _) == RepairPage.NotWritten;
     }
 
     private enum RepairPage
@@ -267,6 +301,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     /// <summary>The pages a torn grow's completion initialized empty — the others were kept, written as this segment's (<see cref="RepairTornGrow"/>).</summary>
     internal int TornGrowPagesReinitialized { get; private set; }
+
+    /// <summary>Chains that ran ahead of the directory, ended where it does (<see cref="RepairTornGrow"/>, #1299).</summary>
+    internal int TornGrowChainsTruncated { get; private set; }
 
     /// <summary>
     /// How many bytes of a page's metadata region this segment claims for its own use, and therefore how much is left

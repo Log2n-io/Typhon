@@ -2591,8 +2591,12 @@ of the LSN value).
             the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
             claim through its resolved CK-05 pair (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
             the older generation stayed cached and the load found the directory as of before its last grow — the chain ahead of it, refused
-  invariant the opposite tear — the directory's last page linking past it, the chain ahead of the directory — is not completed and is refused
-            as before (#1299)
+  invariant the opposite tear — the directory's last page, written as the segment's, linking past it: the chain ahead of the directory — is
+            ended where the directory ends when the page it links to was never written as the segment's (past the file's end, another
+            incarnation or none): a cycle that took the old tail before a grow and not the directory wrote it, and the grow's pages, never
+            checkpointed (CK-16), hold only what the log window holds (#1299). Onto a page written as the segment's — an old lost directory
+            append — it is refused. A Versioned head naming a content chunk past its segment's end (a revision on such a page) is skipped by the
+            open's HEAD rebuild (VersionedHeadRebuildSkips.HeadPastSegment) and brought back by the replay
   invariant open-time verification at Quick depth and deeper still refuses such a segment of a kind the crash path does not replace: the
             finding does not say which way the chain disagrees, and the refusal is the conservative reading
   rationale: the check used to run in LogicalSegment.Load on every open, which read every data page (#1143). Moving it offline kept
@@ -2600,8 +2604,12 @@ of the LSN value).
              clean database with a lost write open with pages its segment can no longer address
   scope: DatabaseIntegrityException.RefusesOpen, SegmentChecks.Run, SegmentWalker.WalkSegment, IntegrityScanner.Scan,
          ChunkBasedSegment.Load, ChunkBasedSegment.ScanForAllocatorState, LogicalSegment.RepairTornGrow, SegmentGeometry.ReadIncarnation,
-         ManagedPagedMMF.ClaimSegmentPagesAtLoad, ManagedPagedMMF.ClaimOwnedPagesAtOpen, ManagedPagedMMF.EnsureDirectoryPairsResolved
+         ManagedPagedMMF.ClaimSegmentPagesAtLoad, ManagedPagedMMF.ClaimOwnedPagesAtOpen, ManagedPagedMMF.EnsureDirectoryPairsResolved,
+         LogicalSegment.NeverWrittenAsOurs, ArchetypeClusterState.RebuildVersionedHeadFromChain
   on_violation: a lost write found offline is ignored by the open, which serves a segment that cannot address all its pages
+  verified: TornCaptureRecoveryTests — AChainAheadOfItsDirectory_IsEndedWhereTheDirectoryEnds, AChainAheadOntoAPageWrittenAsTheSegments_IsRefused,
+            AContentChunkPastATruncatedSegment_IsTorn_AndTheReplayBringsItBack (spawns of two transactions interleaved, committed in reverse)
+            [VerifiesRule] (#1299). Mutations killed: no truncation, every page past the directory taken for unwritten, no HEAD-rebuild guard
   verified: IntegrityScannerTests.AShortenedChain_IsFoundAtQuick_AndRefusesTheOpenUnlessRecoveryRebuildsIt [VerifiesRule];
             IntegrityScannerTests.QuickTier_ReportsAChainThatLoopsBackOnItself_AsFatal; TornCaptureRecoveryTests — a grow whose old tail missed
             the disk is completed at a crash open, its pages claimed (without the claims the open's index rebuild took one of them); a grow whose
