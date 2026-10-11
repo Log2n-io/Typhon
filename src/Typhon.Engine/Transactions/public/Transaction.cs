@@ -519,7 +519,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        var drainSet = _dbe.MMF.CreateChangeSet();
+        var drainSet = _dbe.MMF.CreateChangeSet(drainedByCheckpoint: true);
         try
         {
             _dbe.ProcessEcsCleanups(nextMinTSN, drainSet);

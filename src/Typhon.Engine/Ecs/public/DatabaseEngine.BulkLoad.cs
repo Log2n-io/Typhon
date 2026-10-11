@@ -73,7 +73,7 @@ public partial class DatabaseEngine
 
         // Bulk uses Deferred so per-tx Commit returns without waiting on fsync.
         // The bulk's durability comes from CompleteBulkLoad's explicit checkpoint + WaitForDurable.
-        var changeSet = MMF.CreateChangeSet();
+        var changeSet = MMF.CreateChangeSet(drainedByCheckpoint: true);
         var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
 
         return new UnitOfWork(this, DurabilityMode.Deferred, uowId, effectiveTimeout, changeSet, true);

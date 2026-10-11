@@ -1368,9 +1368,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>
     /// Latches the crash flag so NO further checkpoint writes the data file: the shutdown final cycle is suppressed, any periodic or forced cycle that begins
     /// afterward bails at once (see <see cref="RunCheckpointCycle"/>), and a cycle in flight stops before its next write wave and before its metadata hook,
-    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives), a failed open's
-    /// teardown (CS-04), and the AP-03 stop (<c>DatabaseEngine.LatchCommitPipelineFailure</c>, #1271). Residual: the wave being written when the flag is set
-    /// writes the copies it took.
+    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives) and a failed
+    /// open's teardown (CS-04) — not the AP-03 stop, which it corrupted the recovery of (#1271). Residual: the wave being written when the flag is set writes
+    /// the copies it took.
     /// </summary>
     internal void PrepareCrashStop()
     {

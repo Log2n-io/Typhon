@@ -463,11 +463,12 @@ internal ref struct ComponentRevisionManager
         // The content chunks the compaction frees, freed once the root names the new chain — at most one per element — and the new chain's overflow chunks,
         // given back if the walk throws: the new chain is never longer than the old one, which starts at an offset when the new one starts at 0.
         int itemCount = firstChunkHeader.ItemCount;
-        Span<int> contentFrees = (itemCount < 128) ? stackalloc int[itemCount] : new int[itemCount];
+        Span<int> contentFrees = (itemCount <= 512) ? stackalloc int[itemCount] : new int[itemCount];
         var contentFreeCount = 0;
         Span<int> newChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
         var newChunkCount = 0;
         var stepProbe = ct.DBE?.CompactionStepProbe;
+        Span<byte> destSpan;
 
         try
         {
@@ -601,11 +602,14 @@ internal ref struct ComponentRevisionManager
                 skipCount--;
             }
 
-            // The room for every deferred free, taken before the rewrite: past it, nothing may throw.
+            // The room for every deferred free, and the root's page, taken before the rewrite: past it, nothing may throw.
             deferredChunkFrees?.EnsureCapacity(deferredChunkFrees.Count + contentFreeCount + chunksToFreeCount);
+            destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
         }
         catch
         {
+            versionCleanupScope.Dispose();
+
             // The live chain is as it was; the new one is named by nothing, and never was — freed unheld (CK-17). Given back as far as that goes: a free that
             // throws here leaves its chunk to the orphan sweep the caller's failed cleanup asks for (FreesLost), and must not hide the first failure.
             for (var i = 0; i < newChunkCount; i++)
@@ -630,11 +634,9 @@ internal ref struct ComponentRevisionManager
 
         // Copy the compacted data to the first chunk, but SKIP the Control field (offset 4, size 4)
         // to avoid zeroing it. The caller holds the exclusive lock and the Control must remain intact.
-        var destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
         var controlFieldEnd = sizeof(int) + sizeof(int); // NextChunkId (4) + Control (4) = 8
         tempChunk.Slice(0, sizeof(int)).CopyTo(destSpan.Slice(0, sizeof(int)));
         tempChunk.Slice(controlFieldEnd).CopyTo(destSpan.Slice(controlFieldEnd));
-        firstChunkHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
 
         // The content chunks of the entries the new chain dropped, now that nothing names them.
         for (var i = 0; i < contentFreeCount; i++)

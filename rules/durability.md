@@ -2271,8 +2271,8 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             offset untouched, in both layouts; with the root check removed both fail
 
 ### PS-21: A segment's grow holds none of its new data pages for the unit of work that grew it `[fatal]`
-  invariant under a change set the checkpoint drains (ChangeSet.DrainedByCheckpoint: a unit of work's shared set, and every rented one — a
-            transaction's own, a fence chunk's), a grow's data pages are recorded owed a write (MarkPageModified) and take no mark: the checkpoint
+  invariant under a change set the checkpoint drains (ChangeSet.DrainedByCheckpoint: a unit of work's shared set — a bulk load's too — every rented
+            one, a transaction's own or a fence chunk's, an entity accessor's, a cleanup drain's, and the local set of a grow with none), a grow's data pages are recorded owed a write (MarkPageModified) and take no mark: the checkpoint
             writes them, and they may leave the cache before the unit of work ends. A page that then receives data is marked by the write that puts
             it there. The new map pages and a Create's root keep the change set: they are the directory, few, and the grow publishes through them
   invariant a change set that writes its own pages (SaveChanges: bootstrap, schema evolution, a standalone segment) marks the grow's data pages as
@@ -2282,7 +2282,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never mark a grow's data pages in the caller's ChangeSet: a segment grows by doubling, so a grow can be larger than the cache's free room, and its
         marks hold every slot until the change set ends — which it cannot, if the commit needs a slot to end
   scope: LogicalSegment.CreateOrGrow, LogicalSegment.InitDataPages, ChunkBasedSegment.GrowChunkCapacity, ChangeSet.DrainedByCheckpoint,
-         PagedMMF.RentChangeSet, DatabaseEngine.CreateUnitOfWork
+         PagedMMF.RentChangeSet, PagedMMF.CreateChangeSet, DatabaseEngine.CreateUnitOfWork, DatabaseEngine.CreateUnitOfWorkForBulkLoad
   on_violation: an EntityMap past half an 8 MiB cache grew inside a spawn commit's FinalizeSpawns with 1 022 of 1 024 slots marked, and the commit
                 timed out on back-pressure after its partial publish — a fail-stop (AP-03). At 64 MiB the market's audit map reaches the same size.
                 Dropping the marks under every change set lost a standalone segment's grow: SaveChanges wrote 11 of its 8 500 pages

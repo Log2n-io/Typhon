@@ -2338,7 +2338,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
     
-    public ChangeSet CreateChangeSet() => new(this);
+    /// <param name="drainedByCheckpoint">The set ends by ReleaseDirtyMarks, never SaveChanges: the checkpoint writes its pages (PS-21).</param>
+    public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => new(this) { DrainedByCheckpoint = drainedByCheckpoint };
 
     // ─── ChangeSet pool ────────────────────────────────────────────────────────────────
     // Fence-tick parallel phases create one ChangeSet per chunk (FencePrep + FenceMigrate × chunkCount × tickRate ≈ thousands per second). Pool them via a

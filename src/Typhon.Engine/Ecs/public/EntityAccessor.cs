@@ -154,7 +154,7 @@ public partial class EntityAccessor : IDisposable
         _isDisposed = false;
         _owningThreadId = Environment.CurrentManagedThreadId;
         _entityOperationCount = 0;
-        _changeSet = _dbe.MMF.CreateChangeSet();
+        _changeSet = _dbe.MMF.CreateChangeSet(drainedByCheckpoint: true);
         _ownsChangeSet = true;
         TSN = tsn;
     }

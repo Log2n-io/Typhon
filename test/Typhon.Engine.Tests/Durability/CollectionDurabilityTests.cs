@@ -358,6 +358,30 @@ internal sealed class CollectionDurabilityTests
                 }
 
                 Assert.That(segment.IsChunkAllocated(freeChainChunk), Is.True, "a named buffer's free chain, kept");
+
+                // The schema catalog's own collections: a component's field list (ComponentR1.Fields), an archetype's component names. The catalog's
+                // table reopens without its collection info (#387), so the sweep had no handle into the field list's segment and freed it whole.
+                foreach (var (name, (_, comp)) in dbe.PersistedComponents)
+                {
+                    if (comp.Fields._bufferId != 0)
+                    {
+                        var fieldSegment = dbe.GetComponentCollectionSegment<FieldR1>();
+                        Assert.That((fieldSegment.IsChunkAllocated(comp.Fields._bufferId), fieldSegment.IsChunkHeld(comp.Fields._bufferId)),
+                            Is.EqualTo((true, false)), $"component '{name}': its persisted field list, kept");
+                    }
+                }
+
+                foreach (var (name, (_, arch)) in dbe._persistedArchetypes)
+                {
+                    if (arch.ComponentNames._bufferId != 0)
+                    {
+                        var nameSegment = dbe.GetComponentCollectionSegment<String64>();
+                        Assert.That((nameSegment.IsChunkAllocated(arch.ComponentNames._bufferId), nameSegment.IsChunkHeld(arch.ComponentNames._bufferId)),
+                            Is.EqualTo((true, false)), $"archetype '{name}': its persisted component names, kept");
+                    }
+                }
+
+                Assert.That(segment.DoubleFreeCount, Is.Zero, "the sweep freed nothing twice");
             }
 
             Assert.That(dbe.CollectionChunksSweptAtOpen, Is.GreaterThanOrEqualTo(orphanChunks.Count), "the sweep's count");

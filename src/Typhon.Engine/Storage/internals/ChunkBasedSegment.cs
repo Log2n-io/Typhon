@@ -464,7 +464,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
             // Prefer the caller's ChangeSet, whose unit of work will release the marks taken below. Without one we make a
             // local set and release it ourselves before returning — it used to be created and simply abandoned, so every
             // grow without a caller ChangeSet stranded one mark per new page for the lifetime of the process.
-            var localChangeSet = changeSet == null ? _store.CreateChangeSet() : null;
+            var localChangeSet = changeSet == null ? _store.CreateChangeSet(drainedByCheckpoint: true) : null;
             var effectiveChangeSet = changeSet ?? localChangeSet;
             try
             {

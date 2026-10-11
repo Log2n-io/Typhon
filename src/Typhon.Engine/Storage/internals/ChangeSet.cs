@@ -180,7 +180,8 @@ public class ChangeSet
 
     public Task SaveChangesAsync()
     {
-        System.Diagnostics.Debug.Assert(!DrainedByCheckpoint, "a change set the checkpoint drains is not saved: a segment grow under it marked none of its data pages (PS-21)");
+        System.Diagnostics.Debug.Assert(!DrainedByCheckpoint,
+            "a change set the checkpoint drains is not saved: a segment grow under it marked none of its data pages (PS-21)");
         if (_markedPages.Count == 0)
         {
             return Task.CompletedTask;

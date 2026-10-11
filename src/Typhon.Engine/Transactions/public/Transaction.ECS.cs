@@ -322,8 +322,15 @@ public unsafe partial class Transaction
             Results = results,
             PendingDestroys = _pendingDestroys,
         };
-        engineState.EntityMap.ForEachEntry(ref accessor, ref action);
-        accessor.Dispose();
+        try
+        {
+            engineState.EntityMap.ForEachEntry(ref accessor, ref action);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
         return results;
     }
 

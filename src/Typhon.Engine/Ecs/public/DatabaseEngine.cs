@@ -1787,7 +1787,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
         // the registry page mutation in it (avoiding a synchronous SaveChanges).
-        var changeSet = durabilityMode != DurabilityMode.Immediate ? new ChangeSet(MMF) { DrainedByCheckpoint = true } : null;
+        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
         LogUowLifecycle("ChangeSet created");
 
         // Back-pressure: if registry is full, wait for a slot to be freed.
@@ -7246,11 +7246,35 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         try
         {
             var named = new Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>>();
+
+            // The segments a handle source this sweep reads points into; only those are swept. The schema catalog's table reopens without its collection
+            // info (#387), so its field lists — and the archetypes' component names — are noted from the rows the open read: through the table, the sweep
+            // had no handle into the field lists' segment and freed it whole (review).
+            var swept = new HashSet<ChunkBasedSegment<PersistentStore>>();
+            var fieldListSegment = GetComponentCollectionSegment<FieldR1>();
+            swept.Add(fieldListSegment);
+            foreach (var (_, (_, comp)) in _persistedComponents ?? [])
+            {
+                NoteNamedBuffer(named, fieldListSegment, comp.Fields._bufferId);
+            }
+
+            var componentNamesSegment = GetComponentCollectionSegment<String64>();
+            swept.Add(componentNamesSegment);
+            foreach (var (_, (_, arch)) in _persistedArchetypes ?? [])
+            {
+                NoteNamedBuffer(named, componentNamesSegment, arch.ComponentNames._bufferId);
+            }
+
             foreach (var table in GetAllComponentTables())
             {
                 if (!table.HasCollections || table.ComponentSegment == null)
                 {
                     continue;
+                }
+
+                foreach (var f in table.CollectionFields)
+                {
+                    swept.Add(f.Vsbs.Segment);
                 }
 
                 var scan = table.ComponentSegment.CreateScanAccessor();
@@ -7308,6 +7332,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var sinceBatchPoint = 0;
             foreach (var segment in _componentCollectionSegmentByStride.Values)
             {
+                // A segment no handle source this sweep reads points into is left as it is: what names its buffers is not known here.
+                if (!swept.Contains(segment))
+                {
+                    continue;
+                }
+
                 var owned = new HashSet<int>();
                 if (named.TryGetValue(segment, out var roots))
                 {
@@ -7327,7 +7357,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
                 foreach (var chunkId in segment.AllocatedChunks())
                 {
-                    if (owned.Contains(chunkId))
+                    // A held chunk is a free already made (the scrub's, the replay's releases): freed again, it counts as a double free (REAP-02).
+                    if (owned.Contains(chunkId) || segment.IsChunkHeld(chunkId))
                     {
                         continue;
                     }
@@ -7353,7 +7384,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private static void NoteNamedBuffer(Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>> named, ChunkBasedSegment<PersistentStore> segment,
         int bufferId)
     {
-        if (bufferId <= 0 || bufferId >= segment.ChunkCapacity || !segment.IsChunkAllocated(bufferId))
+        if (bufferId <= 0 || bufferId >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(bufferId))
         {
             return;
         }
@@ -7382,7 +7413,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var next = pass == 0 ? *(int*)scan.GetChunkAddress(root) : firstFree;
             for (var steps = 0; steps < segment.AllocatedChunkCount; steps++)
             {
-                if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next) || !owned.Add(next))
+                if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(next) || !owned.Add(next))
                 {
                     break;
                 }
@@ -7400,6 +7431,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         foreach (var table in GetAllComponentTables())
         {
             loadedComponents.Add(table.Definition.Name);
+
+            // A loaded table whose schema declares a collection field it has no info for: its handles would read as none. The catalog's own table is the
+            // one expected (#387), its handles noted from its rows.
+            if (!table.HasCollections && !ReferenceEquals(table, _componentsTable))
+            {
+                foreach (var field in table.Definition.FieldsByName.Values)
+                {
+                    if (field.Type == FieldType.Collection)
+                    {
+                        return $"component '{table.Definition.Name}' (its collection info not restored)";
+                    }
+                }
+            }
         }
 
         if (_persistedFieldsByComponent != null)

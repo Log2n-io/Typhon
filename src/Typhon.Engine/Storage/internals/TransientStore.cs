@@ -287,7 +287,7 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ChangeSet CreateChangeSet() => null;
+    public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => null;
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -220,7 +220,7 @@ public unsafe interface IPageStore
     /// <para>Persistent: returns <c>new ChangeSet(mmf)</c>.</para>
     /// <para>Transient: returns <c>null</c> (no dirty tracking needed). CBS/LS handle null ChangeSets.</para>
     /// </summary>
-    ChangeSet CreateChangeSet();
+    ChangeSet CreateChangeSet(bool drainedByCheckpoint = false);
 
     /// <summary>
     /// Map a resolved memory page index back to its file page index.

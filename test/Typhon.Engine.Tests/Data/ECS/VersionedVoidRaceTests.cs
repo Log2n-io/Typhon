@@ -169,6 +169,7 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
 
             var before = Entries(dbe, table, root);
             var chunksBefore = table.CompRevTableSegment.AllocatedChunkCount;
+            var contentBefore = table.ComponentSegment.AllocatedChunkCount;
             Assert.That(before, Has.Count.EqualTo(13), "premise: the spawn and twelve commits");
 
             // Below the sixth commit: the spawn and five commits dropped, the fifth kept as the sentinel, and seven entries copied after it — past the
@@ -186,6 +187,7 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
 
             Assert.That(Entries(dbe, table, root), Is.EqualTo(before), "the chain, as it was");
             Assert.That(table.CompRevTableSegment.AllocatedChunkCount, Is.EqualTo(chunksBefore), "the new chain's chunks, given back");
+            Assert.That(table.ComponentSegment.AllocatedChunkCount, Is.EqualTo(contentBefore), "no content freed under the live chain");
             Assert.That(reader.Open(id).Read(VrWalletArch.Wallet).Credits, Is.EqualTo(0), "the reader at the spawn still reads it");
         }
 

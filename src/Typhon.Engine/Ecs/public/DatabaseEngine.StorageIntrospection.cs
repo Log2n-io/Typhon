@@ -1306,8 +1306,14 @@ public partial class DatabaseEngine
             // Read and released (EP-02): the map can be larger than the cache, and an epoch-tagged walk pinned every page of it for the check's scope —
             // the check then waited out back-pressure for evictions its own tags forbade (the market's audit map past a 64 MiB cache).
             var accessor = state.EntityMap.Segment.CreateScanAccessor();
-            state.EntityMap.ForEachEntry(ref accessor, ref recompute);
-            accessor.Dispose();
+            try
+            {
+                state.EntityMap.ForEachEntry(ref accessor, ref recompute);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
 
             // Re-read the summary AFTER the walk, and in IsClusterFullyVisibleAt's order (maxBorn, then died — never the reverse, or a new born can pair with
             // a stale short died array). Because every site folds BEFORE publishing the EntityMap entry, a summary read after the walk is at least as new as

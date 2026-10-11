@@ -770,8 +770,11 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             a handle in an allocated content chunk of a table with a collection field — a Versioned head, a system catalog's row, a flat
             archetype's component — or in any slot of a cluster of an archetype with a SingleVersion collection; it owns its root, the chain
             from it and its free chain. Both sets are supersets of what is live, and every step of a walk is checked, so a stray handle only
-            keeps chunks (DatabaseEngine.SweepCollectionOrphans). The sweep stands down when a persisted component with a collection field has no
-            table loaded, or a persisted archetype no state: their handles would read as none (FirstUnloadedCollectionHandleSource)
+            keeps chunks (DatabaseEngine.SweepCollectionOrphans). The schema catalog's table reopens without its collection info (#387): the field
+            lists and the archetypes' component names are named from the rows the open read. Only a segment some handle source it reads points into is
+            swept; a chunk already held is not freed again. The sweep stands down when a persisted component with a collection field has no table
+            loaded, a loaded table declares one it has no info for, or a persisted archetype has no state: their handles would read as none
+            (FirstUnloadedCollectionHandleSource)
   scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
