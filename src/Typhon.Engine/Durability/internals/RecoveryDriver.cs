@@ -19,6 +19,16 @@ internal sealed class RecoveryDriver
         public int RecordsApplied;
         public int TxCommitted;
         public long MaxTsn;
+
+        /// <summary>The highest commit stamp on any TxCommit record scanned (VIS-03), at or below the checkpoint too: the TSN counter resumes above it (RB-05).</summary>
+        public long MaxCommitStamp;
+
+        /// <summary>
+        /// Identity TSN → commit stamp, for every transaction the window commits (VIS-03; design 05 §3.7). A batch that drew no stamp maps to its TSN.
+        /// Commit fate stays keyed on the identity (LOG-04/08).
+        /// </summary>
+        public Dictionary<long, long> CommitStamps;
+
         public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
 
         /// <summary>
@@ -189,7 +199,7 @@ internal sealed class RecoveryDriver
     {
         var result = default(Result);
         var records = new List<Rec>();
-        var committed = new HashSet<long>();
+        var committed = new Dictionary<long, long>();
 
         // #688: through the backend, so an injected WAL IO is discoverable. Same reason as WalRecovery.DiscoverSegments.
         var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
@@ -220,6 +230,12 @@ internal sealed class RecoveryDriver
                         offset += consumed;
                         result.RecordsScanned++;
 
+                        // RB-05 over every stamp seen, consolidated or not: a stamp is drawn from the TSN counter, which must resume above it.
+                        if (view.IsTxCommit && view.CommitStamp > result.MaxCommitStamp)
+                        {
+                            result.MaxCommitStamp = view.CommitStamp;
+                        }
+
                         if (view.IsUnknownKind || view.Lsn <= checkpointLsn)
                         {
                             continue;
@@ -232,7 +248,7 @@ internal sealed class RecoveryDriver
 
                         if (view.IsTxCommit)
                         {
-                            committed.Add(view.Tsn);
+                            committed[view.Tsn] = view.CommitStamp != 0 ? view.CommitStamp : view.Tsn;
                         }
 
                         // A columnar fence block (#559) carries one cluster's entity-key column plus each durable component's
@@ -319,7 +335,7 @@ internal sealed class RecoveryDriver
         var entities = new Dictionary<long, EntityAgg>();
         foreach (var r in records)
         {
-            if (!r.IsFence && !committed.Contains(r.Tsn))
+            if (!r.IsFence && !committed.ContainsKey(r.Tsn))
             {
                 continue;
             }
@@ -432,12 +448,15 @@ internal sealed class RecoveryDriver
 
         applier.Complete();
         result.TxCommitted = committed.Count;
+        result.CommitStamps = committed;
         result.MaxTsn = applier.MaxTsn;
 
-        // RB-05: NextFreeTSN must exceed every applied TSN, or post-recovery reads would not see the recovered entities.
-        if (applier.MaxTsn >= dbe.TransactionChain.NextFreeId)
+        // RB-05: NextFreeTSN must exceed every applied TSN, or post-recovery reads would not see the recovered entities — and every commit stamp, drawn
+        // from the same counter (VIS-03): a TSN at or below one would share a number with a commit point.
+        var floor = Math.Max(applier.MaxTsn, result.MaxCommitStamp);
+        if (floor >= dbe.TransactionChain.NextFreeId)
         {
-            dbe.TransactionChain.SetNextFreeId(applier.MaxTsn + 1);
+            dbe.TransactionChain.SetNextFreeId(floor + 1);
         }
 
         // #697, the entity-key half of the same watermark discipline: NextEntityKey must be at least the highest key this window applied, or the first

@@ -97,9 +97,17 @@ public unsafe partial class Transaction : EntityAccessor
     // publish; 0 otherwise. The checkpoint keeps CheckpointLSN below the lowest one: those records' page effects are not in memory yet.
     private long _inFlightLsnFloor;
 
+    // VIS-03: the commit card this commit holds (-1 none), from its reservation before PREPARE to the end of its publish; and its commit stamp, drawn at
+    // the commit point (0 until then). Reset at the start of each commit (pooled Transaction reuse).
+    private int _commitCardSlot = -1;
+    private long _commitStamp;
+
     /// <summary>The first LSN this transaction's commit appended, while that commit is between its append and the end of its publish; 0 otherwise
     /// (CK-13).</summary>
     internal long InFlightLsnFloor => Volatile.Read(ref _inFlightLsnFloor);
+
+    /// <summary>The commit stamp of this transaction's last commit (VIS-03), drawn at its commit point; 0 before one.</summary>
+    internal long CommitStamp => _commitStamp;
 
     // Drain cursor into _publishEntries: entries [0, _publishDrainIndex) have been fully published (and their retained handler locks released). On a
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
@@ -3098,6 +3106,7 @@ public unsafe partial class Transaction : EntityAccessor
     private long AppendToWal(ref UnitOfWorkContext ctx)
     {
         long walHighLsn = 0;
+        var cards = _dbe.CommitCards;
         if (State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
         {
             var persistScope = TyphonEvent.BeginTransactionPersist(TSN);
@@ -3110,7 +3119,8 @@ public unsafe partial class Transaction : EntityAccessor
                 if (!batch.IsEmpty)
                 {
                     var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
-                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc, ref _inFlightLsnFloor);
+                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc, ref _inFlightLsnFloor, cards, _commitCardSlot);
+                    _commitStamp = batch.CommitStamp;
                 }
 
                 persistScope.WalLsn = walHighLsn;
@@ -3121,8 +3131,61 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
+        // VIS-03: a commit with no WAL record (bulk-loaded, or an empty batch) has its commit point here, at the end of PREPARE.
+        if (_commitStamp == 0)
+        {
+            _commitStamp = cards.Register(_commitCardSlot, TSN);
+        }
+
         _appendPhaseEnteredThisCommit = true; // AP-01 guard: the append phase has run; publish is now permitted.
         return walHighLsn;
+    }
+
+    /// <summary>
+    /// VIS-03 step 0: a commit card of this transaction's window, before PREPARE takes any chain lock. A full window waits here, holding no chain lock and
+    /// no WAL claim, its epoch refreshed so the cards' owners can load pages; it gives up at the unit of work's deadline with
+    /// <see cref="LockTimeoutException"/>, before anything is staged: the transaction can commit again.
+    /// </summary>
+    private void ReserveCommitCard(ref UnitOfWorkContext ctx)
+    {
+        var cards = _dbe.CommitCards;
+        if (cards.TryReserve(TSN, out _commitCardSlot))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref CommitCardTable.FullWindowWaits);
+        var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
+        var waiter = new AdaptiveWaiter();
+        var refreshedAt = Stopwatch.GetTimestamp();
+        while (!cards.TryReserve(TSN, out _commitCardSlot))
+        {
+            if (!waiter.Wait(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("CommitCard/Reserve", TimeoutOptions.Current.DefaultCommitTimeout);
+            }
+
+            // The waiter is often an old writer, the oldest epoch pin: held while the cards' owners need page loads, it would make a cycle only the
+            // back-pressure timeout breaks (design 05 §3.2). It holds no page reference across the wait (EP-03).
+            if (LiveIndexCursors == 0 && Stopwatch.GetElapsedTime(refreshedAt) >= CommitCardEpochRefreshInterval)
+            {
+                FlushAndRefreshEpoch();
+                refreshedAt = Stopwatch.GetTimestamp();
+            }
+        }
+    }
+
+    /// <summary>How often a commit waiting for a commit card refreshes its epoch.</summary>
+    private static readonly TimeSpan CommitCardEpochRefreshInterval = TimeSpan.FromMilliseconds(1);
+
+    /// <summary>VIS-03 step 6, and every exit before the commit point: the card given back. Idempotent.</summary>
+    private void ReleaseCommitCard()
+    {
+        if (_commitCardSlot >= 0)
+        {
+            _dbe.CommitCards.Release(_commitCardSlot);
+            _commitCardSlot = -1;
+        }
     }
 
     /// <summary>
@@ -3303,6 +3366,11 @@ public unsafe partial class Transaction : EntityAccessor
             // ── Holdoff: entire commit loop runs to completion ──
             using var holdoff = ctx.EnterHoldoff();
 
+            // VIS-03 step 0, before any chain lock: the commit card. The finally gives it back on every exit before the commit point.
+            _commitStamp = 0;
+            ReserveCommitCard(ref ctx);
+            _dbe.CommitAfterReserveProbe?.Invoke();
+
             var conflictSolver = handler != null ? ConcurrencyConflictSolver.GetConflictSolver() : null;
             var context = new CommitContext { Solver = conflictSolver, Handler = handler };
 #pragma warning disable CS9093 // ref-assign is safe: CommitContext is a ref struct that never escapes this method
@@ -3461,6 +3529,9 @@ public unsafe partial class Transaction : EntityAccessor
                 published = true;
                 Volatile.Write(ref _inFlightLsnFloor, 0);
 
+                // VIS-04, step 6: every effect is stamped, the card goes back: before the durability wait, and before Commit() returns (causality).
+                ReleaseCommitCard();
+
                 // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
                 //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
                 _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
@@ -3468,7 +3539,13 @@ public unsafe partial class Transaction : EntityAccessor
             }
             catch (Exception failure) when (State != TransactionState.Committed)
             {
-                // AP-02/AP-03: past the append the records are in the log, and the commit is never rolled back.
+                // AP-02/AP-03: past the append the records are in the log, and the commit is never rolled back. A publish that did not complete keeps its
+                // card registered: what it left flagged is that commit's, which a reader resolves by the card's stamp, and the engine commits no more.
+                if (!published)
+                {
+                    _commitCardSlot = -1;
+                }
+
                 CompleteAfterFailedPublish(walHighLsn, published, failure);
                 throw;   // unreachable: CompleteAfterFailedPublish always throws
             }
@@ -3504,6 +3581,10 @@ public unsafe partial class Transaction : EntityAccessor
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
             ReleaseRetainedPublishLocks();
+
+            // VIS-03: a commit that failed before its commit point gives its card back. A leaked reservation would block its window for good, and a
+            // retried commit of this transaction would wait on itself. A no-op on success (released after the publish).
+            ReleaseCommitCard();
             scope.Dispose();
         }
     }

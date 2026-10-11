@@ -19,11 +19,11 @@ internal sealed class DurabilityLog : IDurabilityLog
         _wal = wal;
     }
 
-    /// <summary>Test seam (CK-13): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> after the floor is stored and
+    /// <summary>Test seam (CK-13): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long, CommitCardTable, int)"/> after the floor is stored and
     /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
     internal Action AfterFloorProbe { get; set; }
 
-    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> and <see cref="AppendFenceBlocks"/>
+    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long, CommitCardTable, int)"/> and <see cref="AppendFenceBlocks"/>
     /// after the first stop check and before the claim — where an append may wait out WAL back-pressure. Null in production: one null check per
     /// append.</summary>
     internal Action BeforeClaimProbe { get; set; }
@@ -113,10 +113,16 @@ internal sealed class DurabilityLog : IDurabilityLog
     public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx)
     {
         long unused = 0;
-        return Append(ref batch, ref ctx, ref unused);
+        return Append(ref batch, ref ctx, ref unused, null, -1);
     }
 
-    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor)
+    /// <summary>
+    /// Appends a transaction's batch. With <paramref name="cards"/>, the commit point is here (VIS-03): once the claim holds and the engine is still
+    /// committing, the committer's card <paramref name="cardSlot"/> is registered, its stamp drawn and stored, and the stamp rides on TxCommit
+    /// (<see cref="CommitBatchBuilder.CommitStamp"/>). Nothing between that and the frame's publish can fail. Without, the batch carries no stamp (fence and
+    /// bulk-load batches, whose effects are never staged).
+    /// </summary>
+    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot)
     {
         if (batch.IsEmpty)
         {
@@ -140,6 +146,12 @@ internal sealed class DurabilityLog : IDurabilityLog
             // barrier at or past this batch has seen the frame's release, and with it this store.
             Volatile.Write(ref inFlightFloor, claim.FirstLSN);
             AfterFloorProbe?.Invoke();
+
+            // ── The commit point (VIS-03 steps 1–3): registered, stamped. Below, only the copy into the claimed span and its publish. ──
+            if (cards != null)
+            {
+                batch.CommitStamp = cards.Register(cardSlot, batch.Tsn);
+            }
 
             var written = RecordCodec.Write(claim.DataSpan, in batch, claim.FirstLSN);
 

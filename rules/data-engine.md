@@ -13,8 +13,9 @@ Design: `claude/design/Revision/05-commit-stamp-and-snapshot-floor.md` (option C
 
 **Scope of this file: family 1, revision elements.** The other five stamp families — `BornTSN`, `DiedTSN`, the cluster
 born/died watermarks, enabled-bits `ChangeTSN`, view deltas — keep today's creation-TSN behaviour until plan 06 Phase 5,
-and are not covered here. Rules marked `[UNBUILT]` state the protocol plan 06 steps 3.2 and 3.3 build; each loses the
-marker in the commit that lands its code and its verifier.
+and are not covered here. Rules marked `[UNBUILT]` state the protocol plan 06 step 3.3 builds; each loses the marker in the
+commit that lands its code and its verifier. Step 3.2 built VIS-03: the cards, the commit point and the stamp on the wire,
+with visibility unchanged — elements still carry the TSN until 3.3.
 
 Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below names the invariant that proves it.
 
@@ -58,19 +59,23 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
   on_violation: an effect created after the stamp is absent for a reader that resolved the commit's other effects as
                 visible: half a commit
 
-### VIS-03: A committer reserves before any chain lock, registers before the stamp, draws it after the last fallible step `[fatal]` `[silent]` `[UNBUILT]`
+### VIS-03: A committer reserves before any chain lock, registers before the stamp, draws it after the last fallible step `[fatal]` `[silent]`
   invariant 0  reserve a card of the window, at the start of the commit and before PREPARE takes any chain lock:
                CAS Owner 0 → −TSN (a marker readers take for "not committing"), then Stamp = 0
                PREPARE (fallible) · APPEND (fallible: TryClaim)
                ─── the commit point: nothing below fails ───
             1  Owner = TSN (release)   2  stamp = Interlocked.Increment(_nextFreeId)   3  Stamp = stamp (release)
-            4  the records written into the claimed span, the stamp on TxCommit; the frame published
+            4  the records written into the claimed span, the stamp on TxCommit (an 8-byte trailer after the record's body,
+               outside BodyLength); the frame published
             5  publish (VIS-04)   6  Owner = 0   7  Commit() returns
   invariant every exit before step 1 releases the reservation (Owner = 0, in a finally): a conflict, a lock timeout,
             back-pressure, a unique collision, an abort at APPEND. A full window waits at step 0 alone — holding no chain
             lock and no WAL claim, bounded by the unit of work's deadline (a clean abort), its epoch refreshed
   invariant a commit with no WAL record draws its stamp at the end of PREPARE
-  scope: Transaction.Commit, DurabilityLog.Append
+  invariant recovery maps each committed identity to the stamp on its TxCommit (commit fate stays keyed on the identity,
+            LOG-04), and the TSN counter resumes above every stamp it scanned, at or below the checkpoint too (RB-05)
+  scope: Transaction.Commit, Transaction.AppendToWal, DurabilityLog.Append, CommitCardTable.TryReserve, CommitCardTable.Register,
+         RecordCodec.Write, RecordCodec.TryReadRecord, RecoveryDriver.Run
   spec: tla/CommitStamp.tla — SnapshotRead (registerafterdraw), NoDirtyRead (drawbeforeappend), Causality, and no
         deadlock (reserveafterprepare: a handler-path committer waiting for a card while holding its chain locks)
   on_violation: register after the draw — a reader whose snapshot is above the stamp finds no card and misses the commit;
@@ -83,6 +88,8 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
 ### VIS-04: A committer leaves its card only once its last revision is stamped `[fatal]` `[UNBUILT]`
   invariant step 5 publishes every revision — stamp written, IsolationFlag cleared, under the chain's exclusive lock —
             before step 6 releases the card (release order)
+  invariant a publish that fails past the append keeps its card registered: what it left flagged belongs to a commit whose
+            records are in the log, which a reader resolves by the card's stamp, and the engine commits no more (AP-03)
   scope: Transaction.PublishComponent, Transaction.Commit
   spec: tla/CommitStamp.tla — AtomicVisibility (releaseearly)
   on_violation: a reader finds one revision published, another still flagged with no card: it sees part of the commit

@@ -693,6 +693,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// fixture can hold a commit in that window while a checkpoint runs. Null in production: one null check per commit.</summary>
     internal Action CommitAfterAppendProbe { get; set; }
 
+    /// <summary>Test seam (VIS-03): invoked by every writing <see cref="Transaction"/> commit once its commit card is reserved, before its PREPARE takes
+    /// any lock, so a fixture can hold a reserving committer there. Null in production: one null check per commit.</summary>
+    internal Action CommitAfterReserveProbe { get; set; }
+
     /// <summary>Test seam (CK-13): invoked by every <see cref="Transaction"/> commit just before it publishes its Commit-discipline staged writes,
     /// its last page effect, so a fixture can show the checkpoint still stays below the commit's records there. Null in production.</summary>
     internal Action CommitBeforeStagedPublishProbe { get; set; }
@@ -1469,6 +1473,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal DeadlineWatchdog Watchdog { get; }
 
     internal TransactionChain TransactionChain { get; }
+
+    /// <summary>The commit cards (VIS-03): a committer's reservation, then its registration and stamp at the commit point.</summary>
+    internal CommitCardTable CommitCards { get; }
     internal DeferredCleanupManager DeferredCleanupManager { get; }
 
     /// <summary>Engine-level MVCC exception dictionary for ECS EnabledBits.</summary>
@@ -1845,6 +1852,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
         _componentCollectionVSBSByType = new ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>>();
         TransactionChain = new TransactionChain(_options.Resources.MaxActiveTransactions, this);
+        CommitCards = new CommitCardTable(TransactionChain, MemoryAllocator, this);
         DeferredCleanupManager = new DeferredCleanupManager(_options.DeferredCleanup, Logger);
         EnabledBitsOverrides = new EnabledBitsOverrides(Logger);
 
@@ -2125,6 +2133,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             WalManager = null;
             Logger?.LogInformation("Engine disposing: TransactionChain + cleanup");
             TransactionChain.Dispose();
+            CommitCards.Dispose();
             UowRegistry?.Dispose();
             MMF.Dispose();
 

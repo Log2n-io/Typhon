@@ -19,6 +19,12 @@ internal static class RecordCodec
 
     private const int ChunkEnvelope = WalChunkHeader.SizeInBytes + WalChunkFooter.SizeInBytes; // 12
 
+    /// <summary>
+    /// The commit stamp's trailer (VIS-03): 8 bytes after the body of a TxCommit-flagged record, outside its <see cref="RecordHeader.BodyLength"/> so the
+    /// body views stay as they are. The wire size of a TxCommit record is header + body + this.
+    /// </summary>
+    internal const int CommitStampTrailerSize = sizeof(long);
+
     /// <summary>Largest single record (header + body) the codec can emit; larger components/elements are rejected at registration (02 §1).</summary>
     internal static int MaxRecordWireSize(int maxChunkSize = DefaultMaxChunkSize) => maxChunkSize - ChunkEnvelope;
 
@@ -37,6 +43,7 @@ internal static class RecordCodec
         var maxBody = maxChunkSize - ChunkEnvelope;
         var total = 0;
         var curBody = 0;
+        var globalIndex = 0;
 
         for (var bucket = 0; bucket <= 3; bucket++)
         {
@@ -47,7 +54,8 @@ internal static class RecordCodec
                     continue;
                 }
 
-                var recWire = RecordHeader.SizeInBytes + BodyLength(e);
+                var recWire = RecordHeader.SizeInBytes + BodyLength(e) + (!batch.FenceMode && globalIndex == recordCount - 1 ? CommitStampTrailerSize : 0);
+                globalIndex++;
                 if (recWire > maxBody)
                 {
                     ThrowHelper.ThrowInvalidOp($"WAL record of {recWire} bytes exceeds the maximum of {maxBody} (must be rejected at component registration).");
@@ -406,8 +414,8 @@ internal static class RecordCodec
 
     /// <summary>
     /// Writes the batch into <paramref name="dest"/> as RecordBatch chunks in LOG-07 order, assigning ascending LSNs from
-    /// <paramref name="firstLsn"/>. Markers: TxBegin on the first record, TxCommit on the last (fence batches carry FenceRecord
-    /// instead). PrevCRC/footer-CRC are left zero — the WAL writer patches them at drain. Returns bytes written (== <see cref="Measure"/>).
+    /// <paramref name="firstLsn"/>. Markers: TxBegin on the first record, TxCommit on the last, followed by the batch's commit stamp
+    /// (<see cref="CommitStampTrailerSize"/>; fence batches carry FenceRecord instead, and no stamp). PrevCRC/footer-CRC are left zero — the WAL writer patches them at drain. Returns bytes written (== <see cref="Measure"/>).
     /// </summary>
     internal static int Write(Span<byte> dest, in CommitBatchBuilder batch, long firstLsn, int maxChunkSize = DefaultMaxChunkSize)
     {
@@ -436,7 +444,8 @@ internal static class RecordCodec
                     continue;
                 }
 
-                var recWire = RecordHeader.SizeInBytes + BodyLength(e);
+                var isCommit = !batch.FenceMode && globalIndex == recordCount - 1;
+                var recWire = RecordHeader.SizeInBytes + BodyLength(e) + (isCommit ? CommitStampTrailerSize : 0);
 
                 // Close the open chunk if this record would overflow it; a record never spans chunks (02 §1).
                 if (chunkStart >= 0 && chunkBodyLen + recWire > maxBody)
@@ -461,13 +470,19 @@ internal static class RecordCodec
                         flags |= RecordFlags.TxBegin;
                     }
 
-                    if (globalIndex == recordCount - 1)
+                    if (isCommit)
                     {
                         flags |= RecordFlags.TxCommit;
                     }
                 }
 
                 var written = WriteRecord(dest[writeOffset..], in e, arena, firstLsn + globalIndex, batch.Tsn, batch.UowEpoch, flags);
+                if (isCommit)
+                {
+                    BinaryPrimitives.WriteInt64LittleEndian(dest[(writeOffset + written)..], batch.CommitStamp);
+                    written += CommitStampTrailerSize;
+                }
+
                 writeOffset += written;
                 chunkBodyLen += written;
                 globalIndex++;
@@ -654,6 +669,19 @@ internal static class RecordCodec
 
         var body = chunkBody.Slice(offset + RecordHeader.SizeInBytes, (int)bodyLength);
 
+        // A TxCommit record carries its commit stamp after the body (VIS-03); a torn trailer is a torn record.
+        var trailer = 0;
+        if ((view.Flags & RecordFlags.TxCommit) != 0)
+        {
+            if (bodyLength + CommitStampTrailerSize > (uint)(remaining - RecordHeader.SizeInBytes))
+            {
+                return false;
+            }
+
+            view.CommitStamp = BinaryPrimitives.ReadInt64LittleEndian(chunkBody[(offset + RecordHeader.SizeInBytes + (int)bodyLength)..]);
+            trailer = CommitStampTrailerSize;
+        }
+
         switch (kind)
         {
             case RecordKind.Slot:
@@ -737,7 +765,7 @@ internal static class RecordCodec
                 break;
         }
 
-        bytesConsumed = RecordHeader.SizeInBytes + (int)bodyLength;
+        bytesConsumed = RecordHeader.SizeInBytes + (int)bodyLength + trailer;
         return true;
     }
 

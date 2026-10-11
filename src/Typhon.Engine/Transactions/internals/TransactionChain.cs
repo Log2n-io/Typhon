@@ -416,6 +416,13 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     }
 
     /// <summary>
+    /// A commit stamp (VIS-03 step 2), from the one counter TSNs come from (design 05 §4). No headroom check: the commit point cannot be refused, and the
+    /// refusal threshold's margin covers the stamps drawn past it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal long DrawCommitStamp() => Interlocked.Increment(ref _nextFreeId);
+
+    /// <summary>
     /// Allocates a monotonically-increasing TSN without creating a Transaction.
     /// Used by <see cref="PointInTimeAccessor"/> to get an MVCC visibility snapshot point.
     /// </summary>

@@ -2882,14 +2882,18 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
   post NextFreeTSN(after recovery) > max(TSN persisted at last checkpoint, max TSN applied from the replayed window).
   invariant the resumption floor is max( TSN persisted at last clean shutdown,
                                         max TSN applied from the replayed window,
-                                        max TSN over surviving SCRUBBED CHAIN HEADS )
+                                        max TSN over surviving SCRUBBED CHAIN HEADS,
+                                        max commit stamp on any TxCommit scanned )
+  note the fourth term (VIS-03): a commit stamp is drawn from the TSN counter at the commit point, after every TSN its
+       records carry, so a commit whose stamp is the counter's last draw leaves no other trace of it. Every scanned
+       TxCommit counts, at or below the checkpoint too.
   note 🔴 the third term is load-bearing and was missing from this rule until 2026-07-28. A consolidating
        checkpoint can advance committed TSNs into the data file WITHOUT leaving them in the WAL window, and
        BK_NextFreeTSN is refreshed only on clean shutdown — so on a hard crash the first two terms can both land
        BELOW the newest consolidated revision, and every post-recovery reader then snapshots beneath it while
        MVCC hides the latest value. PS-07 depends on this rule for exactly that reason.
   scope: DatabaseEngine.ScrubVersionedChains (tracks the max surviving head and calls SetNextFreeId — the
-         DECISIVE restore), RecoveryDriver (watermarks the replayed window only)
+         DECISIVE restore), RecoveryDriver (watermarks the replayed window and every scanned commit stamp)
   on_violation: TSN reuse across restart → two distinct writes share a TSN → MVCC visibility corruption.
 
 ### RB-06: recovery restores EVERY allocation watermark, not only the TSN `[fatal]`
