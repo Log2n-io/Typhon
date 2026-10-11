@@ -918,6 +918,67 @@ internal sealed class PostAppendFailureTests
         }
     }
 
+    /// <summary>
+    /// #1271: once AP-03 stopped the engine, a SingleVersion write under the tick-fence discipline still lands in place — and no fence logs it any more.
+    /// The checkpoint went on, and persisted it: the reopen read a value no WAL record holds, beside the log's pre-stop state. A stopped engine's
+    /// checkpointer writes nothing more to the data file.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    [CancelAfter(30_000)]
+    public void AWriteAfterTheEngineStopped_NeverReachesTheDataFile()
+    {
+        EntityId counter;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = Open(scope1);
+            EntityId wallet;
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                counter = tx.Spawn<PaCounterArch>(PaCounterArch.Counter.Set(new PaCounter { Value = 1 }));
+                wallet = tx.Spawn<PaWalletArch>(PaWalletArch.Wallet.Set(new PaWallet { Credits = 50 }));
+                tx.Commit();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "premise: the spawns are checkpointed");
+
+            dbe.CommitAfterAppendProbe = () => throw new InvalidOperationException("injected after the append");
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                tx.OpenMut(wallet).Set(PaWalletArch.Wallet, new PaWallet { Credits = 99 });
+                Assert.Catch(() => tx.Commit(), "premise: the commit failed past its append");
+            }
+
+            dbe.CommitAfterAppendProbe = null;
+            Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the engine stopped");
+
+            // In place, under the tick fence: no fence logs it once stopped (FenceMustNotAppend), whatever the commit does.
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.OpenMut(counter).Set(PaCounterArch.Counter, new PaCounter { Value = 42 });
+                try
+                {
+                    tx.Commit();
+                }
+                catch (DurabilityException)
+                {
+                    // refused at its start: the write already landed
+                }
+            }
+
+            dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5));
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = Open(scope2);
+            using var tx = dbe.CreateReadOnlyTransaction();
+            Assert.That(tx.Open(counter).Read(PaCounterArch.Counter).Value, Is.EqualTo(1),
+                $"{Marker}: a write made after the stop, with no WAL record, came back");
+        }
+    }
+
     /// <param name="hardCrash">The engine is then torn down as a power cut; otherwise it is disposed, and must close as a crash on its own.</param>
     [Test]
     [VerifiesRule("AP-03")]
@@ -969,7 +1030,8 @@ internal sealed class PostAppendFailureTests
                 Assert.Throws<DurabilityException>(() => later.Commit(), $"{Marker}: a later commit is accepted by a stopped engine");
             }
 
-            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "premise: the checkpoint still cycles");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.False,
+                "the stopped engine's checkpointer writes no more (#1271)");
             Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.LessThan(recordLsn),
                 $"{Marker}: the checkpoint passed the records of a commit whose publish did not complete");
 

@@ -23,6 +23,10 @@ internal sealed class DurabilityLog : IDurabilityLog
     /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
     internal Action AfterFloorProbe { get; set; }
 
+    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> after its first stop check and
+    /// before its claim — where a commit may wait out WAL back-pressure. Null in production: one null check per append.</summary>
+    internal Action BeforeClaimProbe { get; set; }
+
     /// <summary>
     /// Stops every later append (AP-03): set by <see cref="DatabaseEngine.LatchCommitPipelineFailure"/> when a commit's publish failed after its records
     /// were appended. Memory then holds a partial publish, and nothing more is logged over it — a commit, a fence, a bulk manifest alike. The callers check
@@ -81,6 +85,8 @@ internal sealed class DurabilityLog : IDurabilityLog
         var claim = _wal.CommitBuffer.TryClaim(size, blocks.Length, ref ctx);
         try
         {
+            // Again once claimed: the claim may have waited out back-pressure while another commit stopped the engine (#1269). Abandoned below.
+            ThrowIfStopped();
             var written = RecordCodec.WriteFenceBlocks(
                 claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn,
                 entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges);
@@ -118,11 +124,16 @@ internal sealed class DurabilityLog : IDurabilityLog
         ThrowIfStopped();
 
         var size = RecordCodec.Measure(in batch, out var recordCount, out _);
+        BeforeClaimProbe?.Invoke();
 
         // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
         var claim = _wal.CommitBuffer.TryClaim(size, recordCount, ref ctx);
         try
         {
+            // Again once claimed: the claim may have waited out back-pressure while another commit stopped the engine, and appending now would log
+            // over the partial publish the stop is for (AP-03, #1269). The claim is abandoned below, as a failed write's is.
+            ThrowIfStopped();
+
             // CK-13: before the frame is published. The writer drains frames in LSN order and stops at an unpublished one (WP-06), so a checkpoint
             // barrier at or past this batch has seen the frame's release, and with it this store.
             Volatile.Write(ref inFlightFloor, claim.FirstLSN);

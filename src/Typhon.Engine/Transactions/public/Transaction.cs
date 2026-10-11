@@ -2691,6 +2691,13 @@ public unsafe partial class Transaction : EntityAccessor
 
             foreach (var staged in info.CommitStaged)
             {
+                // An entity this commit destroys is skipped, as the validation before the append skips it (CheckStagedUniqueKeys): FlushPendingDestroys
+                // released its slot, and a concurrent spawn may hold it now (#1261).
+                if (_pendingDestroys != null && _pendingDestroys.Contains(EntityId.FromRaw(staged.Key)))
+                {
+                    continue;
+                }
+
                 PublishStagedEntry(info, staged.Key, staged.Value);
             }
         }

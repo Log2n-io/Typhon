@@ -224,10 +224,16 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             the durability wait, the finalization — is `CommitDurabilityUncertainException` (AP-02)
   invariant a stopped engine appends nothing more: the latch stops `DurabilityLog` itself (`DurabilityLog.Stop`), which
             refuses every later append — a commit, a fence, a bulk manifest. The callers check first: a writable commit is
-            refused (`DurabilityException`, `CommitPipelineStopped`) at its start and again just before its append, so one
-            that was in PREPARE when the engine stopped rolls back clean; both fence paths — the serial `WriteTickFence` and
+            refused (`DurabilityException`, `CommitPipelineStopped`) at its start, again just before its append, and once more
+            when its WAL slot is claimed — a claim that waited out back-pressure while another commit stopped the engine is
+            abandoned (#1269) — so one that was in PREPARE when the engine stopped rolls back clean; both fence paths — the serial `WriteTickFence` and
             the runtime's parallel fence, whose appends never pass through it — return without appending
             (`FenceMustNotAppend`), since a tick path must not throw. The engine closes as a crash (no clean flag)
+  invariant a stopped engine writes nothing more to its data file: the latch crash-stops the checkpointer
+            (`CheckpointManager.PrepareCrashStop`), and a cycle in flight stops before its next write wave, its unwritten pages
+            left owed so the cycle is not covered (#1271). A SingleVersion write under the tick fence still lands in place after
+            the stop, and no fence logs it: persisted, the reopen read it beside the log's pre-stop state. Nothing durable is
+            lost — the checkpoint was held below the commit's records, and the replay starts there
   never roll back a commit whose records were appended: recovery replays them, so the rollback is undone at the next open,
         and until then readers have seen part of it and other commits have built on its absence
   never go on appending over a partial publish: a later record builds on what the partial publish left, and recovery replays
@@ -236,7 +242,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          Transaction.IsRemovedByOwnDestroy, Transaction.CompleteAfterFailedPublish, Transaction.WaitAndFinalize,
          PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
-         DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop
+         DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
+         CheckpointManager.PrepareCrashStop
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
           (indexes and views, AP-07), before the lock, allocates and can throw: B+Tree nodes past the publish limit, segment
@@ -246,12 +253,11 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           timeout (5-10 s, a stall rather than pressure), the data file failing to grow — stops the engine as above. A
           lock is rarely held across an allocation (the page-occupancy map's, whose pages stay resident), so a publisher
           waiting out back-pressure seldom makes another one time out; when it does, that one stops the engine. A stopped
-          engine's checkpoint and deferred cleanups go on: what they write is what a crash during that publish would leave,
-          which recovery handles from the pinned floor.
+          engine's deferred cleanups go on, its checkpoint does not (#1271).
           **RESIDUAL:** a concurrent change between the check and the publish is not seen: two transactions that put one
-          unique key both pass, and the later publish stops the engine (#1258). A commit that passed `DurabilityLog`'s own
-          check just before another commit latched still appends and publishes: the check precedes the claim of its slot, so the
-          window spans the claim — a commit waiting in WAL back-pressure, up to its timeout, appends after a stop. A staged
+          unique key both pass, and the later publish stops the engine (#1258). A commit whose claim was re-checked just before
+          another commit latched still appends and publishes; its claim precedes the latch. A wave of a cycle already writing
+          when the stop latched writes the copies it took, which may hold a write made after the stop. A staged
           write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
           fence) is not modelled; the publish's own reconcile shares the assumption. The publish's backstop for a unique
           collision on a Versioned write, `RejectUniqueIndexCollision`, throws `InvalidOperationException` (#1260); the check
@@ -263,8 +269,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   on_violation: an appended commit rolled back while recovery will replay it, or a partial publish other records build on
                 (TXW-8 class)
   verified: PostAppendFailureTests — AThrowAfterTheAppend_KeepsTheCommit_StopsTheEngine_AndARestartRecoversIt (a throw
-            injected after the append: Committed, the engine stopped, a later commit refused, the checkpoint below the
-            record, the value back after a disposal or a hard crash), AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
+            injected after the append: Committed, the engine stopped, a later commit refused, no cycle covered after it, the
+            checkpoint below the record, the value back after a disposal or a hard crash), AWriteAfterTheEngineStopped_NeverReachesTheDataFile
+            (#1271); CommittedDisciplineTests.ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused (#1269), AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
             (a Versioned or SingleVersion spawn over a committed key, two spawns of one key, a Commit-discipline write moved onto
             a held key), AKeyTakenByTheIndexsOwnComparison_IsRejectedBeforeTheAppend (+0/-0 float spawns; a second unique field),
             AStagedWrite_OntoAKeyFreedEarlierInThePublish_Commits (the holder destroyed, or moved away first, in the same commit),
@@ -1072,7 +1079,12 @@ rejected and is the TLA+ mutant.
 
 ### CM-01: No uncommitted staged bytes in page memory `[fatal]`
   never a Commit-discipline transaction writes staged values into cluster/page memory before its Append
-  scope: EntityRefMut write path, Transaction staging arena (Variant A)
+  never a staged write published to an entity its own commit destroys: the destroy released the slot first
+        (FlushPendingDestroys), and a concurrent spawn may hold it — the staged value overwrote that spawn's component, with no
+        error (#1261). The publish skips such entries, as the check before the append does (Transaction.PublishStagedCommitWrites)
+  scope: EntityRefMut write path, Transaction staging arena (Variant A), Transaction.PublishStagedCommitWrites
+  verified: CommittedDisciplineTests.AStagedWriteToAnEntityItsCommitDestroys_LeavesTheSpawnInItsReleasedSlotAlone [VerifiesRule] —
+            the commit held between the destroy's release and the staged publish, another transaction's spawn takes the slot
   on_violation: a fuzzy checkpoint persists uncommitted data with no compensating record
   spec: rules/tla/CommittedDiscipline.tla — CM01_HeadCommitted + CM01_NoUncommittedDurable. The BreakStaging mutant is
         Variant B and violates at depth 2 — this is the machine-checked argument behind ADR-057.

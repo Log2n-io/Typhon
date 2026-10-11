@@ -843,6 +843,20 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     batch.Clear();
                     while (position < pending.Length && batchPlanned < maxPages && Stopwatch.GetTimestamp() - batchStart < WriteBatchMaxTicks)
                     {
+                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy: a stopped engine's pages may hold writes the WAL
+                        // never logged (#1271). The rest stay owed — skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves
+                        // before wrote is settled below.
+                        if (_crashStop)
+                        {
+                            for (var i = position; i < pending.Length; i++)
+                            {
+                                skipped.Add(pending[i]);
+                            }
+
+                            position = pending.Length;
+                            break;
+                        }
+
                         // A wave of disjoint sub-batches, within what the batch has left. Each call partitions its own range: written pages to the front,
                         // skipped ones to the back. The protected pages that lead the pass are a wave of their own, on this thread.
                         var waveSize = 0;

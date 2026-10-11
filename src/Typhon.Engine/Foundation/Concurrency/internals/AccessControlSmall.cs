@@ -271,7 +271,8 @@ internal struct AccessControlSmall
         var ct = Environment.CurrentManagedThreadId << ThreadIdShift;
         var ac = new AtomicChange(ref _data, ref ctx);
 
-        if ((ac.Initial & ~SharedUsedCounterMask) == ct)
+        // The contention flag masked too: sticky, it made the guard miss on a lock ever contended, and the thread waited on its own hold (#1256).
+        if ((ac.Initial & ~(SharedUsedCounterMask | ContentionFlagMask)) == ct)
         {
             ThrowInvalidOperationException("Cannot enter exclusive access while already holding it");
         }

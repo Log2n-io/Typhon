@@ -6281,6 +6281,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         Interlocked.CompareExchange(ref _commitPipelineFailure, failure, null);
         (DurabilityLog as DurabilityLog)?.Stop(failure);
+
+        // Nothing more reaches the data file either (#1271): writes the WAL no longer logs — a SingleVersion write under the tick fence lands in place, and
+        // no fence logs it once stopped — would otherwise be persisted by the next cycle, and the reopen would read them beside the log's pre-stop state.
+        // Nothing durable is lost: the checkpoint was held below this commit's records, and the replay starts there.
+        CheckpointManager?.PrepareCrashStop();
     }
 
     [LoggerMessage(LogLevel.Critical,
