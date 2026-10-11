@@ -4136,6 +4136,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         ArchetypeRegistry.Freeze();
 
+        // CK-08: a crash open's passes start here — the entity-map and HEAD rebuilds before the replay. The manager's creation set it for the first call;
+        // a repeat InitializeArchetypes (#790) recovers again and sets it again.
+        if (CrashRecoveryAtOpen && CheckpointManager != null)
+        {
+            CheckpointManager.RecoveryInProgress = true;
+        }
+
         // Open-time latency instrumentation (#diagnose-open): the three reopen rebuilds below are O(entities) and run on
         // EVERY open (their state is intentionally not persisted — ADR-045). Accumulate per-phase elapsed across the
         // per-archetype loop and log one summary at the end, so a slow open shows exactly where the time went. The
@@ -4973,11 +4980,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        // Set at the manager's creation; set again for a repeat InitializeArchetypes, which runs the recovery again (#790, CK-08).
-        if (CheckpointManager != null)
-        {
-            CheckpointManager.RecoveryInProgress = true;
-        }
 
         LastOpenRanCrashRecovery = true;
         long checkpointLsn;

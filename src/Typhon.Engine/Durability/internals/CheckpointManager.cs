@@ -721,7 +721,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
 
     private int RunFlushOnlyCycleCore()
     {
-        if (_crashStop)
+        // After a fatal cycle failure nothing writes, as for the full cycles (CK-06).
+        if (_crashStop || _fatalError != null)
         {
             return 0;
         }

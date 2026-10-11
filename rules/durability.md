@@ -732,11 +732,12 @@ CK-08 (flush-only cycles) are later increments.
             the WAL flushed through what the copies can reflect (CK-02, CK-16) — and discharges their debt; it never advances CheckpointLSN,
             never flips the meta pair, never recycles segments, never runs the metadata hook, never seals or releases held frees (CK-17)
   invariant it is the ONLY cycle a crash open runs before its seal: CheckpointManager.RecoveryInProgress is set when the manager is created on a
-            crash open and again when RunWalV2Recovery starts (a repeat InitializeArchetypes recovers again), and cleared by SealRecovery and,
+            crash open and again when InitializeArchetypesCore starts (a repeat InitializeArchetypes recovers again), and cleared by SealRecovery and,
             for an open that recovered nothing, at the end of InitializeArchetypes. Every cycle requested meanwhile — the timer's, the dirty-page
             pressure's, a back-pressured allocation's — runs flush-only, its failure classified as a cycle's (CK-06). A suspect page (its checksum
-            failed at load) is left owed by the flush-only cycle and by SavePages: written, its torn bytes were re-checksummed for the next open
-            to serve (#1304)
+            failed at load) is left owed by the flush-only cycle and by SavePages until the suspect resolution ran (DrainSuspectPages): written,
+            its torn bytes were re-checksummed for the next open to serve (#1304); held back after it, the close's flush skipped it under a clean
+            marker. A flush-only cycle after a fatal cycle failure writes nothing
   invariant the recovery's passes work in bounded batches (DatabaseEngine.RecoveryBatchSize entities, chains or records) and call
             DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet saved, the thread's epoch pin refreshed so the batch's pages stop
             being epoch-held, and a flush-only cycle once the owed pages pass the dirty-page threshold. The passes: the entity-map rebuild, the

@@ -1007,7 +1007,8 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         // (#1183). Released unwritten, a segment the replay grew had its directory owed while the scrub's batch wrote the old tail it shares a page with:
         // a crash before the next cycle left the chain ahead of the directory, and the open after it refused the segment (CrashDuringRecoveryTests).
         // Written, the directory goes first (CK-05's alternate slot, then the plain pages). Only once the replay completed: on a throw, an entity's apply
-        // may be half done, and its pages stay owed for no cycle to write before the next open replays it again (review).
+        // may be half done — a flush-only cycle may still write some of it, and the next open's replay of the entity, idempotent, converges over it
+        // (CK-08, AP-12); what this save would add is the rest of the half-applied batch (review).
         if (_completed)
         {
             _changeSet.SaveChanges();

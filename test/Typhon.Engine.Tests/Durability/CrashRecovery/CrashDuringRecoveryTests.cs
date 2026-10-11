@@ -330,11 +330,16 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         {
             if (p == DatabaseEngine.RecoveryPass.Replay && owed == null)
             {
-                var state = dbe._archetypeStates[dbe.GetMetaByRouting(any.ArchetypeId).ArchetypeId].ClusterState;
-                var a = state.ClusterSegment.CreateChunkAccessor();
+                // The cluster of an item the window leaves alone: only the HEAD rebuild wrote it, whatever the replay's order.
+                var es = dbe._archetypeStates[dbe.GetMetaByRouting(any.ArchetypeId).ArchetypeId];
+                var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+                var m = es.EntityMap.Segment.CreateChunkAccessor();
+                Assert.That(es.EntityMap.TryGet(any.EntityKey, record, ref m), Is.True, "premise: the item's record");
+                m.Dispose();
+                var a = es.ClusterState.ClusterSegment.CreateChunkAccessor();
                 try
                 {
-                    owed = dbe.MMF.HasWritebackDebt(dbe.MMF.MemPageIndexOf(a.GetChunkAddress(state.ActiveClusterIds[0])));
+                    owed = dbe.MMF.HasWritebackDebt(dbe.MMF.MemPageIndexOf(a.GetChunkAddress(ClusterEntityRecordAccessor.GetClusterChunkId(record))));
                 }
                 finally
                 {

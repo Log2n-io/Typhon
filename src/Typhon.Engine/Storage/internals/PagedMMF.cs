@@ -581,9 +581,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Whether any page failed its checksum and awaits the suspect resolution (RB-04).</summary>
     internal bool HasSuspectPages => !_suspectPages.IsEmpty;
 
-    /// <summary><paramref name="memPageIndices"/> without the pages that failed their checksum and await the suspect resolution (RB-04).</summary>
+    private bool _suspectsResolved;
+
+    /// <summary>
+    /// <paramref name="memPageIndices"/> without the pages that failed their checksum and await the suspect resolution (RB-04) — until it ran
+    /// (<see cref="DrainSuspectPages"/>); after it, every page as given.
+    /// </summary>
     internal int[] WithoutSuspectPages(int[] memPageIndices)
     {
+        if (Volatile.Read(ref _suspectsResolved) || _suspectPages.IsEmpty)
+        {
+            return memPageIndices;
+        }
+
         var kept = 0;
         var copy = memPageIndices;
         for (var i = 0; i < memPageIndices.Length; i++)
@@ -610,6 +620,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
     {
+        // From here no page is held back from a write as suspect: one recorded after the resolution is judged by no one, and held back for the
+        // session it was skipped by the close's flush too — a clean marker over a page that never reached the disk (review of #1304).
+        Volatile.Write(ref _suspectsResolved, true);
         if (_suspectPages.IsEmpty)
         {
             return Array.Empty<int>();
@@ -3818,7 +3831,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     {
         // A suspect page (its checksum failed at a crash open's load) is left owed until the suspect resolution judges it (RB-04): written, its torn
         // bytes were checksummed again, and the next open served them (#1304).
-        if (HasSuspectPages)
+        if (HasSuspectPages && !Volatile.Read(ref _suspectsResolved))
         {
             memPageIndices = WithoutSuspectPages(memPageIndices);
             if (memPageIndices.Length == 0)
