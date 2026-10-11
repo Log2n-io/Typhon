@@ -46,12 +46,8 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        public void Commit(long tsn)
-        {
-            ref var el = ref Element;
-            el.TSN = tsn;
-            el.IsolationFlag = false;
-        }
+        /// <summary>The publication act (VIS-04): the element stamped with the commit <paramref name="stamp"/>, its isolation flag cleared, in that order.</summary>
+        public void Publish(long stamp) => Element.Publish(stamp);
 
     }
 
@@ -363,6 +359,94 @@ internal ref struct ComponentRevisionManager
         element.IsolationFlag && element.ComponentChunkId == ownChunkId && (ownChunkId != 0 || element.TSN == tsn);
 
     /// <summary>
+    /// An element's commit stamp by VIS-01: a published element's own; a flagged element's owner's, when that owner is registered on a commit card — past
+    /// its commit point, not yet published. False for a void, for an element of <paramref name="self"/>, and for a flagged element whose owner is not
+    /// committing (an uncommitted write, or a rollback's remains).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool TryResolveStamp(in CompRevStorageElement element, CommitCardTable cards, long self, out long stamp)
+    {
+        stamp = 0;
+        if (element.IsVoid)
+        {
+            return false;
+        }
+
+        var tsn = element.TSN;
+        if (!element.IsolationFlag)
+        {
+            stamp = tsn;
+            return tsn > 0;
+        }
+
+        return tsn != self && cards != null && cards.TryGetStamp(tsn, out stamp);
+    }
+
+    /// <summary>
+    /// The chain's newest revision by commit stamp (VIS-05), flagged ones resolved through their owner's card (<see cref="TryResolveStamp"/>), the
+    /// entries of <paramref name="self"/> left out: its index, or -1 when there is none. Conflict detection's test (plan 06 §3.10): a newest stamp above
+    /// a writer's snapshot is a commit it did not see. Takes the chain's shared lock unless the caller holds it.
+    /// </summary>
+    internal static short FindNewestByStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, CommitCardTable cards, long self,
+        out long newestStamp)
+    {
+        newestStamp = 0;
+        short newest = -1;
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            if (TryResolveStamp(enumerator.Current, cards, self, out var stamp) && stamp > newestStamp)
+            {
+                newestStamp = stamp;
+                newest = (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
+            }
+        }
+
+        return newest;
+    }
+
+    /// <summary>
+    /// The highest stamp among the chain's published revisions, the one at <paramref name="exceptIndex"/> left out; 0 when none. The publish's test for
+    /// the cluster HEAD copy (VIS-05): a revision is copied only above every other published one. The caller holds the chain's exclusive lock.
+    /// </summary>
+    internal static unsafe long HighestPublishedStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short exceptIndex)
+    {
+        long highest = 0;
+
+        // The chain in its root alone — the steady state, cleanup keeping a chain to its root (#1298): its elements read in place, no enumerator.
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+        if (header.ChainLength == 1)
+        {
+            var elements = accessor.GetChunkAsSpan(firstChunkId).Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
+            for (var i = 0; i < header.ItemCount; i++)
+            {
+                // The revision index as the enumerator numbers it (FirstItemIndex + position, unwrapped), the element where the circular root holds it.
+                var revisionIndex = header.FirstItemIndex + i;
+                ref var element = ref elements[revisionIndex % CompRevCountInRoot];
+                if (revisionIndex != exceptIndex && !element.IsVoid && !element.IsolationFlag && element.TSN > highest)
+                {
+                    highest = element.TSN;
+                }
+            }
+
+            return highest;
+        }
+
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            ref var element = ref enumerator.Current;
+            if (!element.IsVoid && !element.IsolationFlag && element.TSN > highest
+                && (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex) != exceptIndex)
+            {
+                highest = element.TSN;
+            }
+        }
+
+        return highest;
+    }
+
+    /// <summary>
     /// Voids the entry at <paramref name="index"/>, and drops the chain's item count only when it is the chain's last entry: a void elsewhere is a hole —
     /// readers skip it, the next compaction drops it — and dropping the count would drop the chain's last entry instead: another transaction's revision,
     /// appended after this one (#1233). The caller holds the chain's exclusive lock.
@@ -392,7 +476,7 @@ internal ref struct ComponentRevisionManager
         header.FirstItemIndex = 0;
         header.ItemCount = 1;
         header.ChainLength = 1;
-        header.LastCommitRevisionIndex = -1;
+        header.Reserved = 0;
         header.CommitSequence = 1;
         header.EntityPK = pk;
 
@@ -439,7 +523,6 @@ internal ref struct ComponentRevisionManager
         tempChunk.Clear();
         tempChunk.Split(out Span<CompRevStorageHeader> tempFirstHeader, out Span<CompRevStorageElement> tempElements);
         tempFirstHeader[0].ChainLength = 1;
-        tempFirstHeader[0].LastCommitRevisionIndex = -1;   // no commit until one is copied, as a new chain (a cleared header said 0: the first entry)
         tempFirstHeader[0].CommitSequence = firstChunkHeader.CommitSequence;
         tempFirstHeader[0].EntityPK = firstChunkHeader.EntityPK;
         var curNextChunkId = tempChunk.Slice(0, sizeof(int)).Cast<byte, int>();
@@ -474,8 +557,10 @@ internal ref struct ComponentRevisionManager
             using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
             var maxSkipCount = firstChunkHeader.ItemCount;
 
-            // Sentinel: delayed-free pattern — each newer committed skip candidate frees the previous one's chunk.
-            // The final sentinel is either emitted to the compacted output or freed, depending on the first kept entry's TSN.
+            // Sentinel: the highest-stamp committed revision below the cutoff (VIS-06) — the one the oldest snapshot reads. A skip candidate with a higher
+            // stamp supersedes it and frees its chunk; one with a lower stamp is freed itself: chain order is no version order (VIS-05), and keeping the
+            // last candidate in chain order freed the newest revision of a chain whose writers published out of order ([A(12), B(10)], cutoff 13).
+            // The final sentinel is either emitted to the compacted output or freed, depending on the first kept entry.
             CompRevStorageElement sentinelEntry = default;
             int sentinelCompChunkId = 0;
             bool hasSentinel = false;
@@ -486,8 +571,8 @@ internal ref struct ComponentRevisionManager
                 stepProbe?.Invoke(firstChunkId);
 
                 // A void — a rolled-back entry, or a conflict's orphan — is not an entry (CHAIN-01): dropped wherever it is, and it counts for nothing. Kept,
-                // it ended the skip phase as the chain's last entry and the sentinel, the last committed revision, was freed as no longer needed; copied, it
-                // took LastCommitRevisionIndex, though it is no commit.
+                // it ended the skip phase as the chain's last entry and the sentinel, the newest committed revision below the cutoff, was freed as no longer
+                // needed.
                 if (enumerator.Current.IsVoid)
                 {
                     skipCount++;
@@ -504,14 +589,23 @@ internal ref struct ComponentRevisionManager
 
                     if (isCommitted)
                     {
-                        // Supersede previous sentinel: free/defer its chunk, promote current entry
-                        if (hasSentinel)
+                        if (hasSentinel && enumerator.Current.TSN < sentinelEntry.TSN)
                         {
-                            PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
+                            // Superseded by the sentinel, which is newer.
+                            PendContentFree(contentFrees, ref contentFreeCount, revChunkId);
                         }
-                        sentinelEntry = enumerator.Current;
-                        sentinelCompChunkId = revChunkId;
-                        hasSentinel = true;
+                        else
+                        {
+                            // Supersede the previous sentinel: free/defer its chunk, promote the current entry.
+                            if (hasSentinel)
+                            {
+                                PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
+                            }
+
+                            sentinelEntry = enumerator.Current;
+                            sentinelCompChunkId = revChunkId;
+                            hasSentinel = true;
+                        }
                     }
                     else
                     {
@@ -529,10 +623,11 @@ internal ref struct ComponentRevisionManager
                     inSkipPhase = false;
                     if (hasSentinel)
                     {
-                        if (enumerator.Current.TSN >= nextMinTSN || enumerator.Current.IsolationFlag)
+                        if (enumerator.Current.TSN >= nextMinTSN || enumerator.Current.IsolationFlag || enumerator.Current.TSN < sentinelEntry.TSN)
                         {
                             // Keep sentinel: the first kept entry is at or beyond the cutoff, OR is an active uncommitted entry (IsolationFlag=true) invisible
-                            // to readers — the sentinel provides the read baseline for transactions at MinTSN.
+                            // to readers, OR is older than the sentinel (a lower stamp, VIS-06) — the sentinel provides the read baseline for transactions at
+                            // MinTSN.
                             if (curDestIndexInChunk == curDestElements.Length)
                             {
                                 goto Deferred;
@@ -540,7 +635,6 @@ internal ref struct ComponentRevisionManager
 
                             curDestElements[curDestIndexInChunk++] = sentinelEntry;
                             tempFirstHeader[0].ItemCount++;
-                            tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
                             curDestIndex++;
                             skipCount--; // Sentinel was counted as skipped but is being kept
                         }
@@ -562,10 +656,6 @@ internal ref struct ComponentRevisionManager
 
                 curDestElements[curDestIndexInChunk++] = enumerator.Current;
                 tempFirstHeader[0].ItemCount++;
-                if (!enumerator.Current.IsolationFlag)
-                {
-                    tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
-                }
                 curDestIndex++;
             }
 
@@ -580,7 +670,6 @@ internal ref struct ComponentRevisionManager
 
                 curDestElements[curDestIndexInChunk] = sentinelEntry;
                 tempFirstHeader[0].ItemCount++;
-                tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
                 skipCount--;
             }
 
@@ -784,7 +873,7 @@ internal ref struct ComponentRevisionManager
             destElements[0] = default;                       // all-zero ⇒ IsVoid ⇒ invisible to readers
             destHeader[0].ItemCount = 1;
             destHeader[0].FirstItemIndex = 0;
-            destHeader[0].LastCommitRevisionIndex = -1;
+            destHeader[0].Reserved = 0;
             return true;
         }
 
@@ -793,7 +882,7 @@ internal ref struct ComponentRevisionManager
         head.IsolationFlag = false;
         destElements[0] = head;
         destHeader[0].ItemCount = 1;
-        destHeader[0].LastCommitRevisionIndex = 0;
+        destHeader[0].Reserved = 0;
 
         // A committed head — live or tombstone — is kept as the single surviving element. The entity stays in the EntityMap;
         // a tombstone is filtered by the read path. Only the no-committed-head case above drops the entity.
@@ -1167,7 +1256,7 @@ internal ref struct ComponentRevisionManager
                 h[0].FirstItemIndex = 0;
                 h[0].ChainLength = 1;
                 h[0].ItemCount = 1;
-                h[0].LastCommitRevisionIndex = found ? (short)0 : (short)-1;
+                h[0].Reserved = 0;
                 if (found)
                 {
                     head.UowId = 0;

@@ -289,7 +289,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
                 continue;
             }
 
-            var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, _tsn, true);
+            var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, _tsn, _accessor.CommitCards, true);
             if (chainResult.IsFailure)
             {
                 continue;
@@ -331,7 +331,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
                 continue;
             }
 
-            var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, _tsn, true);
+            var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, _tsn, _accessor.CommitCards, true);
             if (chainResult.IsFailure)
             {
                 continue;

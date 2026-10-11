@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Living — family 1 (revisions) written ahead of its code, plan 06 Phase 3 |
+| Status | Living — family 1 (revisions) built, plan 06 Phase 3 |
 | Last Updated | 2026-10-12 |
 
 What a snapshot sees. A transaction's **TSN** is its identity and its snapshot; a separate **commit stamp**, drawn from the
@@ -13,15 +13,15 @@ Design: `claude/design/Revision/05-commit-stamp-and-snapshot-floor.md` (option C
 
 **Scope of this file: family 1, revision elements.** The other five stamp families — `BornTSN`, `DiedTSN`, the cluster
 born/died watermarks, enabled-bits `ChangeTSN`, view deltas — keep today's creation-TSN behaviour until plan 06 Phase 5,
-and are not covered here. Rules marked `[UNBUILT]` state the protocol plan 06 step 3.3 builds; each loses the marker in the
-commit that lands its code and its verifier. Step 3.2 built VIS-03: the cards, the commit point and the stamp on the wire,
-with visibility unchanged — elements still carry the TSN until 3.3.
+and are not covered here. Plan 06 step 3.2 built VIS-03 (the cards, the commit point, the stamp on the wire), step 3.3 the
+rest: revisions are published with the commit stamp and resolved by stamp and owner. Families 2–5 (born, died, enabled
+bits, cluster watermarks) are written with the stamp at publish since 3.3, without staging; their staging is Phase 5.
 
 Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below names the invariant that proves it.
 
 ## Module: VIS — commit stamps and the visibility predicate
 
-### VIS-01: A reader decides a flagged effect by its owner's card `[fatal]` `[silent]` `[UNBUILT]`
+### VIS-01: A reader decides a flagged effect by its owner's card `[fatal]` `[silent]`
   invariant visible(e, snap):
               ¬e.flagged → e.stamp ≤ snap                                     (every published effect: unchanged)
               e.flagged  → loop over the 4 cards of the owner's window [e.owner & (Size − 1) ..]:
@@ -39,8 +39,11 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
             its previous owner's
   invariant the newest visible revision is the highest stamp (VIS-05), at all three walker sites — the skip-timeout
             fast path, the seqlock fast path and the full walk
+  invariant a reader with no chain lock loads the element's flag word first, by acquire, then the TSN's high word; the publish
+            writes the high word, then the flag word by release (#1149): a clear flag comes with the stamp it carries
   scope: RevisionChainReader.WalkChain, RevisionChainReader.TryWalkSingleEntryOptimistic, RevisionChainReader.WalkChainCore,
-         TransactionChain.Register
+         TransactionChain.Register, ComponentRevisionManager.TryResolveStamp, CommitCardTable.TryGetStamp,
+         CompRevStorageElement.ReadTsnAcquire
   spec: tla/CommitStamp.tla — SnapshotRead, RepeatableRead, AtomicVisibility (mutants singleownerread, nostampreset)
   on_violation: retroactive visibility (#1146): a writer created before a reader commits after its first read and its
                 value appears in the reader's snapshot — a non-repeatable read, measured 13 in 500 runs of
@@ -48,7 +51,7 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
                 a commit
   requires: VIS-03, VIS-04, SNAP-01
 
-### VIS-02: Every revision of a commit exists, flagged with its owner, before the commit point `[fatal]` `[UNBUILT]`
+### VIS-02: Every revision of a commit exists, flagged with its owner, before the commit point `[fatal]`
   invariant a commit's revisions are staged in PREPARE (ComponentRevisionManager.AddCompRev: TSN = owner, IsolationFlag),
             before the commit point; PUBLISH only replaces the flag with the stamp
   note: family-1 scope. For revisions this holds today; families 2–6 (spawns, destroys, cluster watermarks, enabled bits,
@@ -85,29 +88,33 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
                 same transaction waits on itself
   requires: AP-03, AP-05, CK-13
 
-### VIS-04: A committer leaves its card only once its last revision is stamped `[fatal]` `[UNBUILT]`
+### VIS-04: A committer leaves its card only once its last revision is stamped `[fatal]`
   invariant step 5 publishes every revision — stamp written, IsolationFlag cleared, under the chain's exclusive lock —
-            before step 6 releases the card (release order)
+            before step 6 releases the card (release order); born, died, enabled-bit changes and the cluster watermarks are
+            written with the same stamp in step 5
   invariant a publish that fails past the append keeps its card registered: what it left flagged belongs to a commit whose
             records are in the log, which a reader resolves by the card's stamp, and the engine commits no more (AP-03)
-  scope: Transaction.PublishComponent, Transaction.Commit
+  scope: Transaction.PublishComponent, Transaction.Commit, CompRevStorageElement.Publish, Transaction.PublishStamp
   spec: tla/CommitStamp.tla — AtomicVisibility (releaseearly)
   on_violation: a reader finds one revision published, another still flagged with no card: it sees part of the commit
   requires: VIS-03
 
-### VIS-05: The newest revision is the highest commit stamp, everywhere `[fatal]` `[silent]` `[UNBUILT]`
+### VIS-05: The newest revision is the highest commit stamp, everywhere `[fatal]` `[silent]`
   invariant one version order — the walker keeps the highest visible stamp, not the last visible in chain order; the
-            cluster HEAD copy at publish writes only above the chain's highest committed stamp; the compaction's
+            cluster HEAD copy at publish writes only above the chain's highest published stamp; conflict detection weighs
+            the newest by stamp (a handler commit: a published or registered stamp above its snapshot); the compaction's
             sentinel is the highest-stamp skipped revision; the crash scrub (RB-03) keeps the highest stamp; the replay
             (AP-11) keeps the highest stamp per (entity, slot) for Versioned records, against the base HEAD's stamp too.
             Fence and Commit-discipline records keep CM-03's LSN order
-  scope: RevisionChainReader.WalkChainCore, ComponentRevisionManager.CleanUpUnusedEntriesCore, ComponentRevisionManager.ScrubChainToHead
+  scope: RevisionChainReader.WalkChainCore, ComponentRevisionManager.CleanUpUnusedEntriesCore, ComponentRevisionManager.ScrubChainToHead,
+         ComponentRevisionManager.FindNewestByStamp, ComponentRevisionManager.HighestPublishedStamp, RecoveryDriver.Run,
+         SchemaEvolutionEngine.FindHeadElement
   spec: tla/CommitStamp.tla — SnapshotRead (chainorder, with two commits in flight: CommitStamp-twoslots.cfg)
   on_violation: chain order, highest TSN and highest LSN disagree whenever two writers of one entity commit concurrently:
                 the live read, the HEAD, the scrub and the replay pick different newest values, and a snapshot holding one
                 commit without another that precedes it has no serial equivalent
 
-### VIS-06: A revision is reclaimed by stamp, never past a live snapshot `[fatal]` `[silent]` `[UNBUILT]`
+### VIS-06: A revision is reclaimed by stamp, never past a live snapshot `[fatal]` `[silent]`
   invariant the revision GC's cutoff is MinTSN, the oldest live snapshot; a revision superseded at stamp s is reclaimed
             only once MinTSN > s, and the one kept for the oldest snapshot is the highest-stamp revision at or below the
             cutoff — chain [A(12), B(10)] with cutoff 13 keeps A
@@ -116,7 +123,7 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
   on_violation: the GC keyed by identity frees the highest-stamp revision a snapshot needs: the reader reads an older value
   requires: SNAP-01, VIS-05
 
-### VIS-07: No staged revision survives an open `[fatal]` `[UNBUILT]`
+### VIS-07: No staged revision survives an open `[fatal]`
   invariant a crash open discards every revision still flagged with an owner (the recovery scrub drops isolated
             elements, RB-03): a resumed TSN equal to a dead owner must not adopt its staged revisions
   note: family-1 scope; the `Pending(owner)` marks of families 2–6 join it in Phase 5

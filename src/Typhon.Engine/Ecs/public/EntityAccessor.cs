@@ -32,6 +32,9 @@ public partial class EntityAccessor : IDisposable
 
     private protected bool _isDisposed;
     private protected DatabaseEngine _dbe;
+
+    /// <summary>The engine's commit cards, through which a revision walk resolves flagged entries (VIS-01).</summary>
+    internal CommitCardTable CommitCards => _dbe.CommitCards;
     internal DatabaseEngine DBE => _dbe;
     private protected EpochManager _epochManager;
 

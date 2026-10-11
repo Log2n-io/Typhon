@@ -54,12 +54,13 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
         target.Set(VrWalletArch.Wallet, wallet);
     }
 
+    /// <summary>Commits one write and returns its commit stamp, the TSN its published revision carries (VIS-04).</summary>
     private static long Commit(DatabaseEngine dbe, EntityId id, long credits)
     {
         using var tx = dbe.CreateQuickTransaction();
         Write(tx, id, credits);
         Assert.That(tx.Commit(), Is.True);
-        return tx.TSN;
+        return tx.CommitStamp;
     }
 
     /// <summary>
@@ -492,8 +493,8 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
     }
 
     /// <summary>
-    /// A compaction of a chain holding a hole between pending entries: <c>LastCommitRevisionIndex</c> names a committed revision, never the hole — a commit
-    /// testing it would see a conflict that is not there, and a handler would be handed chunk 0 as the committed value.
+    /// A compaction of a chain holding a hole between pending entries: the newest revision by stamp, the one conflict detection weighs and a handler is
+    /// handed as the committed value, is a committed revision, never the hole — a hole there would be a conflict that is not, and chunk 0 as the value.
     /// </summary>
     [Test]
     [VerifiesRule("CHAIN-01")]
@@ -524,11 +525,11 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
             var revisions = table.CompRevTableSegment.CreateChunkAccessor();
             try
             {
-                var lcri = revisions.GetChunk<CompRevStorageHeader>(root).LastCommitRevisionIndex;
-                Assert.That(lcri, Is.GreaterThanOrEqualTo(0), "premise: the chain holds a commit");
-                var element = ComponentRevisionManager.GetRevisionElement(ref revisions, root, lcri).Element;
-                Assert.That(element.IsVoid, Is.False, $"{Marker}: LastCommitRevisionIndex names a hole");
-                Assert.That(element.IsolationFlag, Is.False, "LastCommitRevisionIndex names a commit");
+                var newest = ComponentRevisionManager.FindNewestByStamp(ref revisions, root, dbe.CommitCards, 0, out _);
+                Assert.That(newest, Is.GreaterThanOrEqualTo(0), "premise: the chain holds a commit");
+                var element = ComponentRevisionManager.GetRevisionElement(ref revisions, root, newest).Element;
+                Assert.That(element.IsVoid, Is.False, $"{Marker}: the newest revision is a hole");
+                Assert.That(element.IsolationFlag, Is.False, "the newest revision is a commit");
             }
             finally
             {

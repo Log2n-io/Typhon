@@ -133,7 +133,8 @@ class SnapshotRepeatableReadTests : TestBase<SnapshotRepeatableReadTests>
     /// below the reader's.
     /// </summary>
     [Test]
-    [Category("Quarantine")] // #1146: commit stamps the writer's begin TSN, so an older writer's commit becomes visible mid-snapshot. Red until Phase 3.
+    [VerifiesRule("VIS-01")]
+    [VerifiesRule("VIS-04")]
     public void ASnapshot_ReadAroundTheCommitOfAnOlderWriter_ReadsTheSameValues([Values(10, 1000)] int count, [Values(false, true)] bool bulkLoaded,
         [Values(false, true)] bool readBeforeTheCommit)
     {
@@ -159,8 +160,9 @@ class SnapshotRepeatableReadTests : TestBase<SnapshotRepeatableReadTests>
     }
 
     /// <summary>An entity an older writer spawns, or destroys, after the reader began: neither shows in the reader's snapshot.</summary>
+    /// <remarks>Sequential: born and died carry the commit stamp since plan 06 step 3.3. A reader during the publish window can still see one effect of a
+    /// commit and not another (families 2–6 are placed at publish, not staged: Phase 5).</remarks>
     [Test]
-    [Category("Quarantine")] // #1146: BornTSN/DiedTSN carry the writer's begin TSN (families 2-3). Red until Phase 5.
     public void ASnapshot_AfterAnOlderWritersSpawnAndDestroy_KeepsItsEntities([Values(false, true)] bool bulkLoaded)
     {
         using var dbe = Engine(10, bulkLoaded, out var ids);

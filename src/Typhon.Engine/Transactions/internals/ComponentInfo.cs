@@ -54,13 +54,10 @@ internal sealed class ComponentInfo
         /// The ChunkId storing the component content corresponding to the revision of this CompRevInfo instance
         public int CurCompContentChunkId;
 
-        /// Monotonic commit counter captured at read time. Compared against header.CommitSequence during commit to detect any commits since our
-        /// read — immune to revision index ordering and cleanup compaction that can fool TSN/LCRI-based detection.
+        /// The chain's CommitSequence when the revision was read: a changed one at commit means another commit published since. The conflict test of a
+        /// commit without a handler, which holds no chain lock in PREPARE and is best effort (plan 06 §3.10); a handler's is by stamp, under the lock.
         public int ReadCommitSequence;
 
-        /// CurRevisionIndex captured at read/create time. Used by GetComponentRevision to compute position-based offset:
-        /// revision = ReadCommitSequence + (CurRevisionIndex - ReadRevisionIndex).
-        public short ReadRevisionIndex;
     }
 
     public int EntryCount => SingleCache.Count;

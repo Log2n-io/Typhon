@@ -125,7 +125,7 @@ public unsafe partial class EntityAccessor
         }
 
         var info = GetComponentInfoByTypeId(meta._componentTypeIds[slot], meta._slotToComponentType[slot]);
-        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRoot, TSN, true);
+        var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRoot, TSN, CommitCards, true);
         if (chainResult.IsFailure)
         {
             ThrowIfSnapshotExpired();
@@ -644,7 +644,7 @@ public unsafe partial class EntityAccessor
                 var compTypeId = meta._componentTypeIds[slot];
                 var info = GetComponentInfoByTypeId(compTypeId, meta._slotToComponentType[slot]);
 
-                var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, true);
+                var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, compRevFirstChunkId, TSN, CommitCards, true);
                 if (chainResult.IsFailure)
                 {
                     ThrowIfSnapshotExpired();

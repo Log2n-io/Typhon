@@ -734,8 +734,8 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
   invariant a destroy that follows a write in the same transaction turns the write's revision into the tombstone — its element's chunk set to 0
             before the chunk is freed (ComponentRevisionManager.MakeOwnRevisionTombstone) — rather than adding a second revision: no committed
             element may name a freed chunk, and the chain must reduce to a lone tombstone
-  invariant a commit that relocates a tombstone, or resolves a conflict for one, writes a tombstone: a destroy that lost a race to a concurrent write
-            stays a destroy and names no chunk (Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict)
+  invariant a commit that resolves a conflict for a tombstone writes a tombstone: a destroy that lost a race to a concurrent write stays a destroy
+            and names no chunk (Transaction.DetectAndResolveConflict; the relocation that did the same went with plan 06 step 3.3)
   invariant a rollback frees the chunk it wrote and forgets it (Transaction.RollbackComponent zeroes CurCompContentChunkId); the transaction's reset
             frees a rolled-back spawn's storage only if the rollback has not (Transaction.CleanupEcsState)
   invariant the revision GC's compaction frees every overflow chunk of the chain it rewrites — the ChainLength - 1 chunks linked from the root,
@@ -775,7 +775,7 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             swept; a chunk already held is not freed again. The sweep stands down when a persisted component with a collection field has no table
             loaded, a loaded table declares one it has no info for, or a persisted archetype has no state: their handles would read as none
             (FirstUnloadedCollectionHandleSource)
-  scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
+  scope: Transaction.MarkComponentDeleted, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,

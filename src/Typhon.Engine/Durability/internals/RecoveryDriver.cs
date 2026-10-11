@@ -70,6 +70,7 @@ internal sealed class RecoveryDriver
         public ushort EnabledBits;
         public int Index;        // CollectionDelta: element index (RemoveAt/UpdateAt) or new count (SetCount)
         public bool IsFence;
+        public bool IsCommitDiscipline;
         public byte[] Payload;
     }
 
@@ -297,7 +298,7 @@ internal sealed class RecoveryDriver
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
                             SlotIndex = view.SlotIndex, FieldId = view.FieldId, EnabledBits = view.EnabledBits,
-                            Index = view.Index, IsFence = view.IsFence,
+                            Index = view.Index, IsFence = view.IsFence, IsCommitDiscipline = view.IsCommittedDiscipline,
                             // CollectionDelta element bytes are copied too (#389). They used to be discarded here, one line before the switch that was
                             // documented as deferring the apply — so a CollectionDelta was gutted at SCAN, and adding an apply case alone could never have
                             // worked.
@@ -335,9 +336,16 @@ internal sealed class RecoveryDriver
         var entities = new Dictionary<long, EntityAgg>();
         foreach (var r in records)
         {
-            if (!r.IsFence && !committed.ContainsKey(r.Tsn))
+            if (!r.IsFence)
             {
-                continue;
+                if (!committed.TryGetValue(r.Tsn, out var stamp))
+                {
+                    continue;
+                }
+
+                // A transaction's effects replay with its commit stamp (VIS-03, design 05 §3.7): the stamp is what the live engine published — revisions,
+                // born, died — and the version order (VIS-05). Fate stayed keyed on the identity above. Fence records keep their fence-cycle TSN.
+                r.Tsn = stamp;
             }
 
             applier.Track(r.Tsn); // RB-05 watermark over every applicable record
@@ -353,7 +361,17 @@ internal sealed class RecoveryDriver
                     break;
 
                 case RecordKind.Slot when r.Op == (byte)SlotOp.Upsert:
-                    GetAgg(entities, r.EntityId).Slots[r.SlotIndex] = new RecoveryApplier.SlotData
+                    var slotAgg = GetAgg(entities, r.EntityId);
+
+                    // A Versioned value's newest is the highest stamp (VIS-05), not the highest LSN: the stamp is drawn after the claim, so two commits can
+                    // log in one order and stamp in the other. Fence and Commit-discipline records keep CM-03's LSN order. The base HEAD's stamp is weighed
+                    // by the scrub, which keeps the chain's highest.
+                    if (!r.IsFence && !r.IsCommitDiscipline && slotAgg.Slots.TryGetValue(r.SlotIndex, out var held) && held.Tsn > r.Tsn)
+                    {
+                        break;
+                    }
+
+                    slotAgg.Slots[r.SlotIndex] = new RecoveryApplier.SlotData
                     {
                         SlotIndex = r.SlotIndex,
                         Payload = r.Payload ?? [],

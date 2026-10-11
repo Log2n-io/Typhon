@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
@@ -44,15 +45,16 @@ internal struct CompRevStorageHeader
     /// Total length of the chain
     public short ChainLength;
 
-    /// Index in the chain of the last committed revision, allows us to detect concurrency conflicts
-    public short LastCommitRevisionIndex;
+    /// Unused (was LastCommitRevisionIndex, removed by plan 06 step 3.3: chain position is no version order once revisions carry commit stamps, VIS-05).
+    /// Kept as two zero bytes so the header, and the seqlock's quad over it, keep their layout.
+    public short Reserved;
 
     /// Primary key of the entity that owns this revision chain.
     /// Enables reverse lookup from secondary index results back to entity PKs.
     public long EntityPK;
 
-    /// Monotonically increasing counter incremented on every commit to this entity.
-    /// Used for conflict detection and as the public "revision number" returned by GetComponentRevision.
+    /// Monotonically increasing counter incremented on every commit to this entity: the entity's revision number. Not a version order, and not used for
+    /// conflict detection (stamps are, plan 06 §3.10); the seqlock fast path re-reads it to see a publish.
     public int CommitSequence;
 
     internal void EnterControlLockForTest() => Control.EnterExclusiveAccess(ref WaitContext.Null);
@@ -110,6 +112,32 @@ internal struct CompRevStorageElement
     {
         get => (_packedUowId & IsolationBit) != 0;
         set => _packedUowId = (ushort)(value ? (_packedUowId | IsolationBit) : (_packedUowId & ~IsolationBit));
+    }
+
+    /// <summary>
+    /// The publication of a staged revision (VIS-04): its TSN, the owner's identity until now, replaced by the commit <paramref name="stamp"/>, and the
+    /// isolation flag cleared. The high word first, then the word holding the TSN's low bits and the flag, by a release store (#1149): a reader that loads
+    /// that word first (<see cref="ReadTsnAcquire"/>) and sees the flag clear sees the stamp's high word too, on arm64 as on x64. Under the chain's
+    /// exclusive lock, which orders it for every locked reader.
+    /// </summary>
+    public void Publish(long stamp)
+    {
+        Debug.Assert((ulong)stamp < 1UL << 48, "a stamp outgrew its 48-bit storage");
+        _packedTickHigh = (uint)(stamp >> 16);
+        var low = (int)((uint)(ushort)(stamp & 0xFFFF) | ((uint)(_packedUowId & UowIdMask) << 16));
+        Volatile.Write(ref Unsafe.As<ushort, int>(ref _packedTickLow), low);
+    }
+
+    /// <summary>
+    /// The TSN and the isolation flag read for a reader that holds no chain lock: the word with the flag first (acquire), then the high word — the order
+    /// <see cref="Publish"/>'s release pairs with. A clear flag comes with the stamp's high word.
+    /// </summary>
+    public readonly long ReadTsnAcquire(out bool isolated)
+    {
+        var low = Volatile.Read(ref Unsafe.As<ushort, int>(ref Unsafe.AsRef(in _packedTickLow)));
+        var high = Volatile.Read(ref Unsafe.AsRef(in _packedTickHigh));
+        isolated = ((uint)low & ((uint)IsolationBit << 16)) != 0;
+        return (long)((ulong)high << 16 | (ushort)low);
     }
 
     /// <summary>UoW ID that created this revision (15 bits, max 32,767). 0 until UoW Registry (#51) lands.</summary>

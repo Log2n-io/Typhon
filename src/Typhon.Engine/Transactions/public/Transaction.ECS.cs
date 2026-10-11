@@ -44,11 +44,10 @@ public unsafe partial class Transaction
             Operations = ComponentInfo.OperationType.Created,
             PrevCompContentChunkId = 0,
             PrevRevisionIndex = -1,
+            ReadCommitSequence = 1,
             CurCompContentChunkId = chunkId,
             CompRevTableFirstChunkId = compRevChunkId,
             CurRevisionIndex = 0,
-            ReadCommitSequence = 1,
-            ReadRevisionIndex = 0,
         };
         info.AddNew((long)entityId.RawValue, cri);
         return chunkId;
@@ -1672,6 +1671,20 @@ public unsafe partial class Transaction
     // Commit hooks — flush pending ECS operations
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// The stamp this commit's effects are published with (plan 06 §3.3): the commit stamp — born, died, enabled-bit changes and the cluster watermarks,
+    /// as the revisions. Written at publish, where it is known; a reader whose snapshot sits between this transaction's TSN and its stamp then sees none of
+    /// them, as it sees none of its revisions. Families 2–6 are still placed at publish, not staged (Phase 5).
+    /// </summary>
+    private long PublishStamp
+    {
+        get
+        {
+            System.Diagnostics.Debug.Assert(_commitStamp != 0, "an effect published before the commit stamp was drawn");
+            return _commitStamp;
+        }
+    }
+
     /// <summary>Flush all pending ECS operations into persistent storage. Called during Commit.</summary>
     internal void FlushEcsPendingOperations()
     {
@@ -2748,7 +2761,7 @@ public unsafe partial class Transaction
                 // Build EntityRecord on stack from SpawnEntry
                 ref var header = ref *(EntityRecordHeader*)recordPtr;
                 header = default;
-                header.BornTSN = TSN;
+                header.BornTSN = PublishStamp;
 
                 ushort enabledBits = entry.EnabledBits;
                 if (_pendingEnableDisable != null && _pendingEnableDisable.TryGetValue(entry.Id, out var newBits))
@@ -2874,7 +2887,7 @@ public unsafe partial class Transaction
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, TSN);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, PublishStamp);
                         }
                         clusterBase = ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true);
                         if (ctx.HasClusterTransientAccessor)
@@ -2894,7 +2907,7 @@ public unsafe partial class Transaction
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, TSN);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, PublishStamp);
                         }
                         clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
                     }
@@ -2971,12 +2984,12 @@ public unsafe partial class Transaction
                     // Build ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot)
                     ClusterEntityRecordAccessor.InitializeRecord(recordPtr, ctx.Meta.VersionedSlotCount);
                     ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
-                    clusterHeader.BornTSN = TSN;
+                    clusterHeader.BornTSN = PublishStamp;
                     // H1 visibility summary. For an EXISTING cluster the claim already raised the bound before publishing the occupancy bit — TSN is passed in
                     // for exactly that — and this call is then an idempotent no-op. It is NOT redundant: a freshly allocated cluster is deliberately left
                     // unestablished by the claim so the gate denies it until its slot has contents, and this is what establishes it. See
                     // ArchetypeClusterState.FreshClusterStaysUnknown for why the two directions need opposite treatment.
-                    ctx.ClusterState.NoteClusterBorn(clusterChunkId, TSN);
+                    ctx.ClusterState.NoteClusterBorn(clusterChunkId, PublishStamp);
                     clusterHeader.EnabledBits = enabledBits;
                     ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
                     ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
@@ -3873,7 +3886,7 @@ public unsafe partial class Transaction
                         // probe and can never make the gate say "visible" when it is not (#722 review).
                         if (destroyClusterState != null)
                         {
-                            destroyClusterState.NoteClusterDied(clusterChunkId, TSN);
+                            destroyClusterState.NoteClusterDied(clusterChunkId, PublishStamp);
                         }
 
                         // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup
@@ -3891,7 +3904,7 @@ public unsafe partial class Transaction
                     }
 
                     // Set DiedTSN (header layout is the same for both cluster and legacy records)
-                    EntityRecordAccessor.GetHeader(readBuf).DiedTSN = TSN;
+                    EntityRecordAccessor.GetHeader(readBuf).DiedTSN = PublishStamp;
                     // No watermark fold here. It moved ABOVE ReleaseSlot — see the H1 ordering note there — and the guarded copy that briefly remained,
                     // for "the legacy non-cluster-backed shape", was unreachable: destroyClusterState is non-null only when destroyUseCluster is, and every
                     // ArchetypeClusterState carries at least one segment (a non-pure-Transient archetype throws if its ClusterSegment cannot be allocated;
@@ -4197,7 +4210,7 @@ public unsafe partial class Transaction
                     continue; // already resolved by an Open/Write earlier in this transaction
                 }
 
-                var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, firstChunkId, TSN, true);
+                var chainResult = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, firstChunkId, TSN, CommitCards, true);
                 if (chainResult.IsFailure)
                 {
                     continue;
@@ -4275,7 +4288,7 @@ public unsafe partial class Transaction
             // Record MVCC override if older transactions exist
             if (oldBits != newBits)
             {
-                _dbe.EnabledBitsOverrides.Record(entityId.EntityKey, TSN, oldBits);
+                _dbe.EnabledBitsOverrides.Record(entityId.EntityKey, PublishStamp, oldBits);
 
                 // Notify views: enable/disable changes component visibility.
                 // Enable (0→1) emits isCreation so the view re-evaluates the entity.

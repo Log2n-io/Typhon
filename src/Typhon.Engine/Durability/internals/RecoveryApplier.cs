@@ -628,7 +628,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
 
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
-        handle.Commit(tsn);
+        handle.Publish(tsn);
     }
 
     /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
@@ -842,7 +842,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
     // Allocates a content chunk holding the payload and a committed single-element revision chain pointing at it — exactly the
     // spawn→commit end-state the live ComponentRevisionManager produces (AllocCompRevStorage creates the isolated element, then
-    // the live ElementRevisionHandle.Commit clears the isolation flag). Returns the chain-root chunk id (the slot's location).
+    // the live ElementRevisionHandle.Publish stamps it and clears the isolation flag). Returns the chain-root chunk id (the slot's location).
     private int CreateVersionedChainRoot(ComponentTable table, long pk, long tsn, byte[] payload) =>
         CreateVersionedChainRoot(table, pk, tsn, payload, out _);
 
@@ -858,7 +858,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, tsn, 0, contentChunkId, pk);
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, compRevChunkId, 0);
-        handle.Commit(tsn); // element TSN already == tsn; this clears IsolationFlag → the revision is committed/visible
+        handle.Publish(tsn); // tsn is the commit's stamp (the driver replays stamps); clears IsolationFlag → the revision is committed/visible
 
         // RB-01: recovery never trusts persisted secondary indexes. Apply writes ONLY primary data (content + chain); the secondary indexes are cleared at open
         // on the crash path and rebuilt wholesale from final HEAD data in Phase-5 (DatabaseEngine.RebuildSecondaryIndexes), so populating them here would

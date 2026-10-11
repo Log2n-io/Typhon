@@ -10991,7 +10991,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                         // Walk chain to find HEAD (latest committed entry)
                         ref var compRevAccessor = ref compRevAccessors[slot];
-                        var chainResult = RevisionChainReader.WalkChain(ref compRevAccessor, compRevFirstChunkId, long.MaxValue);
+                        var chainResult = RevisionChainReader.WalkChain(ref compRevAccessor, compRevFirstChunkId, long.MaxValue, cards: null);
                         if (chainResult.IsFailure)
                         {
                             // A chain root exists and the walk failed. Never benign: the slot keeps its stale or zero value with no other signal.

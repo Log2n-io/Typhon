@@ -18,7 +18,9 @@ internal static class RevisionChainReader
     /// </summary>
     /// <param name="compRevTableAccessor">Accessor for reading revision table chunks.</param>
     /// <param name="compRevFirstChunkId">First chunk ID of the entity's revision chain.</param>
-    /// <param name="transactionTSN">The reader's snapshot TSN — entries with TSN &gt; this are invisible.</param>
+    /// <param name="transactionTSN">The reader's snapshot TSN — entries with a commit stamp &gt; this are invisible.</param>
+    /// <param name="cards">The engine's commit cards, through which a flagged entry is resolved (VIS-01); <see langword="null"/> only for a walk with no
+    /// committer alive (an open's rebuild), which then takes flagged entries for uncommitted.</param>
     /// <param name="skipTimeout">Skip Stopwatch.GetTimestamp overhead for uncontended read paths (PTA).</param>
     /// <returns>
     /// <see cref="RevisionReadStatus.Success"/> with revision metadata on success;
@@ -26,7 +28,7 @@ internal static class RevisionChainReader
     /// <see cref="RevisionReadStatus.Deleted"/> if the latest visible entry is a tombstone (ComponentChunkId == 0).
     /// </returns>
     internal static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChain(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
-        long transactionTSN, bool skipTimeout = false)
+        long transactionTSN, CommitCardTable cards, bool skipTimeout = false)
     {
         // ── Fast path: single-entry chain (common case for steady-state entities) ──
         // Avoids RevisionEnumerator construction, lock acquisition, WaitContext/Deadline creation.
@@ -43,8 +45,10 @@ internal static class RevisionChainReader
 
                 if (!element.IsVoid)
                 {
-                    bool isCommitted = (element.TSN > 0) && !element.IsolationFlag;
-                    if (isCommitted && element.TSN <= transactionTSN)
+                    // No lock: the flag word first, by acquire, pairs with the publish's release (#1149) — a clear flag comes with the stamp it carries.
+                    // A flagged entry goes to the full walk, which resolves it through its owner's card.
+                    var stamp = element.ReadTsnAcquire(out var isolated);
+                    if (!isolated && stamp > 0 && stamp <= transactionTSN)
                     {
                         var compRevInfo = new ComponentInfo.CompRevInfo
                         {
@@ -55,7 +59,6 @@ internal static class RevisionChainReader
                             PrevCompContentChunkId = 0,
                             PrevRevisionIndex = -1,
                             ReadCommitSequence = header.CommitSequence,
-                            ReadRevisionIndex = header.FirstItemIndex
                         };
 
                         return element.ComponentChunkId == 0
@@ -72,7 +75,7 @@ internal static class RevisionChainReader
         var lockWc = skipTimeout
             ? new WaitContext(Deadline.Infinite, default)
             : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
-        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, lockWc);
+        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, cards, lockWc);
     }
 
     /// <summary>
@@ -90,7 +93,7 @@ internal static class RevisionChainReader
             return fastResult;
         }
 
-        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, default, tx);
+        return WalkChainCore(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, tx.CommitCards, default, tx);
     }
 
     /// <summary>
@@ -179,7 +182,6 @@ internal static class RevisionChainReader
             PrevCompContentChunkId = 0,
             PrevRevisionIndex = -1,
             ReadCommitSequence = commitSequence1,
-            ReadRevisionIndex = firstItemIndex
         };
 
         result = w0 == 0
@@ -188,65 +190,40 @@ internal static class RevisionChainReader
         return true;
     }
 
+    /// <summary>
+    /// The full walk, under the chain's shared lock. The visible revision is the one with the highest commit stamp at or below the snapshot (VIS-05) —
+    /// not the last visible in chain order: two writers of one entity publish in either order. A flagged entry is resolved through its owner's commit card
+    /// (VIS-01): an owner registered with a stamp is committing, and its stamp decides; one that is not is an uncommitted write, invisible. No revalidation:
+    /// a publish takes this lock exclusively, so the owner cannot stamp the entry and unregister while it is held. The reader's own pending entries are
+    /// skipped — its writes resolve through its own cache.
+    /// </summary>
     private static Result<ComponentInfo.CompRevInfo, RevisionReadStatus> WalkChainCore(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId,
-        long transactionTSN, WaitContext lockWc, Transaction budgetOwner = null)
+        long transactionTSN, CommitCardTable cards, WaitContext lockWc, Transaction budgetOwner = null)
     {
-        // ── Full walk: handles multi-entry chains, voided entries, non-monotonic TSN ordering ──
         short prevCompRevisionIndex = -1;
         short curCompRevisionIndex = -1;
         int prevCompChunkId = 0;
         int curCompChunkId = 0;
-
-        // CommitSequence and committed-entry count must be captured INSIDE the shared lock (held by RevisionEnumerator) so that the chain walk
-        // observes a consistent chain state. Capturing outside the lock creates a race: cleanup or another commit can modify the chain between
-        // capture and the lock acquisition, leaving values consistent with a state the chain walk never sees.
+        long bestStamp = 0;
         int readCommitSequence;
-
 
         {
             using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, compRevFirstChunkId, false, true, lockWc, budgetOwner);
-            readCommitSequence = compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId).CommitSequence;
-            int totalCommitted = 0;
-            int visibleOrdinal = 0;
-
+            readCommitSequence = enumerator.Header.CommitSequence;   // under the shared lock, consistent with the walk
             while (enumerator.MoveNext())
             {
                 ref var element = ref enumerator.Current;
-
-                // Skip voided entries (rolled-back revisions cleared by cleanup or explicit void)
-                if (element.IsVoid)
+                if (!ComponentRevisionManager.TryResolveStamp(element, cards, transactionTSN, out var stamp) || stamp > transactionTSN || stamp <= bestStamp)
                 {
                     continue;
                 }
 
-                // Count ALL committed entries (visible and invisible) to compute the snapshot-isolated revision number.
-                // Do NOT break on TSN > reader.TSN — entries in the chain are NOT guaranteed to be in monotonically increasing TSN order.
-                bool isCommitted = (element.TSN > 0) && !element.IsolationFlag;
-                if (isCommitted)
-                {
-                    totalCommitted++;
-                }
-
-                if (element.TSN > transactionTSN)
-                {
-                    continue;
-                }
-
-                // Update the current revision (and the previous) if a valid entry (tick == 0 means a rollbacked entry) and it's not an isolated one
-                if (isCommitted)
-                {
-                    prevCompRevisionIndex = curCompRevisionIndex;
-                    prevCompChunkId = curCompChunkId;
-                    curCompRevisionIndex = (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
-                    curCompChunkId = element.ComponentChunkId;
-                    visibleOrdinal = totalCommitted;
-                }
-
+                prevCompRevisionIndex = curCompRevisionIndex;
+                prevCompChunkId = curCompChunkId;
+                curCompRevisionIndex = (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
+                curCompChunkId = element.ComponentChunkId;
+                bestStamp = stamp;
             }
-
-            // Compute snapshot-isolated revision number: CS tracks total commits, totalCommitted tracks how many committed entries remain in the
-            // chain (cleanup may have removed some). visibleOrdinal is the 1-based position of the visible entry among committed entries.
-            readCommitSequence = readCommitSequence - totalCommitted + visibleOrdinal;
         }
 
         // Phase 6: chain length is approximated from the first chunk's ChainLength header. Cap at byte max for the wire payload.
@@ -275,7 +252,6 @@ internal static class RevisionChainReader
                 PrevCompContentChunkId = prevCompChunkId,
                 PrevRevisionIndex = prevCompRevisionIndex,
                 ReadCommitSequence = readCommitSequence,
-                ReadRevisionIndex = curCompRevisionIndex
             };
 
             // Tombstoned entity: carry the value (callers like UpdateComponent need revision metadata) but signal Deleted

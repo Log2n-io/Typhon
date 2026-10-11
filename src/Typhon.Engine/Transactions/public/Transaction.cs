@@ -125,7 +125,6 @@ public unsafe partial class Transaction : EntityAccessor
         public int FirstChunkId;
         public int CurCompContentChunkId;
         public short CurRevisionIndex;
-        public short LastCommitRevisionIndex;
         public bool Created;
         public bool LockHeld;
 
@@ -1630,23 +1629,30 @@ public unsafe partial class Transaction : EntityAccessor
     /// Must be called inside the per-entity revision chain lock (when handler is provided) or outside (last-wins path).
     /// </summary>
     /// <remarks>
-    /// Two complementary checks for the handler path:
-    /// <list type="number">
-    /// <item>CommitSequence: detects any commit since our read (monotonic counter, immune to revision index ordering and cleanup compaction).</item>
-    /// <item>Invisible-commit TSN check: detects committed entries by higher-TSN transactions invisible to our snapshot.</item>
-    /// </list>
-    /// Without handler: uses the original index-based check as best-effort for "last wins".
+    /// With a handler, a conflict is a revision another transaction committed past this writer's snapshot (plan 06 §3.10): published with a stamp above
+    /// <paramref name="tsn"/>, or flagged by a committer registered on its commit card with one — past its commit point, not yet published, which a
+    /// CommitSequence test misses (it is bumped at publish). Chain position is no version order (VIS-05), so the old test of the last commit's index is
+    /// gone. Without a handler the test is best effort and takes no lock: a CommitSequence changed since the read. PREPARE holds no chain lock there, the
+    /// later commit point wins by its stamp either way, and the resolution only re-adds this transaction's value.
     /// </remarks>
-    private static void DetectAndResolveConflict(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, 
-        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short lastCommitRevisionIndex, int readCompChunkId, 
+    private static void DetectAndResolveConflict(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, int readCompChunkId,
         bool lockHeld, long tsn, ushort uowId, DatabaseEngine dbe)
     {
         var conflictSolver = context.Solver;
 
-        var hasConflict = (conflictSolver != null) ? 
-            compRev.CommitSequence != compRevInfo.ReadCommitSequence || 
-            (lastCommitRevisionIndex >= 0 && compRev.GetRevisionElement(lastCommitRevisionIndex).Element.TSN > tsn) : 
-            lastCommitRevisionIndex >= compRevInfo.CurRevisionIndex;
+        short newestIndex = -1;
+        bool hasConflict;
+        if (conflictSolver != null)
+        {
+            newestIndex = ComponentRevisionManager.FindNewestByStamp(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, dbe?.CommitCards,
+                tsn, out var newestStamp);
+            hasConflict = newestStamp > tsn;
+        }
+        else
+        {
+            hasConflict = compRev.CommitSequence != compRevInfo.ReadCommitSequence;
+        }
 
         if (!hasConflict)
         {
@@ -1684,7 +1690,7 @@ public unsafe partial class Transaction : EntityAccessor
 
         try
         {
-            ResolveConflictUnderLock(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, lastCommitRevisionIndex, readCompChunkId, tsn, uowId);
+            ResolveConflictUnderLock(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, newestIndex, readCompChunkId, tsn, uowId);
         }
         finally
         {
@@ -1697,11 +1703,12 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock: a new revision at the end carrying this transaction's value —
-    /// resolved by the handler, if any — and this transaction's first entry, the orphan, voided where it now is.
+    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock: a new revision carrying this transaction's value — resolved by
+    /// the handler, if any, against <paramref name="newestIndex"/>, the newest revision by stamp (the handler path has held the lock since detecting it) —
+    /// and this transaction's first entry, the orphan, voided where it now is.
     /// </summary>
     private static void ResolveConflictUnderLock(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
-        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short lastCommitRevisionIndex, int readCompChunkId,
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short newestIndex, int readCompChunkId,
         long tsn, ushort uowId)
     {
         var conflictSolver = context.Solver;
@@ -1750,7 +1757,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
             if (conflictSolver != null)
             {
-                var lastCommitHandle = compRev.GetRevisionElement(lastCommitRevisionIndex);
+                var lastCommitHandle = compRev.GetRevisionElement(newestIndex);
                 var overhead = info.ComponentTable.ComponentOverhead;
                 var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
                 var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(orphanChunkId) + overhead;
@@ -1768,48 +1775,6 @@ public unsafe partial class Transaction : EntityAccessor
                 info.CompContentSegment.FreeChunk(orphanChunkId);
             }
         }
-    }
-
-    /// <summary>
-    /// Relocates a revision entry to the end of the chain when our entry is at or behind LCRI.
-    /// This happens when a later-created transaction committed at a higher index — without relocation,
-    /// the chain walk would shadow our value with the older commit at the higher index.
-    /// </summary>
-    /// <remarks>Must be called under the per-entity revision chain exclusive lock.</remarks>
-    private static ComponentRevisionManager.ElementRevisionHandle RelocateRevisionEntry(
-        ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, ComponentRevision compRev, long tsn, ushort uowId)
-    {
-        // Save the chunk that holds our modified data
-        var oldContentChunkId = compRevInfo.CurCompContentChunkId;
-
-        // A tombstone moves as a tombstone: nothing to copy, nothing to free (REAP-02). Relocated as data, it would publish a live revision copied from — and
-        // then free — chunk 0.
-        if (oldContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
-        {
-            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
-            ComponentRevisionManager.VoidEntry(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, compRevInfo.PrevRevisionIndex);
-            return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-        }
-
-        // Create new entry at end of chain (under existing lock)
-        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
-
-        // Void the old entry as soon as the new one exists (CHAIN-01): it keeps IsolationFlag, which no compaction passes, and a throw in the copy below
-        // would leave it so for good — the rollback finds only the new entry. Its content chunk is the copy's source: freed last.
-        ComponentRevisionManager.VoidEntry(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, compRevInfo.PrevRevisionIndex);
-        try
-        {
-            var srcAddr = info.CompContentAccessor.GetChunkAddress(oldContentChunkId);
-            var dstAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
-            new Span<byte>(srcAddr, info.ComponentTable.ComponentTotalSize)
-                .CopyTo(new Span<byte>(dstAddr, info.ComponentTable.ComponentTotalSize));
-        }
-        finally
-        {
-            info.CompContentSegment.FreeChunk(oldContentChunkId);
-        }
-
-        return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
     }
 
     /// <summary>Action struct for commit PREPARE iteration: delegates to <see cref="PrepareComponent"/>.</summary>
@@ -1843,7 +1808,6 @@ public unsafe partial class Transaction : EntityAccessor
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
         var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var lastCommitRevisionIndex = compRev.LastCommitRevisionIndex;
         var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
 
         // Validate CurRevisionIndex — chain compaction may have shifted entry positions since our read
@@ -1881,7 +1845,6 @@ public unsafe partial class Transaction : EntityAccessor
                 }
                 lockHeld = true;
                 _dbe.PrepareRetainedLockProbe?.Invoke();
-                lastCommitRevisionIndex = lockHeader.LastCommitRevisionIndex;
 
                 // Re-validate CurRevisionIndex under lock (race-free)
                 var curElement = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
@@ -1896,16 +1859,11 @@ public unsafe partial class Transaction : EntityAccessor
                     compRevInfo.CurRevisionIndex = fixedIndex;
                     elementHandle = compRev.GetRevisionElement(fixedIndex);
                 }
-
-                // Relocate if our entry is at or behind LCRI
-                if (lastCommitRevisionIndex >= 0 && compRevInfo.CurRevisionIndex <= lastCommitRevisionIndex)
-                {
-                    elementHandle = RelocateRevisionEntry(info, ref compRevInfo, compRev, TSN, UowId);
-                }
             }
 
+            // No relocation to the chain's end (plan 06 §3.3): the newest revision is the highest stamp wherever it sits (VIS-05).
             DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
-                ref elementHandle, lastCommitRevisionIndex, readCompChunkId, lockHeld, TSN, UowId, _dbe);
+                ref elementHandle, readCompChunkId, lockHeld, TSN, UowId, _dbe);
 
             // Maintain indices/spatial (fallible PREPARE work). The visibility acts — IsolationFlag clear, LCRI/CommitSequence bump, cluster HEAD copy —
             // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
@@ -1978,7 +1936,6 @@ public unsafe partial class Transaction : EntityAccessor
                 FirstChunkId = firstChunkId,
                 CurCompContentChunkId = compRevInfo.CurCompContentChunkId,
                 CurRevisionIndex = compRevInfo.CurRevisionIndex,
-                LastCommitRevisionIndex = lastCommitRevisionIndex,
                 Created = (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0,
                 LockHeld = lockHeld,
                 LockTicket = lockTicket,
@@ -2093,22 +2050,20 @@ public unsafe partial class Transaction : EntityAccessor
                 elementHandle = ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, e.FirstChunkId, found);
             }
 
-            elementHandle.Commit(TSN);   // THE publication act: TSN stamp + IsolationFlag clear
+            Debug.Assert(_commitStamp != 0, "VIS-04: a revision published before its commit stamp was drawn");
+            elementHandle.Publish(_commitStamp);   // THE publication act: the commit stamp replaces the owner's TSN, IsolationFlag cleared (VIS-04)
             _dbe.PublishUnderLockProbe?.Invoke();
 
-            // LCRI / CommitSequence bookkeeping, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it. Read from
-            // the live header: a compaction since PREPARE renumbered the entries, and under a lock held since PREPARE it is the recorded value anyway.
-            var previousLastCommit = header.LastCommitRevisionIndex;
-            header.LastCommitRevisionIndex = Math.Max(previousLastCommit, revisionIndex);
+            // The revision number, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it.
             if (!e.Created)
             {
                 header.CommitSequence++;
             }
 
             // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
-            // is the newest committed one. Two transactions updating one entity can publish in the opposite order to their revisions; copying outside the
-            // lock let the older one land last, leaving the slot behind the chain's HEAD, and let two copies interleave into one slot.
-            if (e.ClusterCopyPending && revisionIndex >= previousLastCommit)
+            // is the newest published one by stamp (VIS-05). Two transactions updating one entity publish in either order of their stamps: the later
+            // publish of the older stamp must not land in the slot. A writer still unpublished copies at its own publish if its stamp is the higher.
+            if (e.ClusterCopyPending && _commitStamp > ComponentRevisionManager.HighestPublishedStamp(ref compRevTableAccessor, e.FirstChunkId, revisionIndex))
             {
                 PublishClusterVersionedSlot(e);
             }
