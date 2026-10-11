@@ -342,7 +342,8 @@ lock ordering and deadlock prevention are still to come.
          ArchetypeClusterState.RebuildActiveList, ComponentRevisionManager.EnumerateVersionedChainHeads,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
-         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
+         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
+         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
@@ -372,6 +373,9 @@ lock ordering and deadlock prevention are still to come.
   verified: WholeSegmentScanTests — the allocated-chunk cursor and the unpinned check walk a segment four times the cache inside one epoch scope
             (the check epoch-tagged again times out) [VerifiesRule]; MarketHardeningTests — the crash open of a 0.4 GiB market over a 64 MiB cache
             completes (it timed out with all 8 192 slots epoch-held)
+  verified: ClusterVisibilitySummaryIntegrityTests.TheAudit_OfAnEntityMapLargerThanTheCache_Completes — the integrity check's cluster-visibility
+            audit and a transaction's EnumerateArchetypeEntities walk an EntityMap larger than an 8 MiB cache [VerifiesRule]. Each walked it
+            through an epoch-tagged accessor, and the market's integrity check timed out once its audit map outgrew 64 MiB; both mutations killed
 
 ### EP-03: No reference the engine hands out outlives the call that produced it, except a fast-path one within its step `[fatal]`
   invariant the point-access handles hand out values, never references into a page: EntityRef.Read / TryRead / ReadRaw copy the

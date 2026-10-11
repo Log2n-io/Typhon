@@ -1787,7 +1787,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
         // the registry page mutation in it (avoiding a synchronous SaveChanges).
-        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet() : null;
+        var changeSet = durabilityMode != DurabilityMode.Immediate ? new ChangeSet(MMF) { DrainedByCheckpoint = true } : null;
         LogUowLifecycle("ChangeSet created");
 
         // Back-pressure: if registry is full, wait for a slot to be freed.
@@ -6411,6 +6411,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         return true;
     }
+
+    /// <summary>How long a rollback's void waits for its chain's lock between two reports of the lock's holder (#1273). A test shortens it.</summary>
+    internal TimeSpan RollbackVoidReportInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The reports a rollback's void made while it waited for its chain's lock (#1273). Diagnostic.</summary>
+    internal int RollbackVoidWaitReports => Volatile.Read(ref _rollbackVoidWaitReports);
+
+    private int _rollbackVoidWaitReports;
+
+    /// <summary>A rollback's void has waited <paramref name="waited"/> for the lock of the chain rooted at <paramref name="firstChunkId"/> (#1273).</summary>
+    internal void NoteRollbackVoidWaiting(int holderThreadId, TimeSpan waited, int firstChunkId)
+    {
+        Interlocked.Increment(ref _rollbackVoidWaitReports);
+        LogRollbackVoidWaiting(holderThreadId, waited.TotalSeconds, firstChunkId);
+    }
+
+    [LoggerMessage(LogLevel.Critical,
+        "A rollback has waited {waitedSeconds:F0} s for the lock of revision chain {firstChunkId}, held by thread {holderThreadId}. A conflict handler that "
+        + "waits on another transaction of the same entity while its commit holds that lock never releases it")]
+    private partial void LogRollbackVoidWaiting(int holderThreadId, double waitedSeconds, int firstChunkId);
 
     /// <summary>
     /// Test hook (#1233): runs where a transaction voids its own revision entry — a rollback, and a last-writer-wins conflict's orphan — before the void, with

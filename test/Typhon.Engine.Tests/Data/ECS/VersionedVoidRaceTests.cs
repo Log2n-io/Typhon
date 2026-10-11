@@ -1,7 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
@@ -163,6 +165,68 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
 
         var newerTsn = Commit(dbe, id, 2);
         return (id, newerTsn);
+    }
+
+    /// <summary>
+    /// #1273: a rollback waits for its chain's lock without a deadline — it has nothing to fail into — but in slices, each one that runs out reported with the
+    /// lock's holder: a conflict handler that waits on another transaction of the entity while its commit holds the lock hangs the rollback, and the report
+    /// names the thread. Released, the rollback voids its entry as before. The lock is held on another thread, as the handler's commit holds it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CHAIN-01")]
+    [CancelAfter(20_000)]
+    public void ARollbackWaitingOnAHeldChainLock_ReportsItsHolder_AndVoidsOnceReleased()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenEngine(scope);
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<VrWalletArch>(VrWalletArch.Wallet.Set(new VrWallet { Credits = 0 }));
+            tx.Commit();
+        }
+
+        var table = dbe.GetComponentTable<VrWallet>();
+        var root = RootOf(dbe, id);
+        dbe.RollbackVoidReportInterval = TimeSpan.FromMilliseconds(20);
+        var writer = dbe.CreateQuickTransaction();
+        Write(writer, id, 999);
+
+        var holderId = 0;
+        using var held = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            holderId = Environment.CurrentManagedThreadId;
+            using var guard = EpochGuard.Enter(dbe.EpochManager);
+            var revisions = table.CompRevTableSegment.CreateChunkAccessor();
+            try
+            {
+                ref var header = ref revisions.GetChunk<CompRevStorageHeader>(root, true);
+                header.Control.EnterExclusiveAccess(ref WaitContext.Null);
+                held.Set();
+
+                // Held until the rollback has reported twice, or 10 s.
+                var sw = Stopwatch.StartNew();
+                while (dbe.RollbackVoidWaitReports < 2 && sw.Elapsed < TimeSpan.FromSeconds(10))
+                {
+                    Thread.Yield();
+                }
+
+                header = ref revisions.GetChunk<CompRevStorageHeader>(root);
+                header.Control.ExitExclusiveAccess();
+            }
+            finally
+            {
+                revisions.Dispose();
+            }
+        });
+        holder.Start();
+        Assert.That(held.Wait(TimeSpan.FromSeconds(5)), Is.True, "premise: the other thread holds the chain's lock");
+
+        writer.Dispose();
+        holder.Join();
+        Assert.That(dbe.RollbackVoidWaitReports, Is.GreaterThanOrEqualTo(2), "the rollback reported its wait while the lock was held");
+        Assert.That((Read(dbe, id), IsolatedEntries(dbe, table, root)), Is.EqualTo((0L, 0)), "released, the rollback voided its entry");
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 ﻿using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
@@ -279,8 +280,7 @@ internal ref struct ComponentRevisionManager
         if (!held)
         {
             ticket = ChainLockTicket(ref accessor, ref header);
-            var unbounded = new WaitContext(Deadline.Infinite, default);
-            header.Control.EnterExclusiveAccess(ref unbounded);
+            EnterChainLockForRollback(info, ref header, firstChunkId);
         }
 
         try
@@ -302,6 +302,28 @@ internal ref struct ComponentRevisionManager
                 header.Control.ExitExclusiveAccess();
                 EndChainLockHold(ref accessor, in ticket);
             }
+        }
+    }
+
+    /// <summary>
+    /// The chain's exclusive lock for a rollback's void, waited for without a deadline — a rollback has nothing to fail into — in slices, each one that runs
+    /// out reported with the lock's holder (#1273). The wait ends unless the holder waits on this rollback: a conflict handler that, while its commit holds
+    /// the chain's lock, waits on another transaction of the same entity. Handler code must not; the report names the thread that does.
+    /// </summary>
+    private static void EnterChainLockForRollback(ComponentInfo info, ref CompRevStorageHeader header, int firstChunkId)
+    {
+        var dbe = info.ComponentTable.DBE;
+        var interval = dbe?.RollbackVoidReportInterval ?? TimeSpan.FromSeconds(30);
+        var start = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var slice = WaitContext.FromTimeout(interval);
+            if (header.Control.EnterExclusiveAccess(ref slice))
+            {
+                return;
+            }
+
+            dbe?.NoteRollbackVoidWaiting(header.Control.LockedByThreadId, Stopwatch.GetElapsedTime(start), firstChunkId);
         }
     }
 

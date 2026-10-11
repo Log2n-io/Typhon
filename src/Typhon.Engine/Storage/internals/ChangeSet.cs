@@ -36,6 +36,12 @@ public class ChangeSet
     private int _mutatorThreadId;
     private int _mutationDepth;
 
+    /// <summary>
+    /// The checkpoint writes this change set's pages: it ends by <see cref="ReleaseDirtyMarks"/>, never <see cref="SaveChangesAsync"/> — a unit of work's,
+    /// a transaction's, a fence chunk's (<see cref="PagedMMF.RentChangeSet"/>). A segment's grow under it then marks none of its new data pages (PS-21).
+    /// </summary>
+    internal bool DrainedByCheckpoint { get; init; }
+
     public ChangeSet(PagedMMF owner)
     {
         _owner = owner;
@@ -174,6 +180,7 @@ public class ChangeSet
 
     public Task SaveChangesAsync()
     {
+        System.Diagnostics.Debug.Assert(!DrainedByCheckpoint, "a change set the checkpoint drains is not saved: a segment grow under it marked none of its data pages (PS-21)");
         if (_markedPages.Count == 0)
         {
             return Task.CompletedTask;

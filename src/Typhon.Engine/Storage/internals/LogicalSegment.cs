@@ -742,7 +742,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     _store.GetOrAllocateDirectoryTwin(mapIndices[m], changeSet);
                 }
 
-                InitDataPages(type, filePageIndices, growFrom, changeSet, epoch);
+                // Under a change set the checkpoint drains, the grow's data pages are owed a write but take no mark (PS-21): the checkpoint writes them,
+                // and they can leave the cache before the unit of work ends. Marked, a grow — a segment doubles — larger than the cache's free room held
+                // every slot until the commit that grew it ended, and could not end: an EntityMap past half an 8 MiB cache grew inside a spawn commit and
+                // stopped the engine (AP-03). A page that receives data is marked by the write that puts it there. A change set that writes its own
+                // pages (SaveChanges) keeps them: nothing else would.
+                InitDataPages(type, filePageIndices, growFrom, changeSet is { DrainedByCheckpoint: true } ? null : changeSet, epoch);
 
                 // Count a pin only once it is taken: `pinned[pinnedCount++] = PinForPublish(…)` would count it before the call, and a throw would then
                 // release a slot this grow never pinned. Only the directory pages the publish writes: those from the one holding entry growFrom on.

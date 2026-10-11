@@ -474,7 +474,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
                 MarkRoomRange(currentLength, newLength);
 
                 // Grow the underlying logical segment (thread-safe, will allocate new pages). It clears every new page in full — the chunk bitmap with it —
-                // and registers each with the change set (InitDataPages, PS-14), so nothing here writes a page after it is published.
+                // and records each as owed a write (InitDataPages, PS-14), so nothing here writes a page after it is published. Under a change set the
+                // checkpoint drains, the data pages take no mark: a grow larger than the cache's free room would otherwise hold every slot until the
+                // change set ends (PS-21).
                 base.Grow(newLength, effectiveChangeSet);
                 GrowPagesPublishedForTest?.Invoke(this);
 

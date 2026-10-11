@@ -1303,7 +1303,9 @@ public partial class DatabaseEngine
             };
             Array.Fill(recompute.MaxBorn, NoEntityInCluster);
 
-            var accessor = state.EntityMap.Segment.CreateChunkAccessor();
+            // Read and released (EP-02): the map can be larger than the cache, and an epoch-tagged walk pinned every page of it for the check's scope —
+            // the check then waited out back-pressure for evictions its own tags forbade (the market's audit map past a 64 MiB cache).
+            var accessor = state.EntityMap.Segment.CreateScanAccessor();
             state.EntityMap.ForEachEntry(ref accessor, ref recompute);
             accessor.Dispose();
 

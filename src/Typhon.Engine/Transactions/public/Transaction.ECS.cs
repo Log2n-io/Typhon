@@ -313,7 +313,8 @@ public unsafe partial class Transaction
             return results;
         }
 
-        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+        // Read and released (EP-02): a whole archetype's map can be larger than the cache, and an epoch-tagged walk pinned all of it for the transaction.
+        var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
         var action = new ArchetypeEntityCollectAction
         {
             RoutingId = routingId,

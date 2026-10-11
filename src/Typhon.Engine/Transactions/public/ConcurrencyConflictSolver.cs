@@ -27,6 +27,11 @@ namespace Typhon.Engine;
 /// The default resolution (before the handler runs) is "last writer wins": the committing data is copied into <c>ToCommitData</c>.
 /// The handler can override this by writing a different value (e.g., rebasing a delta onto the latest committed state).
 /// </para>
+/// <para>
+/// The handler runs under the entity's revision-chain lock, which the commit holds until its publish. Handler code must not wait on another transaction
+/// that touches the same entity: that transaction's commit or rollback needs the lock, and neither would end. A rollback held up so reports the lock's
+/// holder every 30 seconds (#1273).
+/// </para>
 /// </remarks>
 [PublicAPI]
 public unsafe class ConcurrencyConflictSolver

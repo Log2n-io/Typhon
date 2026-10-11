@@ -2349,9 +2349,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>
     /// Rent a reusable <see cref="ChangeSet"/> from the per-engine pool, falling back to a fresh allocation when the pool is empty. Caller must call
     /// <see cref="ReturnChangeSet"/> exactly once when done; pages tracked by the rented ChangeSet must have their dirty marks resolved
-    /// (via SaveChangesAsync / ReleaseDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state.
+    /// (via ReleaseDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state. A rented set is drained by the checkpoint
+    /// (<see cref="ChangeSet.DrainedByCheckpoint"/>): it is never saved.
     /// </summary>
-    public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this);
+    public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this) { DrainedByCheckpoint = true };
 
     /// <summary>
     /// Return a previously-rented <see cref="ChangeSet"/> to the pool. Clears the local tracking buffers via <see cref="ChangeSet.ClearForReuse"/>;

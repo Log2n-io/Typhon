@@ -50,6 +50,40 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
     private static ArchetypeClusterState ClusterStateOf(DatabaseEngine dbe) =>
         dbe._archetypeStates[Archetype<ClAnt>.Metadata.ArchetypeId].ClusterState;
 
+    /// <summary>
+    /// The audit walks the EntityMap reading and releasing each page (EP-02). Through an epoch-tagged accessor, a map larger than the cache pinned every page it
+    /// touched for the check's scope, and the check waited out back-pressure for evictions its own tags forbade: the market's integrity check timed out once
+    /// its audit archetype's map outgrew a 64 MiB cache. Here the map is larger than the engine's smallest cache — grown there by spawn commits, whose grow
+    /// held every new page with a mark until the commit ended (PS-21) — and a transaction's runtime enumeration of the archetype reads it the same way.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [VerifiesRule("PS-21")]
+    [Property("CacheSize", 8L * 1024 * 1024)]
+    [CancelAfter(60_000)]
+    public void TheAudit_OfAnEntityMapLargerThanTheCache_Completes()
+    {
+        using var dbe = SetupEngine();
+        const int entities = 240_000;
+        EntityId any = default;
+        for (var done = 0; done < entities;)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < 1_000; i++, done++)
+            {
+                any = tx.Spawn<ClAnt>(ClAnt.Position.Set(new ClPosition(done, 0)), ClAnt.Movement.Set(new ClMovement(0, 0)));
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the spawns");
+        }
+
+        var mapPages = dbe._archetypeStates[Archetype<ClAnt>.Metadata.ArchetypeId].EntityMap.Segment.Length;
+        Assert.That(mapPages, Is.GreaterThan(8 * 1024 * 1024 / PagedMMF.PageSize), "premise: the EntityMap is larger than the cache");
+        Assert.That(dbe.RunStorageIntegrityCheck().Issues, Is.Empty, "the audit over a map larger than the cache");
+        using var read = dbe.CreateReadOnlyTransaction();
+        Assert.That(read.EnumerateArchetypeEntities(any.ArchetypeId), Has.Count.EqualTo(entities), "the runtime enumeration of the archetype");
+    }
+
     /// <summary>Spawns <see cref="EntityCount"/> entities across two transactions, so the summary bounds a non-zero and a strictly larger BornTSN.</summary>
     private static EntityId[] Populate(DatabaseEngine dbe)
     {

@@ -541,12 +541,16 @@ append after it.
   enforce the rollback waits for the lock without a deadline (it has nothing to fail into; AP-05's argument for why the
           wait ends), or voids under the lock when its thread already holds the chain (a conflict handler disposing another
           transaction of the same entity); the conflict path, a fallible PREPARE step, waits with the chain-lock timeout
-          composed with the unit of work's deadline
+          composed with the unit of work's deadline. The rollback's wait runs in slices (DatabaseEngine.RollbackVoidReportInterval,
+          30 s), each one that runs out reported with the lock's holder (`EnterChainLockForRollback`): the one wait that does
+          not end is on a conflict handler that waits on another transaction of the same entity while its commit holds the
+          lock, which handler code must not do (ConcurrencyConflictSolver's contract, #1273)
   never void by a position recorded before the lock: a compaction in between puts another revision there — the commit
         appended after this one moves into its slot
   never drop the item count for a void that is not the chain's last entry: the count then ends the chain before its last
         entry, another transaction's revision appended after this one
   scope: ComponentRevisionManager.VoidOwnPendingEntry, ComponentRevisionManager.FindOwnPendingEntry,
+         ComponentRevisionManager.EnterChainLockForRollback, DatabaseEngine.NoteRollbackVoidWaiting,
          ComponentRevisionManager.VoidEntry, ComponentRevisionManager.CleanUpUnusedEntriesCore, Transaction.RollbackComponent,
          Transaction.DetectAndResolveConflict, Transaction.ResolveConflictUnderLock, Transaction.RelocateRevisionEntry
   rationale: without a conflict handler, concurrent writers of one entity are allowed (last writer wins), so a transaction's
@@ -564,7 +568,8 @@ append after it.
             ACompactionBeforeARollbacksVoid_LeavesTheNewerCommit, ACompactionBeforeALastWriterWinsVoid_LeavesTheNewerCommit
             (the compaction staged through DatabaseEngine.ChainVoidProbe; each also checks no entry stays isolated),
             TwoRollbacksInReverseOrder_ThenACompaction_KeepTheCommittedRevision, ACompactionOverAHole_LeavesTheLastCommitOnACommit,
-            AConflictHandlerThatThrows_LeavesNoOrphan [VerifiesRule]; mutant
+            AConflictHandlerThatThrows_LeavesNoOrphan, ARollbackWaitingOnAHeldChainLock_ReportsItsHolder_AndVoidsOnceReleased (#1273)
+            [VerifiesRule]; mutant
             ARollbackThatVoidsItsRecordedIndex_LosesTheNewerCommit (`RollbackVoidsRecordedIndexForTest`) [RuleMutant]. Real
             mutations: the count dropped on every void fails the first three; the orphan at its recorded index fails the
             conflict test; the rollback at its recorded index without the lock fails both rollback tests; the compaction
@@ -2265,6 +2270,26 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             staged capture. Mutations killed: the write's release, the raw read and the read accessor never ending their holds, no reset at the
             crash open. LockWordRecoveryTests [VerifiesRule] — the reset clears a held root and leaves an unnamed data chunk's bytes at the lock's
             offset untouched, in both layouts; with the root check removed both fail
+
+### PS-21: A segment's grow holds none of its new data pages for the unit of work that grew it `[fatal]`
+  invariant under a change set the checkpoint drains (ChangeSet.DrainedByCheckpoint: a unit of work's shared set, and every rented one — a
+            transaction's own, a fence chunk's), a grow's data pages are recorded owed a write (MarkPageModified) and take no mark: the checkpoint
+            writes them, and they may leave the cache before the unit of work ends. A page that then receives data is marked by the write that puts
+            it there. The new map pages and a Create's root keep the change set: they are the directory, few, and the grow publishes through them
+  invariant a change set that writes its own pages (SaveChanges: bootstrap, schema evolution, a standalone segment) marks the grow's data pages as
+            before — nothing else writes them; a drained set is never saved (asserted)
+  invariant a grow's data page holds nothing the commit depends on before it is written to: cleared in full, its header and its forward link (PS-14);
+            a crash before the checkpoint writes it is repaired forward from the directory (#1296)
+  never mark a grow's data pages in the caller's ChangeSet: a segment grows by doubling, so a grow can be larger than the cache's free room, and its
+        marks hold every slot until the change set ends — which it cannot, if the commit needs a slot to end
+  scope: LogicalSegment.CreateOrGrow, LogicalSegment.InitDataPages, ChunkBasedSegment.GrowChunkCapacity, ChangeSet.DrainedByCheckpoint,
+         PagedMMF.RentChangeSet, DatabaseEngine.CreateUnitOfWork
+  on_violation: an EntityMap past half an 8 MiB cache grew inside a spawn commit's FinalizeSpawns with 1 022 of 1 024 slots marked, and the commit
+                timed out on back-pressure after its partial publish — a fail-stop (AP-03). At 64 MiB the market's audit map reaches the same size.
+                Dropping the marks under every change set lost a standalone segment's grow: SaveChanges wrote 11 of its 8 500 pages
+  verified: ClusterVisibilitySummaryIntegrityTests.TheAudit_OfAnEntityMapLargerThanTheCache_Completes [VerifiesRule] — 240 000 spawns in commits of
+            1 000 grow an EntityMap past an 8 MiB cache. Mutation killed: the grow's data pages marked in the ChangeSet again (the spawns stop).
+            SegmentGrowthTests — a grow under a saved change set is read back whole
 
 ---
 
