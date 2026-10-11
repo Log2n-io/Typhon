@@ -56,9 +56,10 @@ set -e
 # "is not green" -- a parse error, an undeclared constant, an OOM, a failed jar download -- used to satisfy
 # --expect-violation and exit 0. That let a genuineness check pass without the invariant ever being evaluated.
 # Require positive evidence that TLC actually evaluated an invariant and found it violated.
+# A deadlock is a violated property too: the liveness half of a protocol (CommitStamp's reservation order) is TLC's deadlock check.
 if grep -q "No error has been found" "$out"; then
   result="GREEN"
-elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Action property .* is violated|Error: Invariant)" "$out"; then
+elif grep -qE "(Invariant .* is violated|Temporal property .* is violated|Action property .* is violated|Error: Invariant|Error: Deadlock reached)" "$out"; then
   result="VIOLATION"
 else
   result="ERROR"

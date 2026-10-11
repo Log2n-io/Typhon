@@ -3,13 +3,14 @@
 Formal models of Typhon's durability protocols, model-checked with **TLC**. Each spec proves a set of `rules/`
 invariants exhaustively (every reachable state within small bounds), complementing the empirical crash tests
 (`test/.../Durability/CrashRecovery/`) which sample specific interleavings. Decision **D8** (see
-`../../design/Durability/MinimalWal/` README) fixes exactly three specs:
+`../../design/Durability/MinimalWal/` README) fixed the first three; `CommitStamp` (S4) models MVCC visibility:
 
 | Spec | Models | Proves | Phase | Status |
 |------|--------|--------|-------|--------|
 | **`CheckpointProtocol.tla` (S1)** | barrier / capture / skip / flush2 / coverage gate / recycle / crash anywhere (DC/ACW/seqlock abstracted) | CK-01/02/04 + `NoLostPage` (CK-03 ∘ CK-04) | P0.7 | ✅ TLC green |
 | **`CommitRecovery.tla` (S2)** | append (markers) / publish / drain / checkpoint / torn-tail crash / recovery `Run()` incl. crash-during-recovery + re-run | LOG-04/05, AP-01/02/12, end-state ≡ committed prefix | P1.4 | ✅ TLC green |
 | **`CommittedDiscipline.tla` (S3)** | Committed-mode (Variant A) stage / claim / floor / frame publish / publish / withdraw vs a checkpoint cycle (barrier / floor read / capture / write / CheckpointLSN := the capped barrier) / crash anywhere incl. crash-during-recovery. One slot with serialized writers, or two slots written concurrently (`-twoslots`) | CM-01 (HEAD + durable never hold uncommitted bytes), AP-01, CK-13, CM-03 / acknowledged ⇒ durable | P2 | ✅ TLC green (mutant `BreakStaging` = Variant B violates `CM01_HeadCommitted`; each of the six `-mutant-<name>` CK-13 mutants violates `CK13_BelowUnpublished` or `AckDurable`) |
+| **`CommitStamp.tla` (S4)** | MVCC option C, family 1: writers reserve a commit card, stage flagged revisions (a handler path keeping its chain locks), APPEND (may fail), register / draw the stamp / store it, publish, release; lock-free readers resolve flagged revisions through the card (Owner, Stamp, Owner) and revalidate; the GC keyed by stamp | VIS-01/03/04/05/06: `SnapshotRead`, `RepeatableRead`, `AtomicVisibility`, `Causality`, `NoDirtyRead`, `GCSafety`, and no deadlock | Plan 06 step 3.0 | ✅ TLC green: the gate's bound (1 reader, 171 k states), `-twoslots` (two committers in flight, 4.2 M), `-full` (the plan's 2 × 2 × 2 + GC, 88.6 M, ~10 min, skipped by the gate); each of the 8 `-mutant-<name>` violates |
 
 ## Running TLC
 
@@ -39,6 +40,10 @@ Java 11+.
   proves nothing). Further mutants are `<Spec>-mutant-<name>.cfg`, run as `run-tlc.sh <Spec> mutant-<name> --expect-violation`.
   Spec names carry no `-`, because the CI loop splits a cfg name at the first one, and a green model's `<name>` must not start
   with `mutant`.
+- **Exhaustive bounds past the gate's budget** go in `<Spec>-full.cfg` (or `<Spec>-<name>-full.cfg`): green models the CI loop skips,
+  run locally after any change to the spec or its protocol. The gate keeps a smaller green bound of the same spec.
+- **A deadlock is a violation.** `run-tlc.sh` counts TLC's "Deadlock reached" as one, for a protocol whose liveness is that no state is
+  stuck (CommitStamp's reservation order); a green model must then end in an explicit terminal stutter.
 - **Abstraction is explicit.** What is intentionally NOT modeled (e.g. seqlock parity, physical segments, page-cache
   eviction, bulk-load) is stated in the header, so the proof's scope is honest.
 
