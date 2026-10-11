@@ -1490,6 +1490,153 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     }
 
     /// <summary>
+    /// A collection buffer a revision cleanup released is held as its content chunk is (CK-17, #1300). Freed at once, a transaction took it while the
+    /// data file could still name the dropped revision: a crash then left that revision on disk, and the scrub that dropped it released the buffer under
+    /// its new owner.
+    /// </summary>
+    [TestCase(false, TestName = "ACollectionBufferACleanupReleased_IsNotReusedBeforeACheckpoint")]
+    [TestCase(true, TestName = "ACollectionBufferACleanupReleased_IsNotReusedBeforeACheckpoint_InASegmentTheOpenLoaded")]
+    [VerifiesRule("CK-17")]
+    [CancelAfter(30_000)]
+    public void ACollectionBufferACleanupReleased_IsNotReusedBeforeACheckpoint(bool reopened)
+    {
+        var scope = ServiceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CcVersioned>();
+        dbe.InitializeArchetypes();
+        EntityId x;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var v = new CcVersioned { Seq = 1 };
+            using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+            {
+                cca.Add(1);
+                cca.Add(2);
+            }
+
+            x = tx.Spawn<CcVersionedArch>(CcVersionedArch.C.Set(in v));
+            Assert.That(tx.Commit(), Is.True, "the spawn");
+        }
+
+        if (reopened)
+        {
+            scope.Dispose();
+            scope = ServiceProvider.CreateScope();
+            dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CcVersioned>();
+            dbe.InitializeArchetypes();
+        }
+
+        using var owned = scope;
+
+        int released;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            released = tx.Open(x).Read(CcVersionedArch.C).Items._bufferId;
+        }
+
+        // The update clones the buffer (copy on write): the revision it replaces is the old buffer's only owner, and its cleanup releases it.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var h = tx.OpenMut(x);
+            var v = h.Read(CcVersionedArch.C);
+            using (var cca = h.CreateComponentCollectionAccessor(CcVersionedArch.C, ref v, ref v.Items))
+            {
+                cca.Add(3);
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the update");
+        }
+
+        dbe.FlushDeferredCleanups();
+        dbe.FlushDeferredCleanups();
+        var segment = dbe.GetComponentTable<CcVersioned>().CollectionFields[0].Vsbs.Segment;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var current = tx.Open(x).Read(CcVersionedArch.C).Items;
+            var old = current;
+            old._bufferId = released;
+            Assert.That((current._bufferId != released, tx.GetComponentCollectionRefCounter(ref old)), Is.EqualTo((true, 0)),
+                "premise: the update cloned the buffer, and the cleanup released the old one");
+        }
+
+        Assert.That(segment.IsChunkHeld(released), Is.True, "the released buffer, held until a checkpoint");
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var v = new CcVersioned { Seq = 2 };
+            using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+            {
+                cca.Add(4);
+            }
+
+            tx.Spawn<CcVersionedArch>(CcVersionedArch.C.Set(in v));
+            Assert.That(v.Items._bufferId, Is.Not.EqualTo(released), "a new collection, given another buffer");
+            Assert.That(tx.Commit(), Is.True, "the second spawn");
+        }
+
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        dbe.MMF.DrainReleases();
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            Assert.That((segment.IsChunkHeld(released), segment.IsChunkAllocated(released)), Is.EqualTo((false, false)),
+                "released once a checkpoint covered it");
+        }
+    }
+
+    /// <summary>
+    /// A torn index segment the crash open replaces gives up its directory's CK-05 pair (#1302). Left registered, the abandoned directory's twin stayed
+    /// owned for good, and its primary, reused as a plain page, was routed through a pair that no longer existed. Staged: the index segment's chain cut
+    /// short a page before its directory ends, on a page torn by the crash — the completion refuses a torn page of the segment's, so the load replaces it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-05")]
+    [CancelAfter(30_000)]
+    public void ATornSegmentReplacedAtACrashOpen_GivesUpItsDirectoryPair()
+    {
+        const int items = 6_000;
+        string bundle;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            for (var no = 0; no < items;)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 500; i++, no++)
+                {
+                    tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no }));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            bundle = dbe.MMF.BundleDirectory;
+            dbe.SimulateHardCrash();
+        }
+
+        var damage = Integrity.DamageKit.ShortenForwardChain(bundle, out var root, StorageSegmentKind.Index);
+        var data = Integrity.DamageKit.DataPath(bundle);
+        ChaosPageIO.DamagePageOnDisk(data, (int)(damage.Ranges[0].Offset / PagedMMF.PageSize), PageDamageType.TornPage, PagedMMF.PageSize);
+        var page = new byte[PagedMMF.PageSize];
+        using (var f = System.IO.File.OpenRead(data))
+        {
+            f.Position = (long)root * PagedMMF.PageSize;
+            f.ReadExactly(page);
+        }
+
+        var twin = System.Runtime.InteropServices.MemoryMarshal.Read<LogicalSegmentHeader>(page.AsSpan(LogicalSegmentHeader.Offset)).TwinPageIndex;
+        Assert.That(twin, Is.GreaterThan(0), "premise: the index segment's root is a paired directory page");
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.MMF.ChunkSegmentsReplacedAsTorn, Is.GreaterThanOrEqualTo(1), "premise: the crash open replaced the torn index segment");
+        Assert.That((reopened.MMF.DirectoryTwinOf(root), reopened.MMF.IsPageAllocated(twin)), Is.EqualTo((0, false)),
+            "the abandoned directory: its pair dropped, its twin given back by the re-derive");
+        using var read = reopened.CreateReadOnlyTransaction();
+        Assert.That(read.Query<MkItemArch>().WhereField<MkItem>(x => x.LastTradeSeq < 0).Count(), Is.EqualTo(items), "the index, rebuilt whole");
+    }
+
+    /// <summary>
     /// The same torn grow, the old tail's page on the disk torn as well: its first sector — the header, the incarnation, the link to nothing — as of the
     /// checkpoint, the rest not. The completion took the suspect page for one the grow had not written and initialized it empty, clearing its suspicion:
     /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn disagreeing page that is this segment's is not

@@ -641,7 +641,9 @@ CK-08 (flush-only cycles) are later increments.
          both-slots walk before every `Load`, registers `_pairState`), `MapReadOffset` (directory page → `_pairState.CurrentSlot`),
          `DeleteSegment` (free every directory page's twin + the map-ext pages AND clear its `_pairState` entry — else the twin
          leaks and a stale pair mis-routes a cold read after the primary is reallocated), `ReleaseUnpublishedPages` (the same for the
-         pages a failed grow allocated, PS-11). Both drop pairs under `_pairLock`, which `PersistProtectedPage` re-checks the pair under, so
+         pages a failed grow allocated, PS-11), `TryLoadChunkBasedSegment` (a segment a load abandons — the crash path replacing a torn one —
+         drops the pairs its load registered, `DropDirectoryPairs`: else its twins stayed owned for good and a reused primary kept the paired
+         routing, #1302). All drop pairs under `_pairLock`, which `PersistProtectedPage` re-checks the pair under, so
          a checkpoint persisting a page being freed neither throws nor re-adds its pair. Twin discovery survives a torn primary
          because the `IsLogicalSegment` flag + `TwinPageIndex` are immutable and in the first 4 KiB sector.
   on_violation: a torn write to the only persisted copy → database unopenable / segment unreadable (STO-4); a leaked/stale pair
@@ -649,7 +651,8 @@ CK-08 (flush-only cycles) are later increments.
   verified: MetaPairTests (meta) + DirectoryPairTests (directory): AlternatesSlots_GenerationMonotonic,
             TornCurrentSlot_ReopenSelectsSibling, BothSlotsCorrupt_OpenFailsLoudly, MultiExtensionSegment_RoundTripsReopen,
             RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10),
-            ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot (#1206) + falsification.
+            ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot (#1206) + falsification;
+            TornCaptureRecoveryTests.ATornSegmentReplacedAtACrashOpen_GivesUpItsDirectoryPair [VerifiesRule] (#1302).
             MetaPairStructuralFlushTests — the SOLE-WRITER property: after a full engine lifecycle both slots verify,
             their generations are consecutive, and shutdown writes strictly alternate. That is the property the
             violation below broke, and no earlier test covered it: every one above checks the pair's READ selection or
@@ -746,16 +749,22 @@ CK-08 (flush-only cycles) are later increments.
             owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
             when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305); a partial entity map
             on disk loses preserved EnabledBits (#1306)
+  invariant a crash open fails once its checkpointer has latched a fatal failure (CK-06): at the next batch point, and at its seal whether latched
+            before it or by the seal's own cycle (DurabilityException, TyphonErrorCode.RecoveryCheckpointFailed). It could neither write what the
+            recovery owes nor seal it, and an open that succeeded handed the application an engine that never checkpointed again. A seal cycle that
+            only times out stays soft: the next open replays the window. The failed open closes as a crash (CS-04) — CheckpointLSN never moved
   requires: CK-04, AP-12
   scope: CheckpointManager.RunFlushOnlyCycle, CheckpointManager.RunCheckpointCycle, CheckpointManager.RecoveryInProgress,
-         DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.SealRecovery, RecoveryApplier.BatchPoint, RecoveryDriver.Run
+         DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.SealRecovery, DatabaseEngine.ThrowIfRecoveryCheckpointerFailed, RecoveryApplier.BatchPoint,
+         RecoveryDriver.Run
   on_violation: recovery either deadlocks on cache back-pressure (no valve) — the crash open of a 0.4 GiB market over a 64 MiB cache timed out
                 with every slot epoch-held (#1183) — or destroys its own re-runnability: a full cycle mid-recovery advances CheckpointLSN over a
                 half-recovered file, and a second crash replays nothing over it
   verified: CrashDuringRecoveryTests [VerifiesRule] — a cycle forced inside the replay is flush-only and leaves CheckpointLSN alone (a full one
             advances it); the HEAD rebuild's clusters are owed when the replay starts; a recovery stopped at a batch point of any pass, or two in a
-            row, converges on the next open; MarketHardeningTests at 64 MiB (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then
-            coherent, every durable transfer present
+            row, converges on the next open; a fatal cycle failure latched inside the replay fails the open at the next batch point, before the
+            index pass, and a seal cycle failing fatally fails it too, each followed by an open that recovers whole; MarketHardeningTests at 64 MiB
+            (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then coherent, every durable transfer present
 
 ### CK-09: Occupancy bitmap is derived — re-derived on crash `[fatal]` `[silent]`
   invariant the occupancy bitmap is a DERIVED structure: on the crash path it is never trusted, but rebuilt WHOLESALE from the
@@ -1032,11 +1041,14 @@ CK-08 (flush-only cycles) are later increments.
             again only after a release: a trigger, never a cap — and not during a crash open's recovery, whose cycle is its seal: one mid-scrub
             would write a half-scrubbed file. The hold is never persisted: after a crash a held chunk is still named by the disk's stale pages,
             which the reservation takes, or by nothing, which the orphan sweep frees
-  invariant OPEN (#1300): a dropped revision's collection buffers are released at once, outside the quarantine
+  invariant a component-collection segment holds its frees the same way (DatabaseEngine.GetComponentCollectionSegment,
+            DatabaseEngine.PoolLoadedCollectionSegment): a buffer is named by content chunks the data file's chains name. Freed at once, a
+            transaction took it while the disk could still name the revision that dropped it, and a crash's scrub of that revision released it
+            under its new owner (#1300)
   scope: FreeQuarantine, ChunkBasedSegment.FreeChunk, ChunkBasedSegment.QuarantineFrees, ChunkBasedSegment.ClaimOnPage, ChunkBasedSegment.IsChunkLive,
          PagedMMF.SealQuarantinedFrees, PagedMMF.ReleaseQuarantinedFrees, PagedMMF.NoteQuarantined, PagedMMF.EndFreeQuarantine,
          CheckpointManager.RunCheckpointCycleCore, ComponentTable.QuarantineChainFrees, DatabaseEngine.SealRecovery,
-         DeferredCleanupManager.FreeContentChunk
+         DatabaseEngine.GetComponentCollectionSegment, DatabaseEngine.PoolLoadedCollectionSegment, DeferredCleanupManager.FreeContentChunk
   on_violation: a chunk free is not logged, and the data file holds each page as of its last capture: a chain's root as of before its compaction named
                 an overflow chunk another chain had taken, as of after. The market recovered desk traders holding another trader's record, and credits
                 off, in 2 cycles of 10 (#1251)
@@ -1045,7 +1057,8 @@ CK-08 (flush-only cycles) are later increments.
             the budget asks the checkpoint manager for a cycle, the release worker frees a held chunk after covered cycles (without its signal,
             nothing does); TornCaptureRecoveryTests [VerifiesRule] — an overflow chunk freed by a compaction is
             not reused before a checkpoint (with DatabaseEngine.DisableFreeQuarantineForTest the next growth takes it and the first item recovers an
-            old value), recovery's frees are held until its seal covered them, a free held at a clean close is freed in the file
+            old value), recovery's frees are held until its seal covered them, a free held at a clean close is freed in the file, a collection buffer
+            a cleanup released is not reused before a checkpoint, in a segment created or loaded by the open
 
 ---
 

@@ -96,7 +96,7 @@ internal sealed class VsbsReferenceCountTests : TestBase<VsbsReferenceCountTests
             _vsbs.DeleteBuffer(buffer, ref a);
             return 0;
         });
-        Assert.That(_vsbs.Segment.IsChunkAllocated(buffer), Is.False, "the last reference's delete frees the root");
+        Assert.That(_vsbs.Segment.IsChunkLive(buffer), Is.False, "the last reference's delete frees the root");
     }
 
     /// <summary>

@@ -756,11 +756,15 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             destroy's frees do not wait for a transaction that will never come. A chain root still allocated reads back as a live entity when its
             archetype's map reopens empty and is rebuilt from the chain heads (#1231). What the drain cannot finish — an entry whose lock was busy,
             an entity still put off — stays allocated, a leak; a drain that throws is logged and the close goes on
+  invariant chunks unlinked from every chain are never left for nothing to find (#1268): a close that leaves chunk frees queued — a transaction
+            still alive — or whose drain throws writes no clean-shutdown marker, and nor does a session whose cleanup threw holding frees
+            (DeferredCleanupManager.FreesLost): the next open is a crash open, whose orphan sweep frees them. A cleanup batch that throws still
+            queues the frees of the entities it compacted before (DeferredCleanupManager.ProcessDeferredCleanups)
   scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
-         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk
+         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups
   on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
                 spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
                 MarketHardeningTests' consume-and-craft storm: an item's entity read another item's data within a few thousand operations, and 100
@@ -778,7 +782,8 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
             overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
             a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
-            shape, found by the gate)
+            shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are back after the reopen,
+            a cleanup batch that fails midway queues the frees it collected before
 
 ## Module: VIEWLIFE — What a long-lived view may retain
 

@@ -15,6 +15,15 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
     private const int Traders = 500;
     private const int Transfers = Traders * 6;
 
+    // A WAL on disk, as an engine always has: a close that writes no clean-shutdown marker makes the next open a crash open only when it finds one.
+    protected override IWalFileIO CreateWalFileIO() => new WalFileIO();
+
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Wal.WalDirectory = null;
+    }
+
     private static void Register(DatabaseEngine dbe)
     {
         dbe.RegisterComponentFromAccessor<MkTrader>();
@@ -130,11 +139,11 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
 
     /// <summary>
     /// #1268: a close that finds a transaction still alive skips its cleanup drain, and the revision chunks a trim had unlinked and queued for freeing
-    /// are lost: still allocated, in no chain, so no later cleanup can find them, and a clean open does not sweep. Only a crash recovery's orphan sweep
-    /// gives them back.
+    /// were lost: still allocated, in no chain, so no later cleanup could find them, and a clean open does not sweep. The close now writes no
+    /// clean-shutdown marker, and the next open's orphan sweep gives them back.
     /// </summary>
     [Test]
-    [Category("Quarantine")]   // #1268: red until a close that skips its drain no longer loses the queued frees
+    [VerifiesRule("REAP-02")]
     [CancelAfter(10_000)]
     public void ChunksQueuedForFreeingAtACloseWithALiveTransaction_AreNotLost()
     {
@@ -170,5 +179,40 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
             Assert.That(TraderChunks(dbe), Is.LessThanOrEqualTo(traderBaseline + 2), "trader revision chunks lost at the close");
             Assert.That(WalletChunks(dbe), Is.LessThanOrEqualTo(walletBaseline + 2), "wallet revision chunks lost at the close");
         }
+    }
+
+    /// <summary>
+    /// #1268: a cleanup batch that throws midway — a back-pressure timeout on a small cache — dropped the frees it had collected from the entities it
+    /// compacted before: their chains named those chunks no more, and nothing else did. They are queued even so.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [CancelAfter(10_000)]
+    public void AFailedCleanupBatch_QueuesTheFreesItCollectedBefore()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        var rng = new Random(1);
+        using (dbe.CreateReadOnlyTransaction())
+        {
+            for (var k = 0; k < Transfers; k++)
+            {
+                Transfer(dbe, ids, rng);
+            }
+        }
+
+        var queuedBefore = dbe.DeferredCleanupManager.ChunkFreeQueueSize;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = i =>
+        {
+            if (i == Traders / 4)
+            {
+                throw new InvalidOperationException("staged: the cleanup batch fails midway");
+            }
+        };
+        Assert.Throws<InvalidOperationException>(() => dbe.FlushDeferredCleanups(), "premise: the batch failed");
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        Assert.That(dbe.DeferredCleanupManager.ChunkFreeQueueSize - queuedBefore, Is.GreaterThan(Traders / 8),
+            "the frees of the entities compacted before the throw, queued");
     }
 }

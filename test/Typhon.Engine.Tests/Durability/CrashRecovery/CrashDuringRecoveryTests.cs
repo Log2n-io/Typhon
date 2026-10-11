@@ -353,6 +353,81 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         Assert.That(owed, Is.True, "a cluster the HEAD rebuild wrote, owed when the replay starts");
     }
 
+    /// <summary>
+    /// A checkpointer that latches a fatal failure during a crash open fails the open (CK-08): the open succeeded unsealed, on an engine that never
+    /// checkpointed again. Latched inside the replay, the open fails at the next batch point — before the index pass — and the next open recovers whole.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-08")]
+    [CancelAfter(60_000)]
+    public void AFatalCheckpointerDuringRecovery_FailsTheOpen_AndTheNextOpenRecovers()
+    {
+        var expected = BuildAndCrash();
+        var injected = new InvalidOperationException("simulated fatal checkpoint fault");
+        var indexBatchPoints = 0;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            var latched = false;
+            DatabaseEngine.RecoveryBatchPointProbe = (p, _) =>
+            {
+                if (p == DatabaseEngine.RecoveryPass.Indexes)
+                {
+                    indexBatchPoints++;
+                }
+
+                if (p == DatabaseEngine.RecoveryPass.Replay && !latched)
+                {
+                    latched = true;
+                    dbe.CheckpointManager.CycleFaultInjector = () => throw injected;
+                    dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn, Typhon.Profiler.CheckpointReason.Forced);
+                    dbe.CheckpointManager.CycleFaultInjector = null;
+                    Assert.That(dbe.CheckpointManager.HasFatalError, Is.True, "premise: the cycle latched a fatal failure");
+                }
+            };
+            var e = Assert.Throws<DurabilityException>(() => RegisterMarket(dbe), "the open whose checkpointer failed");
+            Assert.That((e.ErrorCode, e.InnerException), Is.EqualTo((TyphonErrorCode.RecoveryCheckpointFailed, (Exception)injected)));
+        }
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        Assert.That(indexBatchPoints, Is.Zero, "the open failed at the next batch point, not at its seal");
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the failed open closed as a crash");
+        AssertItems(reopened, expected);
+    }
+
+    /// <summary>
+    /// The seal's own cycle failing fatally fails the open too (CK-08): a timeout leaves the recovery to the next open; a fatal failure fails it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-08")]
+    [CancelAfter(60_000)]
+    public void AFatalSealCycle_FailsTheOpen_AndTheNextOpenRecovers()
+    {
+        var expected = BuildAndCrash();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            DatabaseEngine.RecoveryBatchPointProbe = (_, _) => dbe.CheckpointManager.CycleFaultInjector ??= () =>
+            {
+                // The flush-only cycles pass; the seal's, the first full one, fails.
+                if (!dbe.CheckpointManager.RecoveryInProgress)
+                {
+                    throw new InvalidOperationException("simulated fatal seal cycle");
+                }
+            };
+            var e = Assert.Throws<DurabilityException>(() => RegisterMarket(dbe), "the open whose seal cycle failed");
+            Assert.That(e.ErrorCode, Is.EqualTo(TyphonErrorCode.RecoveryCheckpointFailed));
+        }
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the failed open closed as a crash");
+        AssertItems(reopened, expected);
+    }
+
     /// <summary>The same scenario recovered once, without a stop: the control that every assertion above holds of a recovery that ran to its end.</summary>
     [Test]
     [CancelAfter(60_000)]

@@ -84,6 +84,15 @@ internal class DeferredCleanupManager
     /// <summary>Total content chunks freed via the deferred path.</summary>
     public long ChunkFreedTotal { get; private set; }
 
+    /// <summary>
+    /// Set once a cleanup threw where chunks it had taken off a chain, or off the free queue, may be left allocated in no chain (#1268): no later cleanup
+    /// finds them, since a cleanup walks chains. The close then writes no clean-shutdown marker, and the next open's orphan sweep frees them.
+    /// </summary>
+    internal volatile bool FreesLost;
+
+    /// <summary>Invoked before each entity of a cleanup batch is compacted, with its index in the batch. Test seam: a throw stages a failing batch.</summary>
+    internal Action<int> EntityCleanupProbeForTest { get; set; }
+
     public DeferredCleanupManager(DeferredCleanupOptions options, ILogger log = null)
     {
         _options = options;
@@ -295,10 +304,20 @@ internal class DeferredCleanupManager
         if (chunksToFree != null)
         {
             using var chunkFreeGuard = EpochGuard.Enter(dbe.EpochManager);
-            foreach (var entry in chunksToFree)
+            try
             {
-                FreeDeferred(entry);
+                foreach (var entry in chunksToFree)
+                {
+                    FreeDeferred(entry);
+                }
             }
+            catch
+            {
+                // Off the queue already: the rest stay allocated in no chain (#1268).
+                FreesLost = true;
+                throw;
+            }
+
             ChunkFreedTotal += chunksToFree.Count;
         }
 
@@ -306,57 +325,63 @@ internal class DeferredCleanupManager
         var cleanedCount = 0;
         List<DeferredChunkFreeEntry> collectedChunkFrees = null;
 
-        if (toCleanup != null)
+        try
         {
-            collectedChunkFrees = new List<DeferredChunkFreeEntry>(toCleanup.Count);
-            using var entityGuard = EpochGuard.Enter(dbe.EpochManager);
-            var cleanupSpan = CollectionsMarshal.AsSpan(toCleanup);
+            if (toCleanup != null)
+            {
+                collectedChunkFrees = new List<DeferredChunkFreeEntry>(toCleanup.Count);
+                using var entityGuard = EpochGuard.Enter(dbe.EpochManager);
+                var cleanupSpan = CollectionsMarshal.AsSpan(toCleanup);
 
-            // Fast path: if all entries share the same table (common: BulkUpdate uses one component type), single batch
-            var allSameTable = true;
-            for (var i = 1; i < cleanupSpan.Length; i++)
-            {
-                if (!ReferenceEquals(cleanupSpan[i].Table, cleanupSpan[0].Table))
+                // Fast path: if all entries share the same table (common: BulkUpdate uses one component type), single batch
+                var allSameTable = true;
+                for (var i = 1; i < cleanupSpan.Length; i++)
                 {
-                    allSameTable = false;
-                    break;
-                }
-            }
-
-            if (allSameTable)
-            {
-                CleanupEntityRevisionsBatched(cleanupSpan, nextMinTSN, changeSet, collectedChunkFrees, ref cleanedCount);
-            }
-            else
-            {
-                // Multi-table path: sort by table identity hash to group, then process contiguous groups
-                cleanupSpan.Sort((a, b) => RuntimeHelpers.GetHashCode(a.Table).CompareTo(RuntimeHelpers.GetHashCode(b.Table)));
-                var groupStart = 0;
-                while (groupStart < cleanupSpan.Length)
-                {
-                    var groupTable = cleanupSpan[groupStart].Table;
-                    var groupEnd = groupStart + 1;
-                    while (groupEnd < cleanupSpan.Length && ReferenceEquals(cleanupSpan[groupEnd].Table, groupTable))
+                    if (!ReferenceEquals(cleanupSpan[i].Table, cleanupSpan[0].Table))
                     {
-                        groupEnd++;
+                        allSameTable = false;
+                        break;
                     }
-                    CleanupEntityRevisionsBatched(cleanupSpan.Slice(groupStart, groupEnd - groupStart), nextMinTSN, changeSet,
-                        collectedChunkFrees, ref cleanedCount);
-                    groupStart = groupEnd;
+                }
+
+                if (allSameTable)
+                {
+                    CleanupEntityRevisionsBatched(cleanupSpan, nextMinTSN, changeSet, collectedChunkFrees, ref cleanedCount);
+                }
+                else
+                {
+                    // Multi-table path: sort by table identity hash to group, then process contiguous groups
+                    cleanupSpan.Sort((a, b) => RuntimeHelpers.GetHashCode(a.Table).CompareTo(RuntimeHelpers.GetHashCode(b.Table)));
+                    var groupStart = 0;
+                    while (groupStart < cleanupSpan.Length)
+                    {
+                        var groupTable = cleanupSpan[groupStart].Table;
+                        var groupEnd = groupStart + 1;
+                        while (groupEnd < cleanupSpan.Length && ReferenceEquals(cleanupSpan[groupEnd].Table, groupTable))
+                        {
+                            groupEnd++;
+                        }
+                        CleanupEntityRevisionsBatched(cleanupSpan.Slice(groupStart, groupEnd - groupStart), nextMinTSN, changeSet,
+                            collectedChunkFrees, ref cleanedCount);
+                        groupStart = groupEnd;
+                    }
                 }
             }
         }
-
-        if (cleanedCount > 0)
+        finally
         {
-            ProcessedTotal += cleanedCount;
-        }
+            if (cleanedCount > 0)
+            {
+                ProcessedTotal += cleanedCount;
+            }
 
-        // Entity cleanup may have produced new deferred chunk frees — enqueue them with the current safeAfterTSN
-        if (collectedChunkFrees is { Count: > 0 })
-        {
-            var safeAfterTSN = dbe.TransactionChain.NextFreeId;
-            EnqueueChunkFrees(safeAfterTSN, collectedChunkFrees);
+            // Entity cleanup may have produced new deferred chunk frees — enqueue them with the current safeAfterTSN. Also when a batch threw: the entities
+            // it compacted before named their chunks in no chain any more, and dropped with the list they were lost for good (#1268).
+            if (collectedChunkFrees is { Count: > 0 })
+            {
+                var safeAfterTSN = dbe.TransactionChain.NextFreeId;
+                EnqueueChunkFrees(safeAfterTSN, collectedChunkFrees);
+            }
         }
 
         return cleanedCount;
@@ -497,54 +522,69 @@ internal class DeferredCleanupManager
         var compRevTableAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
         var compContentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
 
-        for (var i = 0; i < entries.Length; i++)
+        try
         {
-            ref var entry = ref entries[i];
-            Debug.Assert(ReferenceEquals(entry.Table, table));
-
-            var firstChunkId = entry.FirstChunkId;
-
-            // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
-            // all: compacting it would rearrange someone else's revisions (REAP-02).
-            if (!table.CompRevTableSegment.IsChunkLive(firstChunkId)
-                || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
+            for (var i = 0; i < entries.Length; i++)
             {
-                Interlocked.Increment(ref ForeignChainsSkipped);
-                continue;
-            }
+                EntityCleanupProbeForTest?.Invoke(i);
+                ref var entry = ref entries[i];
+                Debug.Assert(ReferenceEquals(entry.Table, table));
 
-            // Acquire exclusive lock — cleanup restructures the chain, must be serialized with AddCompRev.
-            // Use TryEnter: if contended, skip this entry — it will be retried on the next cleanup pass.
-            ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
-            var ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
-            if (!header.Control.TryEnterExclusiveAccess())
-            {
-                continue;
-            }
+                var firstChunkId = entry.FirstChunkId;
 
-            try
-            {
-                _ = ComponentRevisionManager.CleanUpUnusedEntriesCore(
-                    table, firstChunkId, nextMinTSN, ref compRevTableAccessor, ref compContentAccessor, collectedChunkFrees);
-            }
-            finally
-            {
-                header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
-                header.Control.ExitExclusiveAccess();
-                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
-            }
+                // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
+                // all: compacting it would rearrange someone else's revisions (REAP-02).
+                if (!table.CompRevTableSegment.IsChunkLive(firstChunkId)
+                    || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
+                {
+                    Interlocked.Increment(ref ForeignChainsSkipped);
+                    continue;
+                }
 
-            // A lone tombstone is not freed here, though nothing can read it any more: only an ECS destroy writes tombstones, and the destroyed entity's
-            // cleanup frees the chain once the entity is past every snapshot (ReleaseDestroyedEntityChain). Both used to free it, and between the two
-            // frees a spawn on another thread could take the chunk: the second free then took a LIVE chain, and its commit found its own revision gone
-            // (AP-05). One owner, the one that also unmaps the entity.
-            compRevTableAccessor.DirtyChunk(firstChunkId);
+                // Acquire exclusive lock — cleanup restructures the chain, must be serialized with AddCompRev.
+                // Use TryEnter: if contended, skip this entry — it will be retried on the next cleanup pass.
+                ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+                var ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
+                if (!header.Control.TryEnterExclusiveAccess())
+                {
+                    continue;
+                }
 
-            cleanedCount++;
+                var collectedBefore = collectedChunkFrees?.Count ?? 0;
+                try
+                {
+                    _ = ComponentRevisionManager.CleanUpUnusedEntriesCore(
+                        table, firstChunkId, nextMinTSN, ref compRevTableAccessor, ref compContentAccessor, collectedChunkFrees);
+                }
+                catch
+                {
+                    // This entity's own frees are dropped: its chain, rewritten at the end of the compaction, may still name them. What it unlinked before the
+                    // throw is lost until the orphan sweep (#1268).
+                    collectedChunkFrees?.RemoveRange(collectedBefore, collectedChunkFrees.Count - collectedBefore);
+                    FreesLost = true;
+                    throw;
+                }
+                finally
+                {
+                    header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+                    header.Control.ExitExclusiveAccess();
+                    ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
+                }
+
+                // A lone tombstone is not freed here, though nothing can read it any more: only an ECS destroy writes tombstones, and the destroyed entity's
+                // cleanup frees the chain once the entity is past every snapshot (ReleaseDestroyedEntityChain). Both used to free it, and between the two
+                // frees a spawn on another thread could take the chunk: the second free then took a LIVE chain, and its commit found its own revision gone
+                // (AP-05). One owner, the one that also unmaps the entity.
+                compRevTableAccessor.DirtyChunk(firstChunkId);
+
+                cleanedCount++;
+            }
         }
-
-        compRevTableAccessor.Dispose();
-        compContentAccessor.Dispose();
+        finally
+        {
+            compRevTableAccessor.Dispose();
+            compContentAccessor.Dispose();
+        }
     }
 
     /// <summary>Revision-GC entries skipped because their chain names another owner, or is no longer allocated. Diagnostic.</summary>

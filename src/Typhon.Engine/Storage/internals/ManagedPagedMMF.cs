@@ -907,12 +907,13 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             return false; // Already registered — caller should fall back to fresh allocation
         }
 
-        ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
+        var directory = ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
         try
         {
             if (!LoadChunkSegment(segment, filePageIndex))
             {
                 dic.TryRemove(filePageIndex, out _);
+                DropDirectoryPairs(directory);
                 return false;
             }
         }
@@ -922,6 +923,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             // all of the segment's pages; CK-03's coverage gate held CheckpointLSN back, so the full WAL window is intact). Discard the partial load
             // and let the caller fresh-allocate + WAL-replay instead of trusting it (#395 / RB-01).
             dic.TryRemove(filePageIndex, out _);
+            DropDirectoryPairs(directory);
             Interlocked.Increment(ref _chunkSegmentsReplacedAsTorn);
             return false;
         }
@@ -1358,10 +1360,28 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// flag + <c>TwinPageIndex</c>) survives a torn primary because it lives in the first 4 KiB sector and never changes
     /// across generations. Both-slots-invalid for any directory page → throws (the segment cannot be loaded).
     /// </summary>
-    internal void ResolveDirectoryPairsForLoad(int rootPageIndex)
+    internal List<int> ResolveDirectoryPairsForLoad(int rootPageIndex) => ResolveDirectoryPairs(rootPageIndex);
+
+    /// <summary>
+    /// Drops the CK-05 pair state of a segment's directory pages that a load abandoned (#1302). Left registered, the abandoned segment's twins stayed
+    /// owned for good (the owned-page census claims every registered twin), and a primary later reused as a plain page kept the paired routing: its
+    /// writes went to the alternate slot of a pair that no longer existed, and the next open read the other one. The pages themselves are given back by
+    /// the crash open's occupancy re-derive (CK-09), which no longer finds them owned. Under <see cref="_pairLock"/>, as
+    /// <see cref="PersistProtectedPage"/> re-checks the pair under it.
+    /// </summary>
+    private void DropDirectoryPairs(List<int> directory)
     {
-        ResolveDirectoryPairs(rootPageIndex);
+        lock (_pairLock)
+        {
+            foreach (var page in directory)
+            {
+                _pairState.TryRemove(page, out _);
+            }
+        }
     }
+
+    /// <summary>The twin of a paired directory page, or 0 when <paramref name="primaryPageIndex"/> is not paired. Diagnostic.</summary>
+    internal int DirectoryTwinOf(int primaryPageIndex) => _pairState.TryGetValue(primaryPageIndex, out var dp) ? dp.Twin : 0;
 
     /// <summary>
     /// Resolves the CK-05 pairs of a segment's directory that no load has resolved yet, before a read of it through the cache. Read unresolved, a directory
@@ -1376,8 +1396,9 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
     }
 
-    private void ResolveDirectoryPairs(int rootPageIndex)
+    private List<int> ResolveDirectoryPairs(int rootPageIndex)
     {
+        var resolved = new List<int>(1);
         Span<byte> bufPrimary = new byte[PageSize];
         Span<byte> bufTwin = new byte[PageSize];
 
@@ -1425,6 +1446,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             }
 
             int next;
+            resolved.Add(primary);
             if (tValid && (!pValid || genT > genP))
             {
                 _pairState[primary] = new DirPair(twin, twin, genT);
@@ -1438,6 +1460,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             primary = next;
         }
+
+        return resolved;
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -264,6 +264,10 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
         Assert.That(PageOf(segment, chunks[2]), Is.Not.EqualTo(PageOf(segment, chunks[1])), "premise: the second empty chunk on a page of its own");
         Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
 
+        // The fillers' frees were held (CK-17, #1300): released here, not by the worker racing the eviction below, and their release on disk too.
+        dbe.MMF.DrainReleases();
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the release's checkpoint");
+
         var saved = TimeoutOptions.Current;
         var timeouts = saved.Clone();
         timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(50);

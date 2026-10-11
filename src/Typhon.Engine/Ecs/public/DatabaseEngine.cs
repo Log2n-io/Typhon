@@ -1890,13 +1890,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <remarks>
     /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. Skipped while a transaction is
-    /// still alive — its snapshot may need what is queued.
+    /// still alive — its snapshot may need what is queued. Returns false when chunk frees are left queued: they are in no chain, and only an orphan
+    /// sweep can find them again (#1268).
     /// </remarks>
-    private void DrainCleanupsAtClose()
+    private bool DrainCleanupsAtClose()
     {
-        if (TransactionChain.ActiveCount != 0 || DeferredCleanupManager == null)
+        if (DeferredCleanupManager == null)
         {
-            return;
+            return true;
+        }
+
+        if (TransactionChain.ActiveCount != 0)
+        {
+            var queued = Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize);
+            if (queued == 0)
+            {
+                return true;
+            }
+
+            LogCloseFreesLeftQueued(queued, TransactionChain.ActiveCount);
+            return false;
         }
 
         var changeSet = MMF.CreateChangeSet();
@@ -1924,7 +1937,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             changeSet.ReleaseDirtyMarks();
         }
+
+        return Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize) == 0;
     }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Close: {queued} chunk frees left queued behind {active} live transactions; no clean-shutdown marker, the next open's crash recovery frees them")]
+    private partial void LogCloseFreesLeftQueued(int queued, int active);
 
     // Engine teardown, split out so Dispose() can guarantee owned-provider disposal in a finally (see there). A throw from
     // any step here propagates out of Dispose() after the finally has released the owned container.
@@ -1954,18 +1973,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             // Before the final cycle, so what the drain changes is written with everything else.
+            var freesLostAtClose = false;
             if (!_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete)
             {
-                // A drain that fails leaves what it did not free leaked, as before it existed — never the close itself undone: the final checkpoint and
-                // the clean-shutdown marker still follow.
+                // A drain that fails is never the close itself undone: the final checkpoint follows. What it did not free is in no chain, so no clean-shutdown
+                // marker either: the next open is a crash open, whose orphan sweep frees it (#1268). Marked clean, it stayed allocated in the file for good.
                 try
                 {
-                    DrainCleanupsAtClose();
+                    freesLostAtClose = !DrainCleanupsAtClose();
                 }
                 catch (Exception e)
                 {
                     LogCloseDrainFailed(e);
+                    freesLostAtClose = true;
                 }
+
+                freesLostAtClose |= DeferredCleanupManager?.FreesLost == true;
             }
 
             // The held frees (CK-17), freed before the final cycle so it writes them freed — on this thread, as the checkpoint thread still writes what their pages
@@ -2015,7 +2038,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
                 // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
-                if (!SimulateUncleanShutdownForTest && !freesHeldAtClose)
+                if (!SimulateUncleanShutdownForTest && !freesHeldAtClose && !freesLostAtClose)
                 {
                     // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
                     // flushed it, and the flag and the summary's nonce flip together.
@@ -2634,8 +2657,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // the meta lock, as every writer of the bootstrap must be: the checkpoint thread serializes the dictionary while it advances its LSN.
             var created = segment;
             MMF.MutateBootstrapAndPersist(() => WriteCollectionSegmentMap(stride, created));
+            segment.QuarantineFrees(MMF);
             _componentCollectionSegmentByStride[stride] = segment;
             return segment;
+        }
+    }
+
+    /// <summary>
+    /// Pools a component-collection segment the open loaded. Its frees are held as a Versioned table's chunks are (CK-17, #1300): a buffer is named by
+    /// content chunks the data file's chains name, and one freed at once was taken by a transaction while the disk could still name the revision that
+    /// dropped it — a crash then left that revision on disk, and the scrub that dropped it released the buffer under its new owner.
+    /// </summary>
+    private void PoolLoadedCollectionSegment(int stride, ChunkBasedSegment<PersistentStore> segment)
+    {
+        ResetCollectionBufferLocksAfterCrash(segment);
+        if (_componentCollectionSegmentByStride.TryAdd(stride, segment))
+        {
+            segment.QuarantineFrees(MMF);
         }
     }
 
@@ -3138,9 +3176,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 var stride = RoundToStandardStride(
                     Math.Max(sizeof(FieldR1) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
-                var segment = MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride);
-                ResetCollectionBufferLocksAfterCrash(segment);
-                _componentCollectionSegmentByStride.TryAdd(stride, segment);
+                PoolLoadedCollectionSegment(stride, MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride));
             }
         }
 
@@ -3157,9 +3193,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var collectionSPI = cv.GetInt(1);
             if (collectionSPI != 0 && !_componentCollectionSegmentByStride.ContainsKey(collectionStride))
             {
-                var segment = MMF.LoadChunkBasedSegment(collectionSPI, collectionStride);
-                ResetCollectionBufferLocksAfterCrash(segment);
-                _componentCollectionSegmentByStride.TryAdd(collectionStride, segment);
+                PoolLoadedCollectionSegment(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
             }
         }
 
@@ -5358,6 +5392,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PersistNextFreeTsn();
             }
 
+            ThrowIfRecoveryCheckpointerFailed();
             return;
         }
 
@@ -5374,6 +5409,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             MMF.DrainReleases();
         }
+
+        // A timeout is soft, a fatal failure is not: latched before the seal or by its own cycle, the open fails.
+        ThrowIfRecoveryCheckpointerFailed();
 
         // Persist the TSN watermark AFTER the checkpoint, never before. The recovered revisions carry their ORIGINAL TSNs — RecoveryDriver advanced
         // TransactionChain.NextFreeId past them, and ScrubVersionedChains raises it again for anything a previous consolidating checkpoint left behind (RB-05)
@@ -6757,6 +6795,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         RecoveryBatchPointProbe?.Invoke(pass, RecoveryBatchPoints);
+        ThrowIfRecoveryCheckpointerFailed();
 
         // Sampled: the census reads every slot, and a large database with a large cache makes tens of thousands of batch points (review).
         if ((RecoveryBatchPoints & (RecoveryEpochHeldSampleEvery - 1)) == 0)
@@ -6776,6 +6815,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             && MMF.WritebackDebtPercent() >= (threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent))
         {
             CheckpointManager.RunFlushOnlyCycle();
+            ThrowIfRecoveryCheckpointerFailed();
+        }
+    }
+
+    /// <summary>
+    /// A crash open fails once its checkpointer has latched a fatal failure (CK-06, CK-08): it could neither write what the recovery owes — a recovery
+    /// larger than the cache would stall on back-pressure — nor seal it, and an open that succeeded unsealed handed the application an engine that never
+    /// checkpoints again. Nothing is lost: the failed open closes as a crash, CheckpointLSN never moved, and the next open recovers again.
+    /// </summary>
+    private void ThrowIfRecoveryCheckpointerFailed()
+    {
+        var fatal = CheckpointManager?.FatalError;
+        if (fatal != null)
+        {
+            throw new DurabilityException(TyphonErrorCode.RecoveryCheckpointFailed,
+                $"Crash recovery failed: the checkpointer hit a fatal failure before the recovery was sealed ({fatal.Message})", fatal);
         }
     }
 

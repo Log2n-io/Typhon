@@ -186,6 +186,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>Whether a fatal I/O error has occurred during checkpointing.</summary>
     public bool HasFatalError => _fatalError != null;
 
+    /// <summary>The failure that latched <see cref="HasFatalError"/>, or null.</summary>
+    internal Exception FatalError => _fatalError;
+
     /// <summary>Current durability health (CK-06). <see cref="DurabilityHealth.Degraded"/> means the last cycle hit a
     /// transient stall and will retry next tick; <see cref="DurabilityHealth.Fatal"/> means periodic checkpointing
     /// has halted (the shutdown path still attempts one last-chance flush).</summary>
@@ -715,7 +718,17 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     {
         lock (_cycleLock)
         {
-            return RunFlushOnlyCycleCore();
+            // Classified as a cycle's failure is (CK-06): a transient one is retried by the next call, a fatal one latches and the crash open fails at its
+            // next check (DatabaseEngine.RecoveryBatchPoint).
+            try
+            {
+                return RunFlushOnlyCycleCore();
+            }
+            catch (Exception ex)
+            {
+                ClassifyCycleFailure(ex);
+                return 0;
+            }
         }
     }
 
@@ -726,6 +739,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         {
             return 0;
         }
+
+        CycleFaultInjector?.Invoke();
 
         var pending = _mmf.WithoutSuspectPages(_mmf.CollectDirtyMemPageIndices());
         if (pending.Length == 0)

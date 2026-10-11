@@ -224,15 +224,19 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
         ReadThrough(vsbs, buffer);
         for (var i = boundary; i < boundary + 10; i++)
         {
-            Assert.That(segment.IsChunkAllocated(chunks[i].Chunk), Is.False, $"premise: the reader freed chunk {chunks[i].Chunk}");
+            Assert.That(segment.IsChunkLive(chunks[i].Chunk), Is.False, $"premise: the reader freed chunk {chunks[i].Chunk}");
         }
 
         Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+
+        // The freed chunks were held (CK-17, #1300): released here, not by the worker racing the eviction below, and their release on disk too.
+        _dbe.MMF.DrainReleases();
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the release's checkpoint");
         var predecessorSlot = SlotOf(vsbs, chunks[boundary - 1].Chunk);
         Assert.That(_dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages were evicted");
         Assert.That(_dbe.MMF.GetPageState(predecessorSlot), Is.EqualTo(PagedMMF.PageState.Free), "premise: the predecessor's page left the cache");
         var chain = Chain(vsbs, buffer).ConvertAll(c => c.Chunk);
-        Assert.That(chain, Has.None.Matches<int>(c => !segment.IsChunkAllocated(c)), "the chain read back links a freed chunk");
+        Assert.That(chain, Has.None.Matches<int>(c => !segment.IsChunkLive(c)), "the chain read back links a freed chunk");
     }
 
     /// <summary>

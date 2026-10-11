@@ -119,6 +119,12 @@ public enum TyphonErrorCode
     /// </summary>
     CommitPipelineStopped           = 7010,
 
+    /// <summary>
+    /// A crash open failed: its checkpointer hit a fatal failure before the recovery was sealed, so the recovered state could not be consolidated. The
+    /// data file and the WAL are as the crash left them, plus what the recovery wrote under the old CheckpointLSN; the next open recovers again (CK-08).
+    /// </summary>
+    RecoveryCheckpointFailed        = 7011,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

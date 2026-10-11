@@ -104,7 +104,8 @@ internal sealed class VsbsSetElementsTests : TestBase<VsbsSetElementsTests>
         return a.RefCounter;
     }
 
-    private int AllocatedChunkCount => _vsbs.Segment.AllocatedChunkCount;
+    // Live chunks: a free held until a checkpoint (CK-17, #1300) is reclaimed, not orphaned.
+    private int AllocatedChunkCount => _vsbs.Segment.AllocatedChunkCount - _vsbs.Segment.QuarantinedFreeCount;
 
     // ── AC 2.1: the five shapes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
