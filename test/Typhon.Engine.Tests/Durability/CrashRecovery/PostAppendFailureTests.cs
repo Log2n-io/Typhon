@@ -920,12 +920,11 @@ internal sealed class PostAppendFailureTests
 
     /// <summary>
     /// #1271: once AP-03 stopped the engine, a SingleVersion write under the tick-fence discipline still lands in place — and no fence logs it any more.
-    /// The checkpoint goes on, and persists it: the reopen reads a value no WAL record holds, beside the log's pre-stop state. Quarantined against #1271:
-    /// stopping the checkpointer at the stop made this pass, and corrupted the recovery (an item reopened with another's lore, MarketHardeningTests with
-    /// TYPHON_MKT_FAIL_PUBLISH_AT); the fix is to refuse the write, not to stop the checkpointer.
+    /// The checkpoint went on, and persisted it: the reopen read a value no WAL record holds, beside the log's pre-stop state. A stopped engine's
+    /// checkpointer writes nothing more to the data file.
     /// </summary>
     [Test]
-    [Category("Quarantine")]
+    [VerifiesRule("AP-03")]
     [CancelAfter(30_000)]
     public void AWriteAfterTheEngineStopped_NeverReachesTheDataFile()
     {
@@ -981,12 +980,14 @@ internal sealed class PostAppendFailureTests
     }
 
     /// <summary>
-    /// A crash stop set while a checkpoint cycle is writing — a hard crash simulated mid-cycle — stops the cycle before its next write wave, as a power cut
-    /// would: uncovered, CheckpointLSN where it was. Staged with one-page waves, the stop set by the first page a wave writes after the metadata hook.
+    /// #1271, review: a stop latched while a checkpoint cycle is writing stops the cycle before its next write wave. The cycle that began before the stop
+    /// passed its first check and went on writing every page it had collected, post-stop writes among them; it stops now, uncovered, CheckpointLSN where it
+    /// was. Staged with one-page waves, the stop latched by the first page a wave writes after the metadata hook.
     /// </summary>
     [Test]
+    [VerifiesRule("AP-03")]
     [CancelAfter(30_000)]
-    public void ACrashStopSetMidCycle_StopsTheCycleBeforeItsNextWave()
+    public void AStopLatchedMidCycle_StopsTheCycleBeforeItsNextWave()
     {
         using var scope = _serviceProvider.CreateScope();
         var dbe = Open(scope);
@@ -1017,7 +1018,7 @@ internal sealed class PostAppendFailureTests
         {
             if (hookDone && Interlocked.Increment(ref written) == 1)
             {
-                cm.PrepareCrashStop();
+                dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: a commit's publish failed past its append"));
             }
         };
         try
@@ -1031,7 +1032,8 @@ internal sealed class PostAppendFailureTests
             cm.PersistDurableMetadataHook = hook;
         }
 
-        Assert.That((written, cm.CheckpointLsn), Is.EqualTo((1, before)), "the cycle went on writing after the crash stop");
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the stop latched inside the cycle's waves");
+        Assert.That((written, cm.CheckpointLsn), Is.EqualTo((1, before)), $"{Marker}: the cycle went on writing after the stop");
     }
 
     /// <param name="hardCrash">The engine is then torn down as a power cut; otherwise it is disposed, and must close as a crash on its own.</param>
@@ -1085,7 +1087,8 @@ internal sealed class PostAppendFailureTests
                 Assert.Throws<DurabilityException>(() => later.Commit(), $"{Marker}: a later commit is accepted by a stopped engine");
             }
 
-            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "premise: the checkpoint still cycles");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.False,
+                "the stopped engine's checkpointer writes no more (#1271)");
             Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.LessThan(recordLsn),
                 $"{Marker}: the checkpoint passed the records of a commit whose publish did not complete");
 

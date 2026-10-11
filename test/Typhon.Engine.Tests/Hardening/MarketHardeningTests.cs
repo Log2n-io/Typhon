@@ -211,7 +211,13 @@ public class MarketHardeningTests
         /// spawn's SingleVersion value is checkpoint-durable only (CM-06, DIRTY-01), so an item crafted after the last checkpoint would recover with
         /// default lore — documented behaviour, not a defect. Other runs keep TickFence, the workload every earlier run measured.
         /// </summary>
-        public CommitDiscipline Discipline => Crash != 0 ? CommitDiscipline.Commit : CommitDiscipline.TickFence;
+        // A staged publish failure (TYPHON_MKT_FAIL_PUBLISH_AT) is a crash too: the stopped engine closes as one (AP-03), and under TickFence its reopen
+        // recovered the items crafted since the last checkpoint with default lore — the documented behaviour above, which once read as a corruption (#1271).
+        public CommitDiscipline Discipline =>
+            Crash != 0 || Environment.GetEnvironmentVariable("TYPHON_MKT_FAIL_PUBLISH_AT") != null
+                       || Environment.GetEnvironmentVariable("TYPHON_MKT_COMMIT_DISCIPLINE") == "1"
+                ? CommitDiscipline.Commit
+                : CommitDiscipline.TickFence;
 
         public static Config FromEnvironment() => new()
         {
@@ -1424,7 +1430,10 @@ public class MarketHardeningTests
     {
         // TYPHON_MKT_FAIL_PUBLISH_AT=N: the Nth commit's publish throws midway — its Versioned components published, its SingleVersion writes not — and
         // the engine stops (AP-03). The next open recovers it; the market checks that recovery.
+        // TYPHON_MKT_KILL_AFTER_PUBLISH_FAIL_MS=d, with it: the process ends d ms after that failure, as a power cut after the stop — no close, nothing more
+        // written (#1271). The next open recovers a data file the stopped engine was still writing.
         var failPublishAt = long.TryParse(Environment.GetEnvironmentVariable("TYPHON_MKT_FAIL_PUBLISH_AT"), out var at) ? at : 0;
+        var killAfterMs = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_MKT_KILL_AFTER_PUBLISH_FAIL_MS"), out var kms) ? kms : -1;
         if (failPublishAt > 0)
         {
             var publishes = 0L;
@@ -1656,7 +1665,20 @@ public class MarketHardeningTests
                                     continue;
                                 }
 
-                                if (!tx.Commit())
+                                bool committed;
+                                try
+                                {
+                                    committed = tx.Commit();
+                                }
+                                catch (CommitPublishIncompleteException)
+                                {
+                                    // Whose publish stopped the engine: the reopen's findings are read against it (#1271).
+                                    Log($"publish incomplete: worker {worker}, kind {kind}, item {itemNo}, entity {itemId.RawValue:X}"
+                                        + (kind == KindConsume ? $", crafted entity {newItemId.RawValue:X}" : ""));
+                                    throw;
+                                }
+
+                                if (!committed)
                                 {
                                     Fail($"item {itemNo}: commit returned false");
                                     Volatile.Write(ref stop, 1);
@@ -2043,6 +2065,15 @@ public class MarketHardeningTests
         if (_c.LongReaders > 0)
         {
             Log($"long readers: {longReads:N0} snapshots held, {longSweeps:N0} sweeps of the traders in them");
+        }
+
+        // The power cut after the stop (TYPHON_MKT_KILL_AFTER_PUBLISH_FAIL_MS): the workers have stopped, the engine has not closed.
+        if (killAfterMs >= 0 && dbe.CommitPipelineFailure != null)
+        {
+            Thread.Sleep(killAfterMs);
+            File.AppendAllText(Path.Combine(_c.Directory, "crash.log"),
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} crashed {killAfterMs} ms after the storm stopped on a staged publish failure{Environment.NewLine}");
+            Process.GetCurrentProcess().Kill();
         }
 
         lastSeq = Interlocked.Read(ref seq);

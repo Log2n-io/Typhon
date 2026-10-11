@@ -843,8 +843,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     batch.Clear();
                     while (position < pending.Length && batchPlanned < maxPages && Stopwatch.GetTimestamp() - batchStart < WriteBatchMaxTicks)
                     {
-                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy, as a power cut would. The rest stay owed —
-                        // skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves before wrote is settled below.
+                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy: a stopped engine's pages may hold writes the WAL
+                        // never logged (#1271). The rest stay owed — skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves
+                        // before wrote is settled below.
                         if (_crashStop)
                         {
                             for (var i = position; i < pending.Length; i++)
@@ -1170,7 +1171,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // free first.
             WriteAheadOfTheHook(ref ctx);
 
-            // A crash stop set since the cycle began: the write above stopped at its next wave, and the hook would save its pages to the data file directly.
+            // AP-03 stopped the engine since the cycle began (#1271): the write above stopped at its next wave, and the hook would save its pages to the data
+            // file directly.
             if (_crashStop)
             {
                 return;
@@ -1368,9 +1370,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>
     /// Latches the crash flag so NO further checkpoint writes the data file: the shutdown final cycle is suppressed, any periodic or forced cycle that begins
     /// afterward bails at once (see <see cref="RunCheckpointCycle"/>), and a cycle in flight stops before its next write wave and before its metadata hook,
-    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives) and a failed
-    /// open's teardown (CS-04) — not the AP-03 stop, which it corrupted the recovery of (#1271). Residual: the wave being written when the flag is set writes
-    /// the copies it took.
+    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives), a failed open's
+    /// teardown (CS-04), and the AP-03 stop (<c>DatabaseEngine.LatchCommitPipelineFailure</c>, #1271). Residual: the wave being written when the flag is set
+    /// writes the copies it took.
     /// </summary>
     internal void PrepareCrashStop()
     {

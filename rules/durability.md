@@ -230,14 +230,17 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             the runtime's parallel fence, whose appends never pass through it — return without appending
             (`FenceMustNotAppend`), since a tick path must not throw; a fence whose claim meets a stop latched while it waited
             returns as well (`AppendFenceBatch`, `AppendFenceBlockBatch`). The engine closes as a crash (no clean flag)
-  invariant a stopped engine's checkpointer goes on: its cycles persist the stopped engine's memory, held below the failed
-            commit's records (CK-13), and the close writes the rest; the realm catalog is not written (`RemoveEmptyClosingRealms`).
-            OPEN (#1271): a SingleVersion write under the tick fence still lands in place after the stop, no fence logs it, and the
-            checkpoint persists it — the reopen reads it beside the log's pre-stop state. Stopping the checkpointer at the latch,
-            at its next write wave or at its next cycle, left part of the stopped engine's memory on disk and not the rest: the
-            reopen recovered items holding another item's data (MarketHardeningTests with TYPHON_MKT_FAIL_PUBLISH_AT, 64 MiB: 3 of 3
-            runs with the stop at the next wave, 2 of 3 at the next cycle, 0 of 3 without). The fix is to refuse the write once
-            stopped, not to stop the checkpointer
+  invariant a stopped engine writes nothing more to its data file: the latch crash-stops the checkpointer
+            (`CheckpointManager.PrepareCrashStop`); a cycle in flight stops before its next write wave — its unwritten pages left
+            owed, the cycle not covered — and before its metadata hook, which saves its pages directly; the realm catalog is not
+            written either (`RemoveEmptyClosingRealms`) (#1271). A SingleVersion write under the tick fence still lands in place
+            after the stop, and no fence logs it: persisted, the reopen read it beside the log's pre-stop state. Nothing durable
+            is lost — the checkpoint was held below the commit's records, and the replay starts there. What is not durable is lost as
+            in any crash: under TickFence a spawn's SingleVersion value is checkpoint-durable only (CM-06), so an item crafted since
+            the last checkpoint reopens with default lore — measured with MarketHardeningTests' staged stop (TYPHON_MKT_FAIL_PUBLISH_AT):
+            coherent under Commit discipline, 4 of 4, with the stop or with a power cut right after it. The cost: no writeback
+            debt is discharged after the stop, so a commit past its append that waits on back-pressure runs out its publish
+            timeout — its records are in the WAL, and the reopen replays it
   never roll back a commit whose records were appended: recovery replays them, so the rollback is undone at the next open,
         and until then readers have seen part of it and other commits have built on its absence
   never go on appending over a partial publish: a later record builds on what the partial publish left, and recovery replays
@@ -247,7 +250,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
-         DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
+         CheckpointManager.PrepareCrashStop, DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
          DatabaseEngine.RemoveEmptyClosingRealms
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
@@ -258,10 +261,12 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           timeout (5-10 s, a stall rather than pressure), the data file failing to grow — stops the engine as above. A
           lock is rarely held across an allocation (the page-occupancy map's, whose pages stay resident), so a publisher
           waiting out back-pressure seldom makes another one time out; when it does, that one stops the engine. A stopped
-          engine's deferred cleanups go on, and so does its checkpoint (#1271).
+          engine's deferred cleanups go on, its checkpoint does not (#1271).
           **RESIDUAL:** a concurrent change between the check and the publish is not seen: two transactions that put one
           unique key both pass, and the later publish stops the engine (#1258). A commit whose claim was re-checked just before
-          another commit latched still appends and publishes; its claim precedes the latch. A staged
+          another commit latched still appends and publishes; its claim precedes the latch. A wave or a hook save already
+          writing when the stop latched writes what it took, which may hold a write made after the stop; a cycle whose waves had
+          all been written completes, its advance held below the pinned floor (CK-13). A staged
           write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
           fence) is not modelled; the publish's own reconcile shares the assumption. The publish's backstop for a unique
           collision on a Versioned write, `RejectUniqueIndexCollision`, throws `InvalidOperationException` (#1260); the check
@@ -274,9 +279,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
                 (TXW-8 class)
   verified: PostAppendFailureTests — AThrowAfterTheAppend_KeepsTheCommit_StopsTheEngine_AndARestartRecoversIt (a throw
             injected after the append: Committed, the engine stopped, a later commit refused, no cycle covered after it, the
-            checkpoint below the record, the value back after a disposal or a hard crash; AWriteAfterTheEngineStopped_NeverReachesTheDataFile
-            is quarantined against #1271); MarketHardeningTests with TYPHON_MKT_FAIL_PUBLISH_AT (a publish failed midway in the storm,
-            the reopen coherent); CommittedDisciplineTests.ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused
+            checkpoint below the record, the value back after a disposal or a hard crash), AWriteAfterTheEngineStopped_NeverReachesTheDataFile
+            (#1271), AStopLatchedMidCycle_StopsTheCycleBeforeItsNextWave; CommittedDisciplineTests.ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused
             (#1269), AFenceWhoseClaimMeetsAStop_AppendsNothing_AndDoesNotThrow, AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
             (a Versioned or SingleVersion spawn over a committed key, two spawns of one key, a Commit-discipline write moved onto
             a held key), AKeyTakenByTheIndexsOwnComparison_IsRejectedBeforeTheAppend (+0/-0 float spawns; a second unique field),
