@@ -140,53 +140,35 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
 
     /// <summary>
     /// #1308: a compaction that throws midway leaves the chain as it was. It cleared each entry it dropped in place as it walked and rewrote the root only at
-    /// the end, so a throw on an overflow chunk's page left the chain without those entries — the revision a reader at the horizon reads among them — and the
-    /// new chain's chunks named by nothing. Here the throw comes past the dropped entries, once the copy has filled a new chunk.
+    /// the end, so a throw on an overflow chunk's page left the chain without those entries — the revision a reader at the horizon reads among them. Here
+    /// the throw comes among the entries it drops, the chain spread over overflow chunks.
     /// </summary>
     [Test]
     [VerifiesRule("REAP-02")]
-    public void ACompactionThatThrowsMidway_LeavesTheChainAsItWas_AndGivesBackItsChunks()
+    public void ACompactionThatThrowsMidway_LeavesTheChainAsItWas()
     {
         using var scope = ServiceProvider.CreateScope();
         var dbe = OpenEngine(scope);
-        EntityId id;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            id = tx.Spawn<VrWalletArch>(VrWalletArch.Wallet.Set(new VrWallet { Credits = 0 }));
-            tx.Commit();
-        }
-
-        var table = dbe.GetComponentTable<VrWallet>();
-        var root = RootOf(dbe, id);
-        var tsns = new long[12];
+        var (id, table, root) = SpawnWallet(dbe);
         using (var reader = dbe.CreateReadOnlyTransaction())
         {
-            // The reader keeps every revision from the spawn on.
-            for (var k = 0; k < tsns.Length; k++)
-            {
-                tsns[k] = Commit(dbe, id, k + 1);
-            }
-
+            var tsns = CommitTwelve(dbe, table, id, root);
             var before = Entries(dbe, table, root);
-            var chunksBefore = table.CompRevTableSegment.AllocatedChunkCount;
             var contentBefore = table.ComponentSegment.AllocatedChunkCount;
-            Assert.That(before, Has.Count.EqualTo(13), "premise: the spawn and twelve commits");
 
-            // Below the sixth commit: the spawn and five commits dropped, the fifth kept as the sentinel, and seven entries copied after it — past the
-            // first chunk's room. The throw comes at the eleventh entry visited.
+            // Past everything: all but the newest dropped. The throw comes at the fourth entry visited.
             var visited = 0;
             dbe.CompactionStepProbe = _ =>
             {
-                if (++visited == 11)
+                if (++visited == 4)
                 {
                     throw new InvalidOperationException("staged: a page fault midway through the walk");
                 }
             };
-            Assert.Throws<InvalidOperationException>(() => Compact(table, root, tsns[5]), "premise: the compaction threw");
+            Assert.Throws<InvalidOperationException>(() => Compact(table, root), "premise: the compaction threw");
             dbe.CompactionStepProbe = null;
 
             Assert.That(Entries(dbe, table, root), Is.EqualTo(before), "the chain, as it was");
-            Assert.That(table.CompRevTableSegment.AllocatedChunkCount, Is.EqualTo(chunksBefore), "the new chain's chunks, given back");
             Assert.That(table.ComponentSegment.AllocatedChunkCount, Is.EqualTo(contentBefore), "no content freed under the live chain");
             Assert.That(reader.Open(id).Read(VrWalletArch.Wallet).Credits, Is.EqualTo(0), "the reader at the spawn still reads it");
         }
@@ -195,7 +177,66 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
         {
             Assert.That(Compact(table, root), Is.EqualTo(12), "the next compaction does the whole job");
         }
+
         Assert.That(Read(dbe, id), Is.EqualTo(12L));
+    }
+
+    /// <summary>
+    /// #1298: a compaction that would keep more than the chain's root holds is put off, the chain unchanged. It used to write what it kept past the root
+    /// into fresh chunks after the checkpoint's barrier: a crash that wrote the root and not them recovered an older revision, the newest having been in
+    /// the lost chunk. Here a reader at the spawn keeps the sentinel and seven newer commits — more than the root's room.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    public void ACompactionThatWouldKeepMoreThanTheRoot_IsPutOff()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenEngine(scope);
+        var (id, table, root) = SpawnWallet(dbe);
+        using (var reader = dbe.CreateReadOnlyTransaction())
+        {
+            var tsns = CommitTwelve(dbe, table, id, root);
+            var before = Entries(dbe, table, root);
+            var (revisionsBefore, contentBefore) = (table.CompRevTableSegment.AllocatedChunkCount, table.ComponentSegment.AllocatedChunkCount);
+            var deferredBefore = Interlocked.Read(ref ComponentRevisionManager.CompactionsDeferred);
+            Assert.That(Compact(table, root, tsns[5]), Is.Zero, "nothing removed");
+            Assert.That(Entries(dbe, table, root), Is.EqualTo(before), "the chain, as it was");
+            Assert.That((table.CompRevTableSegment.AllocatedChunkCount, table.ComponentSegment.AllocatedChunkCount),
+                Is.EqualTo((revisionsBefore, contentBefore)), "nothing allocated or freed");
+            Assert.That(Interlocked.Read(ref ComponentRevisionManager.CompactionsDeferred), Is.EqualTo(deferredBefore + 1), "counted as put off");
+        }
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            Assert.That(Compact(table, root), Is.EqualTo(12), "once the reader is gone, compacted into the root");
+        }
+
+        Assert.That(Read(dbe, id), Is.EqualTo(12L));
+    }
+
+    private static (EntityId Id, ComponentTable Table, int Root) SpawnWallet(DatabaseEngine dbe)
+    {
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<VrWalletArch>(VrWalletArch.Wallet.Set(new VrWallet { Credits = 0 }));
+            tx.Commit();
+        }
+
+        return (id, dbe.GetComponentTable<VrWallet>(), RootOf(dbe, id));
+    }
+
+    // Twelve commits past a reader at the spawn: a chain of thirteen entries over overflow chunks.
+    private static long[] CommitTwelve(DatabaseEngine dbe, ComponentTable table, EntityId id, int root)
+    {
+        var tsns = new long[12];
+        for (var k = 0; k < tsns.Length; k++)
+        {
+            tsns[k] = Commit(dbe, id, k + 1);
+        }
+
+        Assert.That(Entries(dbe, table, root), Has.Count.EqualTo(13), "premise: the spawn and twelve commits");
+        return tsns;
     }
 
     /// <summary>Whether the chain holds a committed entry of <paramref name="tsn"/> that still names a content chunk.</summary>

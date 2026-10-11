@@ -741,14 +741,14 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
   invariant the revision GC's compaction frees every overflow chunk of the chain it rewrites — the ChainLength - 1 chunks linked from the root,
             exactly that many — once the root names the new chain, deferred with its content frees past every transaction alive: a rollback or a
             conflict resolution may still write through a handle into the old layout (ComponentRevisionManager.CleanUpUnusedEntriesCore). The chain
-            it builds ends where its length says: its new chunks are allocated cleared, so the last one links to 0 — a reissued chunk keeps its
-            previous owner's link, and a walk that followed it freed another chain's chunk. It skips an entry whose root is no longer allocated or
+            it builds is its root alone (#1298): a compaction that would keep more than the root holds is put off, the chain unchanged
+            (ComponentRevisionManager.CompactionsDeferred), for a pass the entity's next commit queues — writing the rest into fresh chunks after the
+            checkpoint's barrier, a crash that wrote the root and not them recovered an older revision. It skips an entry whose root is no longer allocated or
             names another entity, and never frees a destroyed chain's root (DeferredCleanupManager.CleanupEntityRevisionsBatched,
             ForeignChainsSkipped)
   invariant the compaction is all or nothing up to the root's rewrite (#1308): its walk writes nothing of the live chain and frees nothing — the
             content chunks it drops are freed after the rewrite, the deferral list's room taken before it, so nothing past the rewrite throws. A
-            walk that throws (a page fault on an overflow chunk, an allocation) leaves the chain as it was and gives back the new chain's chunks,
-            unheld: no chain ever named them (CK-17)
+            walk that throws (a page fault on an overflow chunk) leaves the chain as it was
   invariant a destroyed entity's revision chain is released whole by the entity cleanup alone, once the entity's DiedTSN is below every live snapshot:
             every chunk of the chain and every content chunk a live element names, freed deferred past every transaction alive at the release
             (DeferredCleanupManager.ReleaseDestroyedEntityChain). A chain not quiescent — a revision cleanup still queued for it, its lock held, an
@@ -801,9 +801,10 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are drained by it (a clean
             reopen), a cleanup batch that fails midway queues the frees it collected before, a close after lost frees marks the sweep owed and the
             next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest;
-            VersionedVoidRaceTests.ACompactionThatThrowsMidway_LeavesTheChainAsItWas_AndGivesBackItsChunks — a compaction staged to throw past the
-            entries it drops, its copy already in a new chunk, leaves the chain's entries as they were, its chunk count too, and a reader at the
-            spawn reads the spawn. Mutations killed: the dropped entries cleared in place again, the new chunks not given back;
+            VersionedVoidRaceTests.ACompactionThatThrowsMidway_LeavesTheChainAsItWas — a compaction staged to throw among the entries it drops
+            leaves the chain's entries and its content as they were, and a reader at the spawn reads the spawn; ACompactionThatWouldKeepMoreThanTheRoot_IsPutOff
+            — kept entries past the root's room: nothing written, allocated or freed, counted, and compacted once the reader is gone. Mutations
+            killed: the dropped entries cleared in place again, the put-off removed;
             CollectionDurabilityTests.ACrashOpen_FreesTheCollectionBuffersNothingNames_AndKeepsEveryNamedOne — two durable buffers named by nothing,
             one past its root chunk, freed by a crash open; both storage homes' collections intact, a named buffer's free chain kept, and still
             intact after new collections take the freed chunks; ACrashOpen_ThatDoesNotLoadEveryCollectionComponent_SweepsNothing — an open that

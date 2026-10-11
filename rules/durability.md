@@ -450,9 +450,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             root's header the scan finds; a named chunk is a root only when a live entity's EntityPK adopts it, and no scrub frees a live
             root as an overflow chunk; a live chain whose links end before its length (its root's page after a growth, the linking chunk's
             before), or link to a chunk the disk has as free or to another live record's root, is collapsed to its newest reachable committed
-            revision before the replay, so the replay appends onto a chain it can walk (#1251, #1297). OPEN (#1298): a chain compacted after the
-            barrier and torn the same way had its newest revisions moved into the unreachable chunks, unlogged — with no logged update after the
-            barrier, the collapse keeps an older value
+            revision before the replay, so the replay appends onto a chain it can walk (#1251, #1297). A compaction writes the root alone and
+            allocates nothing (REAP-02, #1298): it used to move the newest revisions of a chain it compacted after the barrier into fresh chunks,
+            unlogged, and a crash that wrote the root and not them had the collapse keep an older value
   scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
          VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
          RecoveryApplier.ReapplySpawnedEntityToCluster, ComponentRevisionManager.ScrubChainToHead / FreeDroppedContent /

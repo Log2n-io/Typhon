@@ -1,5 +1,6 @@
 ﻿using JetBrains.Annotations;
 using System;
+using System.Threading;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -421,8 +422,8 @@ internal ref struct ComponentRevisionManager
     /// <para>A <b>sentinel</b> revision is preserved when the first kept entry has TSN &gt; nextMinTSN: this is the last committed
     /// revision before the cutoff, needed because active transactions at MinTSN may have cached its content chunk ID.</para>
     /// <para>All or nothing up to the root's rewrite (REAP-02, #1308): the walk writes nothing of the live chain and frees nothing, so a throw in it — a
-    /// back-pressure timeout on an overflow chunk's page, an allocation — leaves the chain as it was, and gives back the chunks it allocated. The frees
-    /// follow the rewrite, and cannot throw when deferred: the list's room is taken before.</para>
+    /// back-pressure timeout on an overflow chunk's page — leaves the chain as it was. The frees follow the rewrite, and cannot throw when deferred: the
+    /// list's room is taken before. The compacted chain is the root alone (#1298): a compaction that would keep more is put off, the chain unchanged.</para>
     /// </remarks>
     internal static unsafe bool CleanUpUnusedEntriesCore(ComponentTable ct, int firstChunkId, long nextMinTSN,
         ref ChunkAccessor<PersistentStore> compRevTableAccessor, ref ChunkAccessor<PersistentStore> compContentAccessor,
@@ -465,8 +466,6 @@ internal ref struct ComponentRevisionManager
         int itemCount = firstChunkHeader.ItemCount;
         Span<int> contentFrees = (itemCount <= 512) ? stackalloc int[itemCount] : new int[itemCount];
         var contentFreeCount = 0;
-        Span<int> newChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
-        var newChunkCount = 0;
         var stepProbe = ct.DBE?.CompactionStepProbe;
         Span<byte> destSpan;
 
@@ -525,7 +524,6 @@ internal ref struct ComponentRevisionManager
                 }
 
                 // Transition out of skip phase: resolve sentinel
-                int newChunkId;
                 if (inSkipPhase)
                 {
                     inSkipPhase = false;
@@ -535,23 +533,16 @@ internal ref struct ComponentRevisionManager
                         {
                             // Keep sentinel: the first kept entry is at or beyond the cutoff, OR is an active uncommitted entry (IsolationFlag=true) invisible
                             // to readers — the sentinel provides the read baseline for transactions at MinTSN.
+                            if (curDestIndexInChunk == curDestElements.Length)
+                            {
+                                goto Deferred;
+                            }
+
                             curDestElements[curDestIndexInChunk++] = sentinelEntry;
                             tempFirstHeader[0].ItemCount++;
                             tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
                             curDestIndex++;
                             skipCount--; // Sentinel was counted as skipped but is being kept
-
-                            if (curDestIndexInChunk == curDestElements.Length)
-                            {
-                                curDestIndexInChunk = 0;
-                                tempFirstHeader[0].ChainLength++;
-
-                                newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0
-                                newChunks[newChunkCount++] = newChunkId;
-                                curNextChunkId[0] = newChunkId;
-                                var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
-                                newChunkSpan.Split(out curNextChunkId, out curDestElements);
-                            }
                         }
                         else
                         {
@@ -561,7 +552,14 @@ internal ref struct ComponentRevisionManager
                     }
                 }
 
-                // Copy entry to compacted output
+                // Copy entry to compacted output — into the root alone (#1298): what the compaction keeps past it, it would put in fresh chunks after the
+                // checkpoint's barrier, and a crash that wrote the root and not them recovered an older revision, the newest being in the lost chunk.
+                // Put off instead, to a pass that finds fewer entries to keep: nothing has been written or freed yet.
+                if (curDestIndexInChunk == curDestElements.Length)
+                {
+                    goto Deferred;
+                }
+
                 curDestElements[curDestIndexInChunk++] = enumerator.Current;
                 tempFirstHeader[0].ItemCount++;
                 if (!enumerator.Current.IsolationFlag)
@@ -569,24 +567,17 @@ internal ref struct ComponentRevisionManager
                     tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
                 }
                 curDestIndex++;
-
-                if (curDestIndexInChunk == curDestElements.Length)
-                {
-                    curDestIndexInChunk = 0;
-                    tempFirstHeader[0].ChainLength++;
-
-                    newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0, the chain's end
-                    newChunks[newChunkCount++] = newChunkId;
-                    curNextChunkId[0] = newChunkId;
-                    var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
-                    newChunkSpan.Split(out curNextChunkId, out curDestElements);
-                }
             }
 
             // Every entry was skipped — what followed the last committed one was voids: the sentinel is the chain's newest revision, and stays. The count
             // guard above keeps the last entry, but only when it is no void.
             if (inSkipPhase && hasSentinel)
             {
+                if (curDestIndexInChunk == curDestElements.Length)
+                {
+                    goto Deferred;
+                }
+
                 curDestElements[curDestIndexInChunk] = sentinelEntry;
                 tempFirstHeader[0].ItemCount++;
                 tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
@@ -608,22 +599,8 @@ internal ref struct ComponentRevisionManager
         }
         catch
         {
+            // The live chain is as it was: the walk wrote nothing of it and allocated nothing.
             versionCleanupScope.Dispose();
-
-            // The live chain is as it was; the new one is named by nothing, and never was — freed unheld (CK-17). Given back as far as that goes: a free that
-            // throws here leaves its chunk to the orphan sweep the caller's failed cleanup asks for (FreesLost), and must not hide the first failure.
-            for (var i = 0; i < newChunkCount; i++)
-            {
-                try
-                {
-                    ct.CompRevTableSegment.FreeChunkUnheld(newChunks[i]);
-                }
-                catch
-                {
-                    // The sweep's.
-                }
-            }
-
             throw;
         }
 
@@ -666,7 +643,16 @@ internal ref struct ComponentRevisionManager
 
         // Is the component totally deleted? Return true, otherwise false
         return (tempFirstHeader[0].ItemCount == 1 && tempElements[0].ComponentChunkId == 0);
+
+        // What the compaction would keep does not fit the root (#1298): the chain stays as it is, for a later pass — the next commit to the entity queues one.
+        Deferred:
+        Interlocked.Increment(ref CompactionsDeferred);
+        versionCleanupScope.Dispose();
+        return false;
     }
+
+    /// <summary>Compactions put off because what they would keep does not fit the chain's root (#1298). Diagnostic.</summary>
+    internal static long CompactionsDeferred;
 
     /// <summary>
     /// Recovery scrub (03-recovery.md §6, D1): collapses one entity's revision chain to exactly its <b>HEAD</b> — the highest-TSN committed
