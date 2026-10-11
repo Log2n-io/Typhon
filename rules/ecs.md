@@ -745,6 +745,10 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             previous owner's link, and a walk that followed it freed another chain's chunk. It skips an entry whose root is no longer allocated or
             names another entity, and never frees a destroyed chain's root (DeferredCleanupManager.CleanupEntityRevisionsBatched,
             ForeignChainsSkipped)
+  invariant the compaction is all or nothing up to the root's rewrite (#1308): its walk writes nothing of the live chain and frees nothing — the
+            content chunks it drops are freed after the rewrite, the deferral list's room taken before it, so nothing past the rewrite throws. A
+            walk that throws (a page fault on an overflow chunk, an allocation) leaves the chain as it was and gives back the new chain's chunks,
+            unheld: no chain ever named them (CK-17)
   invariant a destroyed entity's revision chain is released whole by the entity cleanup alone, once the entity's DiedTSN is below every live snapshot:
             every chunk of the chain and every content chunk a live element names, freed deferred past every transaction alive at the release
             (DeferredCleanupManager.ReleaseDestroyedEntityChain). A chain not quiescent — a revision cleanup still queued for it, its lock held, an
@@ -761,13 +765,19 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             (DeferredCleanupManager.FreesLost) marks the sweep owed (CS-04): the next open recovers, with strict segment loads, and its orphan sweep
             frees them. A cleanup batch that throws still queues the frees of the entities it compacted before
             (DeferredCleanupManager.ProcessDeferredCleanups); the destroyed-entity cleanup queues what the entities before the throw released and
-            puts the one that threw back in the queue with those after it (DatabaseEngine.ProcessEcsCleanups). OPEN: collection buffers (#1307)
+            puts the one that threw back in the queue with those after it (DatabaseEngine.ProcessEcsCleanups)
+  invariant a crash open frees every component-collection chunk no buffer that live data names owns (#1307): after the scrub, a buffer is named by
+            a handle in an allocated content chunk of a table with a collection field — a Versioned head, a system catalog's row, a flat
+            archetype's component — or in any slot of a cluster of an archetype with a SingleVersion collection; it owns its root, the chain
+            from it and its free chain. Both sets are supersets of what is live, and every step of a walk is checked, so a stray handle only
+            keeps chunks (DatabaseEngine.SweepCollectionOrphans). The sweep stands down when a persisted component with a collection field has no
+            table loaded, or a persisted archetype no state: their handles would read as none (FirstUnloadedCollectionHandleSource)
   scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
          DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups,
-         DatabaseEngine.ProcessEcsCleanupEntry
+         DatabaseEngine.ProcessEcsCleanupEntry, DatabaseEngine.SweepCollectionOrphans, DatabaseEngine.FirstUnloadedCollectionHandleSource
   on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
                 spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
                 MarketHardeningTests' consume-and-craft storm: an item's entity read another item's data within a few thousand operations, and 100
@@ -787,7 +797,15 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
             shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are drained by it (a clean
             reopen), a cleanup batch that fails midway queues the frees it collected before, a close after lost frees marks the sweep owed and the
-            next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest
+            next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest;
+            VersionedVoidRaceTests.ACompactionThatThrowsMidway_LeavesTheChainAsItWas_AndGivesBackItsChunks — a compaction staged to throw past the
+            entries it drops, its copy already in a new chunk, leaves the chain's entries as they were, its chunk count too, and a reader at the
+            spawn reads the spawn. Mutations killed: the dropped entries cleared in place again, the new chunks not given back;
+            CollectionDurabilityTests.ACrashOpen_FreesTheCollectionBuffersNothingNames_AndKeepsEveryNamedOne — two durable buffers named by nothing,
+            one past its root chunk, freed by a crash open; both storage homes' collections intact, a named buffer's free chain kept, and still
+            intact after new collections take the freed chunks; ACrashOpen_ThatDoesNotLoadEveryCollectionComponent_SweepsNothing — an open that
+            does not register a collection component keeps the orphan. Mutations killed: no sweep, no stand-down, the clusters or the content
+            chunks not read, the free chain or the chain past the root not walked
 
 ## Module: VIEWLIFE — What a long-lived view may retain
 

@@ -1066,9 +1066,9 @@ CK-08 (flush-only cycles) are later increments.
   invariant a component-collection segment holds its frees the same way (DatabaseEngine.GetComponentCollectionSegment,
             DatabaseEngine.PoolLoadedCollectionSegment): a buffer is named by content chunks the data file's chains name. Freed at once, a
             transaction took it while the disk could still name the revision that dropped it, and a crash's scrub of that revision released it
-            under its new owner (#1300). OPEN (#1307): no crash-open sweep covers collection segments — a buffer released after the checkpoint
-            that covered it, its bitmap page not yet written, stays allocated after a crash, named by nothing; and the orphan sweep frees orphan
-            content chunks without releasing their buffers. Leaks, never a shared buffer
+            under its new owner (#1300). A buffer released after the checkpoint that covered it, its bitmap page not yet written, is allocated
+            after a crash and named by nothing, as are the buffers of orphan content chunks the orphan sweep frees: the crash open's collection
+            sweep frees them (REAP-02, #1307)
   scope: FreeQuarantine, ChunkBasedSegment.FreeChunk, ChunkBasedSegment.QuarantineFrees, ChunkBasedSegment.ClaimOnPage, ChunkBasedSegment.IsChunkLive,
          PagedMMF.SealQuarantinedFrees, PagedMMF.ReleaseQuarantinedFrees, PagedMMF.NoteQuarantined, PagedMMF.EndFreeQuarantine,
          CheckpointManager.RunCheckpointCycleCore, ComponentTable.QuarantineChainFrees, DatabaseEngine.SealRecovery,

@@ -5151,6 +5151,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // consolidated into the data file by the same checkpoint.
         ScrubVersionedChains();
 
+        // Phase 4b — the component-collection segments' orphans (#1307, REAP-02): a buffer named by nothing once the chains are their heads — one whose free a
+        // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
+        SweepCollectionOrphans();
+
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
         // rebuilt index pages.
@@ -6440,6 +6444,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal Action<ComponentTable, int> ChainVoidProbe { get; set; }
 
     /// <summary>
+    /// Test hook (#1308): runs at each entry a revision compaction visits, with the chain's root, before the entry is handled — where a page fault can throw
+    /// midway through the walk. Per engine. Null in production.
+    /// </summary>
+    internal Action<int> CompactionStepProbe { get; set; }
+
+    /// <summary>
     /// Test-only mutant switch (CHAIN-01): when set, a rollback voids the entry at the index its transaction recorded, without the chain's lock and without
     /// checking it is still its own, and drops the chain's item count whatever entry it was — what CHAIN-01 forbids — so the rule's mutant can show the
     /// verifier rejects it. Per engine. Never set in production.
@@ -7203,6 +7213,242 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.SaveChanges();
         }
     }
+
+    /// <summary>Component-collection chunks the crash open's sweep freed: owned by no buffer that live data names (#1307). Diagnostic.</summary>
+    internal int CollectionChunksSweptAtOpen { get; private set; }
+
+    /// <summary>
+    /// The crash open's sweep of the component-collection segments (#1307, REAP-02). Every buffer that live data names is reachable — its root, the chain
+    /// from it, and its free chain — and every other allocated chunk is freed. Live data is every allocated content chunk of every table with a collection
+    /// field (a Versioned table's chain heads, the scrub having freed the rest; the system catalogs' rows; a flat archetype's components) and every slot of
+    /// every cluster of an archetype with a SingleVersion collection. Both are supersets of what is live: a handle read from a chunk that is no live row only
+    /// keeps a buffer, and its walk is bounded and checked, so a stray id frees nothing that is named.
+    /// </summary>
+    /// <remarks>
+    /// Stands down when a handle could be where this process does not look: a persisted component with a collection field and no table loaded, or a
+    /// persisted archetype with no state — its buffers would read as named by nothing and be freed under data a later open loads. Leaked, they cost space.
+    /// </remarks>
+    private unsafe void SweepCollectionOrphans()
+    {
+        if (_componentCollectionSegmentByStride.IsEmpty)
+        {
+            return;
+        }
+
+        var unloaded = FirstUnloadedCollectionHandleSource();
+        if (unloaded != null)
+        {
+            LogCollectionSweepStoodDown(unloaded);
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            var named = new Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>>();
+            foreach (var table in GetAllComponentTables())
+            {
+                if (!table.HasCollections || table.ComponentSegment == null)
+                {
+                    continue;
+                }
+
+                var scan = table.ComponentSegment.CreateScanAccessor();
+                try
+                {
+                    foreach (var chunkId in table.ComponentSegment.AllocatedChunks())
+                    {
+                        var data = scan.GetChunkAddress(chunkId) + table.ComponentOverhead;
+                        foreach (var f in table.CollectionFields)
+                        {
+                            NoteNamedBuffer(named, f.Vsbs.Segment, *(int*)(data + f.OffsetInComponentStorage));
+                        }
+                    }
+                }
+                finally
+                {
+                    scan.Dispose();
+                }
+            }
+
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                var cs = _archetypeStates[meta.ArchetypeId]?.ClusterState;
+                if (cs?.CollectionSlots == null || cs.ClusterSegment == null)
+                {
+                    continue;
+                }
+
+                var layout = cs.Layout;
+                var scan = cs.ClusterSegment.CreateScanAccessor();
+                try
+                {
+                    foreach (var clusterChunkId in cs.ClusterSegment.AllocatedChunks())
+                    {
+                        var clusterBase = scan.GetChunkAddress(clusterChunkId);
+                        foreach (var slot in cs.CollectionSlots)
+                        {
+                            for (var i = 0; i < layout.ClusterSize; i++)
+                            {
+                                var compBase = clusterBase + layout.ComponentOffset(slot.Slot) + i * layout.ComponentSize(slot.Slot);
+                                foreach (var f in slot.Fields)
+                                {
+                                    NoteNamedBuffer(named, f.Vsbs.Segment, *(int*)(compBase + f.OffsetInComponentStorage));
+                                }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    scan.Dispose();
+                }
+            }
+
+            var sinceBatchPoint = 0;
+            foreach (var segment in _componentCollectionSegmentByStride.Values)
+            {
+                var owned = new HashSet<int>();
+                if (named.TryGetValue(segment, out var roots))
+                {
+                    var scan = segment.CreateScanAccessor();
+                    try
+                    {
+                        foreach (var root in roots)
+                        {
+                            CollectBufferChunks(segment, ref scan, root, owned);
+                        }
+                    }
+                    finally
+                    {
+                        scan.Dispose();
+                    }
+                }
+
+                foreach (var chunkId in segment.AllocatedChunks())
+                {
+                    if (owned.Contains(chunkId))
+                    {
+                        continue;
+                    }
+
+                    if (++sinceBatchPoint > RecoveryBatchSize)
+                    {
+                        RecoveryBatchPoint(changeSet, RecoveryPass.Scrub);
+                        sinceBatchPoint = 1;
+                    }
+
+                    segment.FreeChunk(chunkId);
+                    CollectionChunksSweptAtOpen++;
+                }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    // A handle read from content: noted when it addresses an allocated chunk of its segment. A stray id that does only keeps chunks.
+    private static void NoteNamedBuffer(Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>> named, ChunkBasedSegment<PersistentStore> segment,
+        int bufferId)
+    {
+        if (bufferId <= 0 || bufferId >= segment.ChunkCapacity || !segment.IsChunkAllocated(bufferId))
+        {
+            return;
+        }
+
+        if (!named.TryGetValue(segment, out var roots))
+        {
+            named[segment] = roots = [];
+        }
+
+        roots.Add(bufferId);
+    }
+
+    // The chunks a buffer owns: its root, the chain from it, and its free chain (as VariableSizedBufferSegmentBase frees them). Each step checked and the walk
+    // bounded; one that reaches a chunk already owned stops, as that chunk's own walk covers the rest.
+    private static unsafe void CollectBufferChunks(ChunkBasedSegment<PersistentStore> segment, ref ChunkAccessor<PersistentStore> scan, int root,
+        HashSet<int> owned)
+    {
+        if (!owned.Add(root))
+        {
+            return;
+        }
+
+        var firstFree = scan.GetChunk<VariableSizedBufferRootHeader>(root).FirstFreeChunkId;
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var next = pass == 0 ? *(int*)scan.GetChunkAddress(root) : firstFree;
+            for (var steps = 0; steps < segment.AllocatedChunkCount; steps++)
+            {
+                if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next) || !owned.Add(next))
+                {
+                    break;
+                }
+
+                next = *(int*)scan.GetChunkAddress(next);
+            }
+        }
+    }
+
+    // A source of collection handles this process does not load, or null: a persisted component with a collection field and no table, a persisted archetype
+    // with no state.
+    private string FirstUnloadedCollectionHandleSource()
+    {
+        var loadedComponents = new HashSet<string>();
+        foreach (var table in GetAllComponentTables())
+        {
+            loadedComponents.Add(table.Definition.Name);
+        }
+
+        if (_persistedFieldsByComponent != null)
+        {
+            foreach (var (name, fields) in _persistedFieldsByComponent)
+            {
+                if (loadedComponents.Contains(name))
+                {
+                    continue;
+                }
+
+                foreach (var field in fields)
+                {
+                    if (field.Type == FieldType.Collection)
+                    {
+                        return $"component '{name}'";
+                    }
+                }
+            }
+        }
+
+        if (_persistedArchetypes != null)
+        {
+            var loadedArchetypes = new HashSet<string>();
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                if (_archetypeStates[meta.ArchetypeId] != null)
+                {
+                    loadedArchetypes.Add(meta.Name);
+                }
+            }
+
+            foreach (var name in _persistedArchetypes.Keys)
+            {
+                if (!loadedArchetypes.Contains(name))
+                {
+                    return $"archetype '{name}'";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Crash open: the component-collection sweep stood down — {source} is in the data file and not loaded, so a buffer it names would read as named by "
+        + "nothing. Orphaned buffers stay allocated")]
+    private partial void LogCollectionSweepStoodDown(string source);
 
     /// <summary>
     /// Resolve the persisted <see cref="ArchetypeR1"/> row for a runtime archetype on reopen, matching by durable <see cref="ArchetypeMetadata.Name"/> first,

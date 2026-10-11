@@ -573,9 +573,8 @@ internal class DeferredCleanupManager
                 }
                 catch
                 {
-                    // This entity's own frees are dropped, never freed twice: a compaction that throws midway may have cleared skipped elements in place
-                    // and not yet rewritten the root, so some of them are named still and others by nothing. The orphan sweep FreesLost asks the close for
-                    // frees the unnamed ones (#1268).
+                    // A compaction that throws leaves its chain as it was and queues nothing (#1308); what else this entity's pass collected is dropped,
+                    // never freed twice, and the sweep is owed all the same (#1268): the probe's throw, a chunk the compaction could not give back.
                     collectedChunkFrees?.RemoveRange(collectedBefore, collectedChunkFrees.Count - collectedBefore);
                     FreesLost = true;
                     throw;

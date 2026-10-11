@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -61,8 +62,11 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
         return tx.TSN;
     }
 
-    /// <summary>Compacts one revision chain the way the deferred cleanup does, past every snapshot, and returns how many entries it removed.</summary>
-    private static int Compact(ComponentTable table, int firstChunkId)
+    /// <summary>
+    /// Compacts one revision chain the way the deferred cleanup does — past every snapshot, or below <paramref name="nextMinTsn"/> — and returns how many
+    /// entries it removed.
+    /// </summary>
+    private static int Compact(ComponentTable table, int firstChunkId, long nextMinTsn = long.MaxValue)
     {
         var revisions = table.CompRevTableSegment.CreateChunkAccessor();
         var contents = table.ComponentSegment.CreateChunkAccessor();
@@ -73,7 +77,7 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
             Assert.That(header.Control.TryEnterExclusiveAccess(), Is.True, "premise: nothing holds the chain where the void is about to happen");
             try
             {
-                ComponentRevisionManager.CleanUpUnusedEntriesCore(table, firstChunkId, long.MaxValue, ref revisions, ref contents);
+                ComponentRevisionManager.CleanUpUnusedEntriesCore(table, firstChunkId, nextMinTsn, ref revisions, ref contents);
             }
             finally
             {
@@ -110,6 +114,86 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
         {
             revisions.Dispose();
         }
+    }
+
+    /// <summary>The chain's entries, in order: TSN, content chunk, isolation.</summary>
+    private static List<(long, int, bool)> Entries(DatabaseEngine dbe, ComponentTable table, int root)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var revisions = table.CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            var entries = new List<(long, int, bool)>();
+            using var en = new RevisionEnumerator(ref revisions, root, false, true, WaitContext.FromTimeout(TimeSpan.FromSeconds(5)));
+            while (en.MoveNext())
+            {
+                entries.Add((en.Current.TSN, en.Current.ComponentChunkId, en.Current.IsolationFlag));
+            }
+
+            return entries;
+        }
+        finally
+        {
+            revisions.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #1308: a compaction that throws midway leaves the chain as it was. It cleared each entry it dropped in place as it walked and rewrote the root only at
+    /// the end, so a throw on an overflow chunk's page left the chain without those entries — the revision a reader at the horizon reads among them — and the
+    /// new chain's chunks named by nothing. Here the throw comes past the dropped entries, once the copy has filled a new chunk.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    public void ACompactionThatThrowsMidway_LeavesTheChainAsItWas_AndGivesBackItsChunks()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenEngine(scope);
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<VrWalletArch>(VrWalletArch.Wallet.Set(new VrWallet { Credits = 0 }));
+            tx.Commit();
+        }
+
+        var table = dbe.GetComponentTable<VrWallet>();
+        var root = RootOf(dbe, id);
+        var tsns = new long[12];
+        using (var reader = dbe.CreateReadOnlyTransaction())
+        {
+            // The reader keeps every revision from the spawn on.
+            for (var k = 0; k < tsns.Length; k++)
+            {
+                tsns[k] = Commit(dbe, id, k + 1);
+            }
+
+            var before = Entries(dbe, table, root);
+            var chunksBefore = table.CompRevTableSegment.AllocatedChunkCount;
+            Assert.That(before, Has.Count.EqualTo(13), "premise: the spawn and twelve commits");
+
+            // Below the sixth commit: the spawn and five commits dropped, the fifth kept as the sentinel, and seven entries copied after it — past the
+            // first chunk's room. The throw comes at the eleventh entry visited.
+            var visited = 0;
+            dbe.CompactionStepProbe = _ =>
+            {
+                if (++visited == 11)
+                {
+                    throw new InvalidOperationException("staged: a page fault midway through the walk");
+                }
+            };
+            Assert.Throws<InvalidOperationException>(() => Compact(table, root, tsns[5]), "premise: the compaction threw");
+            dbe.CompactionStepProbe = null;
+
+            Assert.That(Entries(dbe, table, root), Is.EqualTo(before), "the chain, as it was");
+            Assert.That(table.CompRevTableSegment.AllocatedChunkCount, Is.EqualTo(chunksBefore), "the new chain's chunks, given back");
+            Assert.That(reader.Open(id).Read(VrWalletArch.Wallet).Credits, Is.EqualTo(0), "the reader at the spawn still reads it");
+        }
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            Assert.That(Compact(table, root), Is.EqualTo(12), "the next compaction does the whole job");
+        }
+        Assert.That(Read(dbe, id), Is.EqualTo(12L));
     }
 
     /// <summary>Whether the chain holds a committed entry of <paramref name="tsn"/> that still names a content chunk.</summary>

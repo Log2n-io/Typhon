@@ -420,6 +420,9 @@ internal ref struct ComponentRevisionManager
     /// <para>This method is transaction-agnostic and can be called from both the transaction commit path and the lazy cleanup path.</para>
     /// <para>A <b>sentinel</b> revision is preserved when the first kept entry has TSN &gt; nextMinTSN: this is the last committed
     /// revision before the cutoff, needed because active transactions at MinTSN may have cached its content chunk ID.</para>
+    /// <para>All or nothing up to the root's rewrite (REAP-02, #1308): the walk writes nothing of the live chain and frees nothing, so a throw in it — a
+    /// back-pressure timeout on an overflow chunk's page, an allocation — leaves the chain as it was, and gives back the chunks it allocated. The frees
+    /// follow the rewrite, and cannot throw when deferred: the list's room is taken before.</para>
     /// </remarks>
     internal static unsafe bool CleanUpUnusedEntriesCore(ComponentTable ct, int firstChunkId, long nextMinTSN,
         ref ChunkAccessor<PersistentStore> compRevTableAccessor, ref ChunkAccessor<PersistentStore> compContentAccessor,
@@ -457,6 +460,16 @@ internal ref struct ComponentRevisionManager
             next = compRevTableAccessor.GetChunk<int>(next);   // an overflow chunk's first field is its own next-chunk id
         }
 
+        // The content chunks the compaction frees, freed once the root names the new chain — at most one per element — and the new chain's overflow chunks,
+        // given back if the walk throws: the new chain is never longer than the old one, which starts at an offset when the new one starts at 0.
+        int itemCount = firstChunkHeader.ItemCount;
+        Span<int> contentFrees = (itemCount < 128) ? stackalloc int[itemCount] : new int[itemCount];
+        var contentFreeCount = 0;
+        Span<int> newChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
+        var newChunkCount = 0;
+        var stepProbe = ct.DBE?.CompactionStepProbe;
+
+        try
         {
             using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
             var maxSkipCount = firstChunkHeader.ItemCount;
@@ -470,12 +483,13 @@ internal ref struct ComponentRevisionManager
 
             while (enumerator.MoveNext())
             {
+                stepProbe?.Invoke(firstChunkId);
+
                 // A void — a rolled-back entry, or a conflict's orphan — is not an entry (CHAIN-01): dropped wherever it is, and it counts for nothing. Kept,
                 // it ended the skip phase as the chain's last entry and the sentinel, the last committed revision, was freed as no longer needed; copied, it
                 // took LastCommitRevisionIndex, though it is no commit.
                 if (enumerator.Current.IsVoid)
                 {
-                    enumerator.CurrentAsSpan.Clear();
                     skipCount++;
                     continue;
                 }
@@ -493,7 +507,7 @@ internal ref struct ComponentRevisionManager
                         // Supersede previous sentinel: free/defer its chunk, promote current entry
                         if (hasSentinel)
                         {
-                            DeferOrFreeContentChunk(ct, ref compContentAccessor, sentinelCompChunkId, hasCollections, deferredChunkFrees);
+                            PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
                         }
                         sentinelEntry = enumerator.Current;
                         sentinelCompChunkId = revChunkId;
@@ -502,10 +516,9 @@ internal ref struct ComponentRevisionManager
                     else
                     {
                         // No TSN, yet not void: no such entry is written. Freed like a void's chunk would be (0, a no-op).
-                        DeferOrFreeContentChunk(ct, ref compContentAccessor, revChunkId, hasCollections, deferredChunkFrees);
+                        PendContentFree(contentFrees, ref contentFreeCount, revChunkId);
                     }
 
-                    enumerator.CurrentAsSpan.Clear();
                     skipCount++;
                     continue;
                 }
@@ -533,6 +546,7 @@ internal ref struct ComponentRevisionManager
                                 tempFirstHeader[0].ChainLength++;
 
                                 newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0
+                                newChunks[newChunkCount++] = newChunkId;
                                 curNextChunkId[0] = newChunkId;
                                 var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
                                 newChunkSpan.Split(out curNextChunkId, out curDestElements);
@@ -541,7 +555,7 @@ internal ref struct ComponentRevisionManager
                         else
                         {
                             // Sentinel not needed: the first kept entry is visible to all remaining transactions
-                            DeferOrFreeContentChunk(ct, ref compContentAccessor, sentinelCompChunkId, hasCollections, deferredChunkFrees);
+                            PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
                         }
                     }
                 }
@@ -561,6 +575,7 @@ internal ref struct ComponentRevisionManager
                     tempFirstHeader[0].ChainLength++;
 
                     newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0, the chain's end
+                    newChunks[newChunkCount++] = newChunkId;
                     curNextChunkId[0] = newChunkId;
                     var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
                     newChunkSpan.Split(out curNextChunkId, out curDestElements);
@@ -585,6 +600,27 @@ internal ref struct ComponentRevisionManager
                 tempFirstHeader[0].ItemCount = 1;
                 skipCount--;
             }
+
+            // The room for every deferred free, taken before the rewrite: past it, nothing may throw.
+            deferredChunkFrees?.EnsureCapacity(deferredChunkFrees.Count + contentFreeCount + chunksToFreeCount);
+        }
+        catch
+        {
+            // The live chain is as it was; the new one is named by nothing, and never was — freed unheld (CK-17). Given back as far as that goes: a free that
+            // throws here leaves its chunk to the orphan sweep the caller's failed cleanup asks for (FreesLost), and must not hide the first failure.
+            for (var i = 0; i < newChunkCount; i++)
+            {
+                try
+                {
+                    ct.CompRevTableSegment.FreeChunkUnheld(newChunks[i]);
+                }
+                catch
+                {
+                    // The sweep's.
+                }
+            }
+
+            throw;
         }
 
         // Cleanup does NOT increment CommitSequence. CS represents the total number of commits to this entity, and cleanup removing old entries
@@ -599,6 +635,12 @@ internal ref struct ComponentRevisionManager
         tempChunk.Slice(0, sizeof(int)).CopyTo(destSpan.Slice(0, sizeof(int)));
         tempChunk.Slice(controlFieldEnd).CopyTo(destSpan.Slice(controlFieldEnd));
         firstChunkHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+
+        // The content chunks of the entries the new chain dropped, now that nothing names them.
+        for (var i = 0; i < contentFreeCount; i++)
+        {
+            DeferOrFreeContentChunk(ct, ref compContentAccessor, contentFrees[i], hasCollections, deferredChunkFrees);
+        }
 
         // The old overflow chunks, now that nothing names them: deferred with the content frees, past every transaction alive now — a rollback or a
         // conflict resolution can still write through a handle it took into the old layout before this pass took the lock. Immediately only without a
@@ -1192,8 +1234,8 @@ internal ref struct ComponentRevisionManager
     /// chain is exactly its root (NextChunkId==0), so <paramref name="reachableRoots"/> (the chains' root chunk ids) is the full
     /// set of reachable revision-table chunks, and the roots' single head elements yield the only reachable content chunks.
     /// Orphan content is freed with a plain <c>FreeChunk</c> (NOT <see cref="FreeCompContentChunk"/>): a never-linked chunk's
-    /// collection-buffer ids are unreliable, so its buffers are not released — a rare, bounded residual (standalone collection
-    /// buffer orphans are out of scope here). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
+    /// collection-buffer ids are unreliable, so its buffers are not released here — the crash open's collection sweep, which runs after, frees
+    /// what nothing names (DatabaseEngine.SweepCollectionOrphans, #1307). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
     /// </summary>
     internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor,
         ref ChunkAccessor<PersistentStore> contentAccessor, Action batchPoint = null)
@@ -1254,6 +1296,15 @@ internal ref struct ComponentRevisionManager
         contentAccessor.CommitChanges();
         batchPoint();
         since = 1;
+    }
+
+    /// <summary>A content chunk the compaction frees once the root names the new chain (#1308); 0 names none.</summary>
+    private static void PendContentFree(Span<int> frees, ref int count, int chunkId)
+    {
+        if (chunkId != 0)
+        {
+            frees[count++] = chunkId;
+        }
     }
 
     /// <summary>
