@@ -843,9 +843,8 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     batch.Clear();
                     while (position < pending.Length && batchPlanned < maxPages && Stopwatch.GetTimestamp() - batchStart < WriteBatchMaxTicks)
                     {
-                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy: a stopped engine's pages may hold writes the WAL
-                        // never logged (#1271). The rest stay owed — skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves
-                        // before wrote is settled below.
+                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy, as a power cut would. The rest stay owed —
+                        // skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves before wrote is settled below.
                         if (_crashStop)
                         {
                             for (var i = position; i < pending.Length; i++)
@@ -1171,8 +1170,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // free first.
             WriteAheadOfTheHook(ref ctx);
 
-            // AP-03 stopped the engine since the cycle began (#1271): the write above stopped at its next wave, and the hook would save its pages to the data
-            // file directly.
+            // A crash stop set since the cycle began: the write above stopped at its next wave, and the hook would save its pages to the data file directly.
             if (_crashStop)
             {
                 return;

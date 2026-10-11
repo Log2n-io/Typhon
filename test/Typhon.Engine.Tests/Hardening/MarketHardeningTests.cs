@@ -1422,6 +1422,21 @@ public class MarketHardeningTests
     private List<ulong> Storm(DatabaseEngine dbe, ulong[] traderIds, ulong[] itemIds, int runNo, long firstSeq, long totalCredits, out long lastSeq,
         out List<DestroyedItem> destroyed, out List<RolledBack> rolledBack)
     {
+        // TYPHON_MKT_FAIL_PUBLISH_AT=N: the Nth commit's publish throws midway — its Versioned components published, its SingleVersion writes not — and
+        // the engine stops (AP-03). The next open recovers it; the market checks that recovery.
+        var failPublishAt = long.TryParse(Environment.GetEnvironmentVariable("TYPHON_MKT_FAIL_PUBLISH_AT"), out var at) ? at : 0;
+        if (failPublishAt > 0)
+        {
+            var publishes = 0L;
+            dbe.CommitBeforeStagedPublishProbe = () =>
+            {
+                if (Interlocked.Increment(ref publishes) == failPublishAt)
+                {
+                    throw new InvalidOperationException("staged (TYPHON_MKT_FAIL_PUBLISH_AT): a publish fails midway");
+                }
+            };
+        }
+
         var itemLocks = new object[1 << 16];
         var traderLocks = new object[1 << 12];
         for (var i = 0; i < itemLocks.Length; i++)
@@ -1688,7 +1703,8 @@ public class MarketHardeningTests
                 }
                 catch (Exception e)
                 {
-                    Fail($"worker {worker}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
+                    Fail($"worker {worker}: {e.GetType().Name}: {e.Message}\n{e.StackTrace}"
+                         + (e.InnerException == null ? "" : $"\n  inner: {e.InnerException.GetType().Name}: {e.InnerException.Message}\n{e.InnerException.StackTrace}"));
                     Volatile.Write(ref stop, 1);
                 }
                 finally
