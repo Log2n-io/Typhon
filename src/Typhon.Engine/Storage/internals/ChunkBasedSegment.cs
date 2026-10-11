@@ -1806,6 +1806,124 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         return (data[wordIndex] & mask) != 0L;
     }
 
+    /// <summary>
+    /// Whether chunk <paramref name="index"/> is allocated, its bitmap page read and released (EP-02): <see cref="IsChunkAllocated"/> epoch-tags the
+    /// page, and a walk that asks it of chunks across a segment larger than the cache pinned all of it (#1183). The read pin takes the slot's lock:
+    /// for recovery's and the offline walks, not the hot paths.
+    /// </summary>
+    internal bool IsChunkAllocatedUnpinned(int index)
+    {
+        var (pageIndex, chunkInPage) = GetChunkLocation(index);
+        var page = AcquirePageForRead(pageIndex, out var memPageIndex);
+        try
+        {
+            return (page.MetadataReadOnly<long>()[chunkInPage >> 6] & (1L << (chunkInPage & 0x3F))) != 0L;
+        }
+        finally
+        {
+            ReleasePageForRead(memPageIndex);
+        }
+    }
+
+    /// <summary><see cref="IsChunkLive"/> through <see cref="IsChunkAllocatedUnpinned"/>: allocated and not held, the page read and released (EP-02).</summary>
+    internal bool IsChunkLiveUnpinned(int index) => !IsChunkHeld(index) && IsChunkAllocatedUnpinned(index);
+
+    /// <summary>
+    /// The allocated chunks, in chunk order — each page's bitmap copied under a read pin and released before its chunks are returned (EP-02): a walk
+    /// over every chunk of a segment larger than the cache pins one page at a time, never the segment (#1183). A chunk allocated or freed while it
+    /// runs may or may not be returned; held chunks (CK-17) are allocated and are returned.
+    /// </summary>
+    internal AllocatedChunkCursor AllocatedChunks() => new(this);
+
+    /// <summary>The cursor of <see cref="AllocatedChunks"/>: <c>foreach (var chunkId in segment.AllocatedChunks())</c>. Holds no page between moves.</summary>
+    internal ref struct AllocatedChunkCursor
+    {
+        private readonly ChunkBasedSegment<TStore> _segment;
+        private BitmapCopy _words;
+        private int _pageIndex;
+        private int _wordCount;
+        private int _word;
+        private int _chunksOnPage;
+        private long _bits;
+
+        internal AllocatedChunkCursor(ChunkBasedSegment<TStore> segment)
+        {
+            _segment = segment;
+            _words = default;
+            _pageIndex = -1;
+            _wordCount = 0;
+            _word = 0;
+            _chunksOnPage = 0;
+            _bits = 0;
+            Current = -1;
+        }
+
+        public int Current { get; private set; }
+
+        public AllocatedChunkCursor GetEnumerator() => this;
+
+        public bool MoveNext()
+        {
+            while (true)
+            {
+                while (_bits == 0)
+                {
+                    if (++_word < _wordCount)
+                    {
+                        _bits = _words[_word];
+                        continue;
+                    }
+
+                    if (++_pageIndex >= _segment.Length)
+                    {
+                        return false;
+                    }
+
+                    CopyPage();
+                }
+
+                var bit = BitOperations.TrailingZeroCount(_bits);
+                _bits &= _bits - 1;
+                var chunkInPage = (_word << 6) + bit;
+                if (chunkInPage >= _chunksOnPage)
+                {
+                    _bits = 0;
+                    continue;
+                }
+
+                Current = _segment.PageOffsetToChunkIndex(_pageIndex, chunkInPage);
+                return true;
+            }
+        }
+
+        private void CopyPage()
+        {
+            _word = -1;
+            _chunksOnPage = _segment.ChunksOnPage(_pageIndex);
+            _wordCount = _chunksOnPage == 0 ? 0 : _segment.BitmapLongsOnPage(_pageIndex);
+            if (_wordCount == 0)
+            {
+                return;
+            }
+
+            var page = _segment.AcquirePageForRead(_pageIndex, out var memPageIndex);
+            try
+            {
+                page.MetadataReadOnly<long>()[.._wordCount].CopyTo(_words);
+            }
+            finally
+            {
+                _segment.ReleasePageForRead(memPageIndex);
+            }
+        }
+    }
+
+    // A page's chunk bitmap: its metadata region (PagedMMF.PageMetadataSize, 128 bytes) holds at most 16 words.
+    [System.Runtime.CompilerServices.InlineArray(PagedMMF.PageMetadataSize / sizeof(long))]
+    internal struct BitmapCopy
+    {
+        private long _element;
+    }
 }
 
 /// <summary>

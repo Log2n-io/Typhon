@@ -177,7 +177,9 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
             var cs = dbe.MMF.CreateChangeSet();
             var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
-            ComponentRevisionManager.SweepTableOrphans(table, reachableRoots, ref rev);
+            var content = table.ComponentSegment.CreateChunkAccessor(cs);
+            ComponentRevisionManager.SweepTableOrphans(table, reachableRoots, ref rev, ref content);
+            content.Dispose();
             rev.Dispose();
             cs.SaveChanges();
         }

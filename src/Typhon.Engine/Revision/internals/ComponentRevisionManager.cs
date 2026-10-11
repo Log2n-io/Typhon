@@ -803,9 +803,9 @@ internal ref struct ComponentRevisionManager
         {
             // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
             var overflowSet = new HashSet<int>();
-            for (var chunkId = 0; chunkId < capacity; chunkId++)
+            foreach (var chunkId in segment.AllocatedChunks())
             {
-                if (!segment.IsChunkLive(chunkId))
+                if (segment.IsChunkHeld(chunkId))
                 {
                     continue;
                 }
@@ -820,9 +820,9 @@ internal ref struct ComponentRevisionManager
             // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered); then the named chunks
             // with a root's header, for the entities left without one.
             List<(long Pk, int Chunk)> namedRoots = null;
-            for (var chunkId = 0; chunkId < capacity; chunkId++)
+            foreach (var chunkId in segment.AllocatedChunks())
             {
-                if (!segment.IsChunkLive(chunkId))
+                if (segment.IsChunkHeld(chunkId))
                 {
                     continue;
                 }
@@ -932,7 +932,7 @@ internal ref struct ComponentRevisionManager
 
         for (var left = length - 1; left > 0; left--)
         {
-            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkLive(next))
+            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkLiveUnpinned(next))
             {
                 return false;
             }
@@ -951,7 +951,7 @@ internal ref struct ComponentRevisionManager
     /// <remarks>A chunk in <paramref name="withoutRelease"/> — taken by the reservation (free on disk), or the content of a torn element a twin replaced —
     /// is freed without releasing its collection buffers: its bytes may predate it, so the buffer ids it holds are not its own.</remarks>
     internal static void FreeDroppedContent(ComponentTable table, HashSet<int> roots, List<int> droppedContent, HashSet<int> withoutRelease,
-        ref ChunkAccessor<PersistentStore> revAccessor, ref ChunkAccessor<PersistentStore> contentAccessor)
+        ref ChunkAccessor<PersistentStore> revAccessor, ref ChunkAccessor<PersistentStore> contentAccessor, Action batchPoint = null)
     {
         if (droppedContent.Count == 0)
         {
@@ -959,8 +959,10 @@ internal ref struct ComponentRevisionManager
         }
 
         var heads = new HashSet<int>(roots.Count);
+        var sinceBatchPoint = 0;
         foreach (var rootChunkId in roots)
         {
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
             revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
             if (els[0].ComponentChunkId != 0)
             {
@@ -972,7 +974,8 @@ internal ref struct ComponentRevisionManager
         var contentSeg = table.ComponentSegment;
         foreach (var chunkId in droppedContent)
         {
-            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkLive(chunkId))
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
+            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkLiveUnpinned(chunkId))
             {
                 if (withoutRelease != null && withoutRelease.Contains(chunkId))
                 {
@@ -998,7 +1001,7 @@ internal ref struct ComponentRevisionManager
         var revSeg = table.CompRevTableSegment;
         var contentSeg = table.ComponentSegment;
         var reserved = 0;
-        var accessor = revSeg.CreateChunkAccessor();
+        var accessor = revSeg.CreateScanAccessor();
         try
         {
             foreach (var rootChunkId in roots)
@@ -1017,7 +1020,7 @@ internal ref struct ComponentRevisionManager
                 reserved += ReserveContent(contentSeg, rootElements, reservedContent);
                 for (var left = length - 1; left > 0 && next > 0 && next < revSeg.ChunkCapacity; left--)
                 {
-                    if (!revSeg.IsChunkAllocated(next))
+                    if (!revSeg.IsChunkAllocatedUnpinned(next))
                     {
                         revSeg.ReserveChunk(next);
                         reserved++;
@@ -1072,7 +1075,7 @@ internal ref struct ComponentRevisionManager
                 reachable.Add(root);
                 for (var left = length - 1; left > 0; left--)
                 {
-                    if (next <= 0 || next >= capacity || !revSeg.IsChunkAllocated(next) || roots.Contains(next))
+                    if (next <= 0 || next >= capacity || !revSeg.IsChunkAllocatedUnpinned(next) || roots.Contains(next))
                     {
                         break;
                     }
@@ -1149,7 +1152,7 @@ internal ref struct ComponentRevisionManager
         foreach (ref var element in elements)
         {
             var cc = element.ComponentChunkId;
-            if (cc > 0 && cc < contentSeg.ChunkCapacity && !contentSeg.IsChunkAllocated(cc))
+            if (cc > 0 && cc < contentSeg.ChunkCapacity && !contentSeg.IsChunkAllocatedUnpinned(cc))
             {
                 contentSeg.ReserveChunk(cc);
                 reservedContent.Add(cc);
@@ -1170,7 +1173,8 @@ internal ref struct ComponentRevisionManager
     /// collection-buffer ids are unreliable, so its buffers are not released — a rare, bounded residual (standalone collection
     /// buffer orphans are out of scope here). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
     /// </summary>
-    internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor)
+    internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor,
+        ref ChunkAccessor<PersistentStore> contentAccessor, Action batchPoint = null)
     {
         var revSeg = table.CompRevTableSegment;
         var contentSeg = table.ComponentSegment;
@@ -1181,8 +1185,10 @@ internal ref struct ComponentRevisionManager
 
         // Reachable content = the single head element's ComponentChunkId of each surviving chain root.
         var reachableContent = new HashSet<int>(reachableRoots.Count);
+        var sinceBatchPoint = 0;
         foreach (var rootChunkId in reachableRoots)
         {
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
             revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
             var cc = els[0].ComponentChunkId;
             if (cc != 0)
@@ -1191,23 +1197,41 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // Free orphan revision-table chunks (allocated, not a chain root).
-        for (var chunkId = 0; chunkId < revSeg.ChunkCapacity; chunkId++)
+        // Free orphan revision-table chunks (allocated, not a chain root) — the allocated chunks walked page by page (EP-02, #1183).
+        foreach (var chunkId in revSeg.AllocatedChunks())
         {
-            if (revSeg.IsChunkLive(chunkId) && !reachableRoots.Contains(chunkId))
+            if (!revSeg.IsChunkHeld(chunkId) && !reachableRoots.Contains(chunkId))
             {
+                BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
                 revSeg.FreeChunk(chunkId);
             }
         }
 
         // Free orphan content chunks (allocated, referenced by no surviving head).
-        for (var chunkId = 0; chunkId < contentSeg.ChunkCapacity; chunkId++)
+        foreach (var chunkId in contentSeg.AllocatedChunks())
         {
-            if (contentSeg.IsChunkLive(chunkId) && !reachableContent.Contains(chunkId))
+            if (!contentSeg.IsChunkHeld(chunkId) && !reachableContent.Contains(chunkId))
             {
+                BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
                 contentSeg.FreeChunk(chunkId);
             }
         }
+    }
+
+    // A crash open's batch point every DatabaseEngine.RecoveryBatchSize steps of a scrub walk (#1183, CK-08): the accessors' writes committed first — their
+    // dirty slots released to the checkpoint, the pins of the slots they evicted returned. No address the walk took outlives its step.
+    private static void BatchPointEvery(ref int since, Action batchPoint, ref ChunkAccessor<PersistentStore> revAccessor,
+        ref ChunkAccessor<PersistentStore> contentAccessor)
+    {
+        if (batchPoint == null || ++since <= DatabaseEngine.RecoveryBatchSize)
+        {
+            return;
+        }
+
+        revAccessor.CommitChanges();
+        contentAccessor.CommitChanges();
+        batchPoint();
+        since = 1;
     }
 
     /// <summary>

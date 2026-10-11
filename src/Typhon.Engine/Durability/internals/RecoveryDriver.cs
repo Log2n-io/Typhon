@@ -368,8 +368,17 @@ internal sealed class RecoveryDriver
             }
         }
 
+        var sinceBatchPoint = 0;
         foreach (var (entityIdRaw, agg) in entities)
         {
+            // Between entities, every RecoveryBatchSize of them: the replay's pages written so far saved and unpinned, so a window larger than the cache
+            // replays (#1183, CK-08).
+            if (++sinceBatchPoint > DatabaseEngine.RecoveryBatchSize)
+            {
+                applier.BatchPoint();
+                sinceBatchPoint = 1;
+            }
+
             // No Spawn in the window → the record targets a pre-existing (checkpointed) entity already loaded into the EntityMap.
             if (!agg.HasSpawn)
             {
@@ -421,6 +430,7 @@ internal sealed class RecoveryDriver
             result.CollectionFoldsFlushed += FlushCollections(applier, entityIdRaw, agg);
         }
 
+        applier.Complete();
         result.TxCommitted = committed.Count;
         result.MaxTsn = applier.MaxTsn;
 

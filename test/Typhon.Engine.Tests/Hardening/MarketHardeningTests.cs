@@ -422,7 +422,12 @@ public class MarketHardeningTests
             .ConfigureStorage(s => s.VerifyOnOpen = verify));
 
     [TearDown]
-    public void ResetQuarantineSwitch() => DatabaseEngine.DisableFreeQuarantineForTest = false;
+    public void ResetQuarantineSwitch()
+    {
+        DatabaseEngine.DisableFreeQuarantineForTest = false;
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        DatabaseEngine.RecoveryBatchSize = DatabaseEngine.DefaultRecoveryBatchSize;
+    }
 
     [Test]
     public void AMarketLargerThanItsCache_StaysExactlyCoherent_ThroughAStormAndAReopen()
@@ -431,6 +436,11 @@ public class MarketHardeningTests
 
         // TYPHON_MKT_NO_QUARANTINE=1: frees reused at once, as before CK-17 — the A/B switch of its measurements, on the same binary.
         DatabaseEngine.DisableFreeQuarantineForTest = Environment.GetEnvironmentVariable("TYPHON_MKT_NO_QUARANTINE") == "1";
+
+        // TYPHON_MKT_RECOVERY_BATCH: a crash open's batch size, for TYPHON_MKT_STOP_RECOVERY to stop inside a short window's passes.
+        DatabaseEngine.RecoveryBatchSize = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_MKT_RECOVERY_BATCH"), out var batch) && batch > 0
+            ? batch
+            : DatabaseEngine.DefaultRecoveryBatchSize;
         _errors = new ConcurrentQueue<string>();
         Log(_c.ToString());
         Directory.CreateDirectory(_c.Directory);
@@ -997,6 +1007,66 @@ public class MarketHardeningTests
         return s;
     }
 
+    private void StopRecoveries(string spec)
+    {
+        if (string.IsNullOrEmpty(spec))
+        {
+            return;
+        }
+
+        foreach (var entry in spec.Split(','))
+        {
+            var parts = entry.Split(':');
+            var pass = Enum.Parse<DatabaseEngine.RecoveryPass>(parts[0]);
+            var at = int.Parse(parts[1]);
+            var seen = 0;
+            DatabaseEngine.RecoveryBatchPointProbe = (p, _) =>
+            {
+                if (p == pass && ++seen == at)
+                {
+                    throw new InvalidOperationException($"recovery stopped inside {pass}, at its batch point {at}");
+                }
+            };
+            try
+            {
+                using var dbe = Open(_c.CacheMiB, OpenVerification.Spine);
+                Log($"the open meant to stop inside {pass} at batch point {at} completed: {seen} batch point(s) of the pass");
+            }
+            catch (Exception e)
+            {
+                Log($"recovery stopped: {e.GetBaseException().Message}");
+            }
+            finally
+            {
+                DatabaseEngine.RecoveryBatchPointProbe = null;
+            }
+
+            ScanOffline("after the stop");
+        }
+    }
+
+    // What a stopped recovery left in the data file, read offline: the WAL findings in full (a stopped open's writer once broke the log, LOG-08).
+    private void ScanOffline(string when)
+    {
+        using var source = new OfflineBundlePageSource(DatabaseFile(_c));
+        var report = IntegrityScanner.Scan(source, new IntegrityOptions { Depth = ScanDepth.Deep });
+        var codes = new Dictionary<string, int>();
+        foreach (var f in report.Findings)
+        {
+            codes[f.Code] = codes.GetValueOrDefault(f.Code) + 1;
+        }
+
+        Log($"offline scan {when}: {report.Verdict}, {report.Findings.Count} finding(s): {string.Join(", ", codes.Select(kv => kv.Key + " x" + kv.Value))}");
+        foreach (var f in report.Findings)
+        {
+            if (f.Code.StartsWith("CHK-WAL"))
+            {
+                Log($"  {f.Code} @ {f.Locus}: {f.Summary} {f.Detail}");
+            }
+        }
+
+    }
+
     /// <summary>
     /// The run before this one did not check out — it crashed (<c>TYPHON_MKT_CRASH</c>) or failed — so the database holds whatever recovery made of it.
     /// Checked with nothing taken from that run but its crash oracle:
@@ -1019,6 +1089,15 @@ public class MarketHardeningTests
             : $"run {run} crashed: verifying the recovered database against its oracle ({oracle.Value.Committed.Length:N0} committed, " +
               $"{oracle.Value.RolledBack.Length:N0} rolled back)");
         _sampler.Phase = "recovery";
+
+        // TYPHON_MKT_STOP_RECOVERY=Pass:N[,Pass:N…]: before the verified open, one open per entry stopped at its pass's Nth batch point, as a crash during
+        // the recovery would stop it — the next open replays the window over its partial output (AP-12, plan 06 step 2.4).
+        if (Environment.GetEnvironmentVariable("TYPHON_MKT_STOP_RECOVERY") is { Length: > 0 })
+        {
+            ScanOffline("before the stops");
+        }
+
+        StopRecoveries(Environment.GetEnvironmentVariable("TYPHON_MKT_STOP_RECOVERY"));
         var sw = Stopwatch.StartNew();
         var itemIds = new ulong[_c.Items];
         MkAudit[] entries;
@@ -1027,7 +1106,9 @@ public class MarketHardeningTests
         {
             using var tracked = _sampler.Track(dbe, "recovery check");
             var m = dbe.MMF.GetMetrics();
-            Log($"recovered in {sw.Elapsed.TotalSeconds:F1} s: {m.ReadFromDiskCount:N0} pages read, {m.PageWrittenToDiskCount:N0} written");
+            Log($"recovered in {sw.Elapsed.TotalSeconds:F1} s: {m.ReadFromDiskCount:N0} pages read, {m.PageWrittenToDiskCount:N0} written; "
+                + $"{dbe.RecoveryBatchPoints:N0} batch points, peak {dbe.PeakRecoveryEpochHeldPages:N0} pages epoch-held, "
+                + $"{dbe.CheckpointManager.TotalFlushOnlyCycles:N0} flush-only cycle(s)");
 
             sw.Restart();
             actual = ScanState(dbe, traderIds, itemIds);

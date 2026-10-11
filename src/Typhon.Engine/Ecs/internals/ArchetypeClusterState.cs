@@ -4072,7 +4072,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Scan primary segment (PersistentStore for mixed/SV, TransientStore for pure-Transient)
         if (ClusterSegment != null)
         {
-            var accessor = ClusterSegment.CreateChunkAccessor();
+            // Read and released page by page (EP-02): on a crash open the segment can be larger than the cache, and an epoch-tagged scan pinned all of it
+            // — the open timed out on back-pressure, every slot epoch-held (#1183).
+            var accessor = ClusterSegment.CreateScanAccessor();
             try
             {
                 ScanActiveChunks(ref accessor, ClusterSegment.ChunkCapacity);
@@ -4098,9 +4100,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     private void ScanActiveChunks(ref ChunkAccessor<PersistentStore> accessor, int capacity)
     {
-        for (var chunkId = 1; chunkId < capacity; chunkId++)
+        foreach (var chunkId in ClusterSegment.AllocatedChunks())
         {
-            if (!ClusterSegment.IsChunkAllocated(chunkId))
+            if (chunkId == 0)
             {
                 continue;
             }
@@ -10665,7 +10667,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <returns>
     /// The number of index entries dropped because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on every healthy rebuild.
     /// </returns>
-    public int RebuildIndexesFromData(ChangeSet changeSet)
+    /// <param name="changeSet">The ChangeSet the index writes are tracked in.</param>
+    /// <param name="batchPoint">A crash open's batch point (<see cref="DatabaseEngine.RecoveryBatchPoint"/>), called between clusters; null elsewhere.</param>
+    public int RebuildIndexesFromData(ChangeSet changeSet, Action batchPoint = null)
     {
         if (IndexSlots == null || IndexSlots.Length == 0)
         {
@@ -10680,14 +10684,30 @@ internal sealed unsafe partial class ArchetypeClusterState
         // A field's nodes live in whichever segment its stride requires, so rebuild needs an accessor per segment, not per archetype (#658).
         var hasString64 = IndexSegmentString64 != null;
         var idxAccessorS64 = hasString64 ? IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
+        var sinceBatchPoint = 0;
         try
         {
             for (var c = 0; c < ActiveClusterCount; c++)
             {
+                // A crash open's batch point, between clusters (#1183, CK-08): the index accessors' writes committed first. Every address is taken again
+                // for the next cluster.
+                if (batchPoint != null && sinceBatchPoint >= DatabaseEngine.RecoveryBatchSize)
+                {
+                    idxAccessor.CommitChanges();
+                    if (hasString64)
+                    {
+                        idxAccessorS64.CommitChanges();
+                    }
+
+                    batchPoint();
+                    sinceBatchPoint = 0;
+                }
+
                 var chunkId = ActiveClusterIds[c];
                 var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
                 var occupancy = *(ulong*)clusterBase;
                 var wroteElementIds = false;
+                sinceBatchPoint += BitOperations.PopCount(occupancy);
 
                 while (occupancy != 0)
                 {
@@ -10847,8 +10867,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// False when the EntityMap this reads was re-derived on the crash path, where <c>EnabledBits</c> is reconstructed from the cluster SoA copy whose
     /// durability is the open gap in #398. A rootless slot cannot then be classified, so it is counted as a defect rather than as expected absence.
     /// </param>
+    /// <param name="batchPoint">A crash open's batch point (<see cref="DatabaseEngine.RecoveryBatchPoint"/>), called between clusters; null elsewhere.</param>
     public void RebuildVersionedHeadFromChain(ArchetypeMetadata meta, ArchetypeEngineState engineState, ChangeSet changeSet, bool enabledBitsTrusted,
-        out VersionedHeadRebuildSkips skips)
+        out VersionedHeadRebuildSkips skips, Action batchPoint = null)
     {
         skips = default;
         if (meta.VersionedSlotMask == 0)
@@ -10885,13 +10906,23 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
         }
 
+        var sinceBatchPoint = 0;
         try
         {
             for (var c = 0; c < ActiveClusterCount; c++)
             {
+                // A crash open's batch point, between clusters (#1183, CK-08): every address below is taken again for the next cluster, and the accessors'
+                // cached slots stay pinned by their own references.
+                if (batchPoint != null && sinceBatchPoint >= DatabaseEngine.RecoveryBatchSize)
+                {
+                    batchPoint();
+                    sinceBatchPoint = 0;
+                }
+
                 var chunkId = ActiveClusterIds[c];
                 var clusterBase = clusterAccessor.GetChunkAddress(chunkId, true);
                 var occupancy = *(ulong*)clusterBase;
+                sinceBatchPoint += BitOperations.PopCount(occupancy);
 
                 while (occupancy != 0)
                 {
@@ -10975,6 +11006,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                         Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + engineState.SlotToComponentTable[slot].ComponentOverhead, (uint)compSize);
                     }
                 }
+
+                // The HEADs went in through an accessor with no ChangeSet, so nothing recorded the page as owing a write: evicted — the crash open's batch
+                // points make it evictable mid-pass — it reloaded the stale HEADs (PS-10, review of #1183).
+                NoteClusterPageModified(chunkId);
             }
         }
         finally

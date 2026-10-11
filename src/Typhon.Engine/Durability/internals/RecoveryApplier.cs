@@ -937,6 +937,44 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
     }
 
+    /// <summary>The replay applied every entity: <see cref="Dispose"/> writes its last batch.</summary>
+    internal void Complete() => _completed = true;
+
+    private bool _completed;
+
+    /// <summary>
+    /// Between two entities' applies, every <see cref="DatabaseEngine.RecoveryBatchSize"/> of them: every accessor's writes committed — its dirty slots
+    /// released to the checkpoint, the pins of the slots it evicted returned — then the engine's batch point saves this ChangeSet and unpins the batch
+    /// (#1183, CK-08). No accessor address outlives an entity's apply.
+    /// </summary>
+    internal void BatchPoint()
+    {
+        CommitAccessors();
+        _dbe.RecoveryBatchPoint(_changeSet, DatabaseEngine.RecoveryPass.Replay);
+    }
+
+    private void CommitAccessors()
+    {
+        if (_hasAccessor)
+        {
+            _mapAccessor.CommitChanges();
+        }
+
+        if (_hasClusterAccessor)
+        {
+            _clusterAccessor.CommitChanges();
+        }
+
+        foreach (var info in _infoByTable.Values)
+        {
+            info.CompContentAccessor.CommitChanges();
+            if (info.ComponentTable.StorageMode == StorageMode.Versioned)
+            {
+                info.CompRevTableAccessor.CommitChanges();
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (_hasAccessor)
@@ -964,5 +1002,19 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         _infoByTable.Clear();
+
+        // The replay's last batch written, its marks released. Held, they were never released, and every page the replay touched stayed unevictable
+        // (#1183). Released unwritten, a segment the replay grew had its directory owed while the scrub's batch wrote the old tail it shares a page with:
+        // a crash before the next cycle left the chain ahead of the directory, and the open after it refused the segment (CrashDuringRecoveryTests).
+        // Written, the directory goes first (CK-05's alternate slot, then the plain pages). Only once the replay completed: on a throw, an entity's apply
+        // may be half done, and its pages stay owed for no cycle to write before the next open replays it again (review).
+        if (_completed)
+        {
+            _changeSet.SaveChanges();
+        }
+        else
+        {
+            _changeSet.ReleaseDirtyMarks();
+        }
     }
 }

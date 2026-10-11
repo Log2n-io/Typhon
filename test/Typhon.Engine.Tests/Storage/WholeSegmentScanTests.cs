@@ -214,4 +214,57 @@ sealed class WholeSegmentScanTests
 
         Assert.That(wrong, Is.Zero, "a reader was handed a slot that no longer held its page");
     }
+
+    /// <summary>
+    /// The allocated-chunk cursor walks a segment four times the cache inside one epoch scope, as a crash open's recovery scans do, and returns every
+    /// allocated chunk once, in order: it copies each page's bitmap under a read pin and releases it. The recovery scans asked the epoch-tagged
+    /// <c>IsChunkAllocated</c> of every chunk and pinned the whole segment (#1183).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void TheAllocatedChunkCursor_WalksASegmentLargerThanTheCache()
+    {
+        var root = BuildChunkSegment("ep02_cursor", full: true);
+        using var provider = ReopenSmall("ep02_cursor");
+        using var scope = provider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        using var guard = EpochGuard.Enter(pmmf.EpochManager);
+        var segment = pmmf.LoadChunkBasedSegment(root, Stride);
+        var count = 0;
+        var previous = -1;
+        foreach (var chunkId in segment.AllocatedChunks())
+        {
+            Assert.That(chunkId, Is.GreaterThan(previous), "in chunk order, once");
+            previous = chunkId;
+            count++;
+        }
+
+        Assert.That(count, Is.EqualTo(segment.AllocatedChunkCount), "every allocated chunk");
+        Assert.That(segment.IsChunkAllocatedUnpinned(previous) && !segment.IsChunkAllocatedUnpinned(segment.ChunkCapacity - 1), Is.True,
+            "the unpinned check agrees: the last chunk returned is allocated, the one freed is not");
+    }
+
+    /// <summary>The unpinned allocation check asked of every chunk of a segment four times the cache, inside one epoch scope: it pins nothing.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void TheUnpinnedAllocationCheck_OfEveryChunk_HoldsNoPage()
+    {
+        var root = BuildChunkSegment("ep02_point", full: true);
+        using var provider = ReopenSmall("ep02_point");
+        using var scope = provider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        using var guard = EpochGuard.Enter(pmmf.EpochManager);
+        var segment = pmmf.LoadChunkBasedSegment(root, Stride);
+        var allocated = 0;
+        for (var chunkId = 0; chunkId < segment.ChunkCapacity; chunkId++)
+        {
+            allocated += segment.IsChunkAllocatedUnpinned(chunkId) ? 1 : 0;
+        }
+
+        Assert.That(allocated, Is.EqualTo(segment.AllocatedChunkCount), "every allocated chunk counted");
+    }
 }

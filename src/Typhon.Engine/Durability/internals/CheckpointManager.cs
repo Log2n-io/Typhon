@@ -636,6 +636,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     {
         lock (_cycleLock)
         {
+            // CK-08: during a crash open's recovery the only cycle is flush-only — the timer's, the pressure's and a back-pressured allocation's alike.
+            if (RecoveryInProgress)
+            {
+                // Classified as a cycle's failure is (CK-06): escaping, it ended the loop for the session.
+                try
+                {
+                    RunFlushOnlyCycleCore();
+                }
+                catch (Exception ex)
+                {
+                    ClassifyCycleFailure(ex);
+                }
+
+                return;
+            }
+
             RunCheckpointCycleCore(targetLsn, reason);
         }
     }
@@ -669,6 +685,58 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         var written = WriteDirtyPages(ref pending, ref ctx, out _);
         Interlocked.Add(ref _totalPagesWritten, written);
         Interlocked.Increment(ref _totalWritesAheadOfTheHook);
+    }
+
+    /// <summary>
+    /// Set by a crash open for the length of its recovery, cleared before its seal (CK-08): a cycle then only writes. The recovery's passes dirty pages
+    /// beyond the cache, and a full cycle among them would advance CheckpointLSN over a half-recovered file — a second crash would then replay nothing over
+    /// it.
+    /// </summary>
+    internal bool RecoveryInProgress
+    {
+        get => Volatile.Read(ref _recoveryInProgress);
+        set => Volatile.Write(ref _recoveryInProgress, value);
+    }
+
+    private bool _recoveryInProgress;
+    private long _totalFlushOnlyCycles;
+
+    /// <summary>Flush-only cycles run (<see cref="RunFlushOnlyCycle"/>, and every cycle during recovery). Diagnostic.</summary>
+    public long TotalFlushOnlyCycles => Interlocked.Read(ref _totalFlushOnlyCycles);
+
+    /// <summary>
+    /// A flush-only cycle (CK-08): captures and writes the owed pages, discharging their debt, and nothing else — no CheckpointLSN advance, no meta flip,
+    /// no segment recycling, no metadata hook, no held free sealed or released. The write keeps CK-02's order (the WAL is flushed through what the copies
+    /// can reflect before their fsync) and CP-03's, as the cycle's own write does. A suspect page (its checksum failed at load) is left owed: written, its
+    /// torn bytes were checksummed again and the next open served them, whatever the suspect resolution then decided (#1304). Serialized with the cycles.
+    /// Returns the pages written.
+    /// </summary>
+    internal int RunFlushOnlyCycle()
+    {
+        lock (_cycleLock)
+        {
+            return RunFlushOnlyCycleCore();
+        }
+    }
+
+    private int RunFlushOnlyCycleCore()
+    {
+        if (_crashStop)
+        {
+            return 0;
+        }
+
+        var pending = _mmf.WithoutSuspectPages(_mmf.CollectDirtyMemPageIndices());
+        if (pending.Length == 0)
+        {
+            return 0;
+        }
+
+        var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+        var written = WriteDirtyPages(ref pending, ref ctx, out _);
+        Interlocked.Add(ref _totalPagesWritten, written);
+        Interlocked.Increment(ref _totalFlushOnlyCycles);
+        return written;
     }
 
     /// <summary>The highest writeback debt, in percent of the cache, at which <see cref="WriteAheadOfTheHook"/> still lets the hook run first.</summary>

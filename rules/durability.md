@@ -128,6 +128,9 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
              data never consolidates, WAL never recycles). The frontier's LSNs were durable in the prior session (recovered from
              disk), so seeding `DurableLsn` to it is sound — and necessary: the CK-02 barrier blocks on `WaitForDurable(LastAppendedLsn)`,
              and an unseeded `DurableLsn` makes that an unreachable target on an idle reopen (a `WalBackPressureTimeout` per cycle).
+  invariant the recovered LastValidLSN is the highest LSN any segment holds, not the last segment's: an open that failed before its recovery
+            completed has already started its writer, which left a new segment with no record in it. Taken from it, the frontier fell back to
+            CheckpointLSN, the next writer began a segment inside the window's LSNs, and the open after it read the window short (WalRecovery.Recover)
   scope: WalCommitBuffer.SeedNextLsn (the allocator seed); WalWriter.SeedDurableLsn / WalManager.SeedDurableLsn (the durable seed);
          WalManager.Initialize (seeds NextLsn from firstLSN, matching the active segment header); DatabaseEngine.InitializeWalManager
          (`frontierLsn = max(LastValidLSN, CheckpointLsnWatermark)`, then BOTH `SeedNextLsn(frontier+1)` AND `SeedDurableLsn(frontier)`);
@@ -148,7 +151,9 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
                 the test suite into a crawl and the checkpoint thread's `Thread.Join` at shutdown into a near-deadlock.
   verified: PostReopenWindow_AfterPriorSessionCheckpoint_SurvivesCrash [VerifiesRule], asserting recovery MaxLsn > checkpointLsn
             and RecordsApplied > 0 (cross-session) — its session 1 shuts down CLEANLY, which is why it never covered the crash
-            path; DifferentialRecoveryOracleTests.PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier [VerifiesRule]
+            path; DifferentialRecoveryOracleTests.PostRecoveryWrite_ContinuesTheLsnSequenceAboveTheReplayedFrontier [VerifiesRule];
+            CrashDuringRecoveryTests.AnOpenStoppedDuringItsRecovery_LeavesTheNextOpensWalFrontierAtTheWindowsEnd [VerifiesRule] (0 without the
+            max; on the market, two stopped opens lost 177 to 485 durable transfers)
             is the crash-path half, asserting on the watermarks rather than on entity survival so it fails if and only if the LSN
             floor is wrong; CheckpointFrontier_BelowAndWindow_BothRecoverWithIndex is the same-session
             control (LSN already monotonic within a session). The seed-pairing clause is currently verified only empirically (the
@@ -722,16 +727,34 @@ CK-08 (flush-only cycles) are later increments.
          `GetAllSegmentPaths`, reopen-reconcile Add
   on_violation: TXW-7 — `List<T>` corruption under concurrent structural mutation → a fatal latch in a background thread
 
-### CK-08: Flush-only cycles `[UNBUILT]`
-  UNBUILT (verified 2026-07-28): no FlushOnlyCycle exists — searching src/ for FlushOnlyCycle or "flush-only" returns
-    nothing. Migrated here so the ID is not mistaken for an accidentally deleted rule. Both CommitRecovery.tla and
-    CommittedDiscipline.tla justify their CrashDuringRecovery step by citing CK-08; the modelled behaviour is a
-    conservative superset of ordinary eviction so the proofs stand, but their stated justification is design-only.
-  invariant (intended) a FlushOnlyCycle (capture + write + DecrementDirty) never advances CheckpointLSN, never flips
-            the meta pair, never recycles segments; it is the ONLY checkpoint form permitted during recovery
+### CK-08: Flush-only cycles during recovery `[fatal]`
+  invariant a flush-only cycle (CheckpointManager.RunFlushOnlyCycle) captures and writes the owed pages — protected directory pages first,
+            the WAL flushed through what the copies can reflect (CK-02, CK-16) — and discharges their debt; it never advances CheckpointLSN,
+            never flips the meta pair, never recycles segments, never runs the metadata hook, never seals or releases held frees (CK-17)
+  invariant it is the ONLY cycle a crash open runs before its seal: CheckpointManager.RecoveryInProgress is set when the manager is created on a
+            crash open and again when RunWalV2Recovery starts (a repeat InitializeArchetypes recovers again), and cleared by SealRecovery and,
+            for an open that recovered nothing, at the end of InitializeArchetypes. Every cycle requested meanwhile — the timer's, the dirty-page
+            pressure's, a back-pressured allocation's — runs flush-only, its failure classified as a cycle's (CK-06). A suspect page (its checksum
+            failed at load) is left owed by the flush-only cycle and by SavePages: written, its torn bytes were re-checksummed for the next open
+            to serve (#1304)
+  invariant the recovery's passes work in bounded batches (DatabaseEngine.RecoveryBatchSize entities, chains or records) and call
+            DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet saved, the thread's epoch pin refreshed so the batch's pages stop
+            being epoch-held, and a flush-only cycle once the owed pages pass the dirty-page threshold. The passes: the entity-map rebuild, the
+            Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild. A pass
+            calls it only where it holds no page address across it, and records every page it writes through an accessor without a ChangeSet as
+            owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
+            when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305); a partial entity map
+            on disk loses preserved EnabledBits (#1306)
   requires: CK-04, AP-12
-  scope: CheckpointManager.cs, RecoveryDriver.cs
-  on_violation: recovery either deadlocks on cache backpressure (no valve) or destroys its own re-runnability
+  scope: CheckpointManager.RunFlushOnlyCycle, CheckpointManager.RunCheckpointCycle, CheckpointManager.RecoveryInProgress,
+         DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.SealRecovery, RecoveryApplier.BatchPoint, RecoveryDriver.Run
+  on_violation: recovery either deadlocks on cache back-pressure (no valve) — the crash open of a 0.4 GiB market over a 64 MiB cache timed out
+                with every slot epoch-held (#1183) — or destroys its own re-runnability: a full cycle mid-recovery advances CheckpointLSN over a
+                half-recovered file, and a second crash replays nothing over it
+  verified: CrashDuringRecoveryTests [VerifiesRule] — a cycle forced inside the replay is flush-only and leaves CheckpointLSN alone (a full one
+            advances it); the HEAD rebuild's clusters are owed when the replay starts; a recovery stopped at a batch point of any pass, or two in a
+            row, converges on the next open; MarketHardeningTests at 64 MiB (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then
+            coherent, every durable transfer present
 
 ### CK-09: Occupancy bitmap is derived — re-derived on crash `[fatal]` `[silent]`
   invariant the occupancy bitmap is a DERIVED structure: on the crash path it is never trusted, but rebuilt WHOLESALE from the

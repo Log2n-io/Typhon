@@ -338,7 +338,8 @@ lock ordering and deadlock prevention are still to come.
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
          LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
-         ChunkBasedSegment.ScanForAllocatorState,
+         ChunkBasedSegment.ScanForAllocatorState, ChunkBasedSegment.AllocatedChunks, ChunkBasedSegment.IsChunkAllocatedUnpinned,
+         ArchetypeClusterState.RebuildActiveList, ComponentRevisionManager.EnumerateVersionedChainHeads,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
@@ -349,8 +350,13 @@ lock ordering and deadlock prevention are still to come.
                 a chunk summary — every crash-path load — could not load a segment larger than the cache (#1144); and once the storm had
                 completed, counting its 300 000 audit entries stalled with 12 600 pages epoch-protected and none dirty: the count held every
                 cluster page it had read for its transaction
-  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) hold long scopes and dirty more pages than the
-        cache: #1183. A write cannot release its pages early either — its ChangeSet's marks keep them resident until its unit of work ends,
+  invariant a crash open's whole-segment scans read and release (#1183): the allocated chunks through ChunkBasedSegment.AllocatedChunks (each
+            page's bitmap copied under a read pin), a point check through IsChunkAllocatedUnpinned — IsChunkAllocated epoch-tags its bitmap
+            page, and a walk asking it of every chunk pinned the segment — and chunk content through a scan accessor: the active-cluster list,
+            the chain-head enumeration, the reservation, the collapse, the sweep, the entity-map rebuild's cluster walk and its EnabledBits
+            snapshot. OPEN: the spatial passes (#1305)
+  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
+        outside recovery cannot release its pages early — its ChangeSet's marks keep them resident until its unit of work ends,
         which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
         epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
         `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
@@ -363,6 +369,9 @@ lock ordering and deadlock prevention are still to come.
             unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
             epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page
             is left held by a slot reference [VerifiesRule]
+  verified: WholeSegmentScanTests — the allocated-chunk cursor and the unpinned check walk a segment four times the cache inside one epoch scope
+            (the check epoch-tagged again times out) [VerifiesRule]; MarketHardeningTests — the crash open of a 0.4 GiB market over a 64 MiB cache
+            completes (it timed out with all 8 192 slots epoch-held)
 
 ### EP-03: No reference the engine hands out outlives the call that produced it, except a fast-path one within its step `[fatal]`
   invariant the point-access handles hand out values, never references into a page: EntityRef.Read / TryRead / ReadRaw copy the

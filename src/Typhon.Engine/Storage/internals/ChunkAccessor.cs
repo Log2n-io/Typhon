@@ -528,7 +528,8 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </para>
     /// <para>
     /// <b>Standalone path</b> (no ChangeSet): SlotRefCount is decremented immediately. Without a
-    /// Transaction, no epoch refresh can occur during the accessor's lifetime, so epoch protection
+    /// Transaction, no epoch refresh occurs during the accessor's lifetime — save a crash open's batch points
+    /// (<see cref="DatabaseEngine.RecoveryBatchPoint"/>), where the pass holds no address across the refresh — so epoch protection
     /// alone prevents page eviction. ACW is also decremented immediately for dirty slots.
     /// </para>
     /// </summary>

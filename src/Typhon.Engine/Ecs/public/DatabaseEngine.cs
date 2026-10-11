@@ -2135,6 +2135,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish — and below one whose publish failed, for
         // good (AP-03).
         CheckpointManager.InFlightCommitFloor = () => Math.Min(TransactionChain.LowestInFlightLsn(), PinnedCommitFloor);
+
+        // CK-08: until the recovery's seal, every cycle is flush-only — the passes write past the cache, and a full cycle among them would advance
+        // CheckpointLSN over a half-recovered file.
+        CheckpointManager.RecoveryInProgress = CrashRecoveryAtOpen;
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -4076,6 +4080,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _archetypeInitIncomplete = false;
 
+        // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
+        if (CheckpointManager != null)
+        {
+            CheckpointManager.RecoveryInProgress = false;
+        }
+
         // From here a freed revision or content chunk waits for a checkpoint before reuse (#1251) — a crash open turned it on at its replay.
         EnableFreeQuarantine();
 
@@ -4963,6 +4973,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
+        // Set at the manager's creation; set again for a repeat InitializeArchetypes, which runs the recovery again (#790, CK-08).
+        if (CheckpointManager != null)
+        {
+            CheckpointManager.RecoveryInProgress = true;
+        }
+
         LastOpenRanCrashRecovery = true;
         long checkpointLsn;
         using (EpochGuard.Enter(EpochManager))
@@ -5302,7 +5318,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
+                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet, () => RecoveryBatchPoint(changeSet, RecoveryPass.Indexes)));
                 LastOpenClusterIndexRebuildCount++;
             }
         }
@@ -5325,6 +5341,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             return;
         }
+
+        // Every pass has run: the seal's cycle is the recovery's one full cycle (CK-08).
+        CheckpointManager.RecoveryInProgress = false;
 
         if (frontierLsn <= checkpointLsn)
         {
@@ -6369,7 +6388,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 using var vEpoch = EpochGuard.Enter(EpochManager);
                 // Deferred precisely BECAUSE the EntityMap was re-derived — RebuildEntityMapsFromPersistedData rebuilt its EnabledBits from the cluster SoA,
                 // so a clear bit here cannot be told from one that was never persisted (#398). Absence is unclassifiable on this path.
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips);
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips,
+                    () => RecoveryBatchPoint(changeSet, RecoveryPass.VersionedHeads));
                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
@@ -6519,7 +6539,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
     {
         var snapshot = new Dictionary<long, ushort>();
-        var accessor = map.Segment.CreateChunkAccessor();
+
+        // Read and released (EP-02): the map can be larger than the cache, and an epoch-tagged walk of it pinned all of it before the first batch point
+        // (review of #1183). Each entry's address is used before the accessor's next read.
+        var accessor = map.Segment.CreateScanAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
         map.ForEachEntryQuiescent(ref accessor, ref action, MMF.IsSuspectPage);
         accessor.Dispose();
@@ -6580,14 +6603,27 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+
+        // The clusters read and released page by page (EP-02): the segment can be larger than the cache, and an epoch-tagged walk of it pinned all of it
+        // (#1183). A cluster's address holds until this accessor's next miss — the next cluster's.
+        var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
         long maxEntityKey = 0;
+        var sinceBatchPoint = 0;
         try
         {
             for (var c = 0; c < clusterState.ActiveClusterCount; c++)
             {
+                // Between clusters, every RecoveryBatchSize entities: the map's pages written so far saved, the batch's pages unpinned (#1183, CK-08). The
+                // map accessor lives for one insert, the cluster accessor is a scan one: nothing here holds an epoch-protected address across it.
+                if (sinceBatchPoint >= RecoveryBatchSize)
+                {
+                    RecoveryBatchPoint(cs, RecoveryPass.EntityMap);
+                    sinceBatchPoint = 0;
+                }
+
                 var chunkId = clusterState.ActiveClusterIds[c];
                 byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                sinceBatchPoint += BitOperations.PopCount(*(ulong*)clusterBase);
                 ulong occupancy = *(ulong*)clusterBase;
 
                 while (occupancy != 0)
@@ -6703,6 +6739,78 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.SaveChanges();
         }
     }
+
+    /// <summary>
+    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, is saved — its pages written and
+    /// their marks released — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once the owed pages pass
+    /// the dirty-page threshold a flush-only cycle writes them. A pass calls it only where it holds no page address across the call: the refresh moves the
+    /// pin of every scope on this thread. Samples the epoch-held pages first.
+    /// </summary>
+    internal void RecoveryBatchPoint(ChangeSet changeSet, RecoveryPass pass)
+    {
+        Debug.Assert(EpochManager.IsCurrentThreadInScope, "a recovery pass makes its batch points inside its epoch scope");
+        if (!EpochManager.IsCurrentThreadInScope)
+        {
+            return;
+        }
+
+        RecoveryBatchPointProbe?.Invoke(pass, RecoveryBatchPoints);
+
+        // Sampled: the census reads every slot, and a large database with a large cache makes tens of thousands of batch points (review).
+        if ((RecoveryBatchPoints & (RecoveryEpochHeldSampleEvery - 1)) == 0)
+        {
+            var held = MMF.CountEpochProtectedPages();
+            if (held > PeakRecoveryEpochHeldPages)
+            {
+                PeakRecoveryEpochHeldPages = held;
+            }
+        }
+
+        changeSet?.SaveChanges();
+        EpochManager.RefreshScope();
+        RecoveryBatchPoints++;
+        var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
+        if (CheckpointManager != null
+            && MMF.WritebackDebtPercent() >= (threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent))
+        {
+            CheckpointManager.RunFlushOnlyCycle();
+        }
+    }
+
+    // The highest writeback debt, in percent of the cache, a crash open's pass lets build before it writes: the dirty-page trigger's, capped so that
+    // disabling the trigger cannot disable this. Owed pages cannot be evicted, nor the batch's held ones: a quarter leaves the batch room (review).
+    private const int RecoveryFlushMaxThresholdPercent = 25;
+
+    // Every how many batch points the epoch-held census is taken (a power of two).
+    private const int RecoveryEpochHeldSampleEvery = 16;
+
+    /// <summary>The most pages an epoch scope held at the last crash open's batch points, sampled every 16th (<see cref="RecoveryBatchPoint"/>). Diagnostic.</summary>
+    internal int PeakRecoveryEpochHeldPages { get; private set; }
+
+    /// <summary>Batch points the last crash open's passes made. Diagnostic.</summary>
+    internal int RecoveryBatchPoints { get; private set; }
+
+    /// <summary>Entities, records or chains a recovery pass handles between two batch points. A test lowers it, [NonParallelizable], and restores it.</summary>
+    internal static int RecoveryBatchSize { get; set; } = DefaultRecoveryBatchSize;
+
+    /// <summary>The default <see cref="RecoveryBatchSize"/>.</summary>
+    internal const int DefaultRecoveryBatchSize = 1024;
+
+    /// <summary>The crash-open passes that make batch points (<see cref="RecoveryBatchPoint"/>).</summary>
+    internal enum RecoveryPass
+    {
+        EntityMap,
+        VersionedHeads,
+        Replay,
+        Scrub,
+        Indexes,
+    }
+
+    /// <summary>
+    /// Called at each batch point with the pass and the batch points made so far, before the batch is saved: a test throws from it to stop a crash open
+    /// in the middle of a pass, as a crash would, and reopens (#1183, AP-12). Test seam.
+    /// </summary>
+    internal static Action<RecoveryPass, int> RecoveryBatchPointProbe { get; set; }
 
     /// <summary>Live chains whose links ended before their length, collapsed by the last crash open before its replay (#1297). Diagnostic.</summary>
     internal int ChainsCollapsedAtOpen { get; private set; }
@@ -6873,12 +6981,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
                 var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                Action batchPoint = () => RecoveryBatchPoint(changeSet, RecoveryPass.Scrub);
                 try
                 {
                     var dropped = new List<int>();
                     var stale = new HashSet<int>();
+                    var sinceBatchPoint = 0;
                     foreach (var firstChunkId in roots)
                     {
+                        // Between chains, every RecoveryBatchSize of them: the accessors' writes committed, the scrubbed pages saved and unpinned (#1183,
+                        // CK-08). A chain's scrub keeps no address past its own call.
+                        if (++sinceBatchPoint > RecoveryBatchSize)
+                        {
+                            revAccessor.CommitChanges();
+                            contentAccessor.CommitChanges();
+                            batchPoint();
+                            sinceBatchPoint = 1;
+                        }
+
                         ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, dropped, stale, out var headTsn,
                             roots);
                         if (headTsn > maxRecoveredTsn)
@@ -6893,12 +7013,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         stale.UnionWith(reserved);
                     }
 
-                    ComponentRevisionManager.FreeDroppedContent(table, roots, dropped, stale, ref revAccessor, ref contentAccessor);
+                    ComponentRevisionManager.FreeDroppedContent(table, roots, dropped, stale, ref revAccessor, ref contentAccessor, batchPoint);
 
                     // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an interrupted pre-crash op — allocated but
                     // unreachable from a chain root or a surviving head's content. A chain no live record names is no root: the replay's destroys, the old
                     // roots of the spawns it re-applied.
-                    ComponentRevisionManager.SweepTableOrphans(table, roots, ref revAccessor);
+                    ComponentRevisionManager.SweepTableOrphans(table, roots, ref revAccessor, ref contentAccessor, batchPoint);
                 }
                 finally
                 {

@@ -578,6 +578,32 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool IsSuspectPage(int filePageIndex) => _suspectPages.ContainsKey(filePageIndex);
 
+    /// <summary>Whether any page failed its checksum and awaits the suspect resolution (RB-04).</summary>
+    internal bool HasSuspectPages => !_suspectPages.IsEmpty;
+
+    /// <summary><paramref name="memPageIndices"/> without the pages that failed their checksum and await the suspect resolution (RB-04).</summary>
+    internal int[] WithoutSuspectPages(int[] memPageIndices)
+    {
+        var kept = 0;
+        var copy = memPageIndices;
+        for (var i = 0; i < memPageIndices.Length; i++)
+        {
+            if (IsSuspectPage(GetFilePageIndex(memPageIndices[i])))
+            {
+                if (ReferenceEquals(copy, memPageIndices))
+                {
+                    copy = (int[])memPageIndices.Clone();
+                }
+
+                continue;
+            }
+
+            copy[kept++] = memPageIndices[i];
+        }
+
+        return kept == memPageIndices.Length ? memPageIndices : copy[..kept];
+    }
+
     /// <summary>A suspect page rewritten whole — a crash open's completion of a torn grow initialized it: nothing of its torn bytes is left to resolve.</summary>
     internal void ClearSuspectPage(int filePageIndex) => _suspectPages.TryRemove(filePageIndex, out _);
 
@@ -2650,6 +2676,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>Live <see cref="PageInfo.ActiveChunkWriters"/> for a page. Non-zero at quiesce proves a leaked registration.</summary>
     internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).ActiveChunkWriters);
 
+    /// <summary>Slots an epoch scope holds now — tagged at or after the lowest pinned epoch. Diagnostic, O(cache).</summary>
+    internal int CountEpochProtectedPages()
+    {
+        var minActive = EpochManager.MinActiveEpoch;
+        var n = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            if (Volatile.Read(ref Slot(i).AccessEpoch) >= minActive)
+            {
+                n++;
+            }
+        }
+
+        return n;
+    }
+
     /// <summary>Pages holding a writer registration. Must be zero at quiesce (CP-13).</summary>
     internal int CountPagesWithActiveChunkWriters()
     {
@@ -3774,6 +3816,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     unsafe internal Task SavePages(int[] memPageIndices)
     {
+        // A suspect page (its checksum failed at a crash open's load) is left owed until the suspect resolution judges it (RB-04): written, its torn
+        // bytes were checksummed again, and the next open served them (#1304).
+        if (HasSuspectPages)
+        {
+            memPageIndices = WithoutSuspectPages(memPageIndices);
+            if (memPageIndices.Length == 0)
+            {
+                return Task.CompletedTask;
+            }
+        }
+
         // Synchronous span brackets the setup+kickoff work. The async fsync+decrement completion in the ContinueWith is NOT captured under
         // this span because SpanScope is a ref struct — instead, we emit a separate PageCacheFlushCompleted record from inside the continuation,
         // correlated to this span by SpanId. PageCache.Flush is gated by Storage:PageCache:Enabled in JSON (post-2026-04-30 re-tier — only
