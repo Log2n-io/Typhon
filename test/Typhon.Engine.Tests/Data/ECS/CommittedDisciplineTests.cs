@@ -515,7 +515,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         {
             if (Environment.CurrentManagedThreadId == committer)
             {
-                log.Stop(new InvalidOperationException("staged: another commit's publish failed past its append"));
+                dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: another commit's publish failed past its append"));
             }
         };
         Exception thrown = null;
@@ -540,6 +540,36 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         Assert.That((thrown as DurabilityException)?.ErrorCode, Is.EqualTo(TyphonErrorCode.CommitPipelineStopped), $"the commit refused, not {thrown}");
         using var read = dbe.CreateQuickTransaction();
         Assert.That(read.Open(id).Read(CmEntity.Position).X, Is.EqualTo(1f), "the refused commit's write, never published");
+    }
+
+    /// <summary>
+    /// #1269, review: a tick fence whose claim meets a stop latched while it waited appends nothing and does not throw. The re-check once claimed refuses
+    /// it; thrown on the tick path, the runtime recorded a fence failure that is never cleared.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    public void AFenceWhoseClaimMeetsAStop_AppendsNothing_AndDoesNotThrow()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnAnt(dbe, 1, 2, 0);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(5, 6));
+            tx.Commit();
+        }
+
+        var log = (Typhon.Engine.Internals.DurabilityLog)dbe.DurabilityLog;
+        log.BeforeClaimProbe = () => dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: a commit's publish failed past its append"));
+        try
+        {
+            Assert.DoesNotThrow(() => dbe.WriteTickFence(1), "the fence on the tick path");
+        }
+        finally
+        {
+            log.BeforeClaimProbe = null;
+        }
+
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the stop latched inside the fence's append");
     }
 
     private static unsafe (int Chunk, byte Slot) ClusterLocationOf(DatabaseEngine dbe, EntityId id)
@@ -596,13 +626,15 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
                 return;
             }
 
-            spawned = Task.Run(() =>
+            var spawn = Task.Run(() =>
             {
                 using var tx = dbe.CreateQuickTransaction();
                 var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(7, 7)), CmEntity.Wallet.Set(new CmWallet(7)));
                 Assert.That(tx.Commit(), Is.True, "the concurrent spawn");
                 return id;
-            }).Result;
+            });
+            Assert.That(spawn.Wait(TimeSpan.FromSeconds(10)), Is.True, "the concurrent spawn, completed while the commit is held");
+            spawned = spawn.Result;
         };
         try
         {

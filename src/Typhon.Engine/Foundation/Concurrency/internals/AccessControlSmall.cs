@@ -424,13 +424,15 @@ internal struct AccessControlSmall
         while (true)
         {
             int initial = _data;
-            if ((initial & ~SharedUsedCounterMask) != expectedThread)
+
+            // The contention flag masked, as in EnterExclusiveAccess's guard: kept, it made the owner's demote throw on a lock ever contended (#1256 review).
+            if ((initial & ~(SharedUsedCounterMask | ContentionFlagMask)) != expectedThread)
             {
                 ThrowInvalidOperationException("DemoteFromExclusiveAccess called by a thread that doesn't own the lock");
             }
 
-            // Clear thread ID and set shared counter to 1
-            if (Interlocked.CompareExchange(ref _data, 1, initial) == initial)
+            // Clear thread ID and set shared counter to 1, the contention flag preserved
+            if (Interlocked.CompareExchange(ref _data, 1 | (initial & ContentionFlagMask), initial) == initial)
             {
                 break;
             }

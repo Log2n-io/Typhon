@@ -913,7 +913,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             if (!LoadChunkSegment(segment, filePageIndex))
             {
                 dic.TryRemove(filePageIndex, out _);
-                DropDirectoryPairs(directory);
+                DropDirectoryPairs(directory, dic);
                 return false;
             }
         }
@@ -923,7 +923,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             // all of the segment's pages; CK-03's coverage gate held CheckpointLSN back, so the full WAL window is intact). Discard the partial load
             // and let the caller fresh-allocate + WAL-replay instead of trusting it (#395 / RB-01).
             dic.TryRemove(filePageIndex, out _);
-            DropDirectoryPairs(directory);
+            DropDirectoryPairs(directory, dic);
             Interlocked.Increment(ref _chunkSegmentsReplacedAsTorn);
             return false;
         }
@@ -1366,16 +1366,34 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// Drops the CK-05 pair state of a segment's directory pages that a load abandoned (#1302). Left registered, the abandoned segment's twins stayed
     /// owned for good (the owned-page census claims every registered twin), and a primary later reused as a plain page kept the paired routing: its
     /// writes went to the alternate slot of a pair that no longer existed, and the next open read the other one. The pages themselves are given back by
-    /// the crash open's occupancy re-derive (CK-09), which no longer finds them owned. Under <see cref="_pairLock"/>, as
-    /// <see cref="PersistProtectedPage"/> re-checks the pair under it.
+    /// the crash open's occupancy re-derive (CK-09), which no longer finds them owned. A page that is another loaded segment's directory page keeps its pair:
+    /// a stale pointer's walk can run into it, and dropped, that segment's cold reads came from a slot that may be the older one (review). A segment loaded
+    /// later resolves its own pairs again. Under <see cref="_pairLock"/>, as <see cref="PersistProtectedPage"/> re-checks the pair under it.
     /// </summary>
-    private void DropDirectoryPairs(List<int> directory)
+    private void DropDirectoryPairs(List<int> directory, ConcurrentDictionary<int, LogicalSegment<PersistentStore>> loaded)
     {
+        HashSet<int> others = null;
+        using (EpochGuard.Enter(EpochManager))
+        {
+            var epoch = EpochManager.GlobalEpoch;
+            var extensions = new List<int>();
+            foreach (var (root, segment) in loaded)
+            {
+                (others ??= []).Add(root);
+                extensions.Clear();
+                segment.CollectDirectoryMapExtensionPages(epoch, extensions);
+                others.UnionWith(extensions);
+            }
+        }
+
         lock (_pairLock)
         {
             foreach (var page in directory)
             {
-                _pairState.TryRemove(page, out _);
+                if (others == null || !others.Contains(page))
+                {
+                    _pairState.TryRemove(page, out _);
+                }
             }
         }
     }

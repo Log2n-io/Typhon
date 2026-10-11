@@ -228,12 +228,16 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             when its WAL slot is claimed — a claim that waited out back-pressure while another commit stopped the engine is
             abandoned (#1269) — so one that was in PREPARE when the engine stopped rolls back clean; both fence paths — the serial `WriteTickFence` and
             the runtime's parallel fence, whose appends never pass through it — return without appending
-            (`FenceMustNotAppend`), since a tick path must not throw. The engine closes as a crash (no clean flag)
+            (`FenceMustNotAppend`), since a tick path must not throw; a fence whose claim meets a stop latched while it waited
+            returns as well (`AppendFenceBatch`, `AppendFenceBlockBatch`). The engine closes as a crash (no clean flag)
   invariant a stopped engine writes nothing more to its data file: the latch crash-stops the checkpointer
-            (`CheckpointManager.PrepareCrashStop`), and a cycle in flight stops before its next write wave, its unwritten pages
-            left owed so the cycle is not covered (#1271). A SingleVersion write under the tick fence still lands in place after
-            the stop, and no fence logs it: persisted, the reopen read it beside the log's pre-stop state. Nothing durable is
-            lost — the checkpoint was held below the commit's records, and the replay starts there
+            (`CheckpointManager.PrepareCrashStop`); a cycle in flight stops before its next write wave — its unwritten pages left
+            owed, the cycle not covered — and before its metadata hook, which saves its pages directly; the realm catalog is not
+            written either (`RemoveEmptyClosingRealms`) (#1271). A SingleVersion write under the tick fence still lands in place
+            after the stop, and no fence logs it: persisted, the reopen read it beside the log's pre-stop state. Nothing durable
+            is lost — the checkpoint was held below the commit's records, and the replay starts there. The cost: no writeback
+            debt is discharged after the stop, so a commit past its append that waits on back-pressure runs out its publish
+            timeout — its records are in the WAL, and the reopen replays it
   never roll back a commit whose records were appended: recovery replays them, so the rollback is undone at the next open,
         and until then readers have seen part of it and other commits have built on its absence
   never go on appending over a partial publish: a later record builds on what the partial publish left, and recovery replays
@@ -243,7 +247,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          PagedMMF.PublishSince, TimeoutOptions.CommitPublishBackpressureTimeout, IBTreeIndex.KeysEqual,
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
-         CheckpointManager.PrepareCrashStop
+         CheckpointManager.PrepareCrashStop, DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
+         DatabaseEngine.RemoveEmptyClosingRealms
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
           (indexes and views, AP-07), before the lock, allocates and can throw: B+Tree nodes past the publish limit, segment
@@ -256,8 +261,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           engine's deferred cleanups go on, its checkpoint does not (#1271).
           **RESIDUAL:** a concurrent change between the check and the publish is not seen: two transactions that put one
           unique key both pass, and the later publish stops the engine (#1258). A commit whose claim was re-checked just before
-          another commit latched still appends and publishes; its claim precedes the latch. A wave of a cycle already writing
-          when the stop latched writes the copies it took, which may hold a write made after the stop. A staged
+          another commit latched still appends and publishes; its claim precedes the latch. A wave or a hook save already
+          writing when the stop latched writes what it took, which may hold a write made after the stop; a cycle whose waves had
+          all been written completes, its advance held below the pinned floor (CK-13). A staged
           write's mover whose index entry differs from its HEAD bytes (an in-place write of the same tick, pending the
           fence) is not modelled; the publish's own reconcile shares the assumption. The publish's backstop for a unique
           collision on a Versioned write, `RejectUniqueIndexCollision`, throws `InvalidOperationException` (#1260); the check
@@ -271,7 +277,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   verified: PostAppendFailureTests — AThrowAfterTheAppend_KeepsTheCommit_StopsTheEngine_AndARestartRecoversIt (a throw
             injected after the append: Committed, the engine stopped, a later commit refused, no cycle covered after it, the
             checkpoint below the record, the value back after a disposal or a hard crash), AWriteAfterTheEngineStopped_NeverReachesTheDataFile
-            (#1271); CommittedDisciplineTests.ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused (#1269), AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
+            (#1271), AStopLatchedMidCycle_StopsTheCycleBeforeItsNextWave; CommittedDisciplineTests.ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused
+            (#1269), AFenceWhoseClaimMeetsAStop_AppendsNothing_AndDoesNotThrow, AUniqueKeyAlreadyTaken_IsRejectedBeforeTheAppend
             (a Versioned or SingleVersion spawn over a committed key, two spawns of one key, a Commit-discipline write moved onto
             a held key), AKeyTakenByTheIndexsOwnComparison_IsRejectedBeforeTheAppend (+0/-0 float spawns; a second unique field),
             AStagedWrite_OntoAKeyFreedEarlierInThePublish_Commits (the holder destroyed, or moved away first, in the same commit),
@@ -759,7 +766,8 @@ CK-08 (flush-only cycles) are later increments.
   invariant a crash open fails once its checkpointer has latched a fatal failure (CK-06): at the next batch point, and at its seal whether latched
             before it or by the seal's own cycle (DurabilityException, TyphonErrorCode.RecoveryCheckpointFailed). It could neither write what the
             recovery owes nor seal it, and an open that succeeded handed the application an engine that never checkpointed again. A seal cycle that
-            only times out stays soft: the next open replays the window. The failed open closes as a crash (CS-04) — CheckpointLSN never moved
+            only times out stays soft: the next open replays the window. The failed open closes as a crash (CS-04): CheckpointLSN has not
+            moved, or — a fatal failure after the seal's own advance, in its WAL recycling — moved only over data the cycle had fsynced
   requires: CK-04, AP-12
   scope: CheckpointManager.RunFlushOnlyCycle, CheckpointManager.RunCheckpointCycle, CheckpointManager.RecoveryInProgress,
          DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.SealRecovery, DatabaseEngine.ThrowIfRecoveryCheckpointerFailed, RecoveryApplier.BatchPoint,
@@ -770,7 +778,8 @@ CK-08 (flush-only cycles) are later increments.
   verified: CrashDuringRecoveryTests [VerifiesRule] — a cycle forced inside the replay is flush-only and leaves CheckpointLSN alone (a full one
             advances it); the HEAD rebuild's clusters are owed when the replay starts; a recovery stopped at a batch point of any pass, or two in a
             row, converges on the next open; a fatal cycle failure latched inside the replay fails the open at the next batch point, before the
-            index pass, and a seal cycle failing fatally fails it too, each followed by an open that recovers whole; MarketHardeningTests at 64 MiB
+            index pass, a seal cycle failing fatally fails it too, and a batch point's own flush-only cycle failing fatally fails it at that batch
+            point (classified, not thrown raw), each followed by an open that recovers whole; MarketHardeningTests at 64 MiB
             (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then coherent, every durable transfer present
 
 ### CK-09: Occupancy bitmap is derived — re-derived on crash `[fatal]` `[silent]`
@@ -1038,7 +1047,8 @@ CK-08 (flush-only cycles) are later increments.
             gated cycle leaves them sealed for the next. The release worker frees them — never the checkpoint thread, whose own cycle would wait on
             the dirty pages the frees make — segment by segment, one that throws leaving the others' to run, and counting what it freed before a
             throw. The close releases every held free on the disposing thread before its final cycle, which writes them freed; a close the engine
-            treats as a crash releases nothing, and one whose release failed writes no clean-shutdown marker, so the next open's sweep frees them
+            treats as a crash releases nothing, and one whose release failed marks the sweep owed (DurabilityWatermarks.MarkSweepOwed, CS-04), so the
+            next open recovers, with strict segment loads, and its sweep frees them
   invariant a chunk is held once: a second free of a held chunk, in either generation, is a double free (ChunkBasedSegment.DoubleFreeCount), never a
             second hold. A chunk the release freed in the bitmap and has not yet stopped holding is not handed out: the allocator gives the bit back
             and moves to the next page (ChunkBasedSegment.ClaimOnPage). Recovery's chain scans skip held chunks (ChunkBasedSegment.IsChunkLive,
@@ -1051,7 +1061,9 @@ CK-08 (flush-only cycles) are later increments.
   invariant a component-collection segment holds its frees the same way (DatabaseEngine.GetComponentCollectionSegment,
             DatabaseEngine.PoolLoadedCollectionSegment): a buffer is named by content chunks the data file's chains name. Freed at once, a
             transaction took it while the disk could still name the revision that dropped it, and a crash's scrub of that revision released it
-            under its new owner (#1300)
+            under its new owner (#1300). OPEN (#1307): no crash-open sweep covers collection segments — a buffer released after the checkpoint
+            that covered it, its bitmap page not yet written, stays allocated after a crash, named by nothing; and the orphan sweep frees orphan
+            content chunks without releasing their buffers. Leaks, never a shared buffer
   scope: FreeQuarantine, ChunkBasedSegment.FreeChunk, ChunkBasedSegment.QuarantineFrees, ChunkBasedSegment.ClaimOnPage, ChunkBasedSegment.IsChunkLive,
          PagedMMF.SealQuarantinedFrees, PagedMMF.ReleaseQuarantinedFrees, PagedMMF.NoteQuarantined, PagedMMF.EndFreeQuarantine,
          CheckpointManager.RunCheckpointCycleCore, ComponentTable.QuarantineChainFrees, DatabaseEngine.SealRecovery,
@@ -1085,7 +1097,8 @@ rejected and is the TLA+ mutant.
   scope: EntityRefMut write path, Transaction staging arena (Variant A), Transaction.PublishStagedCommitWrites
   verified: CommittedDisciplineTests.AStagedWriteToAnEntityItsCommitDestroys_LeavesTheSpawnInItsReleasedSlotAlone [VerifiesRule] —
             the commit held between the destroy's release and the staged publish, another transaction's spawn takes the slot
-  on_violation: a fuzzy checkpoint persists uncommitted data with no compensating record
+  on_violation: a fuzzy checkpoint persists uncommitted data with no compensating record; a staged write published over a released slot
+                overwrites the component of the spawn that took it, with no error (#1261)
   spec: rules/tla/CommittedDiscipline.tla — CM01_HeadCommitted + CM01_NoUncommittedDurable. The BreakStaging mutant is
         Variant B and violates at depth 2 — this is the machine-checked argument behind ADR-057.
 
@@ -2429,6 +2442,11 @@ of the LSN value).
   invariant DatabaseEngine.TolerateTornSegmentsAtOpen = CrashRecoveryAtOpen ∧ ¬clean flag at open ∧ ¬marker: a repair's forced
             recovery open (CS-06) after a clean close refuses a damaged segment too, for the same reason
   invariant a repeat InitializeArchetypes disarms the checkpoint's segment-pointer persistence until it completes
+  invariant a close that leaves chunks in no chain — frees still held (CK-17), chunk frees or destroyed entities left queued, a drain that threw, a
+            session whose cleanup threw holding frees (REAP-02) — marks the sweep owed where the clean marker would go
+            (DurabilityWatermarks.MarkSweepOwed): the failed-open marker without the clean flag. The next open recovers, so its orphan sweep frees
+            them, and loads its segments strictly: the close flushed the data file whole, and the WAL holds nothing to refill a segment that fails
+            to load. Without the marker, that open tolerated torn segments and replaced one that failed to load with an empty one (#1268 review)
   rationale: hosts (DI, DatabaseEngine.Open) dispose an engine whose initialization threw, and the dispose ran the full close: it
              persisted the archetype table as far as the open had built it — an archetype whose cluster state was never built was
              written with ClusterSegmentSPI = 0, orphaning every entity it held — and set the clean flag over it, so the next open
@@ -2439,14 +2457,16 @@ of the LSN value).
              InitializeArchetypes, so a kill or a constructor failure erased it; and a forced repair open after a clean close
              tolerated a torn segment, emptying it while the repair reported success
   scope: DatabaseEngine.InitializeArchetypes, DatabaseEngine.DisposeCore, DatabaseEngine.TolerateTornSegmentsAtOpen,
-         DurabilityWatermarks.BeginOpenAfterCleanClose, DurabilityWatermarks.ClearFailedOpen
+         DurabilityWatermarks.BeginOpenAfterCleanClose, DurabilityWatermarks.ClearFailedOpen, DurabilityWatermarks.MarkSweepOwed,
+         DatabaseEngine.MarkSweepOwed
   on_violation: silent loss of every entity of the archetypes the failed open had not reached, behind a clean flag; or, on the
                 retry, of every entity of a damaged segment
   verified: HealthyOpenTests.AnOpenThatFailsHalfway_ClosesAsACrash_AndLosesNothing (fails the open between two archetypes through
             DatabaseEngine.ArchetypeClusterInitProbe), HealthyOpenTests.ADamagedClusterSegment_IsRefusedOnTheRetry_AndCompletedAfterACrash (the
             retry of a failed open refuses; after a real crash the chain is completed at load, CS-08, its entities kept — it used to be replaced),
             HealthyOpenTests.AnOpenKilledBeforeItCompletes_LeavesTheMarker_AndTheNextOpenRefusesADamagedSegment,
-            HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule]
+            HealthyOpenTests.ARepairOpenAfterACleanClose_RefusesADamagedClusterSegment_InsteadOfEmptyingIt [VerifiesRule],
+            RevisionChunkRetentionTests.ACloseAfterACleanupLostFrees_MarksTheSweepOwed_AndTheNextOpenSweepsStrictly [VerifiesRule]
 
 ### CS-05: The chunk summary is trusted only after the close that wrote it `[fatal][silent]`
   invariant a clean close writes {bundle}/chunk-summary — every chunk segment's allocated count and page room bits, every

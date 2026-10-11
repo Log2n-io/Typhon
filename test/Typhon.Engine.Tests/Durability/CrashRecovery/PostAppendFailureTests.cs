@@ -979,6 +979,63 @@ internal sealed class PostAppendFailureTests
         }
     }
 
+    /// <summary>
+    /// #1271, review: a stop latched while a checkpoint cycle is writing stops the cycle before its next write wave. The cycle that began before the stop
+    /// passed its first check and went on writing every page it had collected, post-stop writes among them; it stops now, uncovered, CheckpointLSN where it
+    /// was. Staged with one-page waves, the stop latched by the first page a wave writes after the metadata hook.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    [CancelAfter(30_000)]
+    public void AStopLatchedMidCycle_StopsTheCycleBeforeItsNextWave()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = Open(scope);
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+        {
+            for (var i = 0; i < 2_000; i++)
+            {
+                tx.Spawn<PaWalletArch>(PaWalletArch.Wallet.Set(new PaWallet { Credits = i }));
+            }
+
+            tx.Commit();
+        }
+
+        var cm = dbe.CheckpointManager;
+        var before = cm.CheckpointLsn;
+        cm.WriteBatchMaxPagesForTest = 1;
+        cm.WriteSubBatchPagesForTest = 1;
+        // The hook saves its own pages: the waves are what follows it.
+        var hook = cm.PersistDurableMetadataHook;
+        var hookDone = false;
+        cm.PersistDurableMetadataHook = () =>
+        {
+            hook?.Invoke();
+            hookDone = true;
+        };
+        var written = 0;
+        dbe.MMF.PageWriteInterceptor = _ =>
+        {
+            if (hookDone && Interlocked.Increment(ref written) == 1)
+            {
+                dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: a commit's publish failed past its append"));
+            }
+        };
+        try
+        {
+            // On this thread, so the cycle has ended when the counts are read: the latch wakes a forced waiter at once.
+            cm.RunCheckpointCycle(dbe.WalManager.DurableLsn, Typhon.Profiler.CheckpointReason.Forced);
+        }
+        finally
+        {
+            dbe.MMF.PageWriteInterceptor = null;
+            cm.PersistDurableMetadataHook = hook;
+        }
+
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the stop latched inside the cycle's waves");
+        Assert.That((written, cm.CheckpointLsn), Is.EqualTo((1, before)), $"{Marker}: the cycle went on writing after the stop");
+    }
+
     /// <param name="hardCrash">The engine is then torn down as a power cut; otherwise it is disposed, and must close as a crash on its own.</param>
     [Test]
     [VerifiesRule("AP-03")]

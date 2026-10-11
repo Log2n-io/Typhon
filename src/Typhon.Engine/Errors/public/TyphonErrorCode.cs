@@ -121,7 +121,7 @@ public enum TyphonErrorCode
 
     /// <summary>
     /// A crash open failed: its checkpointer hit a fatal failure before the recovery was sealed, so the recovered state could not be consolidated. The
-    /// data file and the WAL are as the crash left them, plus what the recovery wrote under the old CheckpointLSN; the next open recovers again (CK-08).
+    /// data file holds what the crash left and what the recovery wrote, every write covered by the log; the next open recovers again (CK-08).
     /// </summary>
     RecoveryCheckpointFailed        = 7011,
 

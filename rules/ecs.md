@@ -751,20 +751,23 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             element still uncommitted — puts the entity off to a later pass with its record kept; a chain already released is detached from the
             record first, so no retry releases it twice (DatabaseEngine.ProcessEcsCleanups). A root that is not allocated or names another entity
             is never freed and is counted (DestroyedChainsForeign): a bug, never a free of someone else's chunk
-  invariant a clean close with no transaction alive drains what is queued — revision GC entries, destroyed entities, deferred chunk frees —
-            before its final checkpoint, in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a
-            destroy's frees do not wait for a transaction that will never come. A chain root still allocated reads back as a live entity when its
-            archetype's map reopens empty and is rebuilt from the chain heads (#1231). What the drain cannot finish — an entry whose lock was busy,
-            an entity still put off — stays allocated, a leak; a drain that throws is logged and the close goes on
-  invariant chunks unlinked from every chain are never left for nothing to find (#1268): a close that leaves chunk frees queued — a transaction
-            still alive — or whose drain throws writes no clean-shutdown marker, and nor does a session whose cleanup threw holding frees
-            (DeferredCleanupManager.FreesLost): the next open is a crash open, whose orphan sweep frees them. A cleanup batch that throws still
-            queues the frees of the entities it compacted before (DeferredCleanupManager.ProcessDeferredCleanups)
+  invariant a clean close drains what is queued — revision GC entries, destroyed entities, deferred chunk frees — before its final checkpoint,
+            in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a destroy's frees do not wait for
+            a transaction that will never come. A transaction still alive does not hold it off: none outlives the engine's disposal (#1268). A
+            chain root still allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads
+            (#1231). A drain that throws is logged and the close goes on
+  invariant chunks unlinked from every chain are never left for nothing to find (#1268): a close that leaves chunk frees or destroyed entities
+            queued (an entity put off by a chain a live writer still holds), whose drain throws, or a session whose cleanup threw holding frees
+            (DeferredCleanupManager.FreesLost) marks the sweep owed (CS-04): the next open recovers, with strict segment loads, and its orphan sweep
+            frees them. A cleanup batch that throws still queues the frees of the entities it compacted before
+            (DeferredCleanupManager.ProcessDeferredCleanups); the destroyed-entity cleanup queues what the entities before the throw released and
+            puts the one that threw back in the queue with those after it (DatabaseEngine.ProcessEcsCleanups). OPEN: collection buffers (#1307)
   scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
-         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups
+         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups,
+         DatabaseEngine.ProcessEcsCleanupEntry
   on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
                 spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
                 MarketHardeningTests' consume-and-craft storm: an item's entity read another item's data within a few thousand operations, and 100
@@ -782,8 +785,9 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
             overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
             a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
-            shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are back after the reopen,
-            a cleanup batch that fails midway queues the frees it collected before
+            shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are drained by it (a clean
+            reopen), a cleanup batch that fails midway queues the frees it collected before, a close after lost frees marks the sweep owed and the
+            next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest
 
 ## Module: VIEWLIFE — What a long-lived view may retain
 

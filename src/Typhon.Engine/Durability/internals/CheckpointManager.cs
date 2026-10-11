@@ -924,7 +924,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // Retry exactly the skipped pages, not the whole dirty set — new commits dirtying other pages must not block this cycle. After the last pass
             // they are what the caller reads as the owed tail.
             pending = skipped.ToArray();
-            if (stillSkipped == 0)
+            if (stillSkipped == 0 || _crashStop)
             {
                 break;
             }
@@ -1171,6 +1171,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // free first.
             WriteAheadOfTheHook(ref ctx);
 
+            // AP-03 stopped the engine since the cycle began (#1271): the write above stopped at its next wave, and the hook would save its pages to the data
+            // file directly.
+            if (_crashStop)
+            {
+                return;
+            }
+
             // Persist per-archetype durable metadata (segment SPIs, NextEntityKey, EntityMap meta) into the ArchetypeR1 table BEFORE the barrier, so
             // its WAL records and dirty pages are flushed by THIS cycle. This makes the consolidated cluster/EntityMap base reachable on reopen after a
             // hard crash (CK-09 family / #395) — the checkpoint already writes the data pages; this records the pointers to them. Idempotent and cheap
@@ -1236,7 +1243,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     // question that decides the fix is identity, not count: the same page every cycle means a
                     // leaked ACW / stale seqlock counter (a bug — the gate is working as designed), whereas a
                     // churning set means the coverage gate genuinely has no liveness guarantee under load.
-                    CaptureSkipDiagnostics(pending, stillSkipped);
+                    // Not for a crash-stopped cycle: every owed page is "skipped" there, none held by a writer.
+                    if (!_crashStop)
+                    {
+                        CaptureSkipDiagnostics(pending, stillSkipped);
+                    }
 
                     writeScope.WrittenCount = writtenTotal;
                     writeBatchScope.StagingAllocated = writtenTotal;
@@ -1357,10 +1368,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
-    /// Test hook: latches the crash flag so NO further checkpoint writes the data file — the shutdown final cycle is suppressed AND any periodic/forced cycle that
-    /// begins afterward bails immediately (see <see cref="RunCheckpointCycle"/>). Used by <c>DatabaseEngine.SimulateHardCrash</c> to model a power cut where only
-    /// WAL-durable data survives. Must be called before <see cref="Dispose"/>. (A cycle already mid-flight when the flag is set has a small residual window — the
-    /// test sets this on an otherwise-idle engine, so in practice no cycle is in flight.)
+    /// Latches the crash flag so NO further checkpoint writes the data file: the shutdown final cycle is suppressed, any periodic or forced cycle that begins
+    /// afterward bails at once (see <see cref="RunCheckpointCycle"/>), and a cycle in flight stops before its next write wave and before its metadata hook,
+    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives), a failed open's
+    /// teardown (CS-04), and the AP-03 stop (<c>DatabaseEngine.LatchCommitPipelineFailure</c>, #1271). Residual: the wave being written when the flag is set
+    /// writes the copies it took.
     /// </summary>
     internal void PrepareCrashStop()
     {

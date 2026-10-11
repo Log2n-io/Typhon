@@ -40,6 +40,7 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
     {
         DatabaseEngine.RecoveryBatchSize = DatabaseEngine.DefaultRecoveryBatchSize;
         DatabaseEngine.RecoveryBatchPointProbe = null;
+        DatabaseEngine.RecoveryFlushThresholdPercentForTest = -1;
     }
 
     private static DatabaseEngine RegisterMarket(DatabaseEngine dbe)
@@ -425,6 +426,38 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         using var scope2 = ServiceProvider.CreateScope();
         using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
         Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the failed open closed as a crash");
+        AssertItems(reopened, expected);
+    }
+
+    /// <summary>
+    /// A batch point's own flush-only cycle failing fatally fails the open at that batch point (CK-08): its failure is classified as a cycle's (CK-06),
+    /// not thrown raw out of the recovery, and the check after the flush fails the open before the pass goes on.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-08")]
+    [CancelAfter(60_000)]
+    public void AFatalFlushOnlyCycleAtABatchPoint_FailsTheOpenThere()
+    {
+        var expected = BuildAndCrash();
+        DatabaseEngine.RecoveryFlushThresholdPercentForTest = 0;
+        var batchPoints = 0;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            DatabaseEngine.RecoveryBatchPointProbe = (_, _) =>
+            {
+                batchPoints++;
+                dbe.CheckpointManager.CycleFaultInjector ??= () => throw new InvalidOperationException("simulated fatal flush-only cycle");
+            };
+            var e = Assert.Throws<DurabilityException>(() => RegisterMarket(dbe), "the open whose flush-only cycle failed");
+            Assert.That(e.ErrorCode, Is.EqualTo(TyphonErrorCode.RecoveryCheckpointFailed));
+        }
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        DatabaseEngine.RecoveryFlushThresholdPercentForTest = -1;
+        Assert.That(batchPoints, Is.EqualTo(1), "the open failed at the batch point whose flush failed");
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
         AssertItems(reopened, expected);
     }
 

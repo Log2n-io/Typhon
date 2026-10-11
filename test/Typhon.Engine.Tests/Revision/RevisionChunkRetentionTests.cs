@@ -138,9 +138,9 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
     }
 
     /// <summary>
-    /// #1268: a close that finds a transaction still alive skips its cleanup drain, and the revision chunks a trim had unlinked and queued for freeing
-    /// were lost: still allocated, in no chain, so no later cleanup could find them, and a clean open does not sweep. The close now writes no
-    /// clean-shutdown marker, and the next open's orphan sweep gives them back.
+    /// #1268: a close that found a transaction still alive skipped its cleanup drain, and the revision chunks a trim had unlinked and queued for freeing
+    /// were lost: still allocated, in no chain, so no later cleanup could find them, and a clean open does not sweep. The close now drains regardless — no
+    /// transaction outlives the engine's disposal — and marks itself clean.
     /// </summary>
     [Test]
     [VerifiesRule("REAP-02")]
@@ -169,6 +169,7 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         using (var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>())
         {
             Register(dbe);
+            Assert.That(dbe.LastOpenRanCrashRecovery, Is.False, "the close drained what was queued, and marked itself clean");
             for (var k = 0; k < Transfers; k++)
             {
                 Transfer(dbe, ids, rng);
@@ -214,5 +215,115 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
         Assert.That(dbe.DeferredCleanupManager.ChunkFreeQueueSize - queuedBefore, Is.GreaterThan(Traders / 8),
             "the frees of the entities compacted before the throw, queued");
+        Assert.That(dbe.DeferredCleanupManager.FreesLost, Is.True, "the entity that threw: its frees dropped, the sweep owed");
+    }
+
+    /// <summary>
+    /// #1268, review: a close whose session lost chunk frees marks the sweep owed. Written without the clean flag, the next open recovered with torn
+    /// segment loads tolerated — over a data file the close had flushed whole, with nothing in the WAL to refill a segment that failed to load (CS-04). The
+    /// failed-open marker goes with it: the next open recovers, sweeps, and loads its segments strictly.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [VerifiesRule("CS-04")]
+    [CancelAfter(10_000)]
+    public void ACloseAfterACleanupLostFrees_MarksTheSweepOwed_AndTheNextOpenSweepsStrictly()
+    {
+        int traderBaseline;
+        using (var scope = ServiceProvider.CreateScope())
+        using (var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>())
+        {
+            Register(dbe);
+            var ids = SpawnTraders(dbe);
+            traderBaseline = TraderChunks(dbe);
+            var rng = new Random(1);
+            using (dbe.CreateReadOnlyTransaction())
+            {
+                for (var k = 0; k < Transfers; k++)
+                {
+                    Transfer(dbe, ids, rng);
+                }
+            }
+
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = i =>
+            {
+                if (i == Traders / 4)
+                {
+                    throw new InvalidOperationException("staged: the cleanup batch fails midway");
+                }
+            };
+            Assert.Throws<InvalidOperationException>(() => dbe.FlushDeferredCleanups(), "premise: the batch failed");
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+            Assert.That(dbe.DeferredCleanupManager.FreesLost, Is.True, "premise: frees lost");
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        using (var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>())
+        {
+            Register(dbe);
+            Assert.That((dbe.LastOpenRanCrashRecovery, dbe.TolerateTornSegmentsAtOpen), Is.EqualTo((true, false)),
+                "the open after the close: a recovery, its segment loads strict");
+            Assert.That(TraderChunks(dbe), Is.LessThanOrEqualTo(traderBaseline + 2), "trader revision chunks, swept back");
+        }
+    }
+
+    /// <summary>
+    /// #1268, review: the destroyed-entity cleanup had the shape the revision cleanup was fixed for. One that threw midway dropped what the entities before it
+    /// had released and the entities not reached yet. Now the former are queued, the entity that threw goes back in the queue with those after it, and the
+    /// sweep is owed.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [CancelAfter(10_000)]
+    public void AFailedDestroyCleanup_QueuesWhatItReleased_AndRequeuesTheRest()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        const int destroyed = 20;
+
+        // A reader older than the destroys keeps them queued: the destroying commit's own cleanup cannot release them past its snapshot.
+        using (dbe.CreateReadOnlyTransaction())
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < destroyed; i++)
+            {
+                tx.Destroy(ids[i]);
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the destroys");
+        }
+
+        Assert.That(dbe.EcsCleanupQueueSize, Is.EqualTo(destroyed), "premise: the destroyed entities are queued");
+
+        // Their chains' revision cleanups first: a chain one still names is put off, not released.
+        var revisionCleanups = dbe.MMF.CreateChangeSet();
+        dbe.DeferredCleanupManager.ProcessDeferredCleanups(long.MaxValue, dbe.TransactionChain.NextFreeId + 1, dbe, revisionCleanups);
+        revisionCleanups.SaveChanges();
+        var seen = 0;
+        dbe.EcsCleanupProbeForTest = _ =>
+        {
+            if (++seen == 10)
+            {
+                throw new InvalidOperationException("staged: the destroy cleanup fails midway");
+            }
+        };
+        var queuedBefore = dbe.DeferredCleanupManager.ChunkFreeQueueSize;
+        var cs = dbe.MMF.CreateChangeSet();
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => dbe.ProcessEcsCleanups(dbe.TransactionChain.NextFreeId + 1, cs), "premise: the cleanup failed");
+        }
+        finally
+        {
+            dbe.EcsCleanupProbeForTest = null;
+            cs.ReleaseDirtyMarks();
+        }
+
+        Assert.That((dbe.EcsCleanupQueueSize, dbe.DeferredCleanupManager.ChunkFreeQueueSize > queuedBefore, dbe.DeferredCleanupManager.FreesLost),
+            Is.EqualTo((destroyed - 9, true, true)), "the nine released queued, the one that threw and those after it requeued, the sweep owed");
+        dbe.FlushDeferredCleanups();
+        dbe.FlushDeferredCleanups();
+        Assert.That(dbe.EcsCleanupQueueSize, Is.Zero, "the requeued entities, released by the next drain");
     }
 }

@@ -133,7 +133,16 @@ public partial class DatabaseEngine
         }
 
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
-        return DurabilityLog.Append(ref batch, ref wc);
+
+        // A stop latched while the claim waited is refused once claimed (#1269), and a tick path must not throw: nothing appended, as above.
+        try
+        {
+            return DurabilityLog.Append(ref batch, ref wc);
+        }
+        catch (DurabilityException e) when (e.ErrorCode == TyphonErrorCode.CommitPipelineStopped)
+        {
+            return 0;
+        }
     }
 
     /// <summary>Per-thread descriptor scratch for columnar fence emission — one entry per dirty cluster, payload-free (#559).</summary>
@@ -244,9 +253,18 @@ public partial class DatabaseEngine
         }
 
         var wc = WaitContext.FromDeadline(Deadline.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout));
-        return DurabilityLog.AppendFenceBlocks(
-            blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,
-            slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges, ref wc);
+
+        // As AppendFenceBatch: a stop latched while the claim waited appends nothing, and does not throw on the tick path (#1269).
+        try
+        {
+            return DurabilityLog.AppendFenceBlocks(
+                blocks.AsSpan(0, count), archetypeId, tickNumber, entityKeysOffset,
+                slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges, ref wc);
+        }
+        catch (DurabilityException e) when (e.ErrorCode == TyphonErrorCode.CommitPipelineStopped)
+        {
+            return 0;
+        }
     }
 
     /// <summary>

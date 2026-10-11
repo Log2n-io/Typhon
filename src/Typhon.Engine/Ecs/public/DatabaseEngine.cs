@@ -1554,15 +1554,97 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         List<DeferredCleanupManager.DeferredChunkFreeEntry> frees = null;
         List<EcsCleanupEntry> putOff = null;
 
-        foreach (var entry in toProcess)
+        // An entity that throws midway — a back-pressure timeout on its record or a chain — drops what it collected: its record still names the chains, and
+        // it goes back in the queue with the entities after it, for the next drain to release them. A throw inside the record's own update may leave chains
+        // that no record names: FreesLost asks the close for the next open's orphan sweep (#1268). What the entities before it released is queued.
+        var processed = 0;
+        var faulted = true;
+        try
         {
-            var meta = entry.Meta;
-            var engineState = _archetypeStates[meta.ArchetypeId];
-            if (engineState?.EntityMap == null)
+            for (; processed < toProcess.Count; processed++)
             {
-                continue;
+                var freesBefore = frees?.Count ?? 0;
+                try
+                {
+                    ProcessEcsCleanupEntry(toProcess[processed], readBuf, changeSet, ref frees, ref putOff);
+                }
+                catch
+                {
+                    frees?.RemoveRange(freesBefore, frees.Count - freesBefore);
+                    DeferredCleanupManager.FreesLost = true;
+                    throw;
+                }
             }
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+
+            faulted = false;
+        }
+        finally
+        {
+            // The released chains' chunks and the content chunks they named: freed once every transaction alive now has gone — one that resolved an entity
+            // before its destroy committed can still walk its chain until it finishes.
+            if (frees is { Count: > 0 })
+            {
+                try
+                {
+                    DeferredCleanupManager.EnqueueChunkFrees(TransactionChain.NextFreeId, frees);
+                }
+                catch
+                {
+                    DeferredCleanupManager.FreesLost = true;
+                    if (!faulted)
+                    {
+                        throw;
+                    }
+                }
+            }
+
+            // Entities whose chains were not quiescent yet go back in the queue, for the next drain — and, after a throw, the one that threw and those
+            // not reached.
+            if (putOff != null || (faulted && processed < toProcess.Count))
+            {
+                lock (_ecsCleanupLock)
+                {
+                    if (putOff != null)
+                    {
+                        _ecsCleanupQueue.AddRange(putOff);
+                    }
+
+                    if (faulted && processed < toProcess.Count)
+                    {
+                        _ecsCleanupQueue.AddRange(toProcess.GetRange(processed, toProcess.Count - processed));
+                    }
+
+                    Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
+                }
+            }
+        }
+
+        // Also prune EnabledBits overrides
+        EnabledBitsOverrides.Prune(minTSN);
+
+        return toProcess.Count;
+    }
+
+    /// <summary>Invoked as each destroyed entity of <see cref="ProcessEcsCleanups"/> is processed. Test seam: a throw stages a failing cleanup.</summary>
+    internal Action<EntityId> EcsCleanupProbeForTest { get; set; }
+
+    /// <summary>
+    /// One destroyed entity of <see cref="ProcessEcsCleanups"/>: each Versioned chain released into <paramref name="frees"/> and the record removed — or,
+    /// a chain not quiescent yet, the record kept and the entity put off.
+    /// </summary>
+    private unsafe void ProcessEcsCleanupEntry(EcsCleanupEntry entry, byte* readBuf, ChangeSet changeSet,
+        ref List<DeferredCleanupManager.DeferredChunkFreeEntry> frees, ref List<EcsCleanupEntry> putOff)
+    {
+        EcsCleanupProbeForTest?.Invoke(entry.Id);
+        var meta = entry.Meta;
+        var engineState = _archetypeStates[meta.ArchetypeId];
+        if (engineState?.EntityMap == null)
+        {
+            return;
+        }
+        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+        try
+        {
             var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, readBuf, ref accessor);
 
             if (found)
@@ -1636,31 +1718,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
                 }
             }
-
+        }
+        finally
+        {
             accessor.Dispose();
         }
-
-        // The released chains' chunks and the content chunks they named: freed once every transaction alive now has gone — one that resolved an entity
-        // before its destroy committed can still walk its chain until it finishes.
-        if (frees is { Count: > 0 })
-        {
-            DeferredCleanupManager.EnqueueChunkFrees(TransactionChain.NextFreeId, frees);
-        }
-
-        // Entities whose chains were not quiescent yet go back in the queue, for the next drain.
-        if (putOff != null)
-        {
-            lock (_ecsCleanupLock)
-            {
-                _ecsCleanupQueue.AddRange(putOff);
-                Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
-            }
-        }
-
-        // Also prune EnabledBits overrides
-        EnabledBitsOverrides.Prune(minTSN);
-
-        return toProcess.Count;
     }
 
     /// <summary>
@@ -1885,13 +1947,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// A clean close runs the cleanups still queued: revision GC entries, destroyed entities, and the chunk frees deferred past the transactions alive
-    /// when they were queued. With no transaction left, all of it is due, and none of it may outlive the close — a destroyed entity's chain root still
-    /// allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
+    /// when they were queued. All of it is due, and none of it may outlive the close — a destroyed entity's chain root still allocated reads back as a live
+    /// entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
     /// </summary>
     /// <remarks>
-    /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. Skipped while a transaction is
-    /// still alive — its snapshot may need what is queued. Returns false when chunk frees are left queued: they are in no chain, and only an orphan
-    /// sweep can find them again (#1268).
+    /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. A transaction still alive does not
+    /// hold it off: none outlives the engine's disposal, and skipped, the chunks a trim had unlinked were left in no chain for good, which only a crash
+    /// recovery's sweep found again (#1268). Returns false when chunk frees or destroyed entities are left queued — an entity put off by a chain that a
+    /// transaction still writes: only an orphan sweep can find them.
     /// </remarks>
     private bool DrainCleanupsAtClose()
     {
@@ -1900,16 +1963,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return true;
         }
 
-        if (TransactionChain.ActiveCount != 0)
+        var active = TransactionChain.ActiveCount;
+        if (active != 0)
         {
-            var queued = Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize);
-            if (queued == 0)
-            {
-                return true;
-            }
-
-            LogCloseFreesLeftQueued(queued, TransactionChain.ActiveCount);
-            return false;
+            LogCloseWithLiveTransactions(active);
         }
 
         var changeSet = MMF.CreateChangeSet();
@@ -1938,12 +1995,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.ReleaseDirtyMarks();
         }
 
-        return Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize) == 0;
+        return Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize) == 0 && EcsCleanupQueueSize == 0;
     }
 
-    [LoggerMessage(LogLevel.Warning,
-        "Close: {queued} chunk frees left queued behind {active} live transactions; no clean-shutdown marker, the next open's crash recovery frees them")]
-    private partial void LogCloseFreesLeftQueued(int queued, int active);
+    [LoggerMessage(LogLevel.Warning, "Close: {active} transactions still alive; their snapshots end with the engine, and the queued cleanups run")]
+    private partial void LogCloseWithLiveTransactions(int active);
+
+    /// <summary>
+    /// The close's marker when chunks are left in no chain (#1268, CK-17): no clean flag, so the next open recovers and its orphan sweep frees them, and the
+    /// failed-open marker, so that open loads its segments strictly (CS-04) — the data file was flushed whole, and the WAL holds nothing to refill a segment
+    /// that fails to load. Written where the clean marker would have been, after PersistEngineState's fsync.
+    /// </summary>
+    private void MarkSweepOwed()
+    {
+        DurabilityWatermarks.MarkSweepOwed(MMF);
+        LogSweepOwedAtClose();
+    }
+
+    [LoggerMessage(LogLevel.Warning, "Close: chunks left in no chain; the next open runs crash recovery, with strict segment loads, to sweep them")]
+    private partial void LogSweepOwedAtClose();
 
     // Engine teardown, split out so Dispose() can guarantee owned-provider disposal in a finally (see there). A throw from
     // any step here propagates out of Dispose() after the finally has released the owned container.
@@ -1976,8 +2046,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var freesLostAtClose = false;
             if (!_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete)
             {
-                // A drain that fails is never the close itself undone: the final checkpoint follows. What it did not free is in no chain, so no clean-shutdown
-                // marker either: the next open is a crash open, whose orphan sweep frees it (#1268). Marked clean, it stayed allocated in the file for good.
+                // A drain that fails is never the close itself undone: the final checkpoint follows. What it did not free is in no chain, so the close marks
+                // the sweep owed instead of a clean shutdown (#1268): marked clean, it stayed allocated in the file for good.
                 try
                 {
                     freesLostAtClose = !DrainCleanupsAtClose();
@@ -1993,8 +2063,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // The held frees (CK-17), freed before the final cycle so it writes them freed — on this thread, as the checkpoint thread still writes what their pages
             // need. A close the engine treats as a crash frees nothing: only the release worker stops. A release that fails leaves the frees held, allocated
-            // and named by nothing: the close then writes no clean-shutdown marker, so the next open is a crash open, whose sweep frees them — marked clean,
-            // they stayed allocated in the file for good (review of CK-17).
+            // and named by nothing: the close then marks the sweep owed, so the next open recovers, with strict segment loads, and its sweep frees them —
+            // marked clean, they stayed allocated in the file for good (review of CK-17).
             var freesHeldAtClose = false;
             try
             {
@@ -2038,7 +2108,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
                 // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
-                if (!SimulateUncleanShutdownForTest && !freesHeldAtClose && !freesLostAtClose)
+                if (!SimulateUncleanShutdownForTest && (freesHeldAtClose || freesLostAtClose))
+                {
+                    MarkSweepOwed();
+                }
+                else if (!SimulateUncleanShutdownForTest)
                 {
                     // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
                     // flushed it, and the flag and the summary's nonce flip together.
@@ -6816,8 +6890,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         EpochManager.RefreshScope();
         RecoveryBatchPoints++;
         var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
-        if (CheckpointManager != null
-            && MMF.WritebackDebtPercent() >= (threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent))
+        var limit = RecoveryFlushThresholdPercentForTest >= 0 ? RecoveryFlushThresholdPercentForTest
+            : threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent;
+        if (CheckpointManager != null && MMF.WritebackDebtPercent() >= limit)
         {
             CheckpointManager.RunFlushOnlyCycle();
             ThrowIfRecoveryCheckpointerFailed();
@@ -6827,7 +6902,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>
     /// A crash open fails once its checkpointer has latched a fatal failure (CK-06, CK-08): it could neither write what the recovery owes — a recovery
     /// larger than the cache would stall on back-pressure — nor seal it, and an open that succeeded unsealed handed the application an engine that never
-    /// checkpoints again. Nothing is lost: the failed open closes as a crash, CheckpointLSN never moved, and the next open recovers again.
+    /// checkpoints again. Nothing is lost: the failed open closes as a crash, and the next open recovers again — CheckpointLSN has not moved, or, a
+    /// fatal failure after the seal's own advance (recycling the WAL), moved only over data the cycle had fsynced.
     /// </summary>
     private void ThrowIfRecoveryCheckpointerFailed()
     {
@@ -6854,6 +6930,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>Entities, records or chains a recovery pass handles between two batch points. A test lowers it, [NonParallelizable], and restores it.</summary>
     internal static int RecoveryBatchSize { get; set; } = DefaultRecoveryBatchSize;
+
+    /// <summary>The writeback debt, in percent of the cache, past which a batch point runs a flush-only cycle; -1 for the default. A test sets 0, so
+    /// every batch point flushes, [NonParallelizable], and restores it.</summary>
+    internal static int RecoveryFlushThresholdPercentForTest { get; set; } = -1;
 
     /// <summary>The default <see cref="RecoveryBatchSize"/>.</summary>
     internal const int DefaultRecoveryBatchSize = 1024;

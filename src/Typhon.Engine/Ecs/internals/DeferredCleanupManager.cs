@@ -90,7 +90,8 @@ internal class DeferredCleanupManager
     /// </summary>
     internal volatile bool FreesLost;
 
-    /// <summary>Invoked before each entity of a cleanup batch is compacted, with its index in the batch. Test seam: a throw stages a failing batch.</summary>
+    /// <summary>Invoked as each entity of a cleanup batch is compacted, under its chain lock, with its index in the batch. Test seam: a throw stages a failing
+    /// compaction.</summary>
     internal Action<int> EntityCleanupProbeForTest { get; set; }
 
     public DeferredCleanupManager(DeferredCleanupOptions options, ILogger log = null)
@@ -325,6 +326,7 @@ internal class DeferredCleanupManager
         var cleanedCount = 0;
         List<DeferredChunkFreeEntry> collectedChunkFrees = null;
 
+        var faulted = true;
         try
         {
             if (toCleanup != null)
@@ -367,6 +369,8 @@ internal class DeferredCleanupManager
                     }
                 }
             }
+
+            faulted = false;
         }
         finally
         {
@@ -376,11 +380,22 @@ internal class DeferredCleanupManager
             }
 
             // Entity cleanup may have produced new deferred chunk frees — enqueue them with the current safeAfterTSN. Also when a batch threw: the entities
-            // it compacted before named their chunks in no chain any more, and dropped with the list they were lost for good (#1268).
+            // it compacted before named their chunks in no chain any more, and dropped with the list they were lost for good (#1268). An enqueue that
+            // fails loses them as well, and never masks the batch's own failure.
             if (collectedChunkFrees is { Count: > 0 })
             {
-                var safeAfterTSN = dbe.TransactionChain.NextFreeId;
-                EnqueueChunkFrees(safeAfterTSN, collectedChunkFrees);
+                try
+                {
+                    EnqueueChunkFrees(dbe.TransactionChain.NextFreeId, collectedChunkFrees);
+                }
+                catch
+                {
+                    FreesLost = true;
+                    if (!faulted)
+                    {
+                        throw;
+                    }
+                }
             }
         }
 
@@ -526,7 +541,6 @@ internal class DeferredCleanupManager
         {
             for (var i = 0; i < entries.Length; i++)
             {
-                EntityCleanupProbeForTest?.Invoke(i);
                 ref var entry = ref entries[i];
                 Debug.Assert(ReferenceEquals(entry.Table, table));
 
@@ -553,13 +567,15 @@ internal class DeferredCleanupManager
                 var collectedBefore = collectedChunkFrees?.Count ?? 0;
                 try
                 {
+                    EntityCleanupProbeForTest?.Invoke(i);
                     _ = ComponentRevisionManager.CleanUpUnusedEntriesCore(
                         table, firstChunkId, nextMinTSN, ref compRevTableAccessor, ref compContentAccessor, collectedChunkFrees);
                 }
                 catch
                 {
-                    // This entity's own frees are dropped: its chain, rewritten at the end of the compaction, may still name them. What it unlinked before the
-                    // throw is lost until the orphan sweep (#1268).
+                    // This entity's own frees are dropped, never freed twice: a compaction that throws midway may have cleared skipped elements in place
+                    // and not yet rewritten the root, so some of them are named still and others by nothing. The orphan sweep FreesLost asks the close for
+                    // frees the unnamed ones (#1268).
                     collectedChunkFrees?.RemoveRange(collectedBefore, collectedChunkFrees.Count - collectedBefore);
                     FreesLost = true;
                     throw;

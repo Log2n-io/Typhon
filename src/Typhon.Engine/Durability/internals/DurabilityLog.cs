@@ -23,8 +23,9 @@ internal sealed class DurabilityLog : IDurabilityLog
     /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
     internal Action AfterFloorProbe { get; set; }
 
-    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> after its first stop check and
-    /// before its claim — where a commit may wait out WAL back-pressure. Null in production: one null check per append.</summary>
+    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> and <see cref="AppendFenceBlocks"/>
+    /// after the first stop check and before the claim — where an append may wait out WAL back-pressure. Null in production: one null check per
+    /// append.</summary>
     internal Action BeforeClaimProbe { get; set; }
 
     /// <summary>
@@ -80,6 +81,7 @@ internal sealed class DurabilityLog : IDurabilityLog
 
         ThrowIfStopped();
         var size = RecordCodec.MeasureFenceBlocks(blocks, slotIndices.Length, totalComponentSize, out _);
+        BeforeClaimProbe?.Invoke();
 
         // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
         var claim = _wal.CommitBuffer.TryClaim(size, blocks.Length, ref ctx);
