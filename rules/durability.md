@@ -657,6 +657,11 @@ CK-08 (flush-only cycles) are later increments.
             overwritten
   post: at open, ∃ ≥1 CRC-valid slot per protected page; selection = highest valid `PairGeneration`; both-invalid → open
         fails loudly (never a silent fallback)
+  exception (#936, pending Loïc's approval): on the crash path only, a segment ROOT with both slots invalid whose first sector — torn-safe,
+        like the identity fields — records `PairGeneration` 1 is unloadable, not corrupt: the tear hit the pair's first persist (the twin is
+        written from generation 2, and zeroed before generation 1, #1129), so the root never had a durable copy. The segment is replaced and
+        refilled from the WAL, as a root never written; its root and twin stay claimed until then (CS-08). A map-extension page, a root at any
+        other generation, and every page on the clean path still fail loudly
   invariant a pair's first persist zeroes its twin first, with its own fsync, unless the twin lies past the file's end: a twin page number is
             reused from freed pages, and its disk image — a deleted directory's, at any generation — outranked the new pair's generation 1 at the
             next open, which loaded the deleted segment (#1129)

@@ -647,8 +647,10 @@ internal sealed class WalCrashSweepTests
 
     private static IEnumerable<TestCaseData> TornFirstRootWriteCases()
     {
-        yield return new TestCaseData("SingleTxSpawn").SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_SingleTxSpawn");
-        yield return new TestCaseData("MixedDiscipline").SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_MixedDiscipline");
+        yield return new TestCaseData("SingleTxSpawn", true).SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_SingleTxSpawn");
+        yield return new TestCaseData("MixedDiscipline", true).SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_MixedDiscipline");
+        // The root's occupancy bit not durable either — the plain crash: the root and its twin must be claimed before the open allocates (#936, #1163).
+        yield return new TestCaseData("SingleTxSpawn", false).SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_SingleTxSpawn_StaleOccupancy");
     }
 
     private string DataFilePath => Path.Combine(_dbDir, $"{CurrentDatabaseName}.typhon", "data");
@@ -660,7 +662,7 @@ internal sealed class WalCrashSweepTests
     /// Runs <paramref name="workload"/>, then a checkpoint that dies on the first page write after the EntityMap's root landed for the first time,
     /// hard-crashes, and tears that root on disk: the first 4 KiB sector (flag, twin index, generation) survives, the rest does not. Returns the root.
     /// </summary>
-    private int StageTornFirstEntityMapRootWrite(IRecoveryWorkload workload, RecoveryShadowModel shadow)
+    private int StageTornFirstEntityMapRootWrite(IRecoveryWorkload workload, RecoveryShadowModel shadow, bool occupancyDurable = true)
     {
         int root;
         using (var scope1 = _serviceProvider.CreateScope())
@@ -690,12 +692,12 @@ internal sealed class WalCrashSweepTests
             Assert.That(twin, Is.GreaterThan(0), "precondition: the EntityMap root is a paired directory page");
             Assert.That(ReadPairGenerationOnDisk(mmf, root), Is.EqualTo(0UL), "precondition: the EntityMap root has never been persisted");
 
-            // Stage: the root's occupancy bit is already durable. A cycle writes the occupancy page AFTER the directory roots, so a crash on the root
-            // leaves the bit unpersisted, and the reopen hands the page to the first segment it allocates before the archetype loads — which masks the
-            // throw. The bit is durable when the root was allocated after an earlier cycle collected its dirty pages but before that cycle wrote the
-            // occupancy page.
-            using (var guard = EpochGuard.Enter(mmf.EpochManager))
+            // Stage (occupancyDurable): the root's occupancy bit is already durable — the state when the root was allocated after an earlier cycle
+            // collected its dirty pages but before that cycle wrote the occupancy page. Otherwise the bit is lost with the cycle, which writes the
+            // occupancy page after the directory roots, and the reopen must claim the root before it allocates.
+            if (occupancyDurable)
             {
+                using var guard = EpochGuard.Enter(mmf.EpochManager);
                 mmf.RequestPageEpoch(OccupancyDataPage, guard.Epoch, out var occupancyMem);
                 var cs = mmf.CreateChangeSet();
                 cs.AddByMemPageIndex(occupancyMem);
@@ -745,16 +747,24 @@ internal sealed class WalCrashSweepTests
     [Test]
     [CancelAfter(20_000)]
     [TestCaseSource(nameof(TornFirstRootWriteCases))]
-    public void TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal(string workloadName)
+    public void TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal(string workloadName, bool occupancyDurable)
     {
         var workload = MakeWorkload(workloadName);
         var shadow = new RecoveryShadowModel();
-        StageTornFirstEntityMapRootWrite(workload, shadow);
+        var root = StageTornFirstEntityMapRootWrite(workload, shadow, occupancyDurable);
 
         // The open must reach the torn root, not skip it — TornFirstEntityMapRootWrite_WithoutWal_FailsLoudly proves that for this same staging.
         using var scope2 = _serviceProvider.CreateScope();
         var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
         workload.Register(dbe);
+        if (!occupancyDurable)
+        {
+            // New this session, so allocated before the archetypes load: the torn root, unclaimed, was the first free page it found.
+            dbe.RegisterComponentFromAccessor<MkTrader>();
+            Assert.That(dbe.GetComponentTable<MkTrader>().ComponentSegment.Pages.ToArray(), Does.Not.Contain(root),
+                "a component allocated before the archetypes load took the torn root");
+        }
+
         dbe.InitializeArchetypes();
         RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
     }

@@ -1393,7 +1393,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// </summary>
     /// <param name="rootPageIndex">The segment's root directory page.</param>
     /// <param name="tolerateUnpersistedRoot">
-    /// Crash path only (#936): the ROOT has no valid slot and the generation in its first sector — torn-safe like the identity fields (WP-12) — is 1, so
+    /// Crash path only (#936): the ROOT has no valid slot and the generation in its first sector — torn-safe like the identity fields (CK-05) — is 1, so
     /// the write that tore was the pair's first persist (the seed lands it on the primary at generation 1; the twin is written from generation 2). The root
     /// never had a durable copy: the segment is reported unloadable rather than corrupt, the state of a root never written, every write it received in the
     /// WAL window. Any other both-invalid page — a map-extension page, whose segment may hold checkpointed data, or a root persisted before — still throws.
