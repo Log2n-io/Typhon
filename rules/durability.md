@@ -368,8 +368,11 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             after its append while the newer one commits) [VerifiesRule]
 
 ### AP-07: An abort before the append leaves no trace `[fatal]` `[silent]`
-  invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending revisions: a
-            Versioned commit's index and view reconcile (Phase A) runs in its publish (`PublishClusterIndexes`), not in PREPARE.
+  invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending effects, each
+            flagged with its owner and undone by the rollback: its revisions, the spawns it places (VIS-08), its pending died
+            marks (VIS-09) and its pending enabled-bit changes (VIS-10) — `UnplaceSpawns`, `UnmarkDestroysPending`,
+            `UnmarkEnableDisablePending`, run by `RollbackAfterFailedCommit` while `_prepareStaged`. A Versioned commit's
+            index and view reconcile (Phase A) runs in its publish (`PublishClusterIndexes`), not in PREPARE.
             PREPARE only decides it is owed (`IndexPending`: an index covers the slot and the write inserts, deletes or changes
             an indexed field). It runs first in `PublishComponent`, before the chain lock and the stamp, so the index never
             lags a visible revision and readers of the entity never wait out an index update. It runs before AP-05's
@@ -380,7 +383,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             (`RollbackAfterFailedCommit`), and `Commit` again returns false — even if that rollback failed
             (`_prepareConsumed`). A failure before that point — the chain's tail check, a destroy's tombstone — leaves the
             transaction open, and a retried `Commit` is safe
-  never move an index entry or append a view delta before the append: the rollback reverts revisions only, so the index keeps a
+  never move an index entry or append a view delta before the append: the rollback reverts the pending effects only, so the index keeps a
         key no commit made and loses the committed one, and a view refreshed after the abort applies a delta no commit made.
         Undone after the fact, another transaction could take the freed key in between, and the inverse move would collide or
         overwrite it
@@ -391,7 +394,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
         order then wait for each other for good, and every later publish of those entities waits behind them
   scope: Transaction.PrepareClusterVersionedSlot, Transaction.AnyIndexedFieldChanged, Transaction.PublishClusterIndexes,
          Transaction.PublishComponent, Transaction.PublishPreparedComponents, Transaction.Commit,
-         Transaction.RollbackAfterFailedCommit, Transaction.CheckVersionedUniqueKeys, ArchetypeClusterState.IndexedSlots
+         Transaction.RollbackAfterFailedCommit, Transaction.CheckVersionedUniqueKeys, ArchetypeClusterState.IndexedSlots,
+         Transaction.UnplaceSpawns, Transaction.UnmarkDestroysPending, Transaction.UnmarkEnableDisablePending
   rationale: #1262. A Versioned commit maintained its indexes in PREPARE, so that a unique collision there could throw before
              the append (AP-03). That made an abort before the append — a lock timeout, back-pressure on the claim, AP-03's own
              pre-append rejections — leave the index moved and the views notified. Since #396 the pre-append check rejects such
