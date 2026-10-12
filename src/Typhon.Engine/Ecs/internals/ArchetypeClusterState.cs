@@ -5762,9 +5762,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>The growth body of <see cref="EnsureClusterAabbsCapacity"/>. Caller must hold <c>_finalizeLock</c> exclusively.</summary>
+    /// <remarks>
+    /// Carries the in-slice refusal a second time, as <see cref="EnsureClusterCellMapCapacityLocked"/> does and for the same reason: the fresh-cluster
+    /// paths (<c>AllocateClusterInCell</c>, <c>AddClusterToPerCellIndexLocked</c>) already hold the latch and call this body DIRECTLY, and a parallel
+    /// Migrate worker reaches them whenever a migration needs a fresh destination cluster. Without it a short pre-size grew this array silently from
+    /// inside a slice — the reallocation MD-02 forbids — instead of failing the tick (#1168).
+    /// </remarks>
     internal void EnsureClusterAabbsCapacityLocked(int requiredLength)
     {
         AssertFinalizeLockHeld(nameof(EnsureClusterAabbsCapacityLocked));
+        if ((ClusterAabbs?.Length ?? 0) < requiredLength)
+        {
+            ThrowIfGrowingInsideMigrateSlice(nameof(ClusterAabbs), requiredLength, ClusterAabbs?.Length ?? 0);
+        }
+
         if (ClusterAabbs == null)
         {
             var initial = Math.Max(16, requiredLength);
@@ -6137,9 +6148,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>The growth body of <see cref="EnsureClusterSpatialIndexSlotCapacity"/>. Caller must hold <c>_finalizeLock</c> exclusively.</summary>
+    /// <remarks>
+    /// Carries the in-slice refusal a second time, as <see cref="EnsureClusterCellMapCapacityLocked"/> does and for the same reason: the fresh-cluster
+    /// paths (<c>AllocateClusterInCell</c>, <c>AddClusterToPerCellIndexLocked</c>) already hold the latch and call this body DIRECTLY, and a parallel
+    /// Migrate worker reaches them whenever a migration needs a fresh destination cluster. Without it a short pre-size grew this array silently from
+    /// inside a slice — the reallocation MD-02 forbids — instead of failing the tick (#1168).
+    /// </remarks>
     internal void EnsureClusterSpatialIndexSlotCapacityLocked(int requiredLength)
     {
         AssertFinalizeLockHeld(nameof(EnsureClusterSpatialIndexSlotCapacityLocked));
+        if ((ClusterSpatialIndexSlot?.Length ?? 0) < requiredLength)
+        {
+            ThrowIfGrowingInsideMigrateSlice(nameof(ClusterSpatialIndexSlot), requiredLength, ClusterSpatialIndexSlot?.Length ?? 0);
+        }
+
         if (ClusterSpatialIndexSlot == null)
         {
             var initial = Math.Max(16, requiredLength);
@@ -6219,6 +6241,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             return;
         }
+
+        // The in-slice refusal, here as well as in the wrapper: AddClusterToPerCellIndexLocked calls this body directly (#1168, see
+        // EnsureClusterAabbsCapacityLocked).
+        var slotsShort = ClusterMigrationPendingSlots == null || ClusterMigrationPendingSlots.Length < requiredLength;
+        ThrowIfGrowingInsideMigrateSlice(
+            slotsShort ? nameof(ClusterMigrationPendingSlots) : nameof(ClusterProcessBitmap),
+            slotsShort ? requiredLength : requiredWords,
+            slotsShort ? ClusterMigrationPendingSlots?.Length ?? 0 : ClusterProcessBitmap?.Length ?? 0);
 
         // Odd for the whole copy: a lock-free flag whose write the copy may have missed sees the stamp move and redoes it in the new arrays (CA-04).
         Interlocked.Increment(ref _writeBookkeepingGrowth);
@@ -6312,9 +6342,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>The growth body of <see cref="EnsurePerCellIndexCapacity"/>. Caller must hold <c>_finalizeLock</c> exclusively.</summary>
+    /// <remarks>
+    /// Carries the in-slice refusal a second time, as <see cref="EnsureClusterCellMapCapacityLocked"/> does and for the same reason: the fresh-cluster
+    /// paths (<c>AllocateClusterInCell</c>, <c>AddClusterToPerCellIndexLocked</c>) already hold the latch and call this body DIRECTLY, and a parallel
+    /// Migrate worker reaches them whenever a migration needs a fresh destination cluster. Without it a short pre-size grew this array silently from
+    /// inside a slice — the reallocation MD-02 forbids — instead of failing the tick (#1168).
+    /// </remarks>
     internal void EnsurePerCellIndexCapacityLocked(RealmArchetypeSpatial rs, int requiredLength)
     {
         AssertFinalizeLockHeld(nameof(EnsurePerCellIndexCapacityLocked));
+        if ((rs.PerCellIndex?.Length ?? 0) < requiredLength)
+        {
+            ThrowIfGrowingInsideMigrateSlice(nameof(RealmArchetypeSpatial.PerCellIndex), requiredLength, rs.PerCellIndex?.Length ?? 0);
+        }
+
         RealmArchetypeSpatial.AssertNotNone(rs);
         if (rs.PerCellIndex == null)
         {
