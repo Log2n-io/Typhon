@@ -105,6 +105,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly EventQueueBase[][] _systemConsumedQueues;     // Pre-allocated consumed queue refs per system (null if none)
     private readonly PooledEntityList[] _parallelEntityLists;      // Full entity set for parallel QuerySystem chunk slicing
     private readonly HashMap<long>[] _multiTableFilterSets;        // Cached dedup sets for multi-table BuildFilteredEntitySet (avoids per-tick alloc)
+    private readonly HashMap<long>[] _narrowedAddedSets;           // #841: per-system Added set narrowed like the dirty scans (AddedForFilteredRun)
     private readonly PointInTimeAccessor[] _parallelAccessors;      // Per-system reusable PTAs — Attach()ed each tick (per-system to avoid race with DAG-concurrent systems)
     private readonly PartitionEntityView[][] _partitionViews;      // Per-system per-worker partition views [sysIdx][workerId] — inner index is workerId, NOT chunkIndex (chunks may exceed worker count when ChunksPerWorker > 1)
 
@@ -353,6 +354,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _systemConsumedQueues = new EventQueueBase[scheduler.AllSystemCount][];
         _parallelEntityLists = new PooledEntityList[scheduler.AllSystemCount];
         _multiTableFilterSets = new HashMap<long>[scheduler.AllSystemCount];
+        _narrowedAddedSets = new HashMap<long>[scheduler.AllSystemCount];
         _parallelAccessors = new PointInTimeAccessor[scheduler.AllSystemCount];
         _partitionViews = new PartitionEntityView[scheduler.AllSystemCount][];
         _systemTierClusterIds = new int[scheduler.AllSystemCount][];
@@ -1001,11 +1003,21 @@ public sealed partial class TyphonRuntime : IDisposable
 
                 _systemChangeFilterTables[i] = tables;
 
-                // Build ReactiveSkip closure: returns true when no dirty entities exist for this system's change filter.
+                // #841: the Added half of dirtySet ∪ Added. Shared by every change-filtered system on this view, filled at tick start by the pull refresh.
+                // An incremental (WhereField) input view is never refreshed by the runtime — not for a plain system either (BIND-04 names a consumption
+                // path that does not exist) — so its set stays empty and such a system sees neither spawns nor the view's own membership changes.
+                var added = _systemViews[i].AddedThisTick ??= new HashMap<long>(16);
+
+                // Build ReactiveSkip closure: returns true when the view gained no entity and no dirty entities exist for this system's change filter.
                 // Uses PreviousTickHadDirtyEntities (reliable, works regardless of EntityPK overhead).
                 var filterTables = tables;
                 sys.ReactiveSkip = () =>
                 {
+                    if (added.Count > 0)
+                    {
+                        return false; // The view gained entities — don't skip
+                    }
+
                     for (var t = 0; t < filterTables.Length; t++)
                     {
                         if (filterTables[t].PreviousTickHadDirtyEntities)
@@ -1050,21 +1062,23 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Build the filtered entity set for a system with change filter.
+    /// Build the filtered entity set for a system with change filter: <c>dirtySet ∪ Added</c>.
     /// Iterates the raw dirty bitmap from the previous tick, reads entity PKs from chunk offset 0, and intersects with the View's entity set. OR logic
-    /// across multiple changeFilter tables.
+    /// across multiple changeFilter tables. The entities the view gained at this tick's refresh are added (<see cref="AddedForFilteredRun"/>): a spawn sets
+    /// no dirty bit (DIRTY-01), so the dirty set alone never holds one (#841).
     /// Falls back to full View when PK resolution is unavailable (first tick, or SV without indexed fields).
     /// </summary>
     private PooledEntityList BuildFilteredEntitySet(int sysIdx)
     {
         var view = _systemViews[sysIdx];
         var filterTables = _systemChangeFilterTables[sysIdx];
+        var added = AddedForFilteredRun(sysIdx, view);
 
         // Single-table fast path: skip intermediate collection, write directly to result array.
         // Most systems filter on a single component type — this eliminates HashSet allocation + copy.
         if (filterTables.Length == 1)
         {
-            return BuildFilteredSingleTable(sysIdx, view, filterTables[0]);
+            return BuildFilteredSingleTable(sysIdx, view, filterTables[0], added);
         }
 
         // Multi-table path: deduplicate across tables using cached HashMap<long> (zero alloc after first tick)
@@ -1076,6 +1090,14 @@ public sealed partial class TyphonRuntime : IDisposable
             if (!ScanDirtyBitmapIntoSet(sysIdx, view, filterTables[t], dirtyInView, out var fallback))
             {
                 return fallback;
+            }
+        }
+
+        if (added != null)
+        {
+            foreach (var pk in added)
+            {
+                dirtyInView.TryAdd(pk);
             }
         }
 
@@ -1096,27 +1118,192 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Single-table fast path: scan dirty bitmap → View intersection → result array.
-    /// No intermediate collection, no dedup (only one table → no duplicates possible).
+    /// The Added half of this run's <c>dirtySet ∪ Added</c>: the entities the view gained at this tick's refresh (<see cref="ViewBase.AddedThisTick"/>),
+    /// narrowed exactly as the dirty scans narrow a dirty entity — or null when none remains.
+    /// </summary>
+    /// <remarks>
+    /// <para>The dirty scans (<see cref="ScanClusterDirtyEntities"/>, <see cref="ScanClusterDirtyEntitiesIntoSet"/>) deliver a dirty slot only when its
+    /// cluster passes four per-cluster tests: in the run's tier when tier-filtered, not sleeping, not in a dormant realm, in the run's <c>InRealms</c> mask. A
+    /// non-cluster table's entity is in realm 0 and only the realm test applies. An Added entity is delivered on the same terms, so a narrowed system sees a
+    /// new entity exactly when it would see a write to it (DSEL-01) — an Added entity in a sleeping cluster is dropped, as a write there is.</para>
+    /// <para>Cost: nothing when the view gained nothing. Otherwise one routing lookup per Added entity; the EntityMap is read only for an entity whose
+    /// archetype has a narrowing in force, and the set is copied only when one does.</para>
+    /// </remarks>
+    private HashMap<long> AddedForFilteredRun(int sysIdx, ViewBase view)
+    {
+        var added = view.AddedThisTick;
+        if (added is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        var tier = EffectiveTier(sysIdx);
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
+        var states = Engine._stateByRouting;
+        var narrowed = false;
+        foreach (var pk in added)
+        {
+            if (AddedNeedsClusterTest(states, EntityId.FromRaw(pk), tier, realmMask))
+            {
+                narrowed = true;
+                break;
+            }
+        }
+
+        if (!narrowed)
+        {
+            return added;
+        }
+
+        var kept = _narrowedAddedSets[sysIdx] ??= new HashMap<long>(16);
+        kept.Clear();
+        FilterAddedByCluster(added, kept, states, tier, realmMask);
+        return kept.Count > 0 ? kept : null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="id"/> must be located to decide whether this run delivers it: its archetype has clusters and one of the per-cluster tests
+    /// can reject. False when the answer is known from the archetype alone — then it is delivered unless it is a non-cluster entity outside the realm mask,
+    /// which also counts as true here so that the filtering pass drops it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool AddedNeedsClusterTest(ArchetypeEngineState[] states, EntityId id, SimTier tier, ulong[] realmMask)
+    {
+        var routing = id.ArchetypeId;
+        var cs = routing < states.Length ? states[routing]?.ClusterState : null;
+        if (cs == null)
+        {
+            return realmMask != null && !SystemDefinition.InMask(realmMask, RealmId.Default.Value);
+        }
+
+        return realmMask != null || (tier != SimTier.All && cs.TierIndex != null) || cs.SleepingClusterCount > 0 || cs.RealmDispatch is { Filtering: true };
+    }
+
+    /// <summary>Copies into <paramref name="kept"/> the entities of <paramref name="added"/> that pass the dirty scans' per-cluster tests (see
+    /// <see cref="AddedForFilteredRun"/>).</summary>
+    private unsafe void FilterAddedByCluster(HashMap<long> added, HashMap<long> kept, ArchetypeEngineState[] states, SimTier tier, ulong[] realmMask)
+    {
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        using var guard = EpochGuard.Enter(Engine.EpochManager);
+        ArchetypeEngineState open = null;
+        var mapAccessor = default(ChunkAccessor<PersistentStore>);
+        try
+        {
+            foreach (var pk in added)
+            {
+                var id = EntityId.FromRaw(pk);
+                if (!AddedNeedsClusterTest(states, id, tier, realmMask))
+                {
+                    kept.TryAdd(pk);
+                    continue;
+                }
+
+                var state = states[id.ArchetypeId];
+                var cs = state?.ClusterState;
+                if (cs == null || state.EntityMap == null)
+                {
+                    continue; // a non-cluster entity outside the realm mask
+                }
+
+                if (!ReferenceEquals(state, open))
+                {
+                    mapAccessor.Dispose();
+                    mapAccessor = state.EntityMap.Segment.CreateChunkAccessor();
+                    open = state;
+                }
+
+                if (!state.EntityMap.TryGet(id.EntityKey, record, ref mapAccessor) || !ClusterEntityRecordAccessor.GetHeader(record).IsAlive)
+                {
+                    continue; // destroyed since the refresh: nothing to deliver
+                }
+
+                if (ClusterPassesDispatchTests(cs, ClusterEntityRecordAccessor.GetClusterChunkId(record), tier, realmMask))
+                {
+                    kept.TryAdd(pk);
+                }
+            }
+        }
+        finally
+        {
+            mapAccessor.Dispose();
+        }
+    }
+
+    /// <summary>The dirty scans' per-cluster tests, for one cluster: tier (when tier-filtered and the archetype has a tier index), sleep, dormant realm,
+    /// realm mask.</summary>
+    private static bool ClusterPassesDispatchTests(ArchetypeClusterState cs, int chunkId, SimTier tier, ulong[] realmMask)
+    {
+        if (tier != SimTier.All && cs.TierIndex != null && !ClusterInTier(cs, chunkId, tier))
+        {
+            return false;
+        }
+
+        var sleepStates = cs.SleepStates;
+        if (sleepStates != null && (uint)chunkId < (uint)sleepStates.Length && sleepStates[chunkId] == ClusterSleepState.Sleeping)
+        {
+            return false;
+        }
+
+        if (cs.RealmDispatch is { Filtering: true } dormant && dormant.IsExcluded(chunkId))
+        {
+            return false;
+        }
+
+        return realmMask == null || SystemDefinition.InMask(realmMask, RealmOfCluster(cs, chunkId));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="chunkId"/> is in one of <paramref name="tier"/>'s lists — the test <see cref="TierClusterIndex.Rebuild"/> applies: the cluster's
+    /// cell, in the cluster's own realm's grid, carries a tier bit of <paramref name="tier"/>.
+    /// </summary>
+    private static bool ClusterInTier(ArchetypeClusterState cs, int chunkId, SimTier tier)
+    {
+        var cellMap = cs.ClusterCellMap;
+        if (cellMap == null || (uint)chunkId >= (uint)cellMap.Length)
+        {
+            return false;
+        }
+
+        var cellKey = cellMap[chunkId];
+        var realms = cs.RealmSpatial;
+        var realm = RealmOfCluster(cs, chunkId);
+        var grid = cellKey < 0 || realms == null || realm >= realms.Length ? null : realms[realm]?.Grid;
+        return grid != null && (grid.GetCell(cellKey).Tier & (byte)tier) != 0;
+    }
+
+    /// <summary>
+    /// Single-table fast path: <paramref name="added"/>, then dirty bitmap → View intersection → result array, minus <paramref name="added"/>.
+    /// No intermediate collection: one table holds no duplicates, and the only overlap with <paramref name="added"/> — a spawn written later in its own
+    /// tick — is skipped by the scans.
     /// Includes cluster entity scanning (Phase 4a): reads PreviousTickDirtySnapshot from each cluster archetype that references this table.
     /// </summary>
-    private unsafe PooledEntityList BuildFilteredSingleTable(int sysIdx, ViewBase view, ComponentTable table)
+    private unsafe PooledEntityList BuildFilteredSingleTable(int sysIdx, ViewBase view, ComponentTable table, HashMap<long> added)
     {
         if (!table.PreviousTickHadDirtyEntities)
         {
-            return PooledEntityList.Empty;
+            return added == null ? PooledEntityList.Empty : BuildAddedEntityList(added);
         }
 
         var bitmap = table.PreviousTickDirtyBitmap;
         if (bitmap == null || table.IndexedFieldInfos == null || table.IndexedFieldInfos.Length == 0)
         {
+            // The whole view, which holds every Added entity.
             return BuildFullViewEntitySet(sysIdx);
         }
 
-        // Upper bound: view.Count (dirty ∩ view can't exceed view size). Avoids separate cluster estimate scan.
+        // Upper bound: view.Count (Added and dirty ∩ view are disjoint subsets of the view). Avoids separate cluster estimate scan.
         var list = PooledEntityList.Rent(view.Count);
         var span = list.AsSpan();
         int count = 0;
+        if (added != null)
+        {
+            // Added ⊆ view: both come from this tick's refresh, and a pull view is frozen until the next one (#718).
+            Debug.Assert(added.Count <= view.Count, "#841: the Added set outgrew the view it was taken from");
+            foreach (var pk in added)
+            {
+                span[count++] = EntityId.FromRaw(pk);
+            }
+        }
 
         // Non-cluster path: scan ComponentTable dirty bitmap. Those entities are in realm 0.
         var realmMask = Scheduler.Systems[sysIdx].RealmMask;
@@ -1140,7 +1327,7 @@ public sealed partial class TyphonRuntime : IDisposable
                         }
 
                         var entityPK = *(long*)accessor.GetChunkAddress(chunkId);
-                        if (view.Contains(entityPK))
+                        if (view.Contains(entityPK) && (added == null || !added.Contains(entityPK)))
                         {
                             span[count++] = EntityId.FromRaw(entityPK);
                         }
@@ -1157,7 +1344,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Issue #231: tier-filtered systems scope the scan to the tier's clusters (Q9) instead of walking the full snapshot bitmap.
         var sys = Scheduler.Systems[sysIdx];
         var effectiveTier = (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count, realmMask);
+        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count, realmMask, added);
 
         if (count == 0)
         {
@@ -1168,14 +1355,28 @@ public sealed partial class TyphonRuntime : IDisposable
         return new PooledEntityList(list.BackingArray, count);
     }
 
+    /// <summary>A change filter's set on a tick nothing was written: the entities the view gained, alone (#841).</summary>
+    private static PooledEntityList BuildAddedEntityList(HashMap<long> added)
+    {
+        var list = PooledEntityList.Rent(added.Count);
+        var span = list.AsSpan();
+        var idx = 0;
+        foreach (var pk in added)
+        {
+            span[idx++] = EntityId.FromRaw(pk);
+        }
+
+        return list;
+    }
+
     /// <summary>
     /// Scan cluster dirty bitmaps for all archetypes referencing the given table, adding matching entities to the result span.
     /// Uses direct array loop over <see cref="ArchetypeRegistry"/> (no yield-return allocation).
     /// When <paramref name="effectiveTier"/> is non-<see cref="SimTier.All"/> and the archetype has a configured spatial grid, the scan walks only the
-    /// tier's clusters (issue #231 Q9). Returns the updated count.
+    /// tier's clusters (issue #231 Q9). Entities in <paramref name="exclude"/> (already in the span) are skipped. Returns the updated count.
     /// </summary>
     private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count,
-        ulong[] realmMask)
+        ulong[] realmMask, HashMap<long> exclude)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
         bool tierFiltered = effectiveTier != SimTier.All && Engine.PrimaryGrid != null;
@@ -1233,7 +1434,7 @@ public sealed partial class TyphonRuntime : IDisposable
                             int bit = BitOperations.TrailingZeroCount((ulong)word);
                             word &= word - 1;
                             long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
-                            if (view.Contains(entityPK))
+                            if (view.Contains(entityPK) && (exclude == null || !exclude.Contains(entityPK)))
                             {
                                 span[count++] = EntityId.FromRaw(entityPK);
                             }
@@ -1264,7 +1465,7 @@ public sealed partial class TyphonRuntime : IDisposable
                             word &= word - 1;
 
                             long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
-                            if (view.Contains(entityPK))
+                            if (view.Contains(entityPK) && (exclude == null || !exclude.Contains(entityPK)))
                             {
                                 span[count++] = EntityId.FromRaw(entityPK);
                             }
@@ -2927,6 +3128,18 @@ public sealed partial class TyphonRuntime : IDisposable
                 // Created lazily: a schedule with no pull system input must not pay for a transaction it never uses.
                 tx ??= _currentUow.CreateTransaction();
                 view.RefreshFromScheduler(tx);
+                // #841: a change filter's Added set is this refresh's Added delta, which the line below would otherwise discard.
+                var added = view.AddedThisTick;
+                if (added != null)
+                {
+                    if (added.Count > 0)
+                    {
+                        added.Clear();
+                    }
+
+                    view.CopyAddedTo(added);
+                }
+
                 view.ClearDelta();
                 view.LastSystemInputRefreshTick = Scheduler.CurrentTickNumber;
             }
