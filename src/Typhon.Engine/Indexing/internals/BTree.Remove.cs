@@ -3,6 +3,8 @@
 using System.Runtime.CompilerServices;
 using System.Threading;
 
+using System;
+
 namespace Typhon.Engine.Internals;
 
 internal abstract partial class BTree<TKey, TStore>
@@ -25,6 +27,21 @@ internal abstract partial class BTree<TKey, TStore>
     /// All other cases use the pessimistic path.
     /// </summary>
     private void RemoveCore(ref RemoveArguments args)
+    {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            RemoveCoreUnguarded(ref args);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private void RemoveCoreUnguarded(ref RemoveArguments args)
     {
         if (IsEmpty())
         {
@@ -744,6 +761,23 @@ internal abstract partial class BTree<TKey, TStore>
                 retryExit = InsertRetryExit.RemovePathVersionChanged;
                 return false; // restart
             }
+        }
+
+        // #1321: every page the merge below can write is faulted in now, before its first write — after it, a page-cache miss can throw (back-pressure)
+        // out of a half-done merge. A right merge relinks rightNext, which nothing latched or touched, and threw there with the merge done but
+        // rightNext's previous still naming the absorbed node; a cascade threw admitting a level's siblings with the leaf already retired and its parent
+        // still routing to it, until deferred reclaim freed the chunk for reuse. A level can merge only if one removal leaves it under half full.
+        if (leafNext.IsValid && !relatives.HasTrueLeftSibling && relatives.HasTrueRightSibling)
+        {
+            var rightNext = leafNext.GetNext(ref sibAccessor);
+            if (rightNext.IsValid)
+            {
+                rightNext.PreDirtyForWrite(ref sibAccessor);
+            }
+        }
+        for (var i = ctx.Depth - 1; i >= 0 && ctx.PathNodes[i].GetCount(ref accessor) - 1 < ctx.PathNodes[i].GetCapacity() / 2; i--)
+        {
+            PreDirtySiblings(ctx.PathRelatives[i], ref sibAccessor);   // a copy: Phase 3 resolves them again, as before
         }
 
         // All needed nodes locked — Phase 2: Remove at leaf (may borrow/merge)

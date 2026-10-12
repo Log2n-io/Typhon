@@ -59,6 +59,74 @@ class ConcurrencyConflictTests : TestBase<ConcurrencyConflictTests>
         Assert.That(result.A, Is.EqualTo(42));
     }
 
+    /// <summary>
+    /// #1321: a handler commit holds every chain lock it takes in PREPARE until its publish. Taken in write order, two transfers writing a,b and b,a each
+    /// held one lock and waited for the other's until RevisionChainLockTimeout (5 s) — UltimateStress's updaters, whose stall pinned the epoch and filled
+    /// the cache. The probe holds each commit at its first lock until the other has its own: in write order both get there, deadlocked.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-07")]
+    [CancelAfter(20_000)]
+    public void OppositeOrderHandlerCommits_DoNotDeadlock()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+
+        var ids = new EntityId[2];
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var c = new CompA(100);
+            ids[0] = t.Spawn<CompAArch>(CompAArch.A.Set(in c));
+            ids[1] = t.Spawn<CompAArch>(CompAArch.A.Set(in c));
+            t.Commit();
+        }
+
+        using var firstLocks = new CountdownEvent(2);
+        var tookFirst = new ThreadLocal<bool>();
+        dbe.PrepareRetainedLockProbe = () =>
+        {
+            if (!tookFirst.Value)
+            {
+                tookFirst.Value = true;
+                firstLocks.Signal();
+                firstLocks.Wait(200);
+            }
+        };
+
+        using var ready = new Barrier(2);
+        Task<bool> Transfer(int from, int to) => Task.Run(() =>
+        {
+            using var t = dbe.CreateQuickTransaction();
+            foreach (var i in new[] { from, to })
+            {
+                var e = t.OpenMut(ids[i]);
+                var c = e.Read(CompAArch.A);
+                c.A += i == from ? -1 : 1;
+                e.Set(CompAArch.A, c);
+            }
+
+            ready.SignalAndWait();
+            return t.Commit((ref ConcurrencyConflictSolver s) => s.ToCommitData<CompA>().A =
+                s.CommittedData<CompA>().A + (s.CommittingData<CompA>().A - s.ReadData<CompA>().A));
+        });
+
+        try
+        {
+            var t1 = Transfer(0, 1);
+            var t2 = Transfer(1, 0);
+            Assert.That(() => Task.WaitAll(t1, t2), Throws.Nothing, "neither commit times out on the other's chain lock");
+            Assert.That(t1.Result && t2.Result, Is.True);
+        }
+        finally
+        {
+            dbe.PrepareRetainedLockProbe = null;
+        }
+
+        using var tRead = dbe.CreateQuickTransaction();
+        Assert.That(tRead.Open(ids[0]).Read(CompAArch.A).A + tRead.Open(ids[1]).Read(CompAArch.A).A, Is.EqualTo(200));
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // 2. "Last Wins" — no handler, conflicting update overwrites
     // ═══════════════════════════════════════════════════════════════
