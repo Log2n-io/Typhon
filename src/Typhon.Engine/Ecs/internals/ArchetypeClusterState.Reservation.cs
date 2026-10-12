@@ -16,7 +16,7 @@ namespace Typhon.Engine.Internals;
 /// <b>One claim protocol: claimers CAS the claim word.</b> A slot is free when neither its claim bit nor its occupancy bit is set — occupancy covers the slots a
 /// load or a recovery set without a run-time claim, whose claim bit is 0. Only a claim sets a claim bit, by CAS, and only the slot's owner clears it (an abort,
 /// a release, the cleanup), so a stale claimer's CAS can only take a slot that is free again: no ABA. The occupancy word is written by owners alone, with
-/// Interlocked — a claim publishes it at once unless the claimer is a spawn, which clears it again until its PUBLISH.
+/// Interlocked, and never by a claim: a spawn publishes it at its PUBLISH, any other claimer once the slot holds its data (<see cref="PublishClaimedSlot"/>).
 /// </para>
 /// <para>
 /// <b>Readers read occupancy first, then claims.</b> A slot claimed and not occupied (<see cref="PendingBits"/>) is probed — its record decides. A spawn's claim
@@ -26,18 +26,52 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>Blocks never move.</b> The tables are arrays of fixed blocks, grown under a lock, and an element's address is stable for the archetype's life: an
 /// <see cref="Interlocked"/> on a word can never land in an array a concurrent grow is copying away from (the hazard <c>ClusterAabbs</c> needs a stamp for).
+/// A cluster's two words — its claim word and its pending-death count — sit side by side, so a reader that needs both makes one lookup and touches one cache
+/// line: the occupancy count does, per cluster (<see cref="SlotWords"/>).
 /// </para>
 /// </remarks>
 internal sealed unsafe partial class ArchetypeClusterState
 {
     private const int ClaimBlockShift = 10;
     private const int ClaimBlockSize = 1 << ClaimBlockShift;
-    private long[][] _claimBlocks = [];
-    private long[][] _pendingDeathBlocks = [];
+    private const int ClaimWordIndex = 0;
+    private const int PendingDeathWordIndex = 1;
+    private long[][] _slotWordBlocks = [];
     private readonly Lock _claimGrowLock = new();
 
+    /// <summary>
+    /// The block table, by acquire. A loop over clusters reads it once, AFTER the active cluster list: a cluster is in that list only once its words exist, so
+    /// the table read after it has a block for every id the list holds.
+    /// </summary>
+    internal long[][] SlotWordTable => Volatile.Read(ref _slotWordBlocks);
+
+    /// <summary>The first of <paramref name="clusterChunkId"/>'s two words in <paramref name="table"/>, or a null ref when no block holds it (both 0).</summary>
+    internal static ref long SlotWords(long[][] table, int clusterChunkId)
+    {
+        var b = clusterChunkId >> ClaimBlockShift;
+        if ((uint)b >= (uint)table.Length)
+        {
+            return ref Unsafe.NullRef<long>();
+        }
+
+        var block = Volatile.Read(ref table[b]);
+        if (block == null)
+        {
+            return ref Unsafe.NullRef<long>();
+        }
+
+        return ref block[((clusterChunkId & (ClaimBlockSize - 1)) << 1) + ClaimWordIndex];
+    }
+
+    /// <summary>The claim word at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire.</summary>
+    internal static ulong ClaimOf(ref long words) => Unsafe.IsNullRef(ref words) ? 0 : (ulong)Volatile.Read(ref words);
+
+    /// <summary>The pending-death count at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire.</summary>
+    internal static long PendingDeathsOf(ref long words) =>
+        Unsafe.IsNullRef(ref words) ? 0 : Volatile.Read(ref Unsafe.Add(ref words, PendingDeathWordIndex - ClaimWordIndex));
+
     /// <summary>The run-time claimed slots of <paramref name="clusterChunkId"/> — pending, occupied or hidden; 0 for a cluster nothing claimed in.</summary>
-    internal ulong ClaimedBits(int clusterChunkId) => (ulong)ReadBlockWord(_claimBlocks, clusterChunkId);
+    internal ulong ClaimedBits(int clusterChunkId) => ClaimOf(ref SlotWords(SlotWordTable, clusterChunkId));
 
     /// <summary>
     /// The slots claimed and not occupied — a spawn placed and not yet published, or a destroyed entity hidden until the cleanup. <paramref name="occupancy"/> is
@@ -48,30 +82,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Taken slots — claimed or occupied. The occupancy word is read first, then the claim word.</summary>
     internal ulong TakenBits(ulong occupancy, int clusterChunkId) => occupancy | ClaimedBits(clusterChunkId);
 
-    private static long ReadBlockWord(long[][] table, int clusterChunkId)
-    {
-        var blocks = Volatile.Read(ref table);
-        var b = clusterChunkId >> ClaimBlockShift;
-        if ((uint)b >= (uint)blocks.Length)
-        {
-            return 0;
-        }
+    private ref long ClaimWord(int clusterChunkId) => ref BlockWord(clusterChunkId, ClaimWordIndex);
 
-        var block = Volatile.Read(ref blocks[b]);
-        return block == null ? 0 : Volatile.Read(ref block[clusterChunkId & (ClaimBlockSize - 1)]);
-    }
+    private ref long PendingDeathWord(int clusterChunkId) => ref BlockWord(clusterChunkId, PendingDeathWordIndex);
 
-    private ref long ClaimWord(int clusterChunkId) => ref BlockWord(ref _claimBlocks, clusterChunkId);
-
-    private ref long BlockWord(ref long[][] table, int clusterChunkId)
+    private ref long BlockWord(int clusterChunkId, int wordIndex)
     {
         var b = clusterChunkId >> ClaimBlockShift;
-        var blocks = Volatile.Read(ref table);
+        var blocks = Volatile.Read(ref _slotWordBlocks);
         if ((uint)b >= (uint)blocks.Length || Volatile.Read(ref blocks[b]) == null)
         {
             lock (_claimGrowLock)
             {
-                blocks = table;
+                blocks = _slotWordBlocks;
                 if ((uint)b >= (uint)blocks.Length)
                 {
                     var grown = new long[b + 1][];
@@ -79,17 +102,20 @@ internal sealed unsafe partial class ArchetypeClusterState
                     blocks = grown;
                 }
 
-                blocks[b] ??= new long[ClaimBlockSize];
-                Volatile.Write(ref table, blocks);
+                blocks[b] ??= new long[ClaimBlockSize << 1];
+                Volatile.Write(ref _slotWordBlocks, blocks);
             }
         }
 
-        return ref blocks[b][clusterChunkId & (ClaimBlockSize - 1)];
+        return ref blocks[b][((clusterChunkId & (ClaimBlockSize - 1)) << 1) + wordIndex];
     }
 
     /// <summary>
-    /// Claims one free slot of <paramref name="clusterChunkId"/> by CAS on its claim word and publishes its occupancy bit; -1 when none is free. Free is clear in
-    /// both words: the occupancy word is read first, so a slot a load set occupied without a claim is never taken twice.
+    /// Claims one free slot of <paramref name="clusterChunkId"/> by CAS on its claim word; -1 when none is free. Free is clear in both words: the occupancy word
+    /// is read first, so a slot a load set occupied without a claim is never taken twice. The occupancy bit is NOT set: the slot is claimed and not occupied,
+    /// which every reader decides through its record (VIS-08), until its owner publishes it — a spawn at its PUBLISH (<see cref="PublishReservedSlot"/>), any
+    /// other claimer at once (<see cref="PublishClaimedSlot"/>). Set here, a snapshot reader past the claimer's TSN passed the cluster gate and counted a slot
+    /// with no data and no record.
     /// </summary>
     private int ClaimFirstFree(ref ulong occupancy, int clusterChunkId, ulong fullMask)
     {
@@ -108,34 +134,33 @@ internal sealed unsafe partial class ArchetypeClusterState
             var bit = 1L << slot;
             if (Interlocked.CompareExchange(ref claims, claimed | bit, claimed) == claimed)
             {
-                Interlocked.Or(ref Unsafe.As<ulong, long>(ref occupancy), bit);
                 return slot;
             }
         }
     }
 
-    /// <summary>Claims the named slot if it is free, publishing its occupancy bit; one CAS, no retry (see <c>TryClaimExactSlotInCluster</c>).</summary>
+    /// <summary>Claims the named slot if it is free; one CAS, no retry (see <c>TryClaimExactSlotInCluster</c>). The occupancy bit as in <see cref="ClaimFirstFree"/>.</summary>
     private bool ClaimExact(ref ulong occupancy, int clusterChunkId, int slotIndex)
     {
         ref var claims = ref ClaimWord(clusterChunkId);
         var bit = 1L << slotIndex;
         var occupied = Volatile.Read(ref occupancy);
         var claimed = Volatile.Read(ref claims);
-        if ((((ulong)claimed | occupied) & (ulong)bit) != 0 || Interlocked.CompareExchange(ref claims, claimed | bit, claimed) != claimed)
-        {
-            return false;
-        }
-
-        Interlocked.Or(ref Unsafe.As<ulong, long>(ref occupancy), bit);
-        return true;
+        return (((ulong)claimed | occupied) & (ulong)bit) == 0 && Interlocked.CompareExchange(ref claims, claimed | bit, claimed) == claimed;
     }
 
-    /// <summary>A freshly allocated cluster's slot 0, claimed and occupied before the cluster is published to any claimer.</summary>
+    /// <summary>A freshly allocated cluster's slot 0 claimed, and its occupancy word empty, before the cluster is published to any claimer.</summary>
     private void InitFreshCluster(byte* clusterBase, int clusterChunkId)
     {
         Volatile.Write(ref ClaimWord(clusterChunkId), 1L);
-        Volatile.Write(ref *(ulong*)clusterBase, 1UL);
+        Volatile.Write(ref *(ulong*)clusterBase, 0UL);
     }
+
+    /// <summary>
+    /// A claimed slot published as occupied by a claimer other than a spawn — recovery, the open's rebuild, a migration — which publish at once, as the claim
+    /// used to. A spawn publishes at its PUBLISH (<see cref="PublishReservedSlot"/>).
+    /// </summary>
+    internal void PublishClaimedSlot(byte* clusterBase, int slotIndex) => Interlocked.Or(ref *(long*)clusterBase, 1L << slotIndex);
 
     /// <summary>A released slot's claim bit cleared — after its occupancy bit and metadata — returning the claims left.</summary>
     private ulong ReleaseClaim(int clusterChunkId, int slotIndex) =>
@@ -147,15 +172,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// snapshot is above such a destroy's stamp must not count, by the occupancy word, an entity the commit removed. A reader loads it BEFORE the occupancy
     /// word: the publish hides the slot, then lifts the count, so a zero read first means the occupancy read after it reflects the hide.
     /// </summary>
-    internal long PendingDeaths(int clusterChunkId) => ReadBlockWord(_pendingDeathBlocks, clusterChunkId);
+    internal long PendingDeaths(int clusterChunkId) => PendingDeathsOf(ref SlotWords(SlotWordTable, clusterChunkId));
 
     /// <summary>A destroy marked pending (+1), or published or aborted (-1). The publish decrements after it folded the watermark and hid the slot.</summary>
-    internal void AddPendingDeath(int clusterChunkId, int delta) => Interlocked.Add(ref BlockWord(ref _pendingDeathBlocks, clusterChunkId), delta);
-
-    /// <summary>
-    /// A spawn's slot, just claimed (claimed and occupied), taken out of the published set until its PUBLISH: the occupancy bit cleared, the claim kept.
-    /// </summary>
-    internal void ReserveClaimedSlot(byte* clusterBase, int clusterChunkId, int slotIndex) => Interlocked.And(ref *(long*)clusterBase, ~(1L << slotIndex));
+    internal void AddPendingDeath(int clusterChunkId, int delta) => Interlocked.Add(ref PendingDeathWord(clusterChunkId), delta);
 
     /// <summary>
     /// PUBLISH of a placed spawn's slot: the born watermark folds the commit stamp first (BIND-04), then the occupancy bit is set. The claim stays. The caller
@@ -255,7 +275,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         if (PendingDeaths(clusterChunkId) != 0)
         {
-            Volatile.Write(ref BlockWord(ref _pendingDeathBlocks, clusterChunkId), 0);
+            Volatile.Write(ref PendingDeathWord(clusterChunkId), 0);
         }
     }
 }

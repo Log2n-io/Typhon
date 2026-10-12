@@ -1161,6 +1161,10 @@ public partial class DatabaseEngine
                     }
                 }
 
+                // The claim took the destination in the claim word only: it is published once its bytes, entity id and enabled bits are in, so no reader
+                // finds it occupied with its previous occupant's data (VIS-08). It used to be published by the claim, before the copy.
+                clusterState.PublishClaimedSlot(dstBase, dstSlot);
+
                 // 6b. Carry the entity's replication entry to the slot it arrived in (SUB-09's movement half). Beside the component copy because it
                 //     inherits that loop's ordering and its parallel split: slices are cut by destination cell, so no two workers write one destination.
                 //     An entity nobody watches has no block behind its cluster, so this is two branches for almost every move in a large archetype.

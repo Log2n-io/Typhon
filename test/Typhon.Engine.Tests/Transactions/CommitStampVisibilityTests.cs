@@ -372,6 +372,48 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     }
 
     /// <summary>
+    /// VIS-08 between a spawn's claim and its placement: the slot must not be in the published set yet. A reader begun past the spawning writer's TSN passes
+    /// the cluster gate — the claim folded that TSN, below the reader's snapshot — and trusts the occupancy word, so a bit the claim published would be
+    /// counted and enumerated for a slot with no data and no EntityMap record.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [CancelAfter(30_000)]
+    public void AReaderDuringASpawnsClaim_NeitherCountsNorFindsTheUnplacedSlot()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var ids = Spawn(dbe, Count);
+        var gate = new Gate();
+        dbe.SpawnClaimedProbe = gate.Probe;
+        try
+        {
+            var writer = new BackgroundCommit(dbe, tx => tx.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 999 })));
+            gate.ThreadId = writer.ThreadId;
+            writer.Go();
+            gate.AwaitReached();
+
+            Assert.That(SlotCensus(dbe), Is.EqualTo((1, Count)), $"{Marker}: the claim published the slot it took as occupied, before its data");
+            using (var reader = dbe.CreateReadOnlyTransaction())
+            {
+                Assert.That(reader.TSN, Is.GreaterThan(writer.Tsn), "premise: the reader's snapshot is above the spawning writer's TSN");
+                Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(Count), $"{Marker}: the count includes a slot claimed and not yet placed");
+                var found = reader.Query<CsWalletArch>().Execute();
+                Assert.That(found.Count, Is.EqualTo(Count), $"{Marker}: the enumeration returns a slot claimed and not yet placed");
+                Assert.That(found, Is.EquivalentTo(ids), $"{Marker}: the enumeration returns an entity no commit made");
+            }
+
+            gate.Release();
+            writer.Join();
+        }
+        finally
+        {
+            gate.Release();
+            dbe.SpawnClaimedProbe = null;
+        }
+    }
+
+    /// <summary>
     /// VIS-09's window: a reader begun after a writer's commit point, before its publish, sees the entity the commit destroyed gone, together with the
     /// revision it wrote — by id, by count and by enumeration. The destroy's died was pending from PREPARE; the reader resolves it through the writer's card.
     /// </summary>

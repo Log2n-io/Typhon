@@ -140,9 +140,10 @@ below names the invariant that proves it.
 
 ### VIS-08: A pending spawn is never absent from a snapshot, and never persisted as occupied `[fatal]` `[silent]`
   invariant a slot is claimed in the cluster's in-memory claim word, by CAS, from its claim to its final release; the page
-            occupancy word is the published set, written only by the slot's owner. A spawn is placed in PREPARE
-            (Transaction.PlaceSpawns): its slot claimed, its occupancy bit cleared again at once (ReserveClaimedSlot), its SoA
-            bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the bounds widened —
+            occupancy word is the published set, written only by the slot's owner. A claim sets no occupancy bit
+            (ArchetypeClusterState.ClaimFirstFree): its owner publishes it once the slot holds its data — recovery, the open's
+            rebuild and a migration at once (ArchetypeClusterState.PublishClaimedSlot), a spawn at its PUBLISH. A spawn is
+            placed in PREPARE (Transaction.PlaceSpawns): its slot claimed and left unoccupied, its SoA bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the bounds widened —
             zone maps, cluster AABB, per-cell index: conservative upward, and placement reads them. PUBLISH
             (Transaction.PublishSpawns) writes the record's stamp in place, then folds the born watermark and sets the
             occupancy bit, the claim kept (PublishReservedSlot), then adds the B+Tree entries
@@ -158,8 +159,8 @@ below names the invariant that proves it.
             a slot free again — no ABA (ArchetypeClusterState.ClaimFirstFree, ClaimExact); a cluster with a claimed slot is
             never drained
   invariant the claim word is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes and its
-            record, never its occupancy bit — the page the claim set it on has an active writer until the placement clears
-            it — so the crash open's EntityMap rebuild from occupancy resurrects no uncommitted spawn (CM-01)
+            record, never its occupancy bit, which no page holds before the PUBLISH — so the crash open's EntityMap rebuild from
+            occupancy resurrects no uncommitted spawn (CM-01)
   invariant an abort before the commit point un-places the spawn — record removed, claim released, a cluster left empty
             freed (Transaction.UnplaceSpawns, ArchetypeClusterState.UnreserveSlot; AP-07). The widened bounds stay wider,
             which is safe
@@ -167,7 +168,11 @@ below names the invariant that proves it.
        #674): an index-path or spatial query between a commit's append and its publish does not find the spawn its
        revisions announce, and an older snapshot's spatial query does not find a hidden destroy. The cluster-free race of
        a drain outside the fence is #1315
-  scope: Transaction.PlaceSpawns, Transaction.PublishSpawns, Transaction.UnplaceSpawns, ArchetypeClusterState.ReserveClaimedSlot,
+  never a claim sets the occupancy bit of the slot it takes: the claim folds the claimer's TSN into the born watermark first,
+        so a reader whose snapshot is above that TSN passes the cluster gate and counts, or enumerates, a slot with no data and
+        no record (CommitStampVisibilityTests.AReaderDuringASpawnsClaim_NeitherCountsNorFindsTheUnplacedSlot; the claim
+        published the bit and PREPARE cleared it after, until 2026-10-12)
+  scope: Transaction.PlaceSpawns, Transaction.PublishSpawns, Transaction.UnplaceSpawns, ArchetypeClusterState.PublishClaimedSlot,
          ArchetypeClusterState.PublishReservedSlot, ArchetypeClusterState.UnreserveSlot, ArchetypeClusterState.ClaimFirstFree,
          ArchetypeClusterState.ClaimExact, ArchetypeClusterState.TakenBits, ArchetypeClusterState.PendingBits, EntityVisibility.IsVisible,
          EntityVisibility.IsVisibleInScan, EntityRecordHeader.IsAlive

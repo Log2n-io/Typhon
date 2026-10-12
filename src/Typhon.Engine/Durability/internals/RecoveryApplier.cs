@@ -217,6 +217,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         // recovered entity is invisible to the summary.
         var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet, bornTsn);
         byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+        clusterState.PublishClaimedSlot(clusterBase, slotIdx);
 
         // Build the ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot).
         ClusterEntityRecordAccessor.InitializeRecord(recordPtr, _metadata.VersionedSlotCount);

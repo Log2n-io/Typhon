@@ -2958,9 +2958,8 @@ public unsafe partial class Transaction
                         clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
                     }
 
-                    // The claim's occupancy bit is cleared at once, the claim kept: the slot stays taken and is out of the published set until PUBLISH
-                    // (VIS-08). The page the claim dirtied has an active writer until this pass ends, so a checkpoint never captures the bit in between (CM-01).
-                    ctx.ClusterState.ReserveClaimedSlot(clusterBase, clusterChunkId, slotIdx);
+                    // The slot is claimed and not occupied: out of the published set until PUBLISH, so no page ever holds its occupancy bit (VIS-08, CM-01).
+                    _dbe.SpawnClaimedProbe?.Invoke();
 
                     // Copy component data from per-component chunks to cluster SoA slots.
                     // Transient slots are copied to TransientSegment; SV/V to ClusterSegment.

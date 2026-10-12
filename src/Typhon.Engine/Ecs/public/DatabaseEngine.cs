@@ -700,6 +700,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Test seam: runs at the end of PREPARE — every spawn placed (VIS-08) — just before the commit's append. A throw here is an abort before it.</summary>
     internal Action CommitBeforeAppendProbe { get; set; }
 
+    /// <summary>Test seam: runs in PREPARE right after a spawn's slot is claimed, before its data is copied (VIS-08). Null in production.</summary>
+    internal Action SpawnClaimedProbe { get; set; }
+
     /// <summary>Test seam: keep the crash open's identity → commit stamp map in <see cref="LastWalV2RecoveryResult"/> (dropped otherwise: one entry per
     /// committed transaction of the window, for the engine's lifetime). Set before <see cref="InitializeArchetypes"/>.</summary>
     internal bool RetainRecoveryCommitStampsForTest { get; set; }
@@ -6051,6 +6054,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // bornTsn 0: committed before this open, so the claim establishes the summary as "all genesis" and a reopened DB starts on the fast path.
                 var (clusterChunkId, slotIndex) = clusterState.ClaimSlot(ref clusterAccessor, cs, 0);
                 var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+                clusterState.PublishClaimedSlot(clusterBase, slotIndex);
 
                 // The entity-id tail is what every cluster scan resolves a slot back to an entity through; without it the rebuilt cluster is anonymous.
                 *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8) = entityPK;

@@ -2074,14 +2074,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// born maximum is an upper bound that migration can move without a spawn and that a spawn can leave unmoved, so "unmoved" is not "unchanged". See the
     /// remark on <see cref="NoteClusterBorn"/>. Reinstating it needs that argument answered first, not just the two <c>out</c> parameters back.
     /// </remarks>
-    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn)
-    {
+    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn) =>
         // A destroy pending a commit (VIS-09) holds an occupied slot the summary cannot speak for yet: deny, and let the probe ask its record.
-        if (PendingDeaths(clusterChunkId) != 0)
-        {
-            return false;
-        }
+        PendingDeaths(clusterChunkId) == 0 && AreClusterWatermarksVisibleAt(clusterChunkId, txTsn);
 
+    /// <summary>
+    /// <see cref="IsClusterFullyVisibleAt(int, long)"/> without its pending-death test, for a caller that read the count itself, before the occupancy word
+    /// (<see cref="PendingDeaths"/>): the born and died watermarks alone.
+    /// </summary>
+    internal bool AreClusterWatermarksVisibleAt(int clusterChunkId, long txTsn)
+    {
         // Acquire loads, and in THIS order. The growth path publishes the resized ClusterMaxDiedTsn before release-storing ClusterMaxBornTsn, so a reader that
         // reads maxBorn first is guaranteed the died array it then reads is at least as new. Reading them the other way round could pair a new maxBorn with a
         // stale short died array — and a missing died entry reads as "no death", which is a phantom.
@@ -4182,9 +4184,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// around the same work. Both are fixed below. What the CAS in <see cref="ClaimFreeBit"/> does cover is two claimants landing on the same cluster: each
     /// takes a distinct slot or reads the cluster full and falls through to allocate, so the remaining races on the head itself cost at most one extra
     /// allocation.</para>
-    /// <para>The OccupancyBit is set immediately by this method. The caller MUST write component data and EntityKey before the next iteration boundary to
-    /// maintain the invariant that occupied slots contain valid data.</para>
-    /// <para><paramref name="bornTsn"/> is folded into the cluster's H1 visibility summary BEFORE the bit is published — see
+    /// <para>The slot is claimed, not occupied: the caller writes component data and EntityKey, then publishes the OccupancyBit (PublishClaimedSlot; a spawn
+    /// at its PUBLISH), which maintains the invariant that occupied slots contain valid data.</para>
+    /// <para><paramref name="bornTsn"/> is folded into the cluster's H1 visibility summary BEFORE the claim, so before the bit is published — see
     /// <see cref="NoteClusterBorn"/> and the class-level ordering note.</para>
     /// </remarks>
     public (int clusterChunkId, int slotIndex) ClaimSlot(ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, long bornTsn)
@@ -4200,7 +4202,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref var occupancy = ref *(ulong*)clusterBase;
 
-            // Fold BEFORE the claim: the CAS inside ClaimFreeBit is what publishes the bit, and its full fence keeps this store on the correct side of it.
+            // Fold BEFORE the claim: the claim CAS inside ClaimFreeBit, and its full fence, precede every publish of the bit.
             // Folding for a claim that then fails (cluster full) only raises the maximum, which is conservative — never a relaxation.
             NoteClusterBorn(clusterId, bornTsn);
 
@@ -4229,7 +4231,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var newBase = accessor.GetChunkAddress(newClusterId, true);
 
         // Claim slot 0 in the fresh cluster. NO fold here — see FreshClusterStaysUnknown. Release store, paired with the reader's acquire read of the word.
-        InitFreshCluster(newBase, newClusterId); // OccupancyBit 0 set
+        InitFreshCluster(newBase, newClusterId); // slot 0 claimed
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -4249,7 +4251,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var clusterBase = accessor.GetChunkAddress(clusterId, true);
             ref var occupancy = ref *(ulong*)clusterBase;
 
-            NoteClusterBorn(clusterId, bornTsn);   // before the publishing CAS — see the PersistentStore overload
+            NoteClusterBorn(clusterId, bornTsn);   // before the claim CAS — see the PersistentStore overload
 
             var slot = ClaimFreeBit(ref occupancy, Layout.FullMask, clusterId);
             if (slot >= 0)
@@ -4306,7 +4308,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Free slot found — dirty the page before mutating occupancy (ACW-before-write). MRU hit: clusterChunkId was just read above.
         accessor.GetChunkAddress(clusterChunkId, true);
 
-        // Fold the visibility summary BEFORE the CAS that publishes the bit. Placed after the full-cluster early-out so a scan that merely walks past a full
+        // Fold the visibility summary BEFORE the claim CAS, which precedes every publish of the bit. Placed after the full-cluster early-out so a scan that merely walks past a full
         // cluster does not raise its maximum for nothing; a fold whose CAS loop then finds the cluster full is only conservative, never wrong.
         NoteClusterBorn(clusterChunkId, bornTsn);
 
@@ -4452,7 +4454,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
-            // Occupancy bit 0 is written BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
+            // Slot 0 is claimed BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
@@ -4759,7 +4761,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
-            // Occupancy bit 0 is written BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
+            // Slot 0 is claimed BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
@@ -4976,7 +4978,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         try
         {
             newChunkId = AllocateNewCluster(changeSet);
-            // Occupancy bit 0 is written BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
+            // Slot 0 is claimed BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
@@ -5087,7 +5089,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         try
         {
             newChunkId = AllocateNewCluster(null);
-            // Occupancy bit 0 is written BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
+            // Slot 0 is claimed BEFORE AddCluster publishes the cluster into the cell's pool. Published first, a concurrent claimer scanning the
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
