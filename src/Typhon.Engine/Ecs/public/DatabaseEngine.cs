@@ -1909,9 +1909,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
             // pointers, the archetypes' from their catalog. The catalog is read here, not in InitializeArchetypesCore: a component registered before
             // InitializeArchetypes allocates, and an archetype's pages are named only by its catalog row, so a stale occupancy page handed them to that
-            // component and the archetype loaded over its segments (#1163).
+            // component and the archetype loaded over its segments (#1163). Reading the catalog registers ArchetypeR1, which can allocate (its collection
+            // segment), so the components' pages are claimed before it and the archetypes' after; a claim only sets bits.
             if (CrashRecoveryAtOpen)
             {
+                ClaimPersistedPagesAtCrashOpen();
                 RegisterComponentFromAccessor<ArchetypeR1>();
                 _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
                 LoadPersistedArchetypes();

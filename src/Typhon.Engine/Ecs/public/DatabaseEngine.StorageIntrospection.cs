@@ -952,7 +952,6 @@ public partial class DatabaseEngine
                 if (rootPageIndex > 0 && rootPageIndex < ownedLimit)
                 {
                     owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
-                    claimed++;
                 }
             }
 
