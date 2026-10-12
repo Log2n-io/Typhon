@@ -383,7 +383,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         // A finished transaction refuses too: the prep checks the state, not only read-only-ness.
         using (var done = dbe.CreateQuickTransaction())
         {
-            // A write first: Commit() on an EMPTY transaction returns true but leaves it in Created, still usable.
+            // A transaction that did work; an empty one is TransactionTests.Commit_EmptyTransaction_IsTerminal (#1056).
             var target = done.OpenMut(id);
             var position = target.Read(SvUnit.Position);
             position.X = 2;
