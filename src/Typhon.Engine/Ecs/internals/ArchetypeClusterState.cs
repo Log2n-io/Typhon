@@ -50,9 +50,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public int FreeClusterHead;
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-    // Per-archetype structural-mutation latch. Despite the name it does NOT guard a finalize section — nothing ever takes it to finalize a drained cluster
-    // (see the deferred-drain banner below for how that is actually made safe). It serializes the paths that GROW or APPEND to shared per-archetype state
-    // while sibling Migrate-phase workers run, and nothing else. Every acquisition, exhaustively:
+    // Per-archetype structural-mutation latch. It serializes the paths that GROW or APPEND to shared per-archetype state while sibling Migrate-phase workers
+    // or concurrent commits run, and the one inline finalize below. The fence's deferred drain does NOT take it (see the deferred-drain banner below for how
+    // that is made safe). Every acquisition, exhaustively:
+    //   FinalizeDrainedClusterLatched  — a destroy's commit that drained a cluster finalizes it inline (#582): cell detach, RemoveFromActiveList, retire, free.
+    //                                    Concurrent commits put two removers, or a remover and a latched appender, on the list at once; this orders them.
+    //                                    It does NOT order walkers (CLUSTERWALK-01, #582 face 1).
     //   ApplyDirtyBitDeltas            — batch-apply a worker's local dirty-bit deltas into FenceDirtyBits
     //   GrowFenceDirtyBitsForChunkId   — Array.Resize of FenceDirtyBits
     //   RecordClusterDrain             — fallback grow of _drainedClusterIds ONLY; the normal append is lock-free
@@ -78,8 +81,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     // added with a wrong line. EnsureClusterVisibilityCapacity's entry (#722) went with it on 2026-10-12, its watermarks moved into fixed blocks that never
     // grow by copy; the five capacity growers, the three bulk appends, AllocateNewClusterLatched and TryEnsureCellTreeSegment were added later and the list
     // had drifted behind them.
-    // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
-    // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
+    // Writers of the active list: AddToActiveList runs under the latch, and so does RemoveFromActiveList from a commit; the fence's drain removes without
+    // it, serial by the phase barriers and EW-01. A destroy commit is NOT a serial context — two user transactions, or one dispatch's per-chunk
+    // transactions, commit concurrently, which is what #582 measured corrupting the list (a freed id left listed, a live cluster dropped). No reader takes
+    // the latch, so it orders writers against writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
     // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md. The acquisition counter shares that line on purpose:
     // it is written only by the thread already holding the latch, so it rides a line that thread owns exclusively and costs nothing (#912).
@@ -1214,8 +1219,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     private void RetireClusterId(int clusterChunkId)
     {
         // Recorded for the stamp above, and only while the structure signal is read: an engine that never fences would otherwise grow the list without
-        // bound. RetireClusterId runs single-threaded per archetype — under the fence (Migrate records, the Finalize drain acts), or from a serial
-        // destroy's commit.
+        // bound. RetireClusterId runs single-threaded per archetype — under the fence (Migrate records, the Finalize drain acts), or from a destroy's commit
+        // under _finalizeLock (FinalizeDrainedClusterLatched, #582).
         if (TrackStructureChanges)
         {
             if (_retiredPendingCount == _retiredPending.Length)
@@ -10050,12 +10055,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
             else
             {
-                // Single-threaded caller (Transaction.Destroy, etc.) — safe to finalize immediately.
-                FinaliseEmptyClusterCellState(grid, clusterChunkId);
-                RemoveFromActiveList(clusterChunkId);
-                RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
-                ClusterSegment.FreeChunk(clusterChunkId);
-                TransientSegment?.FreeChunk(clusterChunkId);
+                FinalizeDrainedClusterLatched(grid, clusterChunkId);
             }
         }
         else if (FreeClusterHead < 0)
@@ -10110,15 +10110,42 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
             else
             {
-                FinaliseEmptyClusterCellState(grid, clusterChunkId);
-                RemoveFromActiveList(clusterChunkId);
-                RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
-                TransientSegment.FreeChunk(clusterChunkId);
+                FinalizeDrainedClusterLatched(grid, clusterChunkId);
             }
         }
         else if (FreeClusterHead < 0)
         {
             FreeClusterHead = clusterChunkId;
+        }
+    }
+
+    /// <summary>
+    /// Finalize, inline and under the per-archetype latch, a cluster that a destroy's commit has just drained: detach it from its cell, take it off the
+    /// active list, retire its id and free its chunks.
+    /// </summary>
+    /// <remarks>
+    /// #582, writer-versus-writer only. Commits run concurrently — two user threads' transactions, or the per-chunk transactions of one parallel dispatch —
+    /// so two drains of one archetype reach here at once, and <see cref="RemoveFromActiveList"/>'s swap-with-last is an unguarded read-modify-write of the
+    /// (array, count) pair: one remover's scan misses a target the other just swapped below it, frees the chunk anyway and leaves the freed id listed, or
+    /// copies a tail the other already moved and drops a live cluster. The latch serialises removers against each other and against the latched appenders
+    /// (<see cref="AllocateNewClusterLatched"/>, the new-cluster paths of the cell claims). It does NOT protect a walker holding the list
+    /// (CLUSTERWALK-01, #582 face 1 — that needs the fence deferral), nor a claim that CASes into this cluster between the last-bit clear and the free.
+    /// </remarks>
+    private void FinalizeDrainedClusterLatched(SpatialGrid grid, int clusterChunkId)
+    {
+        ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref nullCtx);
+        try
+        {
+            FinaliseEmptyClusterCellState(grid, clusterChunkId);
+            RemoveFromActiveList(clusterChunkId);
+            RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
+            ClusterSegment?.FreeChunk(clusterChunkId);
+            TransientSegment?.FreeChunk(clusterChunkId);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
         }
     }
 
@@ -10215,9 +10242,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         // Issue #229 Q10: per-archetype pool removal. Only decrements the global CellState.ClusterCount if the pool actually owned this cluster id.
         // Both callers are serial for this archetype — DrainPendingClusterFinalizations runs once per archetype after the fence phase barriers, and the
-        // inline ReleaseSlot path has a single-threaded caller — so the CellClusterPool mutation needs no lock. (It does NOT run under _finalizeLock; that
-        // latch guards growth/append only.) The cell descriptor counter is shared ACROSS archetypes, which are not serialized against each other, so that
-        // one still needs Interlocked.
+        // inline ReleaseSlot path runs under _finalizeLock (FinalizeDrainedClusterLatched, #582) — so the CellClusterPool mutation needs no lock of its own.
+        // The cell descriptor counter is shared ACROSS archetypes, which are not serialized against each other, so that one still needs Interlocked.
         if (rs.CellClusterPool.RemoveCluster(cellKey, clusterChunkId))
         {
             Interlocked.Decrement(ref grid.GetCell(cellKey).ClusterCount);
