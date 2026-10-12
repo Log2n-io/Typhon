@@ -147,6 +147,15 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// <summary>Tick number of the last runtime-driven system-input refresh; guards against refreshing one shared view once per consuming system.</summary>
     internal long LastSystemInputRefreshTick { get; set; } = -1;
 
+    /// <summary>
+    /// The entities this tick's runtime-driven refresh added to the view — the <c>Added</c> half of a change filter's <c>dirtySet ∪ Added</c> (#841).
+    /// </summary>
+    /// <remarks>
+    /// Null unless the view feeds a change-filtered system. Filled only by <c>TyphonRuntime.RefreshSystemInputViewsAtTickStart</c>, on the scheduler thread
+    /// before any dispatch, and only read afterwards: a view the runtime does not refresh keeps it empty rather than serving a stale delta every tick.
+    /// </remarks>
+    internal HashMap<long> AddedThisTick { get; set; }
+
     /// <summary>Number of entities currently in the view.</summary>
     public int Count => _entityIds.Count;
 
@@ -187,6 +196,25 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         _addedCount = 0;
         _removedCount = 0;
         _modifiedCount = 0;
+    }
+
+    /// <summary>
+    /// Adds the entities the current delta reports as <c>Added</c> to <paramref name="into"/>; no allocation, unlike enumerating a <see cref="DeltaView"/>.
+    /// </summary>
+    internal void CopyAddedTo(HashMap<long> into)
+    {
+        if (_addedCount == 0)
+        {
+            return;
+        }
+
+        foreach (var kv in _deltas)
+        {
+            if (kv.Value == DeltaKind.Added)
+            {
+                into.TryAdd(kv.Key);
+            }
+        }
     }
 
     internal HashMap<long>.Enumerator GetEnumerator() => _entityIds.GetEnumerator();

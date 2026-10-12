@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
@@ -157,6 +158,71 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         }
 
         Assert.That(cellEntities, Is.EqualTo(population), "the rebuilt cell counters disagree with cluster storage");
+    }
+
+    /// <summary>
+    /// A replayed destroy of a CHECKPOINTED spatial entity (#935) releases its slot through the realm grid the open built — draining a cell's only cluster
+    /// when it takes that cell's last entity — and the entity stays out of spatial queries through the next open, whose cell layer is rebuilt from the
+    /// occupancy that release cleared.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ReplayedDestroyOfACheckpointedEntity_StaysOutOfSpatialQueriesThroughTheNextOpen()
+    {
+        (float x, float y)[] positions = [(50f, 50f), (51f, 51f), (52f, 52f), (550f, 550f), (551f, 551f)];
+        const int destroyed = 4;   // the whole first cell, and one entity of the second
+        var ids = new EntityId[positions.Length];
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            Configure(dbe);
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < positions.Length; i++)
+                    {
+                        ids[i] = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(positions[i].x, positions[i].y, i)));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True);
+                }
+
+                uow.Flush();
+            }
+
+            // The spawns go into the base, so the reopen files their clusters in cells before the replay meets the destroys.
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < destroyed; i++)
+                    {
+                        tx.Destroy(ids[i]);
+                    }
+
+                    Assert.That(tx.Commit(), Is.True);
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        for (var open = 0; open < 2; open++)
+        {
+            using var scope = ServiceProvider.CreateScope();
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            Configure(dbe);
+            var when = open == 0 ? "the open that replayed the destroys" : "the open after it";
+            Assert.That(dbe.LastWalV2RecoveryResult.RecordsApplied, Is.EqualTo(open == 0 ? destroyed : 0), $"premise: {when}");
+            Assert.That(QueryTags(dbe, 0, 0, WorldMax, WorldMax), Is.EquivalentTo(new[] { destroyed }), $"{when}: only the survivor may be found");
+            dbe.SimulateHardCrash();
+        }
     }
 
     [Test]

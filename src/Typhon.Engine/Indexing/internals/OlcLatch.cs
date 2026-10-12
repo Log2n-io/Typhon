@@ -1,8 +1,18 @@
+using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
+
+/// <summary>
+/// The write latches this thread holds, across every <see cref="OlcLatch"/>. A B+Tree write compares it before and after a throw to tell an exception that
+/// left latches held — its structure may be half-modified and those latches stay held for good — from one thrown before any, which leaves it sound (#1321).
+/// </summary>
+internal static class OlcLatchHeld
+{
+    [ThreadStatic] internal static int Count;
+}
 
 /// <summary>
 /// Optimistic Lock Coupling latch operating on a B+Tree node's OlcVersion field.
@@ -103,6 +113,7 @@ internal readonly ref struct OlcLatch
         }
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
+            OlcLatchHeld.Count++;
             return true;
         }
         TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
@@ -137,6 +148,7 @@ internal readonly ref struct OlcLatch
         }
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
+            OlcLatchHeld.Count++;
             wasObsolete = (v & 0b10) != 0;
             return true;
         }
@@ -156,6 +168,7 @@ internal readonly ref struct OlcLatch
         int v = _version;
         var newV = ((v >> 2) + 1) << 2 | (v & 0b10);  // version++, keep obsolete, clear lock
         Volatile.Write(ref _version, newV);
+        OlcLatchHeld.Count--;
         TyphonEvent.EmitConcurrencyOlcLatchWriteUnlock((uint)v, (uint)newV);
     }
 
@@ -181,7 +194,11 @@ internal readonly ref struct OlcLatch
     /// This avoids unnecessary version bumps that would cause cascading restarts.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void AbortWriteLock() => Volatile.Write(ref _version, _version & ~0b1);  // Release-clear locked bit (bit 0), leaving version counter and obsolete bit unchanged
+    public void AbortWriteLock()
+    {
+        Volatile.Write(ref _version, _version & ~0b1);  // Release-clear locked bit (bit 0), leaving version counter and obsolete bit unchanged
+        OlcLatchHeld.Count--;
+    }
 
     /// <summary>Check if locked (for diagnostics only).</summary>
     public bool IsLocked => (_version & 0b1) != 0;

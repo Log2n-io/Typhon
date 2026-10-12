@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
@@ -2479,5 +2480,67 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         using var read = reopened.CreateQuickTransaction();
         Assert.That(read.Open(id).Read(MkTraderArch.Trader).TraderNo, Is.EqualTo(2), "the spawned trader");
         Assert.That(read.Open(id).Read(MkTraderArch.Wallet).Credits, Is.EqualTo(777), "the spawned wallet");
+    }
+
+    /// <summary>
+    /// A crash open whose occupancy page on disk predates the archetype's segments: a component registered before <c>InitializeArchetypes</c> allocates
+    /// from that bitmap, and the archetype's pages, which the persisted catalog names but the bitmap does not, must not be handed to it (#1163).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void AComponentRegisteredBeforeTheArchetypesLoad_DoesNotTakeTheirPages_FromAStaleOccupancyPage()
+    {
+        const int occupancyDataPage = 4;
+        var path = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BuildDatabasePathFileName();
+        var staleOccupancy = new byte[PagedMMF.PageSize];
+        var items = new List<EntityId>();
+        int entityMapRoot;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<MkItem>();
+            dbe.RegisterComponentFromAccessor<MkLore>();
+
+            // The occupancy page as the disk holds it before any archetype segment exists.
+            WriteFilePage(dbe, occupancyDataPage);
+            dbe.MMF.ReadPageDirect(occupancyDataPage, staleOccupancy);
+
+            dbe.InitializeArchetypes();
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (var no = 0; no < 8; no++)
+                {
+                    items.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            entityMapRoot = dbe._archetypeStates[dbe.GetMetaByRouting(items[0].ArchetypeId).ArchetypeId].EntityMap.Segment.RootPageIndex;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.SimulateHardCrash();
+        }
+
+        // Every page on disk as the checkpoint wrote it, but the occupancy page's write lost: the archetype's pages read as free.
+        using (var file = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+        {
+            file.Position = occupancyDataPage * (long)PagedMMF.PageSize;
+            file.Write(staleOccupancy);
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        var reopened = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        reopened.RegisterComponentFromAccessor<MkItem>();
+        reopened.RegisterComponentFromAccessor<MkLore>();
+        // New this session: its segments are allocated now, before the archetype catalog is read.
+        reopened.RegisterComponentFromAccessor<MkTrader>();
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        var trader = reopened.GetComponentTable<MkTrader>();
+        Assert.That(trader.ComponentSegment.Pages.ToArray(), Does.Not.Contain(entityMapRoot), "the new component took the archetype's entity-map root");
+
+        reopened.InitializeArchetypes();
+        AssertItems(reopened, items);
+        AssertStorageHealthy(reopened);
     }
 }
