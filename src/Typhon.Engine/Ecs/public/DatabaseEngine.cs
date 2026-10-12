@@ -1907,9 +1907,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             LoadSystemSchemaR1();
 
             // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
-            // pointers here, the archetypes' once their catalog is read (InitializeArchetypesCore).
+            // pointers, the archetypes' from their catalog. The catalog is read here, not in InitializeArchetypesCore: a component registered before
+            // InitializeArchetypes allocates, and an archetype's pages are named only by its catalog row, so a stale occupancy page handed them to that
+            // component and the archetype loaded over its segments (#1163).
             if (CrashRecoveryAtOpen)
             {
+                RegisterComponentFromAccessor<ArchetypeR1>();
+                _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
+                LoadPersistedArchetypes();
                 ClaimPersistedPagesAtCrashOpen();
             }
         }
@@ -4382,10 +4387,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
-        if (CrashRecoveryAtOpen)
-        {
-            ClaimPersistedPagesAtCrashOpen();
-        }
 
         // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
         // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
