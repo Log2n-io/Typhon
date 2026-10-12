@@ -556,6 +556,66 @@ internal sealed class TrueCrashE2ETests
     }
 
     /// <summary>
+    /// The crash open's EntityMap re-derive must not lower the persisted <c>NextEntityKey</c> (#1164, RB-06): the entity holding the top key destroyed and
+    /// checkpointed, then a crash, and the reopen's first spawn must not be handed the dead entity's key.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("RB-06")]
+    public void DestroyTopKeyEntity_ThenCrash_TheKeyIsNotReissued()
+    {
+        const int count = 4;
+        var entityIds = new EntityId[count];
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    using var tx = uow.CreateTransaction();
+                    entityIds[i] = tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(i + 1, i, i)));
+                    tx.Commit();
+                }
+
+                using (var tx = uow.CreateTransaction())
+                {
+                    tx.Destroy(entityIds[count - 1]);
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            // The destroy below the recovery window: its slot is released in the data file, so the reopen's re-derive sees only the lower keys.
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+            Assert.That(dbe.LastOpenCrashEntityMapRebuildCount, Is.GreaterThan(0), "premise: the crash open re-derived the EntityMap");
+
+            EntityId spawned;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                spawned = tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(100, 0, 0)));
+                Assert.That(tx.Commit(), Is.True);
+            }
+
+            Assert.That(spawned.EntityKey, Is.GreaterThan(entityIds[count - 1].EntityKey),
+                "a spawn after the reopen was handed the destroyed top entity's key: EntityId keys are never recycled");
+        }
+    }
+
+    /// <summary>
     /// The Phase-6 seal must CONSOLIDATE recovered state into the data file, not leave it re-derivable from the WAL. After a crash
     /// the first reopen replays the WAL and seals (a checkpoint that writes the recovered pages + advances CheckpointLSN). We then
     /// hard-crash again AND delete every WAL file: a second reopen has no WAL to replay, so the entities can only survive if the
