@@ -946,6 +946,13 @@ public partial class DatabaseEngine
             if (rootPageIndex != 0)
             {
                 unresolved++;
+
+                // Past the file's end it was never written — a checkpoint that persisted the pointer died before the root landed — yet a durable pointer
+                // names it. Claimed, so a crash open's allocation cannot make it another segment's page that the load then reads as this root (#1163).
+                if (rootPageIndex > 0 && rootPageIndex < ownedLimit)
+                {
+                    owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
+                }
             }
 
             return;

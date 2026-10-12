@@ -2593,10 +2593,14 @@ of the LSN value).
   invariant DELIBERATE (#1303): a torn page past the tear is taken for the grow's. Under an old lost link — the double fault — it was a
             checkpointed page, and its data is lost silently; kept suspect instead, a single torn grow made an open that could not complete. The
             exact rule needs each page's creation generation
-  invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap), right after
-            the schema and again after the archetypes load, and every page a crash-path segment load finds named: the bitmap on disk may predate
-            the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
-            claim through its resolved CK-05 pair (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
+  invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap) right after
+            the schema, the archetype catalog read with it, before any registration can allocate, and every page a crash-path segment load finds
+            named: the bitmap on disk may predate the grow, and the open's own allocations took its pages for a second segment before CK-09's
+            re-derive. Read later, in InitializeArchetypes, the catalog came after a component registered before it had taken an archetype's
+            pages, and the archetype's committed entities were gone with the open silent (#1163). A persisted root past the file's end — a
+            checkpoint persisted the pointer and died before the root landed — is claimed too: unclaimed, an allocation made it another segment's
+            page, and the load read that page as the root. A directory is read for a claim through its resolved CK-05 pair
+            (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
             the older generation stayed cached and the load found the directory as of before its last grow — the chain ahead of it, refused
   invariant the opposite tear — the directory's last page, written as the segment's, linking past it: the chain ahead of the directory — is
             ended where the directory ends when the page it links to was never written as the segment's (past the file's end, another
@@ -2624,8 +2628,11 @@ of the LSN value).
             checkpointed pages keeps them (initialized empty, the items on them were gone); a torn old tail fails the open loudly (it was emptied,
             silently); a torn page of the grow is initialized and the open completes; an unwritten last page is initialized; chunk 0 is reserved
             again after its page is initialized [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
-            (a claim over an unresolved pair failed this reopen). NOT mutation-proven: the directory's
-            trust — its trigger, a torn map-extension page, needs a segment past the root's ~2 000 page indices
+            (a claim over an unresolved pair failed this reopen);
+            TornCaptureRecoveryTests.AComponentRegisteredBeforeTheArchetypesLoad_DoesNotTakeTheirPages_FromAStaleOccupancyPage (#1163; red with
+            the catalog read in InitializeArchetypes) [VerifiesRule]; WalCrashSweepTests.PageAxis_LifecycleChurn_N4 (the root past the file's end;
+            red without its claim). NOT mutation-proven: the directory's trust — its trigger, a torn map-extension page, needs a segment past the
+            root's ~2 000 page indices
 
 ---
 
