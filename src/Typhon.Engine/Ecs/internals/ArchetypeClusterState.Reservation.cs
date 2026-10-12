@@ -47,8 +47,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     private readonly Lock _claimGrowLock = new();
 
     /// <summary>
-    /// The block table, by acquire. A loop over clusters reads it once, AFTER the active cluster list: a cluster is in that list only once its words exist, so
-    /// the table read after it has a block for every id the list holds.
+    /// The block table, by acquire. A cluster can be listed before its block exists — a fresh or repaired cluster, one a clean reopen loaded — and a missing
+    /// block reads as no claim, no pending death and an unestablished born watermark: the gate denies. A reader that must see a claim set after its first
+    /// lookup — the snapshot scan, whose occupancy read follows it — resolves the words again when the first lookup found no block.
     /// </summary>
     internal long[][] SlotWordTable => Volatile.Read(ref _slotWordBlocks);
 
@@ -94,6 +95,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal static bool WatermarksVisibleAt(ref long words, long txTsn)
     {
+        // Died BEFORE born: a retire writes born = VisibilityUnknown, then died = 0 (ResetClusterVisibility), so a reader that sees the reset's died then reads
+        // the reset's born and denies. Born first could pair the retiring cluster's old born with the new died = 0 and grant.
+        var died = MaxDiedOf(ref words);
         var born = MaxBornOf(ref words);
         if (born == VisibilityUnknown || born > txTsn)
         {
@@ -102,7 +106,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // 0 means no death has been recorded, and 0 <= txTsn for every real snapshot, so a cluster nothing has died in never blocks. A reader whose snapshot
         // has reached the last death sees an occupancy word that already reflects it.
-        return MaxDiedOf(ref words) <= txTsn;
+        return died <= txTsn;
     }
 
     /// <summary>

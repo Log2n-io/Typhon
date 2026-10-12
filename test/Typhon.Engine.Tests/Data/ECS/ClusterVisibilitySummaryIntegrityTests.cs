@@ -51,6 +51,39 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         dbe._archetypeStates[Archetype<ClAnt>.Metadata.ArchetypeId].ClusterState;
 
     /// <summary>
+    /// CLUSTERVIS-01 on the cluster-word blocks: a cluster id no site has touched — here in a second block, the table grown for it — reads unestablished
+    /// (born <see cref="ArchetypeClusterState.VisibilityUnknown"/>, nothing claimed, no death), so the gate denies; a new block's born words start at the
+    /// sentinel, not at 0, which would read "visible to every snapshot"; a cluster's four words are its own; and a retire's reset restores the sentinels.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CLUSTERVIS-01")]
+    public void AClusterIdNoSiteTouched_ReadsUnestablished_AndAResetRestoresIt()
+    {
+        using var dbe = SetupEngine();
+        var cs = ClusterStateOf(dbe);
+        const int id = 1024 + 37;   // a second block
+
+        Assert.That(cs.ClusterMaxBorn(id), Is.EqualTo(ArchetypeClusterState.VisibilityUnknown), "an id without words must read unestablished");
+        Assert.That(cs.IsClusterFullyVisibleAt(id, long.MaxValue - 1), Is.False, "the gate must deny a cluster without words");
+
+        cs.MaxDiedWord(id) = 7;   // creates the block
+        Assert.That(cs.ClusterWordCapacity, Is.GreaterThan(id), "premise: the table grew to cover the id");
+        Assert.That(cs.ClusterMaxBorn(id), Is.EqualTo(ArchetypeClusterState.VisibilityUnknown), "a new block's born word must start at the sentinel");
+        Assert.That(cs.ClusterMaxBorn(id + 1), Is.EqualTo(ArchetypeClusterState.VisibilityUnknown), "every born word of a new block starts at the sentinel");
+        Assert.That(cs.ClaimedBits(id), Is.Zero, "a died watermark landed in the claim word");
+        Assert.That(cs.PendingDeaths(id), Is.Zero, "a died watermark landed in the pending-death count");
+
+        cs.MaxBornWord(id) = 5;
+        Assert.That((cs.ClusterMaxBorn(id), cs.ClusterMaxDied(id)), Is.EqualTo((5L, 7L)), "the two watermarks share a word");
+        Assert.That(cs.IsClusterFullyVisibleAt(id, 7), Is.True, "premise: an established, reached summary grants");
+        Assert.That(cs.IsClusterFullyVisibleAt(id, 6), Is.False, "a death the reader has not reached must deny");
+
+        cs.ResetClusterVisibility(id);
+        Assert.That((cs.ClusterMaxBorn(id), cs.ClusterMaxDied(id)), Is.EqualTo((ArchetypeClusterState.VisibilityUnknown, 0L)),
+            "a retire's reset must leave the id unestablished for its next cluster");
+    }
+
+    /// <summary>
     /// The audit walks the EntityMap reading and releasing each page (EP-02). Through an epoch-tagged accessor, a map larger than the cache pinned every page it
     /// touched for the check's scope, and the check waited out back-pressure for evictions its own tags forbade: the market's integrity check timed out once
     /// its audit archetype's map outgrew a 64 MiB cache. Here the map is larger than the engine's smallest cache — grown there by spawn commits, whose grow
@@ -135,7 +168,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
     {
         for (var c = 0; c < cs.ClusterWordCapacity; c++)
         {
-            if (cs.MaxBornWord(c) != ArchetypeClusterState.VisibilityUnknown)
+            if (cs.ClusterMaxBorn(c) != ArchetypeClusterState.VisibilityUnknown)
             {
                 return c;
             }
@@ -181,7 +214,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
 
         var cs = ClusterStateOf(dbe);
         var cluster = FirstEstablishedCluster(cs);
-        var maintained = cs.MaxBornWord(cluster);
+        var maintained = cs.ClusterMaxBorn(cluster);
         Assert.That(maintained, Is.GreaterThan(0), "spawned entities carry a non-zero BornTSN, so there is room to under-state the summary");
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "baseline must be clean, or the assertion below proves nothing");
 
@@ -229,7 +262,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var cluster = -1;
         for (var c = 0; c < cs.ClusterWordCapacity && cluster < 0; c++)
         {
-            if (cs.MaxDiedWord(c) != 0)
+            if (cs.ClusterMaxDied(c) != 0)
             {
                 cluster = c;
             }
@@ -284,7 +317,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         Assert.That(cs.FreeClusterHead, Is.GreaterThanOrEqualTo(0),
             "PRECONDITION: 80 entities must leave the second cluster partly free, so the claim below takes the existing-cluster CAS path and needs no ChangeSet");
 
-        var settled = cs.MaxBornWord(cs.FreeClusterHead);
+        var settled = cs.ClusterMaxBorn(cs.FreeClusterHead);
         Assert.That(settled, Is.Not.EqualTo(ArchetypeClusterState.VisibilityUnknown), "the spawns above must have established this cluster's bound");
 
         // A TSN far beyond anything the engine has issued, so "the summary moved" cannot be confused with "the summary was already there".
@@ -298,7 +331,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
 
             // Nothing between the claim and this read. If the fold happened after the publishing store, the summary is still `settled` here.
-            AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+            AssertBoundedBeforePublish(cs.ClusterMaxBorn(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                 cs.IsClusterFullyVisibleAt(claimed, incoming), incoming);
         }
         finally
@@ -362,7 +395,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var head = cs.FreeClusterHead;
         Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
 
-        var settled = cs.MaxBornWord(head);
+        var settled = cs.ClusterMaxBorn(head);
         var incoming = settled + 1_000;
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
@@ -378,7 +411,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
 
             // Marker is clause 1's own text, not the shared rule id: this mutant must be shown to trip the ordering clause specifically.
             RuleMutants.AssertDetects("CLUSTERVIS-01", BoundBeforePublishMarker, () =>
-                AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                AssertBoundedBeforePublish(cs.ClusterMaxBorn(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                     cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
         }
         finally
@@ -409,7 +442,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var head = cs.FreeClusterHead;
         Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
 
-        var incoming = cs.MaxBornWord(head) + 1_000;
+        var incoming = cs.ClusterMaxBorn(head) + 1_000;
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var accessor = cs.ClusterSegment.CreateChunkAccessor();
@@ -421,7 +454,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             // Marker is clause 3's own text. Matching the shared rule id would have accepted a failure of clause 1 — which is exactly what this mutant must
             // NOT be, since clause 1 is already covered and a born bound left intact is the whole point of reaching this clause.
             RuleMutants.AssertDetects("CLUSTERVIS-01", GateIsBoundedMarker, () =>
-                AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                AssertBoundedBeforePublish(cs.ClusterMaxBorn(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                     cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
         }
         finally
@@ -514,7 +547,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             "the message must name the caller-side cause; an IndexOutOfRangeException here reads as a grow problem and sent #807 after the wrong theory");
 
         // int.MaxValue is the same case with a different arithmetic route: `+ 1` overflows to int.MinValue and walks past a `< 0` guard.
-        Assert.That(Assert.Throws<InvalidOperationException>(() => cs.NoteClusterBorn(int.MaxValue, 10_000)).Message, Does.Contain("only ever grows"));
+        Assert.That(Assert.Throws<InvalidOperationException>(() => cs.NoteClusterBorn(int.MaxValue, 10_000)).Message, Does.Contain("words never move"));
         Assert.That(Assert.Throws<InvalidOperationException>(() => cs.NoteClusterDied(-1, 10_000)).Message, Does.Contain("NoteClusterDied"));
     }
 

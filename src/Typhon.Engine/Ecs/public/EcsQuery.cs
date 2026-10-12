@@ -1771,16 +1771,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// A RESERVED slot of the cluster SoA scan — a spawn placed in PREPARE and not yet published (VIS-08): visible only through a record that exists and a
     /// born its owner's card resolves at or below the snapshot. Unlike an occupied slot, a reserved one with no record yet is a spawn still being placed.
     /// </summary>
-    private static bool IsReservedSpawnVisible(long rawId, ArchetypeEngineState visState, byte* visBuf, long txTsn, CommitCardTable cards,
-        ref ChunkAccessor<PersistentStore> visAccessor)
+    private static bool IsReservedSpawnVisible(long rawId, int clusterChunkId, int slotIndex, ArchetypeEngineState visState, byte* visBuf, long txTsn,
+        CommitCardTable cards, ref ChunkAccessor<PersistentStore> visAccessor)
     {
         if (rawId == 0 || visState == null)
         {
             return false;
         }
 
+        // The record must name THIS slot: a migration's destination is claimed and unoccupied while its source still holds the entity, and the record still
+        // points at the source, so the entity is found there and not twice.
         var key = EntityId.FromRaw(rawId).EntityKey;
-        return visState.EntityMap.TryGet(key, visBuf, ref visAccessor) && EntityVisibility.IsVisibleInScan(visBuf, txTsn, cards, visState.EntityMap, key);
+        return visState.EntityMap.TryGet(key, visBuf, ref visAccessor)
+               && ClusterEntityRecordAccessor.GetClusterChunkId(visBuf) == clusterChunkId && ClusterEntityRecordAccessor.GetSlotIndex(visBuf) == slotIndex
+               && EntityVisibility.IsVisibleInScan(visBuf, txTsn, cards, visState.EntityMap, key);
     }
 
     private void ScanClusterSoa<TSink, TPrimary, TData>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
@@ -1907,6 +1911,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // load from sinking past it. Plain here would let arm64 pair a fresh occupancy word with a stale watermark — the phantom BIND-04 forbids.
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
 
+                // No block at the first lookup — a cluster listed before its words exist (SlotWordTable): resolve them again, after the occupancy word, or a
+                // destroy that created the block and hid its slot meanwhile would read here as neither occupied nor claimed, and an older snapshot lose it.
+                if (visGated && Unsafe.IsNullRef(ref slotWords))
+                {
+                    slotWords = ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId);
+                }
+
                 // VIS-08/09: a slot claimed and not occupied — a spawn placed in PREPARE, or a destroyed entity hidden until the cleanup. A snapshot scan visits
                 // it, the claims read after the occupancy word (a spawn's claim outlives its publish), and decides it through its record and its owner's card.
                 // HEAD readers never see one.
@@ -1973,7 +1984,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
                             var visible = (reserved & (1UL << slotIndex)) != 0
-                                ? IsReservedSpawnVisible(rawId, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
+                                ? IsReservedSpawnVisible(rawId, clusterChunkId, slotIndex, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
                                 : IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor);
                             if (visible)
                             {
@@ -2007,7 +2018,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
                             var visible = (reserved & (1UL << slotIndex)) != 0
-                                ? IsReservedSpawnVisible(rawId, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
+                                ? IsReservedSpawnVisible(rawId, clusterChunkId, slotIndex, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
                                 : IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor);
                             if (visible)
                             {
@@ -3520,8 +3531,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <item><b>Born after the snapshot / died before it.</b> The occupancy word is CURRENT — it knows nothing about the reader's snapshot.
     /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt(int, long)"/> is the same per-cluster summary the SoA scan uses (H1): it is true only when
     /// every entity in the cluster was born at or before <paramref name="txTsn"/> and every death recorded there is already visible to this reader. It is
-    /// conservative by construction — an unsized
-    /// array or an unestablished maximum answers false — so a bail is always safe and only ever costs performance.</item>
+    /// conservative by construction — a cluster without words or an unestablished maximum answers false — so a bail is always safe and only ever costs
+    /// performance.</item>
     /// <item><b>Enabled/disabled (T2) predicates.</b> Occupancy is liveness, not enabled bits, so any T2 requirement disqualifies the archetype outright.</item>
     /// <item><b>Entities pending destroy in this transaction.</b> Their occupancy bit is still set, so a non-empty set disqualifies the archetype.</item>
     /// <item><b>Pending spawns.</b> A spawn still pending in this transaction owns no slot; one placed by a committing transaction holds a reserved slot,
@@ -3566,7 +3577,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return false;
             }
 
-            // Read once, after the active list: it holds a block for every cluster the list does (SlotWordTable).
+            // Read once: a cluster whose block is missing from it reads as unestablished and bails, which is conservative (SlotWordTable).
             var slotWords = clusterState.SlotWordTable;
             var total = 0;
             for (var c = 0; c < activeCount; c++)

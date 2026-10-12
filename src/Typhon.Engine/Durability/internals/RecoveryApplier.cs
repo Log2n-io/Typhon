@@ -213,7 +213,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             return;
         }
 
-        // H1: the claim folds bornTsn into the cluster's visibility summary before publishing the occupancy bit — replay must bound the cluster too, or a
+        // H1: the claim folds bornTsn into the cluster's visibility summary before the occupancy bit is published — replay must bound the cluster too, or a
         // recovered entity is invisible to the summary.
         var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet, bornTsn);
         byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
@@ -264,7 +264,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot). The bits come from the absolute mask,
+        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit published by PublishClaimedSlot above). The bits come from the absolute mask,
         // clearing as well as setting: a claimed slot is not guaranteed clean of its previous occupant's bits (ENABLE-01).
         *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
         for (int slot = 0; slot < _componentCount; slot++)

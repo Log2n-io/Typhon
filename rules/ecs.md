@@ -373,9 +373,10 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
 ### CLUSTERVIS-01: The watermark is folded before the store that publishes the slot `[fatal][silent]`
   invariant at every instant a slot's occupancy bit is observable as SET, the cluster's summary already bounds the entity
             occupying it
-  never folding the watermark after the claim returns. The claim is what publishes the bit, so a caller-side fold leaves a
-        window in which a reader sees the bit paired with a maximum that predates the entity.
-  enforce `NoteClusterBorn` runs inside the claim, ahead of the publishing CAS; `NoteClusterDied` runs ahead of
+  never publishing the bit before the fold: a reader would see the bit paired with a maximum that predates the entity. The
+        claim folds the claimer's TSN; a spawn's publish folds its stamp first (`PublishReservedSlot`); recovery, the open's
+        rebuild and a migration publish after the claim's fold (`PublishClaimedSlot`).
+  enforce `NoteClusterBorn` runs inside the claim, ahead of every publish of the bit; `NoteClusterDied` runs ahead of
           `ReleaseSlot`'s clear. The reader's half is the mirror — acquire-read the occupancy word, THEN the watermarks.
   enforce a FRESHLY allocated cluster is left at `VisibilityUnknown` by the claim and established by the caller once the
           slot has contents. The two directions need opposite treatment: for an existing cluster the hazard is an OLDER
@@ -392,6 +393,7 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
   scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
          ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
          ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.WatermarksVisibleAt, ArchetypeClusterState.SlotWords,
+         ArchetypeClusterState.PublishClaimedSlot, ArchetypeClusterState.PublishReservedSlot,
          ArchetypeClusterState.FreeClusterHead, ArchetypeClusterState.ClaimSlotHeadReadProbe
   on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
                 reader's snapshot. Silent both ways — every value looks plausible.

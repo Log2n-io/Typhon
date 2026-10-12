@@ -394,9 +394,14 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
             gate.AwaitReached();
 
             Assert.That(SlotCensus(dbe), Is.EqualTo((1, Count)), $"{Marker}: the claim published the slot it took as occupied, before its data");
+            var state = dbe._archetypeStates[Archetype<CsWalletArch>.Metadata.ArchetypeId].ClusterState;
+            var clusterIds = state.ReadActiveClusterList(out var clusterCount);
+            Assert.That(clusterCount, Is.EqualTo(1), "premise: the spawn claimed into the committed entities' cluster, not a fresh one the gate denies");
             using (var reader = dbe.CreateReadOnlyTransaction())
             {
                 Assert.That(reader.TSN, Is.GreaterThan(writer.Tsn), "premise: the reader's snapshot is above the spawning writer's TSN");
+                Assert.That(state.AreClusterWatermarksVisibleAt(clusterIds[0], reader.TSN), Is.True,
+                    "premise: the cluster's watermarks grant the reader — the case where a published bit would be counted unprobed");
                 Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(Count), $"{Marker}: the count includes a slot claimed and not yet placed");
                 var found = reader.Query<CsWalletArch>().Execute();
                 Assert.That(found.Count, Is.EqualTo(Count), $"{Marker}: the enumeration returns a slot claimed and not yet placed");

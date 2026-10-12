@@ -72,6 +72,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     //   EnsurePerCellIndexCapacity        ┘
     //   TryEnsureCellTreeSegment       — first-use creation of the archetype's shared cell-tree segment. Two unsynchronised creators would each build a
     //                                    segment and one would win, orphaning every tree already built on the loser.
+    // Taken UNDER it, and a leaf: _claimGrowLock (ArchetypeClusterState.Reservation.cs), which grows the cluster-word blocks — InitFreshCluster runs inside the
+    // latch on ClaimSlotInCell's slow path. Nothing is acquired while holding it.
     // This list is load-bearing: it is what the next person reasons about lock order from, so an acquisition added without a line here is worse than one
     // added with a wrong line. EnsureClusterVisibilityCapacity's entry (#722) went with it on 2026-10-12, its watermarks moved into fixed blocks that never
     // grow by copy; the five capacity growers, the three bulk appends, AllocateNewClusterLatched and TryEnsureCellTreeSegment were added later and the list
@@ -1717,15 +1719,15 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// The two directions need opposite treatment, and doing the same thing to both is a bug either way round.
     /// </para>
     /// <para>
-    /// <b>Existing cluster — fold BEFORE the publishing CAS.</b> The hazard is an OLDER reader: it sees the new bit paired with a bound that predates the
+    /// <b>Existing cluster — fold BEFORE the bit is published.</b> The hazard is an OLDER reader: it sees the new bit paired with a bound that predates the
     /// entity, so the gate vouches for a cluster holding an entity born after its snapshot. Raising first closes that, and raising early is free because the
     /// bound is conservative upward.
     /// </para>
     /// <para>
-    /// <b>Fresh cluster — do NOT fold; leave it unknown.</b> The hazard is a NEWER reader. The claim publishes the occupancy bit before the caller writes the
-    /// slot's EntityId and its EntityMap record, so a reader at or past <c>bornTsn</c> that passed the gate would count a slot whose entity does not exist yet
-    /// — and <c>EcsQuery.TryCountViaOccupancy</c> has no per-entity probe to catch it. An unestablished bound denies the gate outright, which is exactly the
-    /// protection a fresh cluster had before the fold moved into the claim. The caller establishes the real value once the slot's contents exist.
+    /// <b>Fresh cluster — do NOT fold; leave it unknown.</b> The hazard is a NEWER reader. Recovery and the open's rebuild publish the occupancy bit
+    /// (<see cref="PublishClaimedSlot"/>) before they write the slot's EntityId and EntityMap record, so a reader at or past <c>bornTsn</c> that passed the gate
+    /// would count a slot whose entity does not exist yet — and <c>EcsQuery.TryCountViaOccupancy</c> has no per-entity probe to catch it. An unestablished
+    /// bound denies the gate outright. The caller establishes the real value once the slot's contents exist.
     /// </para>
     /// <para>
     /// <b>Why the caller may safely ESTABLISH rather than merely raise.</b> <see cref="NoteClusterBorn"/> overwrites an unknown bound with whatever it is
@@ -1733,10 +1735,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Do not extend that establish-from-unknown path to clusters that already hold entities.
     /// </para>
     /// <para>
-    /// <b>Known residual, NOT fixed here.</b> The same half-written-slot window still exists for an EXISTING cluster whose bound was already established: the
-    /// bit is published by the claim and the EntityMap record is written by the caller, so a newer reader can count a slot in flight. That predates this change
-    /// — the fold moving into the claim neither created nor widened it — and closing it needs a two-phase reserve/publish primitive rather than more fold
-    /// ordering, because the defect is what the SLOT contains, not what the summary says.
+    /// <b>The half-written-slot window of an EXISTING cluster is closed</b> (2026-10-12): a claim no longer publishes the bit, so a spawn's slot is claimed
+    /// and unoccupied until its PUBLISH, and a migration publishes after its copy (VIS-08).
     /// </para>
     /// </remarks>
     internal const string FreshClusterStaysUnknown = "see the remarks on this field";
@@ -1857,7 +1857,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void NoteClusterBorn(int clusterChunkId, long bornTsn)
     {
         // Every claim into an EXISTING cluster folds here, which makes it the companion funnel to AddToActiveList for the changed-cluster list (#205).
-        // It fires slightly before the CAS that publishes the slot, so a claim that then loses the race marks a cluster nothing landed in — conservative
+        // It fires slightly before the claim CAS, so a claim that then loses the race marks a cluster nothing landed in — conservative
         // in the direction the list's one-directional invariant allows, and cheaper than a second hook after every CAS.
         if (clusterChunkId >= 0)
         {
@@ -1866,21 +1866,20 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         // Name the caller's mistake rather than letting it surface as an IndexOutOfRangeException from the fold below. That exception was read for three
-        // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refutes, since the array only ever grows and is
+        // weeks as "the visibility array had not grown to cover the cluster" (#807) — a theory the code refuted, since the array only ever grew and was
         // sized for clusterChunkId + 1 on the next line. The real defect was a negative id produced one frame up (#842). An out-of-range index here is
         // always the caller's, so it should say so; the array access bounds-checks anyway, so this replaces an implicit throw rather than adding a check.
         // Mirrored onto NoteClusterDied, which needs it for a different reason: RecoveryApplier passes a chunk id decoded out of a WAL buffer, so that
         // side takes untrusted input rather than an already-validated slot.
         //
-        // int.MaxValue is rejected with the negatives, and not because such a cluster could exist: `clusterChunkId + 1` OVERFLOWS to int.MinValue on the
-        // next line, so the capacity call would be asked for a negative length, return without growing, and leave the index to fault anyway — past a guard
-        // whose whole purpose is to name the cause. A large-but-representable id is deliberately NOT rejected: sizing to it is a grow, not an error.
+        // int.MaxValue is rejected with the negatives: no cluster can have it, and the array sized to `id + 1` this guard was written for overflowed on it.
+        // A large-but-representable id is deliberately NOT rejected: its block is created, a grow rather than an error.
         if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
         {
             ThrowHelper.ThrowInvalidOp(
                 $"Archetype {ArchetypeId}: NoteClusterBorn was given cluster id {clusterChunkId}. A negative id means the CALLER resolved its cluster "
                 + "more than once and lost the value to a concurrent peer — the shape of #842, where both ClaimSlot overloads tested FreeClusterHead and "
-                + "then re-read it, so a peer filling the cluster stored -1 between the two. Fix the caller; this method's own array only ever grows.");
+                + "then re-read it, so a peer filling the cluster stored -1 between the two. Fix the caller; this method's words never move.");
         }
 
         // CAS rather than a plain store, because two claimants can be folding into the SAME cluster at once — #708 records that Transient spawns commit
@@ -1941,7 +1940,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Chunk ids are RECYCLED — <c>ChunkBasedSegment</c> reuses freed ids — so without this a brand-new cluster inherits whatever the previous occupant of
     /// that id left behind. That defeats <see cref="FreshClusterStaysUnknown"/> entirely: the fresh-cluster claim skips the fold precisely so the gate denies
     /// until the slot has contents, and it can only deny if the entry actually holds the sentinel. Concretely — cluster 7 drains with born=100, died=120 and
-    /// is freed; a spawn at TSN 500 gets id 7 back and release-stores occupancy bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both
+    /// is freed; a recovery claim at TSN 500 gets id 7 back and publishes bit 0; a reader at txTsn=300 loads the word, reads born=100 and died=120, both
     /// satisfied, and counts a slot whose EntityId tail and EntityMap record do not exist yet. It also stops a permanent-deny value (the migration tombstone
     /// guard) being inherited by an unrelated cluster and nailing it to the slow path forever.
     /// </remarks>
@@ -1969,13 +1968,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         // The mirror of NoteClusterBorn's precondition, and this side is the one with untrusted input: RecoveryApplier decodes the chunk id out of a WAL
         // record buffer, so a truncated or corrupt record reaches here as an arbitrary int. Unguarded it lands as the same IndexOutOfRangeException from
-        // inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see NoteClusterBorn for why `+ 1` makes
+        // inside the fold that #807 spent weeks reading as a capacity problem. int.MaxValue joins the negatives — see NoteClusterBorn for why, as it made
         // it the same case.
         if (clusterChunkId < 0 || clusterChunkId == int.MaxValue)
         {
             ThrowHelper.ThrowInvalidOp(
                 $"Archetype {ArchetypeId}: NoteClusterDied was given cluster id {clusterChunkId}. Either a caller resolved its cluster twice (see "
-                + "NoteClusterBorn and #842) or a decoded WAL record carried a bad chunk id. This method's own array only ever grows, so the index is "
+                + "NoteClusterBorn and #842) or a decoded WAL record carried a bad chunk id. This method's words never move, so the index is "
                 + "never this method's to fix.");
         }
 
@@ -1994,7 +1993,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// True when every entity in <paramref name="clusterChunkId"/> is visible to a reader at <paramref name="txTsn"/>, so the scan may skip the per-entity
-    /// EntityMap probe for the whole cluster. False whenever the answer is not certain — an unsized array, an unestablished maximum, or any recorded death.
+    /// EntityMap probe for the whole cluster. False whenever the answer is not certain — no words for the cluster, an unestablished maximum, a pending destroy, or a death a reader has not reached.
     /// </summary>
     /// <remarks>
     /// There was a second overload handing the two watermark values back to the caller, added for a view-refresh prototype that would have kept them as a
@@ -2002,9 +2001,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// born maximum is an upper bound that migration can move without a spawn and that a spawn can leave unmoved, so "unmoved" is not "unchanged". See the
     /// remark on <see cref="NoteClusterBorn"/>. Reinstating it needs that argument answered first, not just the two <c>out</c> parameters back.
     /// </remarks>
-    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn) =>
-        // A destroy pending a commit (VIS-09) holds an occupied slot the summary cannot speak for yet: deny, and let the probe ask its record.
-        PendingDeaths(clusterChunkId) == 0 && AreClusterWatermarksVisibleAt(clusterChunkId, txTsn);
+    internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn)
+    {
+        // A destroy pending a commit (VIS-09) holds an occupied slot the summary cannot speak for yet: deny, and let the probe ask its record. One lookup.
+        ref var words = ref SlotWords(SlotWordTable, clusterChunkId);
+        return PendingDeathsOf(ref words) == 0 && WatermarksVisibleAt(ref words, txTsn);
+    }
 
     /// <summary>
     /// <see cref="IsClusterFullyVisibleAt(int, long)"/> without its pending-death test, for a caller that read the count itself, before the occupancy word
@@ -9798,8 +9800,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// The body is not safe to run twice at once: the two segments' <c>AllocateChunk</c> calls have to interleave with nobody, or the ids stop matching, and
     /// <see cref="AddToActiveList"/> writes <c>ActiveClusterIds[ActiveClusterCount]</c> before publishing the incremented count, which loses a cluster
     /// outright when two allocators do it together. <c>ClaimSlotInCell</c> has always taken this latch around exactly this work; the plain
-    /// <c>ClaimSlot</c> overloads did not, which is #842. Nothing inside takes the latch itself, so there is no re-entrancy here —
-    /// <see cref="NoteClusterBorn"/>, the one path that would, is not called for a freshly allocated cluster (see <c>FreshClusterStaysUnknown</c>).
+    /// <c>ClaimSlot</c> overloads did not, which is #842. Nothing inside takes the latch itself, so there is no re-entrancy here; the folds take no latch at
+    /// all since their words moved into fixed blocks.
     /// </remarks>
     private int AllocateNewClusterLatched(ChangeSet changeSet)
     {

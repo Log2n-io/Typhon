@@ -1343,7 +1343,8 @@ public partial class DatabaseEngine
                 // nowhere, whereas a maximum also catches one recorded with too small a TSN, which admits exactly the readers in between (#722).
                 var actualDied = recompute.MaxDied[c];
                 var claimedDied = clusterState.ClusterMaxDied(c);
-                if (actualDied != 0 && claimedDied < actualDied)
+                // An unestablished born (no words, or VisibilityUnknown) denies the gate whatever the died side says: nothing to report there.
+                if (actualDied != 0 && claimedBorn != ArchetypeClusterState.VisibilityUnknown && claimedDied < actualDied)
                 {
                     issues.Add(new StorageIntegrityIssue(
                         StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
