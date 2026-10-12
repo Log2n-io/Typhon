@@ -5,11 +5,15 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
+/// A cluster's in-memory words: its claim word, its pending-death count and its two visibility watermarks (<see cref="ClusterMaxBorn"/>,
+/// <see cref="ClusterMaxDied"/>), side by side in one 32-byte entry, so the cluster gate reads one entry (<see cref="SlotWords"/>).
+/// <para>
 /// The claim word (VIS-08, VIS-09, plan 06 steps 5.2–5.3): every slot claimed at run time, in memory beside the cluster. A slot is claimed from its claim to
 /// its final release, while its page occupancy bit — the published set HEAD readers trust — is set only while the entity is published: a spawn placed in
 /// PREPARE is claimed and not occupied until its PUBLISH, a destroyed entity of a Versioned archetype stays claimed and not occupied (hidden) until the
 /// cleanup releases it. The claim word is never on a page, so a fuzzy checkpoint can persist a pending slot's bytes but never its occupancy bit, and a crash
 /// rebuild from occupancy resurrects no uncommitted spawn (CM-01).
+/// </para>
 /// </summary>
 /// <remarks>
 /// <para>
@@ -26,16 +30,19 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>Blocks never move.</b> The tables are arrays of fixed blocks, grown under a lock, and an element's address is stable for the archetype's life: an
 /// <see cref="Interlocked"/> on a word can never land in an array a concurrent grow is copying away from (the hazard <c>ClusterAabbs</c> needs a stamp for).
-/// A cluster's two words — its claim word and its pending-death count — sit side by side, so a reader that needs both makes one lookup and touches one cache
-/// line: the occupancy count does, per cluster (<see cref="SlotWords"/>).
+/// The watermarks lived in two arrays grown by copy, so a fold had to re-read the array after its CAS and the gate made three lookups per cluster; in a block a
+/// fold lands where every reader looks, and the occupancy count and the scans read a cluster's four words through one lookup.
 /// </para>
 /// </remarks>
 internal sealed unsafe partial class ArchetypeClusterState
 {
     private const int ClaimBlockShift = 10;
     private const int ClaimBlockSize = 1 << ClaimBlockShift;
+    private const int ClusterWordsShift = 2;   // four words a cluster
     private const int ClaimWordIndex = 0;
     private const int PendingDeathWordIndex = 1;
+    private const int MaxBornWordIndex = 2;
+    private const int MaxDiedWordIndex = 3;
     private long[][] _slotWordBlocks = [];
     private readonly Lock _claimGrowLock = new();
 
@@ -45,7 +52,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal long[][] SlotWordTable => Volatile.Read(ref _slotWordBlocks);
 
-    /// <summary>The first of <paramref name="clusterChunkId"/>'s two words in <paramref name="table"/>, or a null ref when no block holds it (both 0).</summary>
+    /// <summary>
+    /// The first of <paramref name="clusterChunkId"/>'s four words in <paramref name="table"/>, or a null ref when no block holds it: no claim, no pending
+    /// death, an unestablished born watermark — the gate denies.
+    /// </summary>
     internal static ref long SlotWords(long[][] table, int clusterChunkId)
     {
         var b = clusterChunkId >> ClaimBlockShift;
@@ -60,7 +70,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return ref Unsafe.NullRef<long>();
         }
 
-        return ref block[((clusterChunkId & (ClaimBlockSize - 1)) << 1) + ClaimWordIndex];
+        return ref block[((clusterChunkId & (ClaimBlockSize - 1)) << ClusterWordsShift) + ClaimWordIndex];
     }
 
     /// <summary>The claim word at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire.</summary>
@@ -69,6 +79,69 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>The pending-death count at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire.</summary>
     internal static long PendingDeathsOf(ref long words) =>
         Unsafe.IsNullRef(ref words) ? 0 : Volatile.Read(ref Unsafe.Add(ref words, PendingDeathWordIndex - ClaimWordIndex));
+
+    /// <summary>The born watermark at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire; <see cref="VisibilityUnknown"/> without a block.</summary>
+    internal static long MaxBornOf(ref long words) =>
+        Unsafe.IsNullRef(ref words) ? VisibilityUnknown : Volatile.Read(ref Unsafe.Add(ref words, MaxBornWordIndex - ClaimWordIndex));
+
+    /// <summary>The died watermark at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire; 0 without a block, where the born side denies.</summary>
+    internal static long MaxDiedOf(ref long words) =>
+        Unsafe.IsNullRef(ref words) ? 0 : Volatile.Read(ref Unsafe.Add(ref words, MaxDiedWordIndex - ClaimWordIndex));
+
+    /// <summary>
+    /// The cluster gate's watermark half at <paramref name="words"/>: every entity born at or before <paramref name="txTsn"/> and every recorded death visible
+    /// to it. The caller has read the occupancy word first, by acquire (CLUSTERVIS-01), and decides the pending-death count itself.
+    /// </summary>
+    internal static bool WatermarksVisibleAt(ref long words, long txTsn)
+    {
+        var born = MaxBornOf(ref words);
+        if (born == VisibilityUnknown || born > txTsn)
+        {
+            return false;
+        }
+
+        // 0 means no death has been recorded, and 0 <= txTsn for every real snapshot, so a cluster nothing has died in never blocks. A reader whose snapshot
+        // has reached the last death sees an occupancy word that already reflects it.
+        return MaxDiedOf(ref words) <= txTsn;
+    }
+
+    /// <summary>
+    /// Per-cluster maximum <c>BornTSN</c> over the entities it holds, or <see cref="VisibilityUnknown"/> when no site has established it. A reader at snapshot
+    /// <c>txTsn</c> may skip the per-entity born check for this cluster iff it is established and <c>&lt;= txTsn</c>.
+    /// </summary>
+    /// <remarks>
+    /// In-memory only, like <see cref="ClusterAabbs"/> — a reopen rewrites every record with <c>BornTSN = 0</c> (committed before this open, visible at every
+    /// snapshot), so the rebuild seeds 0 rather than persisting anything.
+    /// </remarks>
+    internal long ClusterMaxBorn(int clusterChunkId) => MaxBornOf(ref SlotWords(SlotWordTable, clusterChunkId));
+
+    /// <summary>
+    /// Per-cluster maximum <c>DiedTSN</c> over the entities it has ever held, or 0 when nothing has died there. A reader at snapshot <c>txTsn</c> may skip the
+    /// per-entity died check for this cluster iff it is <c>&lt;= txTsn</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This was a sticky bit until #722.</b> "Has anything ever died here?" is a question that can only be un-asked by a full re-scan, so the bit was never
+    /// cleared and a churning archetype latched permanently onto the per-entity probe — a documented ceiling for <c>Count()</c>, and fatal for anything that
+    /// runs every tick, which is what an unfiltered View's refresh does.
+    /// </para>
+    /// <para>
+    /// The question a reader actually needs answered is not <i>whether</i> something died but <i>whether every death here is already visible to it</i>, and
+    /// that is a maximum rather than a boolean. Occupancy drops a destroyed entity while its tombstone lives on the EntityMap record, so the only hazard a death
+    /// creates is for a reader OLDER than it. A reader newer than every death in the cluster is exact. A maximum only ever rises, so it needs no re-scan to fall
+    /// — it never falls — and the gate recovers on its own as snapshots advance past the last death.
+    /// </para>
+    /// </remarks>
+    internal long ClusterMaxDied(int clusterChunkId) => MaxDiedOf(ref SlotWords(SlotWordTable, clusterChunkId));
+
+    /// <summary>The born watermark's word, its block created if absent — for the folds and for fixtures that stage a summary.</summary>
+    internal ref long MaxBornWord(int clusterChunkId) => ref BlockWord(clusterChunkId, MaxBornWordIndex);
+
+    /// <summary>The died watermark's word, its block created if absent — for the folds and for fixtures that stage a summary.</summary>
+    internal ref long MaxDiedWord(int clusterChunkId) => ref BlockWord(clusterChunkId, MaxDiedWordIndex);
+
+    /// <summary>The cluster ids the blocks cover: every id below it has words; one above it has none, and reads as unestablished.</summary>
+    internal int ClusterWordCapacity => SlotWordTable.Length << ClaimBlockShift;
 
     /// <summary>The run-time claimed slots of <paramref name="clusterChunkId"/> — pending, occupied or hidden; 0 for a cluster nothing claimed in.</summary>
     internal ulong ClaimedBits(int clusterChunkId) => ClaimOf(ref SlotWords(SlotWordTable, clusterChunkId));
@@ -102,12 +175,24 @@ internal sealed unsafe partial class ArchetypeClusterState
                     blocks = grown;
                 }
 
-                blocks[b] ??= new long[ClaimBlockSize << 1];
+                if (blocks[b] == null)
+                {
+                    // Every born watermark starts unestablished — 0 would read as "visible to everyone" — and the block is release-stored filled: a reader that
+                    // finds it must find the sentinels.
+                    var fresh = new long[ClaimBlockSize << ClusterWordsShift];
+                    for (var i = MaxBornWordIndex; i < fresh.Length; i += 1 << ClusterWordsShift)
+                    {
+                        fresh[i] = VisibilityUnknown;
+                    }
+
+                    Volatile.Write(ref blocks[b], fresh);
+                }
+
                 Volatile.Write(ref _slotWordBlocks, blocks);
             }
         }
 
-        return ref blocks[b][((clusterChunkId & (ClaimBlockSize - 1)) << 1) + wordIndex];
+        return ref blocks[b][((clusterChunkId & (ClaimBlockSize - 1)) << ClusterWordsShift) + wordIndex];
     }
 
     /// <summary>

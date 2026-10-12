@@ -65,9 +65,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     //   AllocateNewClusterLatched      — both ClaimSlot overloads' new-cluster path (#842); the twin of TryClaimSlotInCluster's slow path. NOT the repair
     //                                    path, which this line named until #582 face 2: repair allocates through AllocateEmptyClusterForCell and takes no
     //                                    latch at all. A wrong entry here is worse than a missing one — this list is what the next reader reasons from
-    //   EnsureClusterVisibilityCapacity — GROWTH ONLY, behind a double-checked length compare; the fold itself never takes it. Serializing growers against
-    //                                    each other is not the whole fix — see NoteClusterBorn for why a fold must also re-read the array reference after
-    //                                    its CAS — but it is the half that stops two growers dropping each other's copy.
     //   EnsureClusterAabbsCapacity        ┐ GROWTH ONLY, all five behind a double-checked length compare, all five with a ...Locked body a caller already
     //   EnsureClusterSpatialIndexSlotCapacity │ holding the latch calls directly. See the PER-ARCHETYPE ARRAY GROWTH banner below for what they are
     //   EnsureClusterCellMapCapacity      │ protecting against and why growth from inside a Migrate slice is refused rather than serialised.
@@ -76,8 +73,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     //   TryEnsureCellTreeSegment       — first-use creation of the archetype's shared cell-tree segment. Two unsynchronised creators would each build a
     //                                    segment and one would win, orphaning every tree already built on the loser.
     // This list is load-bearing: it is what the next person reasons about lock order from, so an acquisition added without a line here is worse than one
-    // added with a wrong line. EnsureClusterVisibilityCapacity was added in #722 and this entry with it; the five capacity growers, the three bulk appends,
-    // AllocateNewClusterLatched and TryEnsureCellTreeSegment were added later and the list had drifted behind them.
+    // added with a wrong line. EnsureClusterVisibilityCapacity's entry (#722) went with it on 2026-10-12, its watermarks moved into fixed blocks that never
+    // grow by copy; the five capacity growers, the three bulk appends, AllocateNewClusterLatched and TryEnsureCellTreeSegment were added later and the list
+    // had drifted behind them.
     // Note the asymmetry this leaves: AddToActiveList runs under the latch, RemoveFromActiveList never does — removal happens only from serial contexts
     // (Finalize, or a single-threaded Transaction.Destroy). No reader takes it either, so the latch orders writers against writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
@@ -1700,43 +1698,13 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // MVCC visibility summary (H1). The SoA scan's born/died gate does an EntityMap point-read PER MATCH — measured at 166-241 ns/entity against 27 ns for the
-    // entire rest of the scan, because XxHash32 full avalanche scatters consecutive keys into unrelated buckets. These two arrays answer "can any entity in
-    // this cluster be invisible to a reader at txTsn?" from one sequential read, letting a clean cluster skip the probe for every slot it holds.
+    // entire rest of the scan, because XxHash32 full avalanche scatters consecutive keys into unrelated buckets. Two watermarks a cluster — ClusterMaxBorn and
+    // ClusterMaxDied, in the cluster's in-memory entry beside its claim word (ArchetypeClusterState.Reservation.cs) — answer "can any entity in this cluster be
+    // invisible to a reader at txTsn?" from one read, letting a clean cluster skip the probe for every slot it holds.
     //
     // The summary is CONSERVATIVE in one direction only: it may say "probe" when probing was unnecessary (slower, still correct), and must never say "clean"
     // when an entity could be invisible. Every value therefore starts at the pessimistic end and is only relaxed by a site that knows the true TSN.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Per-cluster maximum <c>BornTSN</c> over the entities it holds, or <see cref="VisibilityUnknown"/> when no site has established it. Indexed by
-    /// clusterChunkId. A reader at snapshot <c>txTsn</c> may skip the per-entity born check for this cluster iff the value is <see cref="VisibilityUnknown"/>
-    /// -free and <c>&lt;= txTsn</c>.
-    /// </summary>
-    /// <remarks>
-    /// In-memory only, like <see cref="ClusterAabbs"/> — a reopen rewrites every record with <c>BornTSN = 0</c> (committed before this open, visible at every
-    /// snapshot), so the rebuild seeds 0 rather than persisting anything.
-    /// </remarks>
-    internal long[] ClusterMaxBornTsn;
-
-    /// <summary>
-    /// Per-cluster maximum <c>DiedTSN</c> over the entities it has ever held, or 0 when nothing has died there. Indexed by clusterChunkId. A reader at
-    /// snapshot <c>txTsn</c> may skip the per-entity died check for this cluster iff the value is <c>&lt;= txTsn</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>This was a sticky bit until #722.</b> "Has anything ever died here?" is a question that can only be un-asked by a full re-scan, so the bit was never
-    /// cleared and a churning archetype latched permanently onto the per-entity probe — a documented ceiling for <c>Count()</c>, and fatal for anything that
-    /// runs every tick, which is what an unfiltered View's refresh does.
-    /// </para>
-    /// <para>
-    /// The question a reader actually needs answered is not <i>whether</i> something died but <i>whether every death here is already visible to it</i>, and
-    /// that is a maximum rather than a boolean. <c>ReleaseSlot</c> clears the occupancy bit at destroy commit while the tombstone lives on the EntityMap
-    /// record, so the only hazard a death creates is for a reader OLDER than it: occupancy has already dropped an entity that reader must still see. A reader
-    /// newer than every death in the cluster is exact. A maximum only ever rises, so it needs no re-scan to fall — it never falls — and the gate recovers on
-    /// its own as snapshots advance past the last death.
-    /// </para>
-    /// </remarks>
-    internal long[] ClusterMaxDiedTsn;
 
     /// <summary>Sentinel for "no site has established this cluster's maximum BornTSN" — forces the per-entity probe.</summary>
     internal const long VisibilityUnknown = long.MaxValue;
@@ -1872,11 +1840,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// The reader's half is the mirror: acquire-read the occupancy word, then read the summary.
     /// </para>
     /// <para>
-    /// <b>The CAS covers the element, NOT the array.</b> Two concurrent growers each allocate, copy and publish, and the later publish drops the earlier's
-    /// contents — so a fold that lands between another thread's copy and its publish is lost regardless of how atomically it was made. That hazard predates
-    /// this method's CAS and is not fixed by it. <see cref="EnsureClusterVisibilityCapacity"/> now serialises growers on <c>_finalizeLock</c>, which removes
-    /// the grower-versus-grower half; what remains is a FOLD racing a grow, which is why this method re-reads the array reference after its CAS rather than
-    /// trusting the one it started with. (This paragraph used to say the capacity method was unsynchronised. It was, until #722.)
+    /// <b>The word never moves.</b> The watermark lives in the cluster's entry in a fixed block (<see cref="MaxBornWord"/>), so the CAS lands where every reader
+    /// looks. It lived in an array grown by copy until 2026-10-12, where a fold racing a grow landed in the doomed copy and had to re-read the array after its
+    /// CAS, and growers serialised on <c>_finalizeLock</c> (#722).
     /// </para>
     /// <para>
     /// <b>The maximum is an upper bound, not the exact largest BornTSN present, and it is not monotone with the TSN clock.</b> Cluster migration folds the TSN
@@ -1917,34 +1883,15 @@ internal sealed unsafe partial class ArchetypeClusterState
                 + "then re-read it, so a peer filling the cluster stored -1 between the two. Fix the caller; this method's own array only ever grows.");
         }
 
-        EnsureClusterVisibilityCapacity(clusterChunkId + 1);
-
         // CAS rather than a plain store, because two claimants can be folding into the SAME cluster at once — #708 records that Transient spawns commit
         // concurrently from independent transactions, and that is the very path this now runs on. A read-modify-write of a maximum loses updates under that:
         // both read 5, one writes 12, the other writes 10 last, and the cluster ends up vouching for a snapshot at 10 while holding an entity born at 12.
         // Silent, and produces a phantom rather than a slow query.
-        //
-        // The re-read of the array reference after the CAS is the other half, and serialising growers against each other does NOT cover it: a folder can pass
-        // the capacity check, take a reference to the CURRENT array, and CAS into it while a grower — holding the lock, entirely correctly — has already
-        // Array.Copy'd and is about to publish the replacement. The fold lands in an array nobody will read again. Confirming the reference is unchanged after
-        // the CAS, and retrying when it is not, is what makes the fold durable across a grow.
+        ref var word = ref MaxBornWord(clusterChunkId);
         while (true)
         {
-            var slots = Volatile.Read(ref ClusterMaxBornTsn);
-            var current = Volatile.Read(ref slots![clusterChunkId]);
-            if (current != VisibilityUnknown && bornTsn <= current)
-            {
-                // Even a no-op has to confirm it read the live array — a "already high enough" decision taken against a doomed copy is not a decision.
-                if (ReferenceEquals(Volatile.Read(ref ClusterMaxBornTsn), slots))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (Interlocked.CompareExchange(ref slots[clusterChunkId], bornTsn, current) == current
-                && ReferenceEquals(Volatile.Read(ref ClusterMaxBornTsn), slots))
+            var current = Volatile.Read(ref word);
+            if ((current != VisibilityUnknown && bornTsn <= current) || Interlocked.CompareExchange(ref word, bornTsn, current) == current)
             {
                 return;
             }
@@ -2000,16 +1947,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void ResetClusterVisibility(int clusterChunkId)
     {
-        var born = Volatile.Read(ref ClusterMaxBornTsn);
-        if (born != null && (uint)clusterChunkId < (uint)born.Length)
+        ref var words = ref SlotWords(SlotWordTable, clusterChunkId);
+        if (!Unsafe.IsNullRef(ref words))
         {
-            Volatile.Write(ref born[clusterChunkId], VisibilityUnknown);
-        }
-
-        var died = Volatile.Read(ref ClusterMaxDiedTsn);
-        if (died != null && (uint)clusterChunkId < (uint)died.Length)
-        {
-            Volatile.Write(ref died[clusterChunkId], 0);
+            Volatile.Write(ref MaxBornWord(clusterChunkId), VisibilityUnknown);
+            Volatile.Write(ref MaxDiedWord(clusterChunkId), 0);
         }
     }
 
@@ -2037,27 +1979,13 @@ internal sealed unsafe partial class ArchetypeClusterState
                 + "never this method's to fix.");
         }
 
-        EnsureClusterVisibilityCapacity(clusterChunkId + 1);
-
-        // CAS, and the same post-CAS array re-read as NoteClusterBorn — see there. A lost update on this side under-records the watermark, which admits
-        // exactly the readers between the recorded value and the real death and makes them miss a tombstone they must still see. 0 is "no death", so it is
-        // never a legal value to fold.
+        // CAS — see NoteClusterBorn. A lost update on this side under-records the watermark, which admits exactly the readers between the recorded value and
+        // the real death and makes them miss a tombstone they must still see. 0 is "no death", so it is never a legal value to fold.
+        ref var word = ref MaxDiedWord(clusterChunkId);
         while (true)
         {
-            var slots = Volatile.Read(ref ClusterMaxDiedTsn);
-            var current = Volatile.Read(ref slots![clusterChunkId]);
-            if (diedTsn <= current)
-            {
-                if (ReferenceEquals(Volatile.Read(ref ClusterMaxDiedTsn), slots))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (Interlocked.CompareExchange(ref slots[clusterChunkId], diedTsn, current) == current
-                && ReferenceEquals(Volatile.Read(ref ClusterMaxDiedTsn), slots))
+            var current = Volatile.Read(ref word);
+            if (diedTsn <= current || Interlocked.CompareExchange(ref word, diedTsn, current) == current)
             {
                 return;
             }
@@ -2082,103 +2010,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <see cref="IsClusterFullyVisibleAt(int, long)"/> without its pending-death test, for a caller that read the count itself, before the occupancy word
     /// (<see cref="PendingDeaths"/>): the born and died watermarks alone.
     /// </summary>
-    internal bool AreClusterWatermarksVisibleAt(int clusterChunkId, long txTsn)
-    {
-        // Acquire loads, and in THIS order. The growth path publishes the resized ClusterMaxDiedTsn before release-storing ClusterMaxBornTsn, so a reader that
-        // reads maxBorn first is guaranteed the died array it then reads is at least as new. Reading them the other way round could pair a new maxBorn with a
-        // stale short died array — and a missing died entry reads as "no death", which is a phantom.
-        var maxBorn = Volatile.Read(ref ClusterMaxBornTsn);
-        if (maxBorn == null || (uint)clusterChunkId >= (uint)maxBorn.Length)
-        {
-            return false;
-        }
-
-        var born = Volatile.Read(ref maxBorn[clusterChunkId]);
-
-        // A died array that is absent or too short is NOT evidence of "nobody died" — it is evidence that this reader cannot tell. Fall back to the probe.
-        var died = Volatile.Read(ref ClusterMaxDiedTsn);
-        if (died == null || (uint)clusterChunkId >= (uint)died.Length)
-        {
-            return false;
-        }
-
-        var diedWatermark = Volatile.Read(ref died[clusterChunkId]);
-
-        if (born == VisibilityUnknown || born > txTsn)
-        {
-            return false;
-        }
-
-        // Unlike the born side there is no "unknown" sentinel: 0 means no death has been recorded, and 0 <= txTsn for every real snapshot, so a cluster
-        // nothing has died in never blocks. A reader whose snapshot has reached the last death sees an occupancy word that already reflects it.
-        return diedWatermark <= txTsn;
-    }
-
-    /// <summary>
-    /// Grow both visibility arrays to hold at least <paramref name="requiredLength"/> clusters, seeding new entries at the pessimistic end
-    /// (<see cref="VisibilityUnknown"/>, no deaths recorded). Mirrors <see cref="EnsureClusterSpatialIndexSlotCapacity"/>.
-    /// </summary>
-    internal void EnsureClusterVisibilityCapacity(int requiredLength)
-    {
-        // Double-checked growth. The fast path is a plain length compare and stays lock-free; only an actual grow serialises. Unsynchronised, two growers each
-        // allocate, Array.Copy and publish, and the later publish silently drops every fold the earlier one copied — a lost BORN fold leaves the cluster
-        // vouching for an entity born after it, which is a phantom. Reachable since the fold moved into TryClaimSlotInCluster, which parallel Migrate-phase
-        // workers call. No caller holds _finalizeLock across this: ClaimSlotInCell's lock block covers AllocateNewCluster and the cell bookkeeping only, and
-        // every fold site sits outside it.
-        var current = Volatile.Read(ref ClusterMaxBornTsn);
-        if (current != null && current.Length >= requiredLength)
-        {
-            return;
-        }
-
-        ref var growCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Enter(ref growCtx);
-        try
-        {
-            GrowClusterVisibilityCapacityLocked(requiredLength);
-        }
-        finally
-        {
-            _finalizeLock.Exit();
-        }
-    }
-
-    /// <summary>The growth body of <see cref="EnsureClusterVisibilityCapacity"/>. Caller must hold <c>_finalizeLock</c> exclusively.</summary>
-    private void GrowClusterVisibilityCapacityLocked(int requiredLength)
-    {
-        if (ClusterMaxBornTsn == null)
-        {
-            var initial = Math.Max(16, requiredLength);
-            var fresh = new long[initial];
-            Array.Fill(fresh, VisibilityUnknown);
-            // Zero-filled is correct and is NOT the pessimistic end for this array: 0 means "no death recorded", which is the truth for a cluster that has
-            // never held one. The born array needs its sentinel because an unestablished maximum must not read as 0 (= visible to everyone).
-            Volatile.Write(ref ClusterMaxDiedTsn, new long[initial]);
-            // Publish the sized-and-filled array as one store: a reader that sees a non-null reference must see it fully initialized, or it would read a
-            // default 0 as "clean" and skip the probe. See M3/M4/M5 in the pre-merge review for the same hazard in ZoneMapArray.
-            Volatile.Write(ref ClusterMaxBornTsn, fresh);
-            return;
-        }
-        if (ClusterMaxBornTsn.Length >= requiredLength)
-        {
-            return;
-        }
-
-        var newLen = Math.Max(ClusterMaxBornTsn.Length, 1);
-        while (newLen < requiredLength)
-        {
-            newLen *= 2;
-        }
-
-        var oldLen = ClusterMaxBornTsn.Length;
-        var grown = new long[newLen];
-        Array.Copy(ClusterMaxBornTsn, grown, oldLen);
-        Array.Fill(grown, VisibilityUnknown, oldLen, newLen - oldLen);
-        var grownDied = new long[newLen];
-        Array.Copy(ClusterMaxDiedTsn, grownDied, ClusterMaxDiedTsn.Length);
-        Volatile.Write(ref ClusterMaxDiedTsn, grownDied);
-        Volatile.Write(ref ClusterMaxBornTsn, grown);
-    }
+    internal bool AreClusterWatermarksVisibleAt(int clusterChunkId, long txTsn) => WatermarksVisibleAt(ref SlotWords(SlotWordTable, clusterChunkId), txTsn);
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only
@@ -5883,7 +5715,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         var oldLen = ClusterCellMap.Length;
         // Copy-fill-publish rather than Array.Resize(ref field): the resize overload stores the new reference BEFORE the tail is seeded, so a lock-free
-        // reader can observe an array whose new entries still read 0 — a valid cell key — instead of -1. Same shape as GrowClusterVisibilityCapacityLocked.
+        // reader can observe an array whose new entries still read 0 — a valid cell key — instead of -1. Same shape as a new cluster-word block (BlockWord).
         var grown = new int[newLen];
         Array.Copy(ClusterCellMap, grown, oldLen);
         Array.Fill(grown, -1, oldLen, newLen - oldLen);

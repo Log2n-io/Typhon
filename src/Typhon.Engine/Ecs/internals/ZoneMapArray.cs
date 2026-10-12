@@ -40,8 +40,8 @@ internal sealed unsafe class ZoneMapArray
     /// </para>
     /// <para>
     /// Bundling them means a reader's single <see cref="Volatile.Read{T}"/> either sees a generation whole or does not see it at all. Three separately
-    /// published fields would need every reader to load them in a fixed order to be sound, and nothing in the type system makes that hold. Same reasoning as
-    /// <c>ArchetypeClusterState.EnsureClusterVisibilityCapacity</c>, whose comment cites this finding.
+    /// published fields would need every reader to load them in a fixed order to be sound, and nothing in the type system makes that hold. The cluster
+    /// visibility watermarks had the same shape until they moved into fixed blocks (<c>ArchetypeClusterState.BlockWord</c>).
     /// </para>
     /// </remarks>
     internal sealed class Store

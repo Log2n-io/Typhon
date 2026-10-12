@@ -1095,7 +1095,7 @@ public partial class DatabaseEngine
     /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
     /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
     /// <c>ChunkCapacity</c>. Desync indicates the segment's allocated count drifted from its on-page chunk bitmaps.</item>
-    /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBornTsn</c> / <c>ClusterMaxDiedTsn</c> pair, recomputed from the archetype's
+    /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBorn</c> / <c>ClusterMaxDied</c> pair, recomputed from the archetype's
     /// EntityMap and compared against the maintained one. A summary that claims more visibility than its entities justify makes the SoA scan skip its
     /// per-entity probe and emit a phantom; see <see cref="StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound"/>.</item>
     /// </list>
@@ -1241,7 +1241,7 @@ public partial class DatabaseEngine
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Why this exists.</b> The summary (<c>ClusterMaxBornTsn</c> / <c>ClusterMaxDiedTsn</c> on <see cref="ArchetypeClusterState"/>) lets the SoA scan skip its
+    /// <b>Why this exists.</b> The summary (<c>ClusterMaxBorn</c> / <c>ClusterMaxDied</c> on <see cref="ArchetypeClusterState"/>) lets the SoA scan skip its
     /// per-entity EntityMap probe for a whole cluster. It is maintained by five sites — spawn commit, WAL replay, both reopen rebuilds, and spatial cluster
     /// migration — and a sixth site added later that forgets to fold produces a phantom rather than a failure. Enumerating the sites is the weaker move;
     /// checking the invariant is the stronger one.
@@ -1288,13 +1288,12 @@ public partial class DatabaseEngine
                 continue;
             }
 
-            var sizing = Volatile.Read(ref clusterState.ClusterMaxBornTsn);
-            if (sizing == null)
+            var clusterCount = clusterState.ClusterWordCapacity;
+            if (clusterCount == 0)
             {
                 continue;   // no site has established anything for this archetype; every cluster takes the per-entity probe
             }
 
-            var clusterCount = sizing.Length;
             var recompute = new ClusterVisibilityRecomputeAction
             {
                 ClusterCount = clusterCount,
@@ -1315,15 +1314,11 @@ public partial class DatabaseEngine
                 accessor.Dispose();
             }
 
-            // Re-read the summary AFTER the walk, and in IsClusterFullyVisibleAt's order (maxBorn, then died — never the reverse, or a new born can pair with
-            // a stale short died array). Because every site folds BEFORE publishing the EntityMap entry, a summary read after the walk is at least as new as
-            // every record the walk compared against it. Reading it before instead would race with a concurrent spawn that grows and replaces the array, and
-            // report a phantom that was never there — a false positive is how an invariant check gets disabled.
-            var maxBorn = Volatile.Read(ref clusterState.ClusterMaxBornTsn);
-            var died = Volatile.Read(ref clusterState.ClusterMaxDiedTsn);
-
+            // Read the summary AFTER the walk. Because every site folds BEFORE publishing the EntityMap entry, a summary read after the walk is at least as new
+            // as every record the walk compared against it; read before, it would race a concurrent spawn's fold and report a phantom that was never there —
+            // a false positive is how an invariant check gets disabled.
             var rootPage = clusterState.ClusterSegment?.RootPageIndex ?? 0;
-            for (var c = 0; c < clusterCount && c < maxBorn!.Length; c++)
+            for (var c = 0; c < clusterCount; c++)
             {
                 var actualBorn = recompute.MaxBorn[c];
                 if (actualBorn == NoEntityInCluster)
@@ -1335,25 +1330,25 @@ public partial class DatabaseEngine
 
                 // VisibilityUnknown needs no special case: it is long.MaxValue, so it can never compare below a real BornTSN — an unestablished summary is
                 // maximally pessimistic and the gate rejects it outright.
-                var claimedBorn = maxBorn[c];
+                var claimedBorn = clusterState.ClusterMaxBorn(c);
                 if (claimedBorn < actualBorn)
                 {
                     issues.Add(new StorageIntegrityIssue(
                         StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
-                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxBornTsn={claimedBorn} but an entity in it was born at {actualBorn} — a reader at " +
+                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxBorn={claimedBorn} but an entity in it was born at {actualBorn} — a reader at " +
                         $"any snapshot in [{claimedBorn}..{actualBorn - 1}] passes the cluster gate, skips the per-entity probe and emits an unborn entity"));
                 }
 
-                // A died array that is absent or too short reads as "cannot tell" at the gate, which is conservative — only an UNDER-recorded watermark inside
-                // a sized array is unsound. This is strictly stronger than the flag it replaced: a boolean could only catch a death recorded nowhere, whereas
-                // a maximum also catches one recorded with too small a TSN, which admits exactly the readers in between (#722).
+                // Only an UNDER-recorded watermark is unsound. This is strictly stronger than the flag it replaced: a boolean could only catch a death recorded
+                // nowhere, whereas a maximum also catches one recorded with too small a TSN, which admits exactly the readers in between (#722).
                 var actualDied = recompute.MaxDied[c];
-                if (actualDied != 0 && died != null && (uint)c < (uint)died.Length && died[c] < actualDied)
+                var claimedDied = clusterState.ClusterMaxDied(c);
+                if (actualDied != 0 && claimedDied < actualDied)
                 {
                     issues.Add(new StorageIntegrityIssue(
                         StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound, rootPage, -1, 0,
-                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxDiedTsn={died[c]} but an entity in it died at {actualDied} — a reader at any " +
-                        $"snapshot in [{died[c]}..{actualDied - 1}] passes the cluster gate, skips the per-entity probe and misses a tombstone it must "
+                        $"archetype '{meta.Name}' cluster {c}: ClusterMaxDied={claimedDied} but an entity in it died at {actualDied} — a reader at any " +
+                        $"snapshot in [{claimedDied}..{actualDied - 1}] passes the cluster gate, skips the per-entity probe and misses a tombstone it must "
                         + "still see"));
                 }
             }

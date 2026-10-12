@@ -1922,7 +1922,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // cluster, so the probe count collapses to ~0. A cluster that fails the summary keeps the exact per-entity check, so correctness is unchanged.
                 // Read AFTER the occupancy word on purpose: the summary is published by the same commit that sets the occupancy bit, so a reader that cannot
                 // see the bit cannot be misled by a summary that predates it.
-                var clusterVisGated = visGated && (pendingDeaths != 0 || !clusterState.AreClusterWatermarksVisibleAt(clusterChunkId, txTsn));
+                var clusterVisGated = visGated && (pendingDeaths != 0 || !ArchetypeClusterState.WatermarksVisibleAt(ref slotWords, txTsn));
 
                 // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
                 // lockstep between the two segments, so the same clusterChunkId addresses both.
@@ -3583,7 +3583,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 // A slot claimed and not occupied — a spawn placed in PREPARE (VIS-08), a destroy hidden until the cleanup (VIS-09) — is decided by its
                 // owner's stamp or its died, which a popcount cannot tell: the map probe decides it.
-                if (pendingDeaths != 0 || !clusterState.AreClusterWatermarksVisibleAt(clusterChunkId, txTsn)
+                if (pendingDeaths != 0 || !ArchetypeClusterState.WatermarksVisibleAt(ref words, txTsn)
                     || (ArchetypeClusterState.ClaimOf(ref words) & ~occupancy) != 0)
                 {
                     return false;

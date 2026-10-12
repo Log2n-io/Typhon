@@ -362,7 +362,9 @@ applied synchronously inside `Commit()`, not at the fence.
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
-A cluster carries two watermarks, `ClusterMaxBornTsn` and `ClusterMaxDiedTsn`, and `IsClusterFullyVisibleAt(c, txTsn)` is
+A cluster carries two watermarks, `ClusterMaxBorn` and `ClusterMaxDied` — in its in-memory entry beside its claim word and
+pending-death count, one 32-byte entry a cluster in fixed blocks (`ArchetypeClusterState.SlotWords`) — and
+`IsClusterFullyVisibleAt(c, txTsn)` is
 true only when a reader at `txTsn` may skip the per-entity `EntityMap` probe for that whole cluster. It is a conservative
 approximation: false is always safe and merely slower. Its consumers differ in what a wrong TRUE costs them — `EcsQuery`'s
 SoA and Path-A scans keep a per-entity probe, so a bad grant only loses performance, while `EcsQuery.TryCountViaOccupancy`
@@ -383,12 +385,13 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
   enforce `ResetClusterVisibility` runs at every site that frees a cluster chunk, before the id can be recycled. Chunk ids
           come from a free list, so without it a "fresh" cluster inherits the previous occupant's watermarks and the clause
           above silently does nothing.
-  enforce both folds are `Interlocked` on the element AND re-read the array reference after the CAS. Concurrent claimants
-          fold into the same cluster (#708: Transient spawns commit concurrently), and a fold can otherwise land in an array
-          a grower has already copied and is about to replace.
+  enforce both folds are `Interlocked` on the word. Concurrent claimants fold into the same cluster (#708: Transient spawns
+          commit concurrently). The word lives in a fixed block that never moves, and a new block is release-stored with
+          every born watermark at `VisibilityUnknown`; until 2026-10-12 the watermarks were arrays grown by copy, and a fold
+          had to re-read the array after its CAS or land in a copy a grower was replacing.
   scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
          ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
-         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity,
+         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.WatermarksVisibleAt, ArchetypeClusterState.SlotWords,
          ArchetypeClusterState.FreeClusterHead, ArchetypeClusterState.ClaimSlotHeadReadProbe
   on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
                 reader's snapshot. Silent both ways — every value looks plausible.

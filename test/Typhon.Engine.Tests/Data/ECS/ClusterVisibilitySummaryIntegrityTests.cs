@@ -10,7 +10,7 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why this fixture exists.</b> <c>ClusterMaxBornTsn</c> / <c>ClusterAnyDied</c> let the SoA scan skip its per-entity EntityMap probe for a whole cluster —
+/// <b>Why this fixture exists.</b> <c>ClusterMaxBorn</c> / <c>ClusterAnyDied</c> let the SoA scan skip its per-entity EntityMap probe for a whole cluster —
 /// the single change that restored the consolidation's 4.3–6.0× headline. Five sites maintain the pair (spawn commit, WAL replay, both reopen rebuilds,
 /// spatial cluster migration) and, before this fixture, none verified it: a sixth born-site added later would produce a phantom that every existing test
 /// still passes. <see cref="DatabaseEngine.RunStorageIntegrityCheck"/> now recomputes the summary from the EntityMap, and the tests below assert it actually
@@ -133,9 +133,9 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
     /// <summary>First cluster whose summary a site has established — the one the corruption tests then make unsound.</summary>
     private static int FirstEstablishedCluster(ArchetypeClusterState cs)
     {
-        for (var c = 0; c < cs.ClusterMaxBornTsn.Length; c++)
+        for (var c = 0; c < cs.ClusterWordCapacity; c++)
         {
-            if (cs.ClusterMaxBornTsn[c] != ArchetypeClusterState.VisibilityUnknown)
+            if (cs.MaxBornWord(c) != ArchetypeClusterState.VisibilityUnknown)
             {
                 return c;
             }
@@ -181,16 +181,16 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
 
         var cs = ClusterStateOf(dbe);
         var cluster = FirstEstablishedCluster(cs);
-        var maintained = cs.ClusterMaxBornTsn[cluster];
+        var maintained = cs.MaxBornWord(cluster);
         Assert.That(maintained, Is.GreaterThan(0), "spawned entities carry a non-zero BornTSN, so there is room to under-state the summary");
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "baseline must be clean, or the assertion below proves nothing");
 
         // Exactly the state a sixth born-site that never called NoteClusterBorn would leave: "this cluster is all-genesis".
-        cs.ClusterMaxBornTsn[cluster] = 0;
+        cs.MaxBornWord(cluster) = 0;
 
         var issues = VisibilityIssues(dbe, out _);
         Assert.That(issues, Has.Count.EqualTo(1), "the under-stated cluster must be reported exactly once");
-        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterMaxBornTsn=0"),
+        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterMaxBorn=0"),
             "the issue must localise the cluster and quote both the claimed and the actual bound");
     }
 
@@ -227,9 +227,9 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
 
         var cs = ClusterStateOf(dbe);
         var cluster = -1;
-        for (var c = 0; c < cs.ClusterMaxDiedTsn.Length && cluster < 0; c++)
+        for (var c = 0; c < cs.ClusterWordCapacity && cluster < 0; c++)
         {
-            if (cs.ClusterMaxDiedTsn[c] != 0)
+            if (cs.MaxDiedWord(c) != 0)
             {
                 cluster = c;
             }
@@ -238,11 +238,11 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         Assert.That(cluster, Is.GreaterThanOrEqualTo(0), "the destroy path must have recorded the death in the summary");
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "baseline must be clean, or the assertion below proves nothing");
 
-        cs.ClusterMaxDiedTsn[cluster] -= 1;   // one TSN too low: a reader at exactly that snapshot now passes the gate and misses the tombstone
+        cs.MaxDiedWord(cluster) -= 1;   // one TSN too low: a reader at exactly that snapshot now passes the gate and misses the tombstone
 
         var issues = VisibilityIssues(dbe, out _);
         Assert.That(issues, Has.Count.EqualTo(1), "the cluster holding the tombstone must be reported exactly once");
-        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterMaxDiedTsn"),
+        Assert.That(issues[0].Detail, Does.Contain($"cluster {cluster}").And.Contain("ClusterMaxDied"),
             "the issue must name the death watermark rather than the born bound");
     }
 
@@ -284,7 +284,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         Assert.That(cs.FreeClusterHead, Is.GreaterThanOrEqualTo(0),
             "PRECONDITION: 80 entities must leave the second cluster partly free, so the claim below takes the existing-cluster CAS path and needs no ChangeSet");
 
-        var settled = cs.ClusterMaxBornTsn[cs.FreeClusterHead];
+        var settled = cs.MaxBornWord(cs.FreeClusterHead);
         Assert.That(settled, Is.Not.EqualTo(ArchetypeClusterState.VisibilityUnknown), "the spawns above must have established this cluster's bound");
 
         // A TSN far beyond anything the engine has issued, so "the summary moved" cannot be confused with "the summary was already there".
@@ -298,7 +298,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
 
             // Nothing between the claim and this read. If the fold happened after the publishing store, the summary is still `settled` here.
-            AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+            AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                 cs.IsClusterFullyVisibleAt(claimed, incoming), incoming);
         }
         finally
@@ -362,7 +362,7 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var head = cs.FreeClusterHead;
         Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
 
-        var settled = cs.ClusterMaxBornTsn[head];
+        var settled = cs.MaxBornWord(head);
         var incoming = settled + 1_000;
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
@@ -374,11 +374,11 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
             // Roll the REAL summary back to its pre-claim value. That is precisely the state a caller-side fold leaves behind — bit published, summary
             // unmoved — so the helper is driven by engine state a violating implementation would actually produce, rather than by fabricated scalars that
             // would only prove NUnit rejects one number against another. The slot is left orphaned, so this test must not run the integrity audit.
-            cs.ClusterMaxBornTsn[claimed] = settled;
+            cs.MaxBornWord(claimed) = settled;
 
             // Marker is clause 1's own text, not the shared rule id: this mutant must be shown to trip the ordering clause specifically.
             RuleMutants.AssertDetects("CLUSTERVIS-01", BoundBeforePublishMarker, () =>
-                AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                     cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
         }
         finally
@@ -409,19 +409,19 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var head = cs.FreeClusterHead;
         Assert.That(head, Is.GreaterThanOrEqualTo(0), "PRECONDITION: the claim below must take the existing-cluster path");
 
-        var incoming = cs.ClusterMaxBornTsn[head] + 1_000;
+        var incoming = cs.MaxBornWord(head) + 1_000;
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var accessor = cs.ClusterSegment.CreateChunkAccessor();
         try
         {
             var (claimed, _) = cs.ClaimSlot(ref accessor, null, incoming);
-            cs.ClusterMaxDiedTsn[claimed] = long.MaxValue;   // a death nothing can have reached: the gate must deny every reader, including this one
+            cs.MaxDiedWord(claimed) = long.MaxValue;   // a death nothing can have reached: the gate must deny every reader, including this one
 
             // Marker is clause 3's own text. Matching the shared rule id would have accepted a failure of clause 1 — which is exactly what this mutant must
             // NOT be, since clause 1 is already covered and a born bound left intact is the whole point of reaching this clause.
             RuleMutants.AssertDetects("CLUSTERVIS-01", GateIsBoundedMarker, () =>
-                AssertBoundedBeforePublish(cs.ClusterMaxBornTsn[claimed], cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
+                AssertBoundedBeforePublish(cs.MaxBornWord(claimed), cs.IsClusterFullyVisibleAt(claimed, incoming - 1),
                     cs.IsClusterFullyVisibleAt(claimed, incoming), incoming));
         }
         finally
@@ -533,8 +533,8 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         var cs = ClusterStateOf(dbe);
         var cluster = FirstEstablishedCluster(cs);
 
-        cs.ClusterMaxBornTsn[cluster] = ArchetypeClusterState.VisibilityUnknown;   // "cannot tell" — the gate rejects it outright
-        cs.ClusterMaxDiedTsn[cluster] = long.MaxValue;                            // a death that never happened — costs a probe, emits nothing wrong
+        cs.MaxBornWord(cluster) = ArchetypeClusterState.VisibilityUnknown;   // "cannot tell" — the gate rejects it outright
+        cs.MaxDiedWord(cluster) = long.MaxValue;                            // a death that never happened — costs a probe, emits nothing wrong
 
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "an over-pessimistic summary is slower, never wrong, and must not be reported as a defect");
     }
