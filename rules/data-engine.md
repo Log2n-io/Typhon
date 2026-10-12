@@ -207,3 +207,17 @@ below names the invariant that proves it.
   on_violation: a reader between a commit's append and its publish sees its revisions and the entity's old enabled bits; an
                 older reader with two later changes sees bits the entity had only between them
   requires: VIS-01, VIS-04
+
+### VIS-11: A view delta carries its commit's stamp `[fatal]` `[silent]`
+  invariant every view delta a commit appends — index moves, spawns, destroys, membership, enable/disable — is appended at
+            publish and tagged with the commit stamp (Transaction.ViewDeltaTag, PublishStamp); a view refreshed at
+            snapshot S folds the entries tagged at or below S
+  note the ring is FIFO in publish order, not stamp order: a commit with a stamp at or below S that publishes after a
+       higher-stamp one, or after the refresh, is folded by a later refresh — a view lags, it never holds a change its
+       snapshot does not see. Reserving deltas in PREPARE and draining by stamp (plan 06 §8 step 5.6 as sketched) is
+       not built: since step 1.4 PREPARE appends no delta, which is what keeps an abort free of view work (AP-07)
+  scope: Transaction.ViewDeltaTag, Transaction.ReconcileClusterIndexAndViews, Transaction.PublishMembershipDeltas,
+         ViewDeltaRingBuffer.TryPeek
+  on_violation: tagged with the writer's TSN, a view refreshed at a snapshot between that TSN and the stamp applies a change
+                committed after the snapshot
+  requires: VIS-01

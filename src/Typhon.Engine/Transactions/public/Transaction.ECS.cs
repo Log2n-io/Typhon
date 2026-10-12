@@ -1677,9 +1677,15 @@ public unsafe partial class Transaction
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// The stamp this commit's effects are published with (plan 06 §3.3): the commit stamp — born, died, enabled-bit changes and the cluster watermarks,
-    /// as the revisions. Written at publish, where it is known; a reader whose snapshot sits between this transaction's TSN and its stamp then sees none of
-    /// them, as it sees none of its revisions. Families 2–6 are still placed at publish, not staged (Phase 5).
+    /// The tag of this commit's view deltas: its commit stamp (VIS-11). Only the AP-07 rule mutant (<c>PrepareReconcilesIndexesForTest</c>) appends a delta
+    /// in PREPARE, before the stamp exists; it tags with the TSN, as the code it reproduces did.
+    /// </summary>
+    private long ViewDeltaTag => _commitStamp != 0 ? _commitStamp : TSN;
+
+    /// <summary>
+    /// The stamp this commit's effects are published with (plan 06 §3.3): the commit stamp — born, died, enabled-bit changes, the cluster watermarks and the
+    /// view deltas, as the revisions. The effects themselves exist before it, flagged with the owner (VIS-08, VIS-09, VIS-10); the publish replaces the
+    /// owner with this stamp.
     /// </summary>
     private long PublishStamp
     {
@@ -1875,7 +1881,7 @@ public unsafe partial class Transaction
                 continue;
             }
             hook?.Invoke();
-            reg.DeltaBuffer.TryAppend(entityId, default, default, TSN, flags);
+            reg.DeltaBuffer.TryAppend(entityId, default, default, PublishStamp, flags);
         }
     }
 
@@ -1951,7 +1957,7 @@ public unsafe partial class Transaction
                     var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
                     byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
                     spawnHook?.Invoke();
-                    reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(entityId, default, newKey, PublishStamp, flags, reg.ComponentTag);
                 }
             }
         }
@@ -2070,7 +2076,7 @@ public unsafe partial class Transaction
 
                         byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
                         destroyHook?.Invoke();
-                        reg.DeltaBuffer.TryAppend(entityId, key, default, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, key, default, PublishStamp, flags, reg.ComponentTag);
                     }
                 }
             }
@@ -4898,7 +4904,7 @@ public unsafe partial class Transaction
                     // isDeletion (0x80) for disable, isCreation (0x40) for enable
                     byte flags = wasEnabled ? (byte)((fi & 0x3F) | 0x80) : (byte)((fi & 0x3F) | 0x40);
                     QueryPathProbe.PrePublishAppendHook?.Invoke();
-                    reg.DeltaBuffer.TryAppend(entityId, default, default, TSN, flags, reg.ComponentTag);
+                    reg.DeltaBuffer.TryAppend(entityId, default, default, PublishStamp, flags, reg.ComponentTag);
                 }
             }
         }

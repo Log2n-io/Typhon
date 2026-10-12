@@ -2572,21 +2572,21 @@ public unsafe partial class Transaction : EntityAccessor
                         var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                         var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)(fi & 0x3F);
-                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                     else if (newComp != null)
                     {
                         // Add: isCreation flag
                         var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                     else if (oldComp != null)
                     {
                         // Remove: isDeletion flag
                         var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                 }
             }

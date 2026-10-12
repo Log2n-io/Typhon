@@ -29,6 +29,49 @@ class ViewDeltaRingDefectTests : TestBase<ViewDeltaRingDefectTests>
     }
 
     /// <summary>
+    /// A commit's view delta carries its commit STAMP, not its writer's TSN (VIS-11): a view refreshed by a transaction whose snapshot is between the
+    /// writer's TSN and its stamp leaves the change out — that snapshot does not see the commit — and the next refresh, above the stamp, takes it in.
+    /// Tagged with the TSN, the refresh applied a change committed after its snapshot: retroactive visibility, in the view.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-11")]
+    [CancelAfter(10_000)]
+    public void AViewRefreshedBetweenAWritersTsnAndItsStamp_LeavesTheChangeOut()
+    {
+        using var dbe = SetupEngine();
+        EntityId z;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            z = tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 10, 1.0)));
+            tx.Commit();
+        }
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<CompDArch>().WhereField<CompD>(d => d.B >= 50).ToView();
+        using (var first = dbe.CreateQuickTransaction())
+        {
+            view.Refresh(first);   // the view's first refresh is a full one; the incremental fold is what follows
+        }
+
+        Assert.That(view.Contains(z), Is.False, "premise: Z starts outside the view");
+        using var writer = dbe.CreateQuickTransaction();
+        SetB(writer, z, 60);
+        using (var between = dbe.CreateQuickTransaction())
+        {
+            Assert.That(writer.Commit(), Is.True);
+            Assert.That(between.TSN, Is.GreaterThan(writer.TSN).And.LessThan(writer.CommitStamp), "premise: the refresher's snapshot is between the two");
+            view.Refresh(between);
+            Assert.That(view.Contains(z), Is.False, "VIS violated: a view refreshed at a snapshot below the commit's stamp applied its change");
+        }
+
+        using (var after = dbe.CreateQuickTransaction())
+        {
+            view.Refresh(after);
+            Assert.That(view.Contains(z), Is.True, $"{Marker}: a refresh above the stamp did not take the change in");
+        }
+    }
+
+    /// <summary>
     /// A commit's delta reaches the ring (here: is dropped, the ring full) before its value reaches the cluster slot the full re-scan reads. A view that
     /// re-scans in between misses the value, and must re-scan once more: it ends holding Z, whose committed B passes. With the ring Reset and the
     /// overflow cleared, the next refresh found nothing to do.
