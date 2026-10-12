@@ -54,7 +54,7 @@ internal sealed unsafe class CommitCardTable : IDisposable
     internal int Size => _mask + 1;
 
     /// <summary>Reservations that found their window full and waited (diagnostics and tests).</summary>
-    internal static long FullWindowWaits;
+    internal long FullWindowWaits;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ref long OwnerAt(int slot) => ref Unsafe.AsRef<long>(_cards + ((long)slot * CardBytes));

@@ -106,11 +106,11 @@ internal struct CompRevStorageElement
         _packedUowId = 0;
     }
 
-    public bool IsVoid => ComponentChunkId == 0 && _packedTickHigh == 0 && _packedTickLow == 0 && _packedUowId == 0;
+    public readonly bool IsVoid => ComponentChunkId == 0 && _packedTickHigh == 0 && _packedTickLow == 0 && _packedUowId == 0;
 
     public bool IsolationFlag
     {
-        get => (_packedUowId & IsolationBit) != 0;
+        readonly get => (_packedUowId & IsolationBit) != 0;
         set => _packedUowId = (ushort)(value ? (_packedUowId | IsolationBit) : (_packedUowId & ~IsolationBit));
     }
 
@@ -149,7 +149,7 @@ internal struct CompRevStorageElement
 
     public long TSN
     {
-        get => (long)((ulong)_packedTickHigh << 16 | _packedTickLow);
+        readonly get => (long)((ulong)_packedTickHigh << 16 | _packedTickLow);
         set
         {
             // 48 bits: TransactionChain refuses transactions well before a TSN outgrows them (#1208).

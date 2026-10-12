@@ -30,7 +30,7 @@ class CsWalletArch : Archetype<CsWalletArch>
 /// Visibility is unchanged in this step: these tests check the protocol's mechanics, the wire and recovery.
 /// </summary>
 [TestFixture]
-[NonParallelizable] // CommitCardTable.FullWindowWaits is a process-wide counter.
+[NonParallelizable] // Probes and residue-staged TSNs: one engine at a time keeps the staged interleavings exact.
 class CommitStampTests : TestBase<CommitStampTests>
 {
     private const string Marker = "VIS-03 violated";
@@ -48,6 +48,7 @@ class CommitStampTests : TestBase<CommitStampTests>
     private static DatabaseEngine Open(IServiceScope scope)
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RetainRecoveryCommitStampsForTest = true;
         dbe.RegisterComponentFromAccessor<CsWallet>();
         dbe.RegisterComponentFromAccessor<CompD>();
         dbe.InitializeArchetypes();
@@ -349,9 +350,9 @@ class CommitStampTests : TestBase<CommitStampTests>
                 "premise: the handler committer is registered on a card of the window");
             Assert.That(CardsHeld(dbe), Is.EqualTo(4), "premise: the window is full");
 
-            var waitsBefore = Interlocked.Read(ref CommitCardTable.FullWindowWaits);
+            var waitsBefore = Interlocked.Read(ref dbe.CommitCards.FullWindowWaits);
             fifth.Go();
-            Assert.That(SpinWait.SpinUntil(() => Interlocked.Read(ref CommitCardTable.FullWindowWaits) > waitsBefore, TimeSpan.FromSeconds(10)), Is.True,
+            Assert.That(SpinWait.SpinUntil(() => Interlocked.Read(ref dbe.CommitCards.FullWindowWaits) > waitsBefore, TimeSpan.FromSeconds(10)), Is.True,
                 $"{Marker}: the fifth committer did not wait for a card");
 
             // No chain lock: a handler commit of the fifth's entity takes that chain's lock in PREPARE. No WAL claim: an unpublished frame would hold the
@@ -707,6 +708,91 @@ class CommitStampTests : TestBase<CommitStampTests>
 
         Assert.That(stalled.Result, Is.True);
         Assert.That(ReadCredits(dbe, ids[0]), Is.EqualTo(1));
+    }
+
+    /// <summary>
+    /// An abort between the WAL claim and the commit point — the engine's stop re-checked once the claim holds (#1269) — is before the commit point:
+    /// the claim is abandoned, the card goes back, no stamp is drawn.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-03")]
+    [CancelAfter(15_000)]
+    public void AnAbortAfterTheClaimBeforeTheCommitPoint_GivesTheCardBack_WithNoStampDrawn()
+    {
+        using var dbe = Open();
+        var ids = SpawnWallets(dbe, 1);
+        var log = (DurabilityLog)dbe.DurabilityLog;
+        var committer = Environment.CurrentManagedThreadId;
+        using var tx = dbe.CreateQuickTransaction();
+        SetCredits(tx, ids[0], 5);
+        log.AfterFloorProbe = () =>
+        {
+            if (Environment.CurrentManagedThreadId == committer)
+            {
+                throw new InvalidOperationException("staged: a failure once the claim holds, before the commit point");
+            }
+        };
+        try
+        {
+            var before = dbe.TransactionChain.NextFreeId;
+            Assert.Throws<InvalidOperationException>(() => tx.Commit());
+            Assert.That(dbe.TransactionChain.NextFreeId, Is.EqualTo(before), $"{Marker}: a commit that failed before its commit point drew a stamp");
+        }
+        finally
+        {
+            log.AfterFloorProbe = null;
+        }
+
+        Assert.That(CardsHeld(dbe), Is.Zero, $"{Marker}: the abort kept its card");
+        Assert.That(ReadCredits(dbe, ids[0]), Is.EqualTo(100));
+        using var after = dbe.CreateQuickTransaction();
+        SetCredits(after, ids[0], 6);
+        Assert.That(after.Commit(), Is.True, "the engine commits on: the abandoned claim does not hold the log");
+    }
+
+    /// <summary>
+    /// VIS-04: a publish that fails past the append keeps its card registered — what it left flagged belongs to a commit whose records are in the log,
+    /// and a reader resolves it by the card's stamp — and the engine commits no more (AP-03).
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-04")]
+    [CancelAfter(30_000)]
+    public void APublishThatFailsPastTheAppend_KeepsItsCardRegistered()
+    {
+        using var dbe = Open();
+        var ids = SpawnWallets(dbe, 2);
+        var committer = Environment.CurrentManagedThreadId;
+        var calls = 0;
+        dbe.PublishComponentProbe = (_, _) =>
+        {
+            if (Environment.CurrentManagedThreadId == committer && ++calls == 2)
+            {
+                throw new InvalidOperationException("staged: a publish that fails past the append");
+            }
+        };
+        long tsn;
+        try
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            tsn = tx.TSN;
+            SetCredits(tx, ids[0], 7);
+            SetCredits(tx, ids[1], 8);
+            Assert.Throws<CommitPublishIncompleteException>(() => tx.Commit());
+        }
+        finally
+        {
+            dbe.PublishComponentProbe = null;
+        }
+
+        Assert.That(CardsHeld(dbe), Is.EqualTo(1), $"{Marker}: a failed publish gave its card back");
+        var window = dbe.CommitCards;
+        var start = (int)(tsn & (window.Size - 1));
+        Assert.That(new[] { 0, 1, 2, 3 }, Has.Some.Matches<int>(i => window.OwnerOfSlot((start + i) & (window.Size - 1)) == tsn),
+            $"{Marker}: the card is not registered with the failed commit");
+        Assert.That(window.TryGetStamp(tsn, out var stamp), Is.True);
+        Assert.That(stamp, Is.GreaterThan(tsn));
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the engine stopped committing");
+        dbe.SimulateHardCrash();
     }
 
     /// <summary>A commit with no WAL record still draws a stamp, at the end of PREPARE, and gives its card back.</summary>

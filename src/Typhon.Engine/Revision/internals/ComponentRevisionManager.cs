@@ -694,9 +694,8 @@ internal ref struct ComponentRevisionManager
         }
 
         // Cleanup does NOT increment CommitSequence. CS represents the total number of commits to this entity, and cleanup removing old entries
-        // doesn't constitute a new commit. The commit path's CurRevisionIndex re-validation (FindRevisionIndexByChunkId) handles stale indices
-        // caused by chain compaction. Keeping CS stable across cleanup ensures the snapshot-isolated revision number formula
-        // (CS - totalCommitted + visibleOrdinal) remains correct.
+        // doesn't constitute a new commit — a changed CS is a handler-less commit's conflict signal. The commit path's CurRevisionIndex re-validation
+        // (FindRevisionIndexByChunkId) handles stale indices caused by chain compaction.
 
         // Copy the compacted data to the first chunk, but SKIP the Control field (offset 4, size 4)
         // to avoid zeroing it. The caller holds the exclusive lock and the Control must remain intact.

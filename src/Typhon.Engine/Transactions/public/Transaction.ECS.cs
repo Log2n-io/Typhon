@@ -1587,9 +1587,9 @@ public unsafe partial class Transaction
             {
                 if (chainRootChunkId != 0)
                 {
-                    // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence stays snapshot-correct: the walk computes it
-                    // position-based (CS - totalCommitted + visibleOrdinal), so a commit that landed between resolve and write still trips the
-                    // first-committer-wins check at our commit.
+                    // Re-resolve from the chain root recorded by ResolveEntity. ReadCommitSequence is the chain's CommitSequence at this walk: a commit
+                    // published after it trips a handler-less commit's conflict test; one published between the snapshot and this walk does not (it is
+                    // best effort, plan 06 §3.10). A handler commit tests by stamp, under the lock.
                     var walk = RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chainRootChunkId, TSN, this);
                     if (!walk.IsFailure)
                     {

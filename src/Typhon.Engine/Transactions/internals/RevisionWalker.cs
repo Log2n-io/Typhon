@@ -31,44 +31,12 @@ internal static class RevisionChainReader
         long transactionTSN, CommitCardTable cards, bool skipTimeout = false)
     {
         // ── Fast path: single-entry chain (common case for steady-state entities) ──
-        // Avoids RevisionEnumerator construction, lock acquisition, WaitContext/Deadline creation.
-        // Safe when skipTimeout=true (PTA path, no concurrent writers).
-        if (skipTimeout)
+        // No lock, no WaitContext, no clock — and validated: the seqlock read (TryWalkSingleEntryOptimistic). The plain read this used to be trusted "no
+        // concurrent writers", which ordinary transaction reads (EntityRef) do not guarantee: a compaction rewrites the root with a plain copy, and a read
+        // racing it could take the new item count with the old element, a revision the compaction had dropped.
+        if (skipTimeout && TryWalkSingleEntryOptimistic(ref compRevTableAccessor, compRevFirstChunkId, transactionTSN, out var fastResult))
         {
-            ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevFirstChunkId);
-            if (header.ItemCount == 1)
-            {
-                // Single entry — read it directly from the root chunk
-                var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId);
-                var elements = chunkContent.Slice(Unsafe.SizeOf<CompRevStorageHeader>()).Cast<byte, CompRevStorageElement>();
-                ref var element = ref elements[header.FirstItemIndex];
-
-                if (!element.IsVoid)
-                {
-                    // No lock: the flag word first, by acquire, pairs with the publish's release (#1149) — a clear flag comes with the stamp it carries.
-                    // A flagged entry goes to the full walk, which resolves it through its owner's card.
-                    var stamp = element.ReadTsnAcquire(out var isolated);
-                    if (!isolated && stamp > 0 && stamp <= transactionTSN)
-                    {
-                        var compRevInfo = new ComponentInfo.CompRevInfo
-                        {
-                            Operations = ComponentInfo.OperationType.Undefined,
-                            CompRevTableFirstChunkId = compRevFirstChunkId,
-                            CurCompContentChunkId = element.ComponentChunkId,
-                            CurRevisionIndex = header.FirstItemIndex,
-                            PrevCompContentChunkId = 0,
-                            PrevRevisionIndex = -1,
-                            ReadCommitSequence = header.CommitSequence,
-                        };
-
-                        return element.ComponentChunkId == 0
-                            ? new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(compRevInfo, RevisionReadStatus.Deleted)
-                            : new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(compRevInfo);
-                    }
-                }
-
-                // Single entry but not visible — fall through to full walk (shouldn't happen for committed entities with valid TSN)
-            }
+            return fastResult;
         }
 
         // PTA / no-caller-context path: infinite deadline when skipping the timeout, else a fresh per-call timeout.
@@ -103,8 +71,8 @@ internal static class RevisionChainReader
     /// <list type="bullet">
     /// <item>No exclusive holder before AND after the data reads — every chain mutator that can produce a torn read (AddCompRev, cleanup compaction,
     /// prepare and publish — the publish takes the lock itself since #1158, AP-05) runs under the exclusive chain lock.</item>
-    /// <item>Header quad (FirstItemIndex/ItemCount/ChainLength/LCRI), CommitSequence and the 12 element bytes re-read unchanged — catches a locked
-    /// mutator session that ran entirely between the two probes, a publish among them (TSN re-stamp + IsolationFlag flip + CS/LCRI bump). If every
+    /// <item>Header quad (FirstItemIndex/ItemCount/ChainLength/Reserved), CommitSequence and the 12 element bytes re-read unchanged — catches a locked
+    /// mutator session that ran entirely between the two probes, a publish among them (stamp + IsolationFlag flip + CS bump). If every
     /// compared byte is unchanged, the value read IS the current consistent state, so returning it is correct even if transient states existed in
     /// between.</item>
     /// </list>
@@ -133,7 +101,7 @@ internal static class RevisionChainReader
             return false;
         }
 
-        // Header quad at offset 8 (8-byte aligned): FirstItemIndex | ItemCount | ChainLength | LastCommitRevisionIndex — one atomic load.
+        // Header quad at offset 8 (8-byte aligned): FirstItemIndex | ItemCount | ChainLength | Reserved — one atomic load.
         ref long quadRef = ref Unsafe.As<short, long>(ref header.FirstItemIndex);
         long quad1 = Volatile.Read(ref quadRef);
         short firstItemIndex = (short)quad1;

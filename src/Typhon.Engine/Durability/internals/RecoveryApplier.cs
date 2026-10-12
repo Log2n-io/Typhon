@@ -561,7 +561,25 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                 CapturePreApplyHandles(table, slotIndex, new ReadOnlySpan<byte>(dst, compSize));
             }
 
-            slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+            // A Versioned slot's HEAD copy takes the replayed value only above every revision its chain already holds (VIS-05), as the live publish: the
+            // base can hold a later stamp than this record's — a commit that drew its stamp after this one's, published and checkpointed while this one
+            // was still in flight — and the scrub keeps that one in the chain.
+            var copyHead = true;
+            if (table.StorageMode == StorageMode.Versioned)
+            {
+                var vih = layout.SlotToVersionedIndex[slotIndex];
+                var existingRoot = vih >= 0 ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordPtr, vih) : 0;
+                if (existingRoot != 0)
+                {
+                    var info = GetRecoveryInfo(table);
+                    copyHead = slot.Tsn > ComponentRevisionManager.HighestPublishedStamp(ref info.CompRevTableAccessor, existingRoot, -1);
+                }
+            }
+
+            if (copyHead)
+            {
+                slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+            }
 
             // Versioned in a cluster: the SoA slot is the HEAD cache over the chain, so the chain has to carry the value too or the scrub would collapse the
             // HEAD back to a stale revision.

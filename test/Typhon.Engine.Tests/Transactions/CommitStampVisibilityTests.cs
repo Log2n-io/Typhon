@@ -4,6 +4,7 @@ using System;
 using System.Numerics;
 using System.Threading;
 using Typhon.Engine.Internals;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
 
@@ -32,6 +33,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<CsWallet>();
+        dbe.RegisterComponentFromAccessor<EvoCcBagV1>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -95,14 +97,16 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         public long Stamp;
         public Exception Error;
 
-        public BackgroundCommit(DatabaseEngine dbe, Action<Transaction> write)
+        public BackgroundCommit(DatabaseEngine dbe, Action<Transaction> write, CommitDiscipline discipline = CommitDiscipline.TickFence)
         {
             _thread = new Thread(() =>
             {
                 ThreadId = Environment.CurrentManagedThreadId;
                 try
                 {
-                    using var tx = dbe.CreateQuickTransaction();
+                    using var tx = discipline == CommitDiscipline.TickFence
+                        ? dbe.CreateQuickTransaction()
+                        : dbe.CreateQuickTransaction(DurabilityMode.Deferred, discipline);
                     Tsn = tx.TSN;
                     write(tx);
                     Written.Set();
@@ -208,6 +212,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
         finally
         {
+            gate.Release();
             dbe.CommitAfterAppendProbe = null;
         }
     }
@@ -259,6 +264,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
         finally
         {
+            gate.Release();
             dbe.PublishComponentProbe = null;
         }
     }
@@ -321,6 +327,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
         finally
         {
+            gate.Release();
             dbe.CommitAfterAppendProbe = null;
         }
 
@@ -367,6 +374,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
             }
             finally
             {
+                gate.Release();
                 log.AfterFloorProbe = null;
             }
 
@@ -425,6 +433,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
         finally
         {
+            gate.Release();
             log.AfterFloorProbe = null;
         }
 
@@ -474,6 +483,169 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
 
         Assert.That(Isolated(dbe, root), Is.Zero, $"{Marker}: the scrub kept a staged revision");
         Assert.That(ReadNew(dbe, id), Is.EqualTo(50), "the committed head is kept");
+    }
+
+    /// <summary>
+    /// The compaction's skip phase over an out-of-order pair (VIS-06): <c>[spawn, A(s1), B(s2), F]</c>, s1 &gt; s2, F a staged entry. B, below the
+    /// cutoff and older than the sentinel A, frees itself; F, flagged, ends the skip phase and keeps the sentinel. The chain-order sentinel kept B and
+    /// freed A — the read after it is A's.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-06")]
+    [CancelAfter(30_000)]
+    public void ACompactionsSkipPhase_FreesAnOlderStampBehindTheSentinel()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var id = Spawn(dbe, 1)[0];
+        var log = (DurabilityLog)dbe.DurabilityLog;
+        var gate = new Gate();
+        log.AfterFloorProbe = gate.Probe;
+        long aStamp;
+        try
+        {
+            var a = new BackgroundCommit(dbe, tx => Set(tx, id, 12));
+            gate.ThreadId = a.ThreadId;
+            a.Go();
+            gate.AwaitReached();
+            using (var b = dbe.CreateQuickTransaction())
+            {
+                Set(b, id, 10);
+                Assert.That(b.Commit(), Is.True);
+            }
+
+            gate.Release();
+            a.Join();
+            aStamp = a.Stamp;
+        }
+        finally
+        {
+            gate.Release();
+            log.AfterFloorProbe = null;
+        }
+
+        using var staged = dbe.CreateQuickTransaction();
+        Set(staged, id, 99);
+        var table = dbe.GetComponentTable<CsWallet>();
+        Compact(dbe, table, RootOf(dbe, id), aStamp + 1);
+        Assert.That(ReadNew(dbe, id), Is.EqualTo(12), $"{Marker}: the skip phase freed the highest-stamp revision for an older one");
+    }
+
+    private static void SetBag(Transaction tx, EntityId id, int item)
+    {
+        var target = tx.OpenMut(id);
+        var bag = target.Read(EvoCcUnit.Bag);
+        bag.A = item;
+        using (var cca = target.CreateComponentCollectionAccessor(EvoCcUnit.Bag, ref bag, ref bag.Items))
+        {
+            cca.Add(item);
+        }
+
+        target.Set(EvoCcUnit.Bag, bag);
+    }
+
+    private static (int A, int[] Items) ReadBag(DatabaseEngine dbe, EntityId id)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var bag = tx.Open(id).Read(EvoCcUnit.Bag);
+        using var cca = tx.CreateComponentCollectionAccessor(ref bag.Items);
+        var items = new int[cca.ElementCount];
+        cca.GetAllElements(items);
+        return (bag.A, items);
+    }
+
+    /// <summary>The value the cluster's HEAD copy holds for the bag archetype's one entity.</summary>
+    private static int BagClusterHead(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        using var accessor = tx.For<EvoCcUnit>();
+        var value = -1;
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var bags = cluster.GetReadOnlySpan(EvoCcUnit.Bag);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                var idx = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                value = bags[idx].A;
+            }
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// Two writers of one entity whose stamps invert their LSNs (W1 claims first, stamps last), each writing the value and its collection, then a crash
+    /// (VIS-05). The recovered value, its collection and the cluster HEAD copy are all W1's: the replay keeps the highest stamp for the collection's fold
+    /// as for the value. (A checkpoint between the two — W1 in the base, W2 replayed — cannot be staged for one entity: the cycle does not write a page an
+    /// active writer holds. The applier's guard for it, a HEAD copy only above the chain's stamps, is defence in depth.) Under the Commit discipline the
+    /// batch flags every record Committed, Versioned ones included: they still replay by stamp — Versioned is the table's storage mode, not the flag.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-05")]
+    [CancelAfter(60_000)]
+    public void InvertedWritersWithACollection_RecoverTheHighestStamp_ValueCollectionAndHead(
+        [Values(CommitDiscipline.TickFence, CommitDiscipline.Commit)] CommitDiscipline discipline)
+    {
+        EntityId id;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            using (var spawn = dbe.CreateQuickTransaction())
+            {
+                id = spawn.Spawn<EvoCcUnit>(EvoCcUnit.Bag.Set(new EvoCcBagV1(0)));
+                Assert.That(spawn.Commit(), Is.True);
+            }
+
+            var log = (DurabilityLog)dbe.DurabilityLog;
+            var floorGate = new Gate();
+            var appendGate = new Gate();
+            log.AfterFloorProbe = floorGate.Probe;
+            dbe.CommitAfterAppendProbe = appendGate.Probe;
+            try
+            {
+                var w1 = new BackgroundCommit(dbe, tx => SetBag(tx, id, 1), discipline);
+                floorGate.ThreadId = w1.ThreadId;
+                w1.Go();
+                floorGate.AwaitReached();
+
+                var w2 = new BackgroundCommit(dbe, tx => SetBag(tx, id, 2), discipline);
+                appendGate.ThreadId = w2.ThreadId;
+                w2.Go();
+                appendGate.AwaitReached();
+
+                floorGate.Release();
+                w1.Join();
+                Assert.That(w1.Stamp, Is.GreaterThan(w2.Stamp == 0 ? 0 : w2.Stamp), "premise: W1 stamped after W2");
+                appendGate.Release();
+                w2.Join();
+                Assert.That(w1.Stamp, Is.GreaterThan(w2.Stamp), "premise: the writer that claimed first drew the later stamp");
+            }
+            finally
+            {
+                floorGate.Release();
+                appendGate.Release();
+                log.AfterFloorProbe = null;
+                dbe.CommitAfterAppendProbe = null;
+            }
+
+            Assert.That(ReadBag(dbe, id), Is.EqualTo((1, new[] { 1 })), "premise: the live newest is W1's");
+            Assert.That(BagClusterHead(dbe), Is.EqualTo(1), "premise: the live HEAD copy is W1's");
+            using (var flush = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                flush.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = -1 }));
+                Assert.That(flush.Commit(), Is.True);
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        var reopened = Open(scope2);
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        Assert.That(ReadBag(reopened, id), Is.EqualTo((1, new[] { 1 })), $"{Marker}: the recovered value and collection are not the highest stamp's");
+        Assert.That(BagClusterHead(reopened), Is.EqualTo(1), $"{Marker}: the recovered cluster HEAD copy is not the highest stamp's");
     }
 
     private static int Isolated(DatabaseEngine dbe, int root)

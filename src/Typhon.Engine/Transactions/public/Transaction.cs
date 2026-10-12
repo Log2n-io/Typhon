@@ -83,7 +83,7 @@ public unsafe partial class Transaction : EntityAccessor
 
     // AP-01 (Append-before-publish): the commit pipeline splits each component entry into a PREPARE half (all fallible work — conflict
     // detect/resolve, index/spatial B+Tree mutation, cluster Phase-A index updates, view notify) and a non-throwing PUBLISH half
-    // (IsolationFlag clear + TSN stamp, LCRI/CommitSequence bump, cluster Phase-B HEAD→slot memcpy, handler-lock release). PrepareComponent
+    // (commit stamp + IsolationFlag clear, CommitSequence bump, cluster Phase-B HEAD→slot memcpy, handler-lock release). PrepareComponent
     // records one PublishEntry here; the entries are drained by PublishComponent AFTER the WAL Append, so no change is made visible before
     // its records are appended. ElementRevisionHandle is a ref struct (cannot be stored), so the handle is re-derived in publish from the
     // blittable (FirstChunkId, CurRevisionIndex). Pooled, reused across pooled Transaction lifetimes; cleared after each commit.
@@ -1664,7 +1664,7 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Phase 6: Data:Transaction:Conflict instant. componentTypeId left as 0 — the enclosing
         // TransactionCommitComponent span (kind 22) carries the typeId, so the viewer correlates by parent.
-        // conflictType encodes which detection path fired: 0 = handler-based (sequence/lcri), 1 = index-based fallback.
+        // conflictType encodes which detection path fired: 0 = handler-based (by stamp), 1 = handler-less (CommitSequence changed).
         var conflictType = (byte)(conflictSolver != null ? 0 : 1);
         TyphonEvent.EmitDataTransactionConflict(tsn, pk, 0, conflictType);
 
@@ -1795,7 +1795,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// PREPARE half of the AP-01 commit split: all fallible work for one component revision — acquires the revision chain lock (when a handler is
     /// provided; the lock is RETAINED for <see cref="PublishComponent"/> so detect→publish stays atomic for concurrent conflict resolution), detects
     /// and resolves write-write conflicts, mutates secondary/spatial/cluster (Phase-A) indexes, and notifies views — then records a
-    /// <see cref="PublishEntry"/>. It does NOT clear IsolationFlag, does NOT bump LCRI/CommitSequence, and does NOT copy to the cluster slot: those are
+    /// <see cref="PublishEntry"/>. It does NOT clear IsolationFlag, does NOT bump CommitSequence, and does NOT copy to the cluster slot: those are
     /// the visibility acts, deferred to PublishComponent AFTER the WAL Append (AP-01: append before publish).
     /// </summary>
     private void PrepareComponent(ref CommitContext context)
@@ -1832,7 +1832,7 @@ public unsafe partial class Transaction : EntityAccessor
         var publishRecorded = false;
         try
         {
-            // Inside the try (#1278): from the lock on, a throw — the re-validation's, the relocation's — reaches the finally, which releases
+            // Inside the try (#1278): from the lock on, a throw — the re-validation's, the conflict resolution's — reaches the finally, which releases
             // the lock while no publish entry owns it.
             if (conflictSolver != null)
             {
@@ -1865,7 +1865,7 @@ public unsafe partial class Transaction : EntityAccessor
             DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
                 ref elementHandle, readCompChunkId, lockHeld, TSN, UowId, _dbe);
 
-            // Maintain indices/spatial (fallible PREPARE work). The visibility acts — IsolationFlag clear, LCRI/CommitSequence bump, cluster HEAD copy —
+            // Maintain indices/spatial (fallible PREPARE work). The visibility acts — the stamp and IsolationFlag clear, CommitSequence bump, cluster HEAD copy —
             // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
             var archId = EntityId.FromRaw(pk).ArchetypeId;
             var commitMeta = _dbe.GetMetaByRouting(archId);
@@ -1981,7 +1981,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>
     /// PUBLISH half of the AP-01 commit split: makes one prepared component revision visible. Non-throwing by construction (AP-03) — re-derives the
     /// revision handle (an <see cref="ComponentRevisionManager.ElementRevisionHandle"/> is a ref struct and cannot be carried across the Append), stamps
-    /// TSN + clears IsolationFlag (the publication act), bumps LCRI/CommitSequence, copies the committed HEAD value into the cluster slot (Phase B), and
+    /// the commit stamp + clears IsolationFlag (the publication act), bumps CommitSequence, copies the committed HEAD value into the cluster slot (Phase B), and
     /// releases the per-entity revision-chain lock retained by <see cref="PrepareComponent"/>. MUST run only after the transaction's WAL Append.
     /// </summary>
     private void PublishComponent(in PublishEntry e)
@@ -2037,7 +2037,7 @@ public unsafe partial class Transaction : EntityAccessor
                 if (found < 0)
                 {
                     // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
-                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing more is published: no stamp, no LCRI,
+                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing more is published: no stamp, no CommitSequence,
                     // no cluster copy. (Phase A, run above, has moved the index for it, as it did from PREPARE before #1262.) The commit is lost either way;
                     // this keeps it from taking a neighbour down with it, and says so.
                     Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
@@ -3109,7 +3109,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        Interlocked.Increment(ref CommitCardTable.FullWindowWaits);
+        Interlocked.Increment(ref cards.FullWindowWaits);
         var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
         var waiter = new AdaptiveWaiter();
         var refreshedAt = Stopwatch.GetTimestamp();
@@ -3470,7 +3470,7 @@ public unsafe partial class Transaction : EntityAccessor
                 _dbe.CommitAfterAppendProbe?.Invoke();
 
                 // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
-                //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
+                //    CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
                 //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
                 _dbe.LogCommitPhase(TSN, "Publish");
                 PublishPreparedComponents();

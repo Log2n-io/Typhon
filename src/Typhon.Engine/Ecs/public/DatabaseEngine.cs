@@ -697,6 +697,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// any lock, so a fixture can hold a reserving committer there. Null in production: one null check per commit.</summary>
     internal Action CommitAfterReserveProbe { get; set; }
 
+    /// <summary>Test seam: keep the crash open's identity → commit stamp map in <see cref="LastWalV2RecoveryResult"/> (dropped otherwise: one entry per
+    /// committed transaction of the window, for the engine's lifetime). Set before <see cref="InitializeArchetypes"/>.</summary>
+    internal bool RetainRecoveryCommitStampsForTest { get; set; }
+
     /// <summary>Test seam (CK-13): invoked by every <see cref="Transaction"/> commit just before it publishes its Commit-discipline staged writes,
     /// its last page effect, so a fixture can show the checkpoint still stays below the commit's records there. Null in production.</summary>
     internal Action CommitBeforeStagedPublishProbe { get; set; }
