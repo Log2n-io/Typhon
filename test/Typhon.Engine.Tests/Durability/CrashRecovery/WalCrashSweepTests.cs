@@ -80,7 +80,9 @@ internal sealed class WalCrashSweepTests
 
     private static int[] BuildCrashBoundaries()
     {
-        var floor = new[] { 1, 2, 3, 5, 8 };
+        // 4: LifecycleChurn's cycle persists the archetype catalog, then dies before an entity map's root reaches the disk — the crash open allocated that
+        // root, past the file's end, before the archetypes loaded (#1163).
+        var floor = new[] { 1, 2, 3, 4, 5, 8 };
 
         // A context-free derivation, not TestSeed.Random(): this runs in a static field initializer, where TestContext may name the fixture, a random test, or
         // nothing at all. Keying on the fixture name instead keeps the boundary set identical for every case in the run.
