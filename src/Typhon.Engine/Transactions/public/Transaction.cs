@@ -3125,8 +3125,9 @@ public unsafe partial class Transaction : EntityAccessor
     {
         try
         {
-            // The spawns PREPARE placed go first: their records name the chain roots the rollback frees (AP-07, VIS-08).
+            // The spawns PREPARE placed go first: their records name the chain roots the rollback frees (AP-07, VIS-08). The destroys' pending died with them.
             UnplaceSpawns();
+            UnmarkDestroysPending();
             var unbounded = UnitOfWorkContext.None;
             RollbackCore(ref unbounded, Typhon.Profiler.TransactionRollbackReason.AutoOnDispose);
         }
@@ -3400,9 +3401,10 @@ public unsafe partial class Transaction : EntityAccessor
             // cell needs — is checked here, after PREPARE and before the point of no return: past it a failure could only stop the engine.
             ValidatePublishBeforeAppend();
 
-            // VIS-08: every spawn exists before the commit point — its slot reserved, its record in the EntityMap with a pending born. An exit before the
-            // append un-places them (RollbackAfterFailedCommit).
+            // VIS-08: every spawn exists before the commit point — its slot reserved, its record in the EntityMap with a pending born. VIS-09: every destroy
+            // too — its record's died pending. An exit before the append un-places and un-marks them (RollbackAfterFailedCommit).
             PlaceSpawns();
+            MarkDestroysPending();
 
             // ── PREPARE complete. Deferred-cleanup enqueue is prepare-side bookkeeping (no visibility) — it runs before Append. ──
             _dbe.LogCommitPhase(TSN, "DeferredCleanup");

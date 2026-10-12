@@ -2074,6 +2074,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal bool IsClusterFullyVisibleAt(int clusterChunkId, long txTsn)
     {
+        // A destroy pending a commit (VIS-09) holds an occupied slot the summary cannot speak for yet: deny, and let the probe ask its record.
+        if (PendingDeaths(clusterChunkId) != 0)
+        {
+            return false;
+        }
+
         // Acquire loads, and in THIS order. The growth path publishes the resized ClusterMaxDiedTsn before release-storing ClusterMaxBornTsn, so a reader that
         // reads maxBorn first is guaranteed the died array it then reads is at least as new. Reading them the other way round could pair a new maxBorn with a
         // stale short died array — and a missing died entry reads as "no death", which is a phantom.

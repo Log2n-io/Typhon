@@ -66,13 +66,13 @@ public struct EntityRecordHeader
     }
 
     /// <summary>
-    /// True if the entity is published and has not been destroyed (DiedTSN == 0). A spawn placed in PREPARE and not yet published (its born pending, VIS-08)
-    /// is not alive for a HEAD reader: its commit may still abort.
+    /// True if the entity is published and its destroy is not (a HEAD reader's view). A spawn placed in PREPARE and not yet published (its born pending,
+    /// VIS-08) is not alive: its commit may still abort. An entity whose destroy is pending (VIS-09) still is, for the same reason.
     /// </summary>
     public readonly bool IsAlive
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => DiedTsnHigh == 0 && DiedTsnLow == 0 && (BornTsnHigh & PendingHighBit) == 0;
+        get => (BornTsnHigh & PendingHighBit) == 0 && ((DiedTsnHigh == 0 && DiedTsnLow == 0) || (DiedTsnHigh & PendingHighBit) != 0);
     }
 
     /// <summary>Bit 47 of a 48-bit stamp field: the value is an owner's TSN, not a commit stamp (VIS-08). TSNs stay below it (#1208).</summary>
@@ -90,11 +90,25 @@ public struct EntityRecordHeader
         get => (BornTsnHigh & PendingHighBit) != 0;
     }
 
+    /// <summary>True while a destroy's commit has not published: <see cref="DiedTSN"/> holds its owner's TSN (VIS-09).</summary>
+    internal readonly bool IsDiedPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => (DiedTsnHigh & PendingHighBit) != 0;
+    }
+
+    /// <summary>Either stamp field holds an owner: the record needs the owner's card to be read at a snapshot.</summary>
+    internal readonly bool HasPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => ((BornTsnHigh | DiedTsnHigh) & PendingHighBit) != 0;
+    }
+
     /// <summary>
     /// <see cref="IsVisibleAt(long)"/> with a pending born resolved through its owner's commit card (VIS-01, VIS-08): visible when the owner is registered
-    /// with a stamp at or below <paramref name="txTsn"/>, or is <paramref name="txTsn"/> itself. With no card holding the owner the answer is in the live
-    /// record, not this copy — it was published since, or removed by an abort: <paramref name="reread"/> is set, and the caller reads the record again and
-    /// asks once more; a record still pending then is not committed.
+    /// with a stamp at or below <paramref name="txTsn"/>, or is <paramref name="txTsn"/> itself; a pending died the same way (VIS-09), the entity dead from its
+    /// owner's stamp on. With no card holding the owner the answer is in the live record, not this copy — it was published since, or its commit aborted:
+    /// <paramref name="reread"/> is set, and the caller reads the record again and asks once more; a value still pending then is not committed.
     /// </summary>
     internal readonly bool IsVisibleAt(long txTsn, CommitCardTable cards, out bool reread)
     {
@@ -123,6 +137,24 @@ public struct EntityRecordHeader
             {
                 return false;
             }
+        }
+
+        if (IsDiedPending)
+        {
+            // Dead at txTsn once its owner's stamp is at or below it; an owner with no card is not committed — unless the live record says otherwise.
+            var owner = DiedTSN & ~PendingBit;
+            if (owner == txTsn)
+            {
+                return false;
+            }
+
+            if (cards == null || !cards.TryGetStamp(owner, out var diedStamp))
+            {
+                reread = true;
+                return true;
+            }
+
+            return diedStamp > txTsn;
         }
 
         var died = DiedTSN;

@@ -1727,6 +1727,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
                 else
                 {
+                    // A destroy of a Versioned archetype hid its slot rather than release it (VIS-09): released now, no snapshot seeing the entity alive.
+                    ReleaseHiddenDestroySlot(meta, engineState, readBuf, changeSet);
+
                     // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries
                     // the dirty marks — so the call does not read as though this write is exempt from ownership.
                     engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
@@ -1736,6 +1739,33 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         finally
         {
             accessor.Dispose();
+        }
+    }
+
+    /// <summary>The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record; a slot not reserved is not one.</summary>
+    private unsafe void ReleaseHiddenDestroySlot(ArchetypeMetadata meta, ArchetypeEngineState engineState, byte* record, ChangeSet changeSet)
+    {
+        if (!meta.IsClusterEligible || engineState.ClusterState is not { ClusterSegment: not null } clusterState)
+        {
+            return;
+        }
+
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(record);
+        int slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(record);
+        if (!clusterState.IsReserved(clusterChunkId, slotIndex))
+        {
+            return;
+        }
+
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+        try
+        {
+            clusterState.ReleaseHiddenSlot(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterChunkId, slotIndex, changeSet,
+                clusterState.SpatialOfCluster(clusterChunkId).Grid);
+        }
+        finally
+        {
+            clusterAccessor.Dispose();
         }
     }
 

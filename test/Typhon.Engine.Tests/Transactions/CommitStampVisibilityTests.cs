@@ -349,6 +349,221 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     }
 
     /// <summary>
+    /// VIS-09's window: a reader begun after a writer's commit point, before its publish, sees the entity the commit destroyed gone, together with the
+    /// revision it wrote — by id, by count and by enumeration. The destroy's died was pending from PREPARE; the reader resolves it through the writer's card.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    [CancelAfter(30_000)]
+    public void AReaderBegunBetweenTheAppendAndThePublish_SeesTheDestroyWithTheRevision()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var ids = Spawn(dbe, 2);
+        var (y, x) = (ids[0], ids[1]);
+        var gate = new Gate();
+        dbe.CommitAfterAppendProbe = gate.Probe;
+        try
+        {
+            var writer = new BackgroundCommit(dbe, tx =>
+            {
+                Set(tx, y, 777);
+                tx.Destroy(x);
+            });
+            gate.ThreadId = writer.ThreadId;
+            writer.Go();
+            gate.AwaitReached();
+
+            using var reader = dbe.CreateReadOnlyTransaction();
+            void AssertWholeCommit(string when)
+            {
+                Assert.That(Read(reader, y), Is.EqualTo(777), $"premise ({when}): the reader sees the commit's revision");
+                Assert.That(reader.TryOpen(x, out _), Is.False, $"{Marker} ({when}): the reader sees the revision and the entity the commit destroyed");
+                Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker} ({when}): the count holds the destroyed entity");
+                Assert.That(reader.Query<CsWalletArch>().Execute(), Does.Not.Contain(x), $"{Marker} ({when}): the enumeration holds the destroyed entity");
+            }
+
+            AssertWholeCommit("before the publish");
+            gate.Release();
+            writer.Join();
+            AssertWholeCommit("after the publish");
+        }
+        finally
+        {
+            gate.Release();
+            dbe.CommitAfterAppendProbe = null;
+        }
+    }
+
+    /// <summary>
+    /// A snapshot older than a destroy still finds the entity after the destroy published — by id, by count, by enumeration and by the SoA scan — because
+    /// its slot is held, hidden from HEAD and reserved, until the cleanup; the cleanup releases it once that snapshot ends, and the slot is claimable again
+    /// (VIS-09). Released at publish, the scans lost an entity the snapshot holds.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    [CancelAfter(30_000)]
+    public void AnOlderSnapshot_StillFindsADestroyedEntity_UntilTheCleanupReleasesItsSlot()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        EntityId y, x;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            y = tx.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 1, Value = 1 }));
+            x = tx.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 1, Value = 2 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var older = dbe.CreateReadOnlyTransaction();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(x);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var state = dbe._archetypeStates[Archetype<CsKeyedArch>.Metadata.ArchetypeId].ClusterState;
+        using (var newer = dbe.CreateReadOnlyTransaction())
+        {
+            Assert.That(newer.TryOpen(x, out _), Is.False, "premise: the destroy is committed");
+            Assert.That(newer.Query<CsKeyedArch>().Count(), Is.EqualTo(1), "premise: a newer snapshot counts one");
+        }
+
+        QueryPathProbe.Forced = ClusterScanPath.FullScan;
+        try
+        {
+            Assert.That(older.TryOpen(x, out _), Is.True, $"{Marker}: an older snapshot lost the entity by id");
+            Assert.That(older.Query<CsKeyedArch>().Count(), Is.EqualTo(2), $"{Marker}: an older snapshot's count lost the entity");
+            Assert.That(older.Query<CsKeyedArch>().WhereField<CsKeyed>(k => k.Group == 1).Execute(), Does.Contain(x),
+                $"{Marker}: an older snapshot's scan lost the entity — its slot was released at the destroy's publish");
+        }
+        finally
+        {
+            QueryPathProbe.Forced = ClusterScanPath.Planner;
+        }
+
+        int reservedBefore, reservedAfter;
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var ids = state.ReadActiveClusterList(out var count);
+            reservedBefore = 0;
+            for (var c = 0; c < count; c++)
+            {
+                reservedBefore += BitOperations.PopCount(state.ReservedBits(ids[c]));
+            }
+        }
+
+        older.Dispose();
+        dbe.FlushDeferredCleanups();
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var ids = state.ReadActiveClusterList(out var count);
+            reservedAfter = 0;
+            for (var c = 0; c < count; c++)
+            {
+                reservedAfter += BitOperations.PopCount(state.ReservedBits(ids[c]));
+            }
+        }
+
+        Assert.That(reservedBefore, Is.EqualTo(1), "premise: the destroyed entity's slot is held, reserved, while an older snapshot lives");
+        Assert.That(reservedAfter, Is.Zero, $"{Marker}: the cleanup did not release the hidden slot");
+    }
+
+    /// <summary>The pending destroys the wallet archetype's clusters hold (VIS-09).</summary>
+    private static long PendingDeaths(DatabaseEngine dbe)
+    {
+        var state = dbe._archetypeStates[Archetype<CsWalletArch>.Metadata.ArchetypeId].ClusterState;
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var ids = state.ReadActiveClusterList(out var count);
+        long pending = 0;
+        for (var c = 0; c < count; c++)
+        {
+            pending += state.PendingDeaths(ids[c]);
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// The cleanup of a destroyed entity is keyed by the destroy's commit STAMP (VIS-06, VIS-09): a snapshot begun after the destroyer was created and
+    /// before its commit point still holds the entity once the destroyer is gone and the drain runs at its dispose. Keyed by the destroyer's TSN, below that
+    /// snapshot, the drain removed the record and released the slot under it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    [VerifiesRule("VIS-06")]
+    [CancelAfter(30_000)]
+    public void ASnapshotBetweenADestroyersTsnAndItsStamp_KeepsTheEntityThroughTheCleanup()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var x = Spawn(dbe, 1)[0];
+        var destroyer = dbe.CreateQuickTransaction();
+        using var reader = dbe.CreateReadOnlyTransaction();
+        destroyer.Destroy(x);
+        Assert.That(destroyer.Commit(), Is.True);
+        Assert.That(destroyer.CommitStamp, Is.GreaterThan(reader.TSN), "premise: the destroy's stamp is above the reader's snapshot, its TSN below");
+        destroyer.Dispose();
+        dbe.FlushDeferredCleanups(reader.TSN);
+
+        Assert.That(reader.TryOpen(x, out _), Is.True, $"{Marker}: the cleanup took an entity a live snapshot holds");
+        Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker}: the cleanup dropped an entity from a live snapshot's count");
+    }
+
+    /// <summary>A commit that aborts after marking its destroys pending, before its commit point, leaves the entity alive and its died clear (AP-07).</summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    [VerifiesRule("AP-07")]
+    [CancelAfter(30_000)]
+    public void AnAbortAfterTheDestroyIsMarked_LeavesTheEntityAlive()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var x = Spawn(dbe, 1)[0];
+        var state = dbe._archetypeStates[Archetype<CsWalletArch>.Metadata.ArchetypeId];
+        bool marked = false;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(x);
+            dbe.CommitBeforeAppendProbe = () =>
+            {
+                using var guard = EpochGuard.Enter(dbe.EpochManager);
+                var map = state.EntityMap.Segment.CreateChunkAccessor();
+                try
+                {
+                    unsafe
+                    {
+                        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+                        Assert.That(state.EntityMap.TryGet(x.EntityKey, record, ref map), Is.True);
+                        marked = EntityRecordAccessor.GetHeader(record).IsDiedPending;
+                    }
+                }
+                finally
+                {
+                    map.Dispose();
+                }
+
+                throw new InvalidOperationException("staged: an abort after the destroy was marked, before the append");
+            };
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => tx.Commit());
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+            }
+
+            Assert.That(PendingDeaths(dbe), Is.Zero, $"{Marker}: the aborted destroy still holds its cluster's gate shut");
+        }
+
+        Assert.That(marked, Is.True, "premise: the destroy's died was pending when the commit aborted");
+        using var reader = dbe.CreateReadOnlyTransaction();
+        Assert.That(reader.TryOpen(x, out _), Is.True, $"{Marker}: the aborted destroy took the entity");
+        Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker}: the aborted destroy dropped the entity from the count");
+    }
+
+    /// <summary>
     /// The other side: a reader begun before the writer's commit point sees neither the spawn nor the revision, before the publish and after it — the
     /// pending born resolves to a stamp above its snapshot.
     /// </summary>
@@ -456,7 +671,9 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         Assert.That(header.IsVisibleAt(TransactionChain.TsnRefusalThreshold), Is.False, "a pending born, to a plain test, is not born at any TSN");
         header.BornTSN = 43;
         Assert.That(header.IsAlive, Is.True, "published");
-        header.DiedTSN = 44;
+        header.DiedTSN = EntityRecordHeader.PendingBorn(44);
+        Assert.That(header.IsAlive, Is.True, $"{Marker}: a pending destroy reads dead to a HEAD reader — its commit may still abort (VIS-09)");
+        header.DiedTSN = 45;
         Assert.That(header.IsAlive, Is.False, "destroyed");
     }
 

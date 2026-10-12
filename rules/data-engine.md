@@ -11,7 +11,8 @@ is **registered** on a commit card, and a reader that meets one of its still-fla
 Design: `claude/design/Revision/05-commit-stamp-and-snapshot-floor.md` (option C, amended 2026-10-09); plan:
 `claude/design/Revision/06-mvcc-commit-path-implementation-plan.md` §6.
 
-**Scope of this file: family 1, revision elements, and family 2, spawns (VIS-08, plan 06 step 5.2).** The other four stamp families — `BornTSN`, `DiedTSN`, the cluster
+**Scope of this file: families 1–3 — revisions, spawns (VIS-08) and destroys (VIS-09), plan 06 steps 3.3, 5.2, 5.3 — and the cluster
+gate's pending deaths (family 4).** The other stamp families — `BornTSN`, `DiedTSN`, the cluster
 born/died watermarks, enabled-bits `ChangeTSN`, view deltas — keep today's creation-TSN behaviour until plan 06 Phase 5,
 and are not covered here. Plan 06 step 3.2 built VIS-03 (the cards, the commit point, the stamp on the wire), step 3.3 the
 rest: revisions are published with the commit stamp and resolved by stamp and owner. Families 2–5 (born, died, enabled
@@ -165,12 +166,25 @@ below names the invariant that proves it.
   on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan
   requires: VIS-01, VIS-02, CM-01
 
-### VIS-09: A destroy is pending before the stamp, and its slot outlives every snapshot that sees the entity `[fatal]` `[silent]` `[UNBUILT]`
-  invariant a destroy writes `DiedTSN = Pending(owner)` in PREPARE and the stamp at PUBLISH; of two concurrent destroys the
-            first stamp wins, by CAS
-  invariant the occupancy bit and the EntityMap record of a destroyed entity are released by the cleanup once MinTSN is past
-            its died stamp, not at PUBLISH: an older snapshot still finds it by scan
-  unbuilt: plan 06 step 5.3. Today the destroy's died stamp is written at PUBLISH, and its slot released there
+### VIS-09: A destroy is pending before the stamp, and its slot outlives every snapshot that sees the entity `[fatal]` `[silent]`
+  invariant a destroy writes `DiedTSN = Pending(owner)` in PREPARE (Transaction.MarkDestroysPending, under the record's bucket
+            latch; a died already set is left), undone on an abort (UnmarkDestroysPending), and the stamp at PUBLISH
+            (FlushPendingDestroys): over its own pending value or none, and of two destroys the lowest stamp — another
+            owner's pending died weighed by that owner's card. A reader resolves a pending died through the card; a HEAD
+            reader takes it for alive
+  invariant while a destroy is pending, its cluster's gate denies (ArchetypeClusterState.PendingDeaths, read by
+            IsClusterFullyVisibleAt): its slot is still occupied and its died watermark not folded. The publish folds the
+            watermark, then hides the slot, then lifts the count
+  invariant in an archetype with a Versioned component — the one that promises snapshot isolation — the publish hides the slot
+            rather than release it (ArchetypeClusterState.HideDestroyedSlot): out of HEAD (change signals, cell count,
+            shrink flag, occupancy bit) and reserved, its bytes and entity id kept, so an older snapshot still finds the
+            entity by scan. The cleanup, keyed by the died STAMP, releases it once MinTSN is past that stamp
+            (DatabaseEngine.ReleaseHiddenDestroySlot, ArchetypeClusterState.ReleaseHiddenSlot), then removes the record.
+            SingleVersion and Transient archetypes release at publish, as before: they promise no isolation
+  scope: Transaction.MarkDestroysPending, Transaction.UnmarkDestroysPending, Transaction.FlushPendingDestroys,
+         ArchetypeClusterState.HideDestroyedSlot, ArchetypeClusterState.ReleaseHiddenSlot, ArchetypeClusterState.PendingDeaths,
+         ArchetypeClusterState.IsClusterFullyVisibleAt, DatabaseEngine.ReleaseHiddenDestroySlot, DatabaseEngine.ProcessEcsCleanups
+  note the lowest-stamp rule for two concurrent destroys of one entity has no test of its own
   spec: tla/CommitStampFamilies.tla — DestroyRead (destroyatpublish, releaseatpublish)
   on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
                 effects; an older reader's scan loses an entity its snapshot holds

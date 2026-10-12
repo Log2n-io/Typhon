@@ -4096,7 +4096,13 @@ public unsafe partial class Transaction
                         // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
                         // The cell bookkeeping is the cluster's realm's (Realms C1): an entity destroyed in realm 3 frees a slot in realm 3's cell.
                         var releaseGrid = destroyClusterState.SpatialOfCluster(clusterChunkId).Grid;
-                        if (hasClusterAccessor)
+                        if (hasClusterAccessor && meta.VersionedSlotMask != 0)
+                        {
+                            // VIS-09: an archetype that promises snapshot isolation keeps the slot, hidden from HEAD and reserved, for a snapshot older than
+                            // the destroy to still find; the cleanup releases it once no snapshot can (DatabaseEngine.ProcessEcsCleanupEntry).
+                            destroyClusterState.HideDestroyedSlot(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterChunkId, slotIndex, releaseGrid);
+                        }
+                        else if (hasClusterAccessor)
                         {
                             destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, releaseGrid);
                         }
@@ -4106,18 +4112,26 @@ public unsafe partial class Transaction
                         }
                     }
 
-                    // Set DiedTSN (header layout is the same for both cluster and legacy records)
-                    EntityRecordAccessor.GetHeader(readBuf).DiedTSN = PublishStamp;
+                    // Set DiedTSN (header layout is the same for both cluster and legacy records): the pending died PREPARE wrote takes the stamp, in place
+                    // under the bucket's latch — of two destroys of one entity, the lowest stamp (VIS-09).
                     // No watermark fold here. It moved ABOVE ReleaseSlot — see the H1 ordering note there — and the guarded copy that briefly remained,
                     // for "the legacy non-cluster-backed shape", was unreachable: destroyClusterState is non-null only when destroyUseCluster is, and every
                     // ArchetypeClusterState carries at least one segment (a non-pure-Transient archetype throws if its ClusterSegment cannot be allocated;
                     // a pure-Transient one has transientSlotMask != 0 by construction), so one of the two accessor flags is always set. In the genuine
                     // legacy shape destroyClusterState is null and the branch was excluded by its own first conjunct. Had it ever run it would have decoded
                     // a cluster chunk id out of a LEGACY record's bytes and folded that garbage index into a cluster summary.
-                    engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
+                    var diedStamper = new DiedStamper { Stamp = PublishStamp, Owner = TSN, Cards = CommitCards };
+                    engineState.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref diedStamper, ref accessor);
 
-                    // Enqueue for deferred GC (LinearHash removal + chunk freeing when MinTSN advances past DiedTSN)
-                    _dbe.EnqueueEcsCleanup(entityId, meta, TSN);
+                    // Last: the watermark folded and the slot hidden above, the cluster's gate may vouch for it again (VIS-09).
+                    if (diedStamper.WasMarked && destroyClusterState != null)
+                    {
+                        destroyClusterState.AddPendingDeath(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), -1);
+                    }
+
+                    // Enqueue for deferred GC (LinearHash removal, chunk freeing, the hidden slot's release) once MinTSN is past the died STAMP: keyed by the
+                    // writer's TSN it was released while a snapshot between the two still saw the entity alive (VIS-06, VIS-09).
+                    _dbe.EnqueueEcsCleanup(entityId, meta, PublishStamp);
                 }
             }
         }
@@ -4150,6 +4164,132 @@ public unsafe partial class Transaction
             if (hasDestroyClusterTransientIdxAccessorS64)
             {
                 destroyClusterTransientIdxAccessorS64.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// VIS-09, in PREPARE: every committed entity this transaction destroys gets <c>DiedTSN = Pending(owner)</c> on its record, so the destroy exists before
+    /// the commit point and a reader resolves it through the owner's card. A died already set — another destroy pending or published — is left. Undone by
+    /// <see cref="UnmarkDestroysPending"/> on an abort; stamped by <see cref="FlushPendingDestroys"/>.
+    /// </summary>
+    private void MarkDestroysPending() => ForEachCommittedDestroyRecord(pending: true);
+
+    /// <summary>An abort before the commit point clears the pending died <see cref="MarkDestroysPending"/> wrote — this transaction's own only.</summary>
+    private void UnmarkDestroysPending() => ForEachCommittedDestroyRecord(pending: false);
+
+    private void ForEachCommittedDestroyRecord(bool pending)
+    {
+        if (_pendingDestroys == null || _pendingDestroys.Count == 0)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(_epochManager);
+        ArchetypeEngineState state = null;
+        ushort lastArch = 0;
+        var accessor = default(ChunkAccessor<PersistentStore>);
+        var has = false;
+        try
+        {
+            foreach (var entityId in _pendingDestroys)
+            {
+                if (SpawnedContains(entityId))
+                {
+                    continue;
+                }
+
+                var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
+                if (meta == null)
+                {
+                    continue;
+                }
+
+                if (!has || entityId.ArchetypeId != lastArch)
+                {
+                    if (has)
+                    {
+                        accessor.Dispose();
+                        has = false;
+                    }
+
+                    state = _dbe._archetypeStates[meta.ArchetypeId];
+                    if (state?.EntityMap == null)
+                    {
+                        continue;
+                    }
+
+                    accessor = state.EntityMap.Segment.CreateChunkAccessor(_changeSet);
+                    lastArch = entityId.ArchetypeId;
+                    has = true;
+                }
+
+                var marker = new DiedMarker { Owner = TSN, Pending = pending };
+                if (state.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref marker, ref accessor) && marker.Changed && meta.IsClusterEligible
+                    && state.ClusterState != null)
+                {
+                    state.ClusterState.AddPendingDeath(marker.ClusterChunkId, pending ? 1 : -1);
+                }
+            }
+        }
+        finally
+        {
+            if (has)
+            {
+                accessor.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Writes (<see cref="Pending"/>) or clears this owner's pending died — a died already holding another value is left.</summary>
+    private struct DiedMarker : IRawValueUpdater
+    {
+        public long Owner;
+        public bool Pending;
+        public bool Changed;
+        public int ClusterChunkId;
+
+        public void Update(byte* valueBytes)
+        {
+            ref var header = ref EntityRecordAccessor.GetHeader(valueBytes);
+            var mine = EntityRecordHeader.PendingBorn(Owner);
+            Changed = Pending ? header.DiedTSN == 0 : header.DiedTSN == mine;
+            if (Changed)
+            {
+                header.DiedTSN = Pending ? mine : 0;
+                ClusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(valueBytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A destroy's publish: the died takes <see cref="Stamp"/> — over this owner's pending value or none, and below any other: a published died keeps the
+    /// lower stamp, and another owner's pending one is weighed by that owner's card (VIS-09: of two destroys, the first stamp wins).
+    /// </summary>
+    private struct DiedStamper : IRawValueUpdater
+    {
+        public long Stamp;
+        public long Owner;
+        public CommitCardTable Cards;
+        public bool WasMarked;
+
+        public void Update(byte* valueBytes)
+        {
+            ref var header = ref EntityRecordAccessor.GetHeader(valueBytes);
+            var current = header.DiedTSN;
+            WasMarked = current == EntityRecordHeader.PendingBorn(Owner);
+            if (current == 0 || WasMarked)
+            {
+                header.DiedTSN = Stamp;
+            }
+            else if (header.IsDiedPending)
+            {
+                var other = current & ~EntityRecordHeader.PendingBit;
+                header.DiedTSN = Cards != null && Cards.TryGetStamp(other, out var otherStamp) && otherStamp < Stamp ? otherStamp : Stamp;
+            }
+            else if (Stamp < current)
+            {
+                header.DiedTSN = Stamp;
             }
         }
     }
@@ -4711,6 +4851,11 @@ public unsafe partial class Transaction
 
         // If transaction was NOT committed, free component chunks for spawned entities. A spawn PREPARE placed and nothing un-placed yet (a failure of the
         // rollback that should have) is given back first: its record names the chain freed below (VIS-08).
+        if (State != TransactionState.Committed)
+        {
+            UnmarkDestroysPending();
+        }
+
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)
         {
             UnplaceSpawns();

@@ -813,11 +813,13 @@ class EnableDisableTests : TestBase<EnableDisableTests>
     /// </summary>
     /// <remarks>
     /// The commit-time publish reads the entity's record and writes the cluster slot it names. When a later transaction has destroyed the entity and committed
-    /// first, that record is a tombstone and its slot has been released at commit — and a spawn may already hold it. Writing then stamps the dead entity's mask
-    /// onto a different live entity. Single-threaded and deterministic: the transactions are interleaved by hand.
+    /// first, that record is a tombstone — and before VIS-09 its slot was released at commit, so a spawn could already hold it, and the write stamped the dead
+    /// entity's mask onto a different live entity. Since VIS-09 the slot is held, hidden, until no snapshot can see the entity alive: the stale transaction
+    /// is one, so the spawn lands elsewhere and the hazard cannot arise while it lives. Single-threaded and deterministic: interleaved by hand.
     /// </remarks>
     [Test]
     [VerifiesRule("ENABLE-01")]
+    [VerifiesRule("VIS-09")]
     public void ACommitAgainstADestroyedEntity_LeavesTheSlotsNextOccupantAlone()
     {
         using var dbe = SetupEngine();
@@ -849,8 +851,8 @@ class EnableDisableTests : TestBase<EnableDisableTests>
             t.Commit();
         }
 
-        Assert.That(ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, occupant), Is.EqualTo(victimSlot),
-            "premise: the new entity must reuse the destroyed entity's slot, or nothing here can be overwritten");
+        Assert.That(ClusterSoAProbe.Locate(dbe, meta.ArchetypeId, occupant), Is.Not.EqualTo(victimSlot),
+            "VIS-09: the destroyed entity's slot was reused while an older transaction can still see the entity alive");
 
         stale.Commit();
 

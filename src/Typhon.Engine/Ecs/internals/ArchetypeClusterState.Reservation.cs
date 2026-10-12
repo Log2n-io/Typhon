@@ -28,6 +28,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     private const int ReservationBlockShift = 10;
     private const int ReservationBlockSize = 1 << ReservationBlockShift;
     private long[][] _reservedBlocks = [];
+    private long[][] _pendingDeathBlocks = [];
     private readonly Lock _reservationGrowLock = new();
 
     /// <summary>The reserved (pending-spawn) slots of <paramref name="clusterChunkId"/>; 0 for a cluster nothing ever reserved in.</summary>
@@ -44,15 +45,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         return block == null ? 0 : (ulong)Volatile.Read(ref block[clusterChunkId & (ReservationBlockSize - 1)]);
     }
 
-    private ref long ReservationWord(int clusterChunkId)
+    private ref long ReservationWord(int clusterChunkId) => ref BlockWord(ref _reservedBlocks, clusterChunkId);
+
+    private ref long BlockWord(ref long[][] table, int clusterChunkId)
     {
         var b = clusterChunkId >> ReservationBlockShift;
-        var blocks = Volatile.Read(ref _reservedBlocks);
+        var blocks = Volatile.Read(ref table);
         if ((uint)b >= (uint)blocks.Length || Volatile.Read(ref blocks[b]) == null)
         {
             lock (_reservationGrowLock)
             {
-                blocks = _reservedBlocks;
+                blocks = table;
                 if ((uint)b >= (uint)blocks.Length)
                 {
                     var grown = new long[b + 1][];
@@ -61,12 +64,33 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 blocks[b] ??= new long[ReservationBlockSize];
-                Volatile.Write(ref _reservedBlocks, blocks);
+                Volatile.Write(ref table, blocks);
             }
         }
 
         return ref blocks[b][clusterChunkId & (ReservationBlockSize - 1)];
     }
+
+    /// <summary>
+    /// The destroys of <paramref name="clusterChunkId"/>'s entities pending a commit (VIS-09, family 4): marked in PREPARE, their slots still occupied and
+    /// their died watermark not folded yet. While it is non-zero the cluster gate denies (<see cref="IsClusterFullyVisibleAt(int, long)"/>): a reader whose
+    /// snapshot is above such a destroy's stamp must not count, by the occupancy word, an entity the commit removed.
+    /// </summary>
+    internal long PendingDeaths(int clusterChunkId)
+    {
+        var blocks = Volatile.Read(ref _pendingDeathBlocks);
+        var b = clusterChunkId >> ReservationBlockShift;
+        if ((uint)b >= (uint)blocks.Length)
+        {
+            return 0;
+        }
+
+        var block = Volatile.Read(ref blocks[b]);
+        return block == null ? 0 : Volatile.Read(ref block[clusterChunkId & (ReservationBlockSize - 1)]);
+    }
+
+    /// <summary>A destroy marked pending (+1), or published or aborted (-1). The publish decrements after it folded the watermark and hid the slot.</summary>
+    internal void AddPendingDeath(int clusterChunkId, int delta) => Interlocked.Add(ref BlockWord(ref _pendingDeathBlocks, clusterChunkId), delta);
 
     /// <summary>
     /// Turns a slot the caller has just claimed into a reservation: taken, and not occupied. The reservation is set before the occupancy bit is cleared.
@@ -97,10 +121,56 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void UnreserveSlot(byte* clusterBase, int clusterChunkId, int slotIndex, SpatialGrid grid)
     {
         ClearSlotMetadata(clusterBase, slotIndex);
+        DecrementCellEntityCountOnRelease(grid, clusterChunkId, true);
+        DropReservation(clusterBase, clusterChunkId, slotIndex, grid);
+    }
+
+    /// <summary>
+    /// PUBLISH of a destroy in an archetype that promises snapshot isolation (VIS-09): the slot leaves HEAD — the change signals, the cell's count, the
+    /// shrink flag, the occupancy bit — and stays taken, reserved, its entity id and bytes in place, so a snapshot older than the destroy still finds the
+    /// entity by scan until the cleanup releases it (<see cref="ReleaseHiddenSlot"/>) once no snapshot can see it alive. The died watermark is the caller's,
+    /// folded before (BIND-04).
+    /// </summary>
+    internal void HideDestroyedSlot(byte* clusterBase, int clusterChunkId, int slotIndex, SpatialGrid grid)
+    {
+        var bit = 1L << slotIndex;
+        NoteSlotsChanged(clusterChunkId, (ulong)bit);
+        NoteStructureSlots(clusterChunkId, (ulong)bit);
+        Interlocked.Or(ref ReservationWord(clusterChunkId), bit);
+        var prevOccupancy = Interlocked.And(ref *(long*)clusterBase, ~bit);
+        if ((prevOccupancy & bit) == 0)
+        {
+            return;
+        }
+
+        // The slot is not reusable before the cleanup, so the claim cursor is left where it is.
+        DecrementCellEntityCountOnRelease(grid, clusterChunkId, false);
+        Interlocked.Increment(ref SlotReleasesThisTick);
+        FlagClusterShrinkAxesOnly(clusterChunkId);
+    }
+
+    /// <summary>
+    /// The cleanup's half of a hidden destroy (VIS-09): the slot's collection buffers released, its metadata cleared, its reservation dropped — the slot
+    /// claimable again — and a cluster left with nothing occupied or reserved finalised and freed.
+    /// </summary>
+    internal void ReleaseHiddenSlot(byte* clusterBase, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid)
+    {
+        if (CollectionSlots != null)
+        {
+            ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
+        }
+
+        ClearSlotMetadata(clusterBase, slotIndex);
+        DropReservation(clusterBase, clusterChunkId, slotIndex, grid);
+    }
+
+    /// <summary>Whether <paramref name="slotIndex"/> of the cluster is held by a reservation — a placed spawn, or a hidden destroy.</summary>
+    internal bool IsReserved(int clusterChunkId, int slotIndex) => (ReservedBits(clusterChunkId) & (1UL << slotIndex)) != 0;
+
+    private void DropReservation(byte* clusterBase, int clusterChunkId, int slotIndex, SpatialGrid grid)
+    {
         var bit = 1L << slotIndex;
         var prevReserved = (ulong)Interlocked.And(ref ReservationWord(clusterChunkId), ~bit);
-        DecrementCellEntityCountOnRelease(grid, clusterChunkId, true);
-
         var drained = (prevReserved & ~(ulong)bit) == 0 && (Volatile.Read(ref *(ulong*)clusterBase) & Layout.FullMask) == 0;
         if (drained)
         {

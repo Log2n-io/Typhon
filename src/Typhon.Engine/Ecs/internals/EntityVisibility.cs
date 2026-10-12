@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// A snapshot's view of an EntityMap record, a pending born resolved through its owner's commit card (VIS-01, VIS-08). A published record is tested
+/// A snapshot's view of an EntityMap record, a pending born or died resolved through its owner's commit card (VIS-01, VIS-08, VIS-09). A published record is tested
 /// exactly as before, inline; only a spawn caught between its PREPARE and its PUBLISH takes the slow path.
 /// </summary>
 internal static unsafe class EntityVisibility
@@ -17,21 +17,17 @@ internal static unsafe class EntityVisibility
         ref ChunkAccessor<PersistentStore> accessor, EpochManager epochManager)
     {
         ref var header = ref EntityRecordAccessor.GetHeader(record);
-        return header.IsBornPending ? IsVisiblePending(record, tsn, cards, map, key, ref accessor, epochManager) : header.IsVisibleAt(tsn);
+        return header.HasPending ? IsVisiblePending(record, tsn, cards, map, key, ref accessor, epochManager) : header.IsVisibleAt(tsn);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool IsVisiblePending(byte* record, long tsn, CommitCardTable cards, RawValuePagedHashMap<long, PersistentStore> map, long key,
         ref ChunkAccessor<PersistentStore> accessor, EpochManager epochManager)
     {
-        if (EntityRecordAccessor.GetHeader(record).IsVisibleAt(tsn, cards, out var reread))
-        {
-            return true;
-        }
-
+        var visible = EntityRecordAccessor.GetHeader(record).IsVisibleAt(tsn, cards, out var reread);
         if (!reread)
         {
-            return false;
+            return visible;
         }
 
         using var guard = EpochGuard.Enter(epochManager);
@@ -46,20 +42,16 @@ internal static unsafe class EntityVisibility
     internal static bool IsVisibleInScan(byte* entry, long tsn, CommitCardTable cards, RawValuePagedHashMap<long, PersistentStore> map, long key)
     {
         ref var header = ref EntityRecordAccessor.GetHeader(entry);
-        return header.IsBornPending ? IsVisiblePendingInScan(entry, tsn, cards, map, key) : header.IsVisibleAt(tsn);
+        return header.HasPending ? IsVisiblePendingInScan(entry, tsn, cards, map, key) : header.IsVisibleAt(tsn);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool IsVisiblePendingInScan(byte* entry, long tsn, CommitCardTable cards, RawValuePagedHashMap<long, PersistentStore> map, long key)
     {
-        if (EntityRecordAccessor.GetHeader(entry).IsVisibleAt(tsn, cards, out var reread))
-        {
-            return true;
-        }
-
+        var visible = EntityRecordAccessor.GetHeader(entry).IsVisibleAt(tsn, cards, out var reread);
         if (!reread || map == null)
         {
-            return false;
+            return visible;
         }
 
         byte* record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
