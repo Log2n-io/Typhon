@@ -6281,7 +6281,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        if (maxEntityKey > 0)
+        // A max, never an assignment: the persisted counter may be above every occupied key — the top-key entity destroyed — and keys are never
+        // recycled (RB-06). Assigned, the next spawn was handed the dead entity's key (#1164).
+        if (maxEntityKey > state.NextEntityKey)
         {
             state.NextEntityKey = maxEntityKey;
         }
@@ -6903,7 +6905,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             clusterAccessor.Dispose();
         }
 
-        if (maxEntityKey > 0)
+        // A max, never an assignment: the persisted counter may be above every occupied key — the top-key entity destroyed — and keys are never
+        // recycled (RB-06). Assigned, the next spawn was handed the dead entity's key (#1164).
+        if (maxEntityKey > state.NextEntityKey)
         {
             state.NextEntityKey = maxEntityKey;
         }
