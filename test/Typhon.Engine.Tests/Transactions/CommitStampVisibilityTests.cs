@@ -33,6 +33,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<CsWallet>();
+        dbe.RegisterComponentFromAccessor<CsKeyed>();
         dbe.RegisterComponentFromAccessor<EvoCcBagV1>();
         dbe.InitializeArchetypes();
         return dbe;
@@ -215,6 +216,306 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
             gate.Release();
             dbe.CommitAfterAppendProbe = null;
         }
+    }
+
+    /// <summary>The reserved (pending-spawn) slots and the occupied ones of the archetype's clusters (VIS-08).</summary>
+    private static (int Reserved, int Occupied) SlotCensus(DatabaseEngine dbe)
+    {
+        var state = dbe._archetypeStates[Archetype<CsWalletArch>.Metadata.ArchetypeId].ClusterState;
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var ids = state.ReadActiveClusterList(out var count);
+        var accessor = state.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            int reserved = 0, occupied = 0;
+            for (var c = 0; c < count; c++)
+            {
+                reserved += BitOperations.PopCount(state.ReservedBits(ids[c]));
+                unsafe
+                {
+                    occupied += BitOperations.PopCount(*(ulong*)accessor.GetChunkAddress(ids[c]));
+                }
+            }
+
+            return (reserved, occupied);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// VIS-08's defining case: a reader begun after a writer's commit point, before its publish, sees the entity the commit spawned together with the
+    /// revision it wrote — by id, by count and by enumeration. The spawn was placed in PREPARE with a pending born and a reserved slot; the reader resolves
+    /// it through the writer's commit card, as it resolves the revision. Placed at publish, the spawn was absent while the revision was visible: half a
+    /// commit. Read again after the publish, the same.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [CancelAfter(30_000)]
+    public void AReaderBegunBetweenTheAppendAndThePublish_SeesTheSpawnWithTheRevision()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var y = Spawn(dbe, 1)[0];
+        var gate = new Gate();
+        dbe.CommitAfterAppendProbe = gate.Probe;
+        try
+        {
+            var x = EntityId.Null;
+            var writer = new BackgroundCommit(dbe, tx =>
+            {
+                Set(tx, y, 777);
+                x = tx.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 999 }));
+            });
+            gate.ThreadId = writer.ThreadId;
+            writer.Go();
+            gate.AwaitReached();
+            Assert.That(SlotCensus(dbe).Reserved, Is.EqualTo(1), "premise: the spawn holds a reserved slot between the append and the publish");
+
+            using var reader = dbe.CreateReadOnlyTransaction();
+            void AssertWholeCommit(string when)
+            {
+                Assert.That(Read(reader, y), Is.EqualTo(777), $"premise ({when}): the reader sees the commit's revision");
+                Assert.That(reader.TryOpen(x, out var e), Is.True, $"{Marker} ({when}): the reader sees the revision and not the entity the commit spawned");
+                Assert.That(e.Read(CsWalletArch.Wallet).Credits, Is.EqualTo(999), $"{Marker} ({when}): the spawn reads incomplete");
+                Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(2), $"{Marker} ({when}): the count misses the spawn");
+                Assert.That(reader.Query<CsWalletArch>().Execute(), Does.Contain(x), $"{Marker} ({when}): the enumeration misses the spawn");
+            }
+
+            AssertWholeCommit("before the publish");
+            gate.Release();
+            writer.Join();
+            Assert.That(reader.TSN, Is.GreaterThan(writer.Stamp), "premise: the reader's snapshot is above the writer's stamp");
+            AssertWholeCommit("after the publish");
+            Assert.That(SlotCensus(dbe), Is.EqualTo((0, 2)), "the publish left a reservation, or no occupancy bit");
+        }
+        finally
+        {
+            gate.Release();
+            dbe.CommitAfterAppendProbe = null;
+        }
+    }
+
+    /// <summary>
+    /// The same window through a predicate query on the SoA scan path: the spawn's slot is reserved, not occupied, and the scan visits it and resolves it
+    /// through the writer's card — its cluster not pruned, the zone maps having been widened at the placement. The index path is HEAD-valued (design 05's
+    /// non-goal, #674): its entries are the publish's.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [CancelAfter(30_000)]
+    public void AScanBetweenTheAppendAndThePublish_FindsTheSpawnInItsReservedSlot()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        EntityId y;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            y = tx.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 1, Value = 1 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var gate = new Gate();
+        dbe.CommitAfterAppendProbe = gate.Probe;
+        QueryPathProbe.Forced = ClusterScanPath.FullScan;
+        try
+        {
+            var x = EntityId.Null;
+            var writer = new BackgroundCommit(dbe, tx =>
+            {
+                tx.OpenMut(y).Set(CsKeyedArch.Keyed, new CsKeyed { Group = 1, Value = 2 });
+                x = tx.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 5, Value = 9 }));
+            });
+            gate.ThreadId = writer.ThreadId;
+            writer.Go();
+            gate.AwaitReached();
+
+            using var reader = dbe.CreateReadOnlyTransaction();
+            Assert.That(reader.Open(y).Read(CsKeyedArch.Keyed).Value, Is.EqualTo(2), "premise: the reader sees the commit's revision");
+            var found = reader.Query<CsKeyedArch>().WhereField<CsKeyed>(k => k.Group == 5).Execute();
+            Assert.That(found, Does.Contain(x), $"{Marker}: the scan misses the spawn in its reserved slot");
+            Assert.That(found, Does.Not.Contain(y), "the committed entity is in another group");
+            gate.Release();
+            writer.Join();
+        }
+        finally
+        {
+            QueryPathProbe.Forced = ClusterScanPath.Planner;
+            gate.Release();
+            dbe.CommitAfterAppendProbe = null;
+        }
+    }
+
+    /// <summary>
+    /// The other side: a reader begun before the writer's commit point sees neither the spawn nor the revision, before the publish and after it — the
+    /// pending born resolves to a stamp above its snapshot.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [CancelAfter(30_000)]
+    public void AReaderBegunBeforeTheCommitPoint_SeesNeitherTheSpawnNorTheRevision()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var y = Spawn(dbe, 1)[0];
+        var gate = new Gate();
+        dbe.CommitAfterAppendProbe = gate.Probe;
+        try
+        {
+            var x = EntityId.Null;
+            var writer = new BackgroundCommit(dbe, tx =>
+            {
+                Set(tx, y, 777);
+                x = tx.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 999 }));
+            });
+            gate.ThreadId = writer.ThreadId;
+            using var reader = dbe.CreateReadOnlyTransaction();
+            writer.Go();
+            gate.AwaitReached();
+
+            void AssertNone(string when)
+            {
+                Assert.That(Read(reader, y), Is.EqualTo(100), $"premise ({when}): the older reader keeps the old revision");
+                Assert.That(reader.TryOpen(x, out _), Is.False, $"{Marker} ({when}): an older reader sees a spawn committed after its snapshot");
+                Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker} ({when}): the older reader counts the spawn");
+            }
+
+            AssertNone("before the publish");
+            gate.Release();
+            writer.Join();
+            AssertNone("after the publish");
+        }
+        finally
+        {
+            gate.Release();
+            dbe.CommitAfterAppendProbe = null;
+        }
+    }
+
+    /// <summary>
+    /// A commit that aborts after its spawns were placed, before its commit point, leaves no trace of them (AP-07): no record, no reserved slot, the
+    /// cluster the spawn opened given back — and no reader ever saw them.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [VerifiesRule("AP-07")]
+    [CancelAfter(30_000)]
+    public void AnAbortAfterThePlacement_LeavesNoTraceOfTheSpawn()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var y = Spawn(dbe, 1)[0];
+        var before = SlotCensus(dbe);
+        (int, int) placed = default;
+        EntityId x;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Set(tx, y, 777);
+            x = tx.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 999 }));
+            dbe.CommitBeforeAppendProbe = () =>
+            {
+                placed = SlotCensus(dbe);
+                throw new InvalidOperationException("staged: an abort after the placement, before the append");
+            };
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => tx.Commit());
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+            }
+
+            Assert.That(placed.Item1, Is.EqualTo(1), "premise: the spawn was placed — its slot reserved — when the commit aborted");
+            Assert.That(SlotCensus(dbe), Is.EqualTo(before), $"{Marker}: the aborted spawn's slot is still reserved, or occupied");
+        }
+
+        using var reader = dbe.CreateReadOnlyTransaction();
+        Assert.That(reader.TryOpen(x, out _), Is.False, $"{Marker}: the aborted spawn is in the EntityMap");
+        Assert.That(Read(reader, y), Is.EqualTo(100), "the aborted revision");
+        Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker}: the aborted spawn is counted");
+        using var next = dbe.CreateQuickTransaction();
+        var z = next.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 5 }));
+        Assert.That(next.Commit(), Is.True, "the engine spawns on after the abort");
+        Assert.That(SlotCensus(dbe), Is.EqualTo((0, 2)), "the next spawn reuses the given-back slot");
+    }
+
+    /// <summary>
+    /// A HEAD reader — one with no snapshot: subscriptions, references — takes a pending born for not alive: the spawn's commit may still abort. Published,
+    /// the entity is alive; destroyed, it is not.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    public void APendingBorn_IsNotAliveForAHeadReader()
+    {
+        var header = new EntityRecordHeader { BornTSN = EntityRecordHeader.PendingBorn(42) };
+        Assert.That(header.IsBornPending, Is.True, "premise");
+        Assert.That(header.IsAlive, Is.False, $"{Marker}: a pending spawn reads alive to a HEAD reader");
+        Assert.That(header.IsVisibleAt(TransactionChain.TsnRefusalThreshold), Is.False, "a pending born, to a plain test, is not born at any TSN");
+        header.BornTSN = 43;
+        Assert.That(header.IsAlive, Is.True, "published");
+        header.DiedTSN = 44;
+        Assert.That(header.IsAlive, Is.False, "destroyed");
+    }
+
+    /// <summary>
+    /// What a checkpoint can persist of a placed spawn — its record, born pending, and its cluster page — never says the slot is occupied: the slot is held
+    /// by the in-memory reservation, the page's occupancy bit is clear (VIS-08, CM-01). The crash open re-derives the EntityMap from occupancy, so a crash
+    /// before the append reopens with no trace of the spawn. Had the claim's occupancy bit stayed set, that rebuild would resurrect an entity no commit made.
+    /// Checked on the page itself: a checkpoint does not complete while the committing transaction holds its pages, so the crash cannot be staged here.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [CancelAfter(30_000)]
+    public void APlacedSpawn_IsNeverOccupiedOnItsPage_OnlyReserved()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Spawn(dbe, 1);
+        var state = dbe._archetypeStates[Archetype<CsWalletArch>.Metadata.ArchetypeId];
+        bool pending = false, onPage = true, reserved = false;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var x = tx.Spawn<CsWalletArch>(CsWalletArch.Wallet.Set(new CsWallet { Credits = 999 }));
+            dbe.CommitBeforeAppendProbe = () =>
+            {
+                using var guard = EpochGuard.Enter(dbe.EpochManager);
+                var map = state.EntityMap.Segment.CreateChunkAccessor();
+                var clusters = state.ClusterState.ClusterSegment.CreateChunkAccessor();
+                try
+                {
+                    unsafe
+                    {
+                        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+                        Assert.That(state.EntityMap.TryGet(x.EntityKey, record, ref map), Is.True, "premise: the placed spawn has its record");
+                        pending = EntityRecordAccessor.GetHeader(record).IsBornPending;
+                        var cluster = ClusterEntityRecordAccessor.GetClusterChunkId(record);
+                        var bit = 1UL << ClusterEntityRecordAccessor.GetSlotIndex(record);
+                        onPage = (*(ulong*)clusters.GetChunkAddress(cluster) & bit) != 0;
+                        reserved = (state.ClusterState.ReservedBits(cluster) & bit) != 0;
+                    }
+                }
+                finally
+                {
+                    clusters.Dispose();
+                    map.Dispose();
+                }
+            };
+            try
+            {
+                Assert.That(tx.Commit(), Is.True);
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+            }
+        }
+
+        Assert.That(pending, Is.True, $"{Marker}: the placed spawn's record is not born pending");
+        Assert.That(onPage, Is.False, $"{Marker}: the placed spawn's occupancy bit is on its page, where a checkpoint persists it");
+        Assert.That(reserved, Is.True, $"{Marker}: nothing holds the placed spawn's slot");
     }
 
     /// <summary>

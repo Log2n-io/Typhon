@@ -208,7 +208,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
               it removes every persistent slot), one a staged write visited earlier moves away, or one its own entity
               holds. Keys are compared by the index's own comparison (`IBTreeIndex.KeysEqual` / `KeyHash`): -0 and +0
               are one float key;
-            - a spawn that leaves unset a Versioned component a unique index covers: `FinalizeSpawns` would index it under
+            - a spawn that leaves unset a Versioned component a unique index covers: `PublishSpawns` would index it under
               whatever its claimed cluster slot holds (`InvalidOperationException`; the same stale key under an AllowMultiple
               index is #1259);
             - a spawn of a spatial archetype without its spatial component (`InvalidOperationException`)

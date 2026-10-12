@@ -7,10 +7,10 @@ namespace Typhon.Engine.Internals;
 
 // Applies committed WAL v2 records back into engine state during crash recovery, reusing the engine's own write primitives (the design's "one write path").
 // P1.2: rebuilds a committed spawned entity — the EntityRecord plus, per spawn-init Slot, a committed revision-chain root holding the component value — by
-// BUILDING the full record then InsertNew once, mirroring the live FinalizeSpawns (approach B; the live engine has no in-place location update — a Versioned
+// BUILDING the full record then InsertNew once, mirroring the live PlaceSpawns (approach B; the live engine has no in-place location update — a Versioned
 // location is written once at spawn and stays fixed, revisions append within the chain). Both the flat (non-cluster) path and the cluster path are wired:
 // a cluster-eligible archetype reconstructs the entity into a CLUSTER slot (ClaimSlot + SoA value write + ClusterEntityRecord), mirroring the live
-// FinalizeSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy, SetEnabledBits and
+// PlaceSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy, SetEnabledBits and
 // collections (#389: ApplyCollectionFolds, which MUST run after an entity's Slot apply) are all wired. Runs single-threaded under one epoch scope with a
 // dedicated ChangeSet (so applied page mutations are captured by the sealing checkpoint). See 03-recovery.md §3.
 
@@ -116,7 +116,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>
     /// Rebuilds a committed spawned entity: the EntityRecord (BornTSN, EnabledBits) plus, for each spawn-init Slot, a committed
     /// revision-chain root holding the component value, then inserts it into the archetype's EntityMap. Mirrors the live
-    /// FinalizeSpawns build-then-insert so recovery produces the same persisted shape through the same insert primitive. Flat
+    /// PlaceSpawns build-then-insert so recovery produces the same persisted shape through the same insert primitive. Flat
     /// (non-cluster) Versioned/SingleVersion path; the entity becomes alive AND its spawn-init component values resolve.
     /// </summary>
     public void ApplySpawnedEntity(long entityIdRaw, ushort archetypeId, ushort enabledBits, long bornTsn, IReadOnlyCollection<SlotData> slots)
@@ -190,7 +190,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>
     /// Cluster counterpart of <see cref="ApplySpawnedEntity"/>: reconstructs a committed spawned entity into a CLUSTER slot — claims a slot, writes each
     /// committed component value into the cluster SoA (the HEAD; for Versioned it also builds the revision-chain root and records its chunkId), writes the
-    /// EntityId + per-slot EnabledBits into the cluster, and inserts the ClusterEntityRecord. Mirrors the live FinalizeSpawns cluster branch. Spatial
+    /// EntityId + per-slot EnabledBits into the cluster, and inserts the ClusterEntityRecord. Mirrors the live PlaceSpawns cluster branch. Spatial
     /// cell-routing and AABBs are rebuilt wholesale on reopen, so a plain (non-spatial) ClaimSlot is used. RB-01: secondary indexes are NOT populated here
     /// — they are rebuilt from final HEAD data at open. Idempotent (AP-12): a re-applied entity already in the loaded map is skipped.
     /// </summary>

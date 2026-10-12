@@ -80,6 +80,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                 RoutingId = _sourceTable.DBE.RoutingIdOf(meta),
                 View = this,
                 Tx = tx,
+                Map = engineState.EntityMap,
             };
             engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
             accessor.Dispose();
@@ -88,14 +89,14 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
     private struct SourceCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
+        public RawValuePagedHashMap<long, PersistentStore> Map;
         public ushort RoutingId;
         public NavigationView<TSource, TTarget> View;
         public Transaction Tx;
 
         public bool Process(long key, byte* value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
-            if (!header.IsVisibleAt(Tx.TSN))
+            if (!EntityVisibility.IsVisibleInScan(value, Tx.TSN, Tx.DBE.CommitCards, Map, key))
             {
                 return true;
             }

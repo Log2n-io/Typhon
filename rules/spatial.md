@@ -177,7 +177,7 @@
     ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
     ClusterRef.ApplySpatialWrite,
     ArchetypeClusterState.ReachCoversIndex, ArchetypeClusterState.RebuildClusterAabbs, ArchetypeClusterState.RebuildSpatialStateFromData,
-    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.FinalizeSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent, ClusterRadiusBatch
+    DatabaseEngine.FinalizeArchetypeFenceHead, Transaction.PlaceSpawns, EscapedClusterSet, EscapedClusterSet.IsCurrent, ClusterRadiusBatch
   verified: ClusterOverhangTests — one entity filed a row below each query and reaching 0.1 into it, found by AABB (all three drains),
     radius, ray and frustum; AabbClusterEnumeratorDrainTests' oracle on a scattered population (added 2026-09-12, #906 — before it every
     one of those four missed the entity); ClusterReachTests — an edge cell's out-of-world overhang widens nothing, an inner cell's box

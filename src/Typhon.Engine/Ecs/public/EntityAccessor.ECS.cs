@@ -309,7 +309,7 @@ public unsafe partial class EntityAccessor
             guard.Dispose();
         }
 
-        return found && EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(TSN);
+        return found && EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager);
     }
 
     /// <summary>Check whether an entity link target is alive.</summary>
@@ -565,13 +565,13 @@ public unsafe partial class EntityAccessor
             return Miss(id, throwOnMiss);
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
-
-        // MVCC visibility check
-        if (!header.IsVisibleAt(TSN))
+        // MVCC visibility check — a pending born through its owner's card (VIS-08)
+        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager))
         {
             return Miss(id, throwOnMiss);
         }
+
+        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
 
         // Resolve EnabledBits with MVCC overrides
         ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN);
@@ -680,7 +680,7 @@ public unsafe partial class EntityAccessor
         byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, ref info.TransientCompContentAccessor, ref info.CompContentAccessor);
         // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
         // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
-        // (FinalizeSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
+        // (PlaceSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
         if (_discipline == CommitDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
             && info.CommitStaged != null && info.CommitStaged.TryGetValue(pk, out var slot))
         {
@@ -745,9 +745,9 @@ public unsafe partial class EntityAccessor
             }
 
             // #713: an entity this transaction spawned has no HEAD to protect — it lives in a spawn-staging chunk that no other transaction can see until
-            // FinalizeSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
+            // PlaceSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
             // was wrong three ways: StagedSlot.Location would carry a content chunk id where PublishStagedEntry expects a cluster location, the publish
-            // would run against a HEAD that does not exist yet, and FinalizeSpawns would then overwrite it with the spawn value. Skipping the staging
+            // would run against a HEAD that does not exist yet, and PlaceSpawns would then overwrite it with the spawn value. Skipping the staging
             // leaves the spawn's own SV Slot record (BuildCommitBatch, #395 D5 / CM-06) carrying the final value — one record, still atomic.
             if (_discipline == CommitDiscipline.Commit && !isOwnSpawn)
             {
@@ -778,7 +778,7 @@ public unsafe partial class EntityAccessor
             _didInPlaceSvWrite = true;   // CM-02: a TickFence in-place SingleVersion write happened — blocks late escalation to Commit
         }
 
-        // DIRTY-01 (rules/ecs.md): a spawn sets no dirty bit. These bitmaps track write mutations to entities that are already PUBLISHED, and FinalizeSpawns
+        // DIRTY-01 (rules/ecs.md): a spawn sets no dirty bit. These bitmaps track write mutations to entities that are already PUBLISHED, and PlaceSpawns
         // deliberately marks neither this one nor ClusterDirtyBitmap for a spawn. For an own-spawn `chunkId` names the spawn-staging chunk, which has no
         // published identity to report: the entity PK is stamped into that chunk's overhead only for TRANSIENT slots, so the fence reads PK 0 and dies on
         // GetMetaByRouting(0) — silently, in Release (#837). A Transient own-spawn does carry its PK and so reached the change-filtered dispatch scan instead,

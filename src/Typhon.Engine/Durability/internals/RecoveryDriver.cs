@@ -471,7 +471,7 @@ internal sealed class RecoveryDriver
             }
 
             // Spawned AND destroyed within the window → net not-alive: don't insert (and don't create its revision chains), exactly
-            // as the live FinalizeSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
+            // as the live PlaceSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
             // historical alive-then-dead transition is not observable — absence == dead for IsAlive.
             //
             // Not "nothing to do": the data file may hold the entity — a checkpoint that copied its cluster page between the spawn and the destroy — and

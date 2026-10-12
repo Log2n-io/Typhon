@@ -124,7 +124,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         }
         byte* readBuf = stackalloc byte[_recordSize];
         return _engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor)
-            && EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(_tsn);
+            && EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref _entityMapAccessor,
+                _accessor.DBE.EpochManager);
     }
 
     /// <summary>
@@ -197,11 +198,13 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             return Miss(id, throwOnMiss);
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
-        if (!header.IsVisibleAt(_tsn))
+        if (!EntityVisibility.IsVisible(readBuf, _tsn, _accessor.CommitCards, _engineState.EntityMap, id.EntityKey, ref _entityMapAccessor,
+                _accessor.DBE.EpochManager))
         {
             return Miss(id, throwOnMiss);
         }
+
+        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
         ushort enabledBits = _enabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, _tsn);
 
         var result = new EntityRef(id, _archetype, _engineState, _accessor, enabledBits);

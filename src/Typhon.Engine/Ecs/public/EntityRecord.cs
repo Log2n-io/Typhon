@@ -65,11 +65,68 @@ public struct EntityRecordHeader
         }
     }
 
-    /// <summary>True if the entity has not been destroyed (DiedTSN == 0).</summary>
+    /// <summary>
+    /// True if the entity is published and has not been destroyed (DiedTSN == 0). A spawn placed in PREPARE and not yet published (its born pending, VIS-08)
+    /// is not alive for a HEAD reader: its commit may still abort.
+    /// </summary>
     public readonly bool IsAlive
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => DiedTsnHigh == 0 && DiedTsnLow == 0;
+        get => DiedTsnHigh == 0 && DiedTsnLow == 0 && (BornTsnHigh & PendingHighBit) == 0;
+    }
+
+    /// <summary>Bit 47 of a 48-bit stamp field: the value is an owner's TSN, not a commit stamp (VIS-08). TSNs stay below it (#1208).</summary>
+    internal const long PendingBit = 1L << 47;
+
+    private const uint PendingHighBit = 1u << 31;   // bit 47 of the 48-bit value, in its upper 32 bits
+
+    /// <summary>The born value of a spawn placed in PREPARE by <paramref name="ownerTsn"/>: above every snapshot, so a test that ignores it reads "not born".</summary>
+    internal static long PendingBorn(long ownerTsn) => PendingBit | ownerTsn;
+
+    /// <summary>True while the spawn's commit has not published: <see cref="BornTSN"/> holds its owner's TSN.</summary>
+    internal readonly bool IsBornPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => (BornTsnHigh & PendingHighBit) != 0;
+    }
+
+    /// <summary>
+    /// <see cref="IsVisibleAt(long)"/> with a pending born resolved through its owner's commit card (VIS-01, VIS-08): visible when the owner is registered
+    /// with a stamp at or below <paramref name="txTsn"/>, or is <paramref name="txTsn"/> itself. With no card holding the owner the answer is in the live
+    /// record, not this copy — it was published since, or removed by an abort: <paramref name="reread"/> is set, and the caller reads the record again and
+    /// asks once more; a record still pending then is not committed.
+    /// </summary>
+    internal readonly bool IsVisibleAt(long txTsn, CommitCardTable cards, out bool reread)
+    {
+        reread = false;
+        if (IsBornPending)
+        {
+            var owner = BornTSN & ~PendingBit;
+            if (owner != txTsn)
+            {
+                if (cards == null || !cards.TryGetStamp(owner, out var stamp))
+                {
+                    reread = true;
+                    return false;
+                }
+
+                if (stamp > txTsn)
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            var born = BornTSN;
+            if (born != 0 && born > txTsn)
+            {
+                return false;
+            }
+        }
+
+        var died = DiedTSN;
+        return died == 0 || died > txTsn;
     }
 
     /// <summary>

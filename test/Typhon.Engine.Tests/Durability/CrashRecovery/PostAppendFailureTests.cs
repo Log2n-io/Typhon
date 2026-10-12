@@ -294,15 +294,18 @@ internal sealed class PostAppendFailureTests
         }
     }
 
-    /// <summary>Enough spawns that the publish grows the archetype's cluster segment, so it allocates pages.</summary>
-    private const int SpawnCount = 3_000;
+    /// <summary>
+    /// Enough spawns that the publish grows the archetype's B+Tree, so it allocates pages. A spawn's placement — the cluster segment's growth — is PREPARE's
+    /// since VIS-08; its index entries are still the publish's.
+    /// </summary>
+    private const int SpawnCount = 20_000;
 
     private static EntityId[] SpawnWallets(Transaction tx)
     {
         var ids = new EntityId[SpawnCount];
         for (var i = 0; i < ids.Length; i++)
         {
-            ids[i] = tx.Spawn<PaWalletArch>(PaWalletArch.Wallet.Set(new PaWallet { Credits = 1_000 + i }));
+            ids[i] = tx.Spawn<PaVKeyArch>(PaVKeyArch.Key.Set(new PaVKey { Key = 1_000 + i }));
         }
 
         return ids;
@@ -314,7 +317,7 @@ internal sealed class PostAppendFailureTests
         for (var i = 0; i < ids.Length; i++)
         {
             Assert.That(tx.TryOpen(ids[i], out var e), Is.True, $"{Marker}: {what}: spawn {i} of {ids.Length} is missing");
-            Assert.That(e.Read(PaWalletArch.Wallet).Credits, Is.EqualTo(1_000 + i), $"{Marker}: {what}: spawn {i} is incomplete");
+            Assert.That(e.Read(PaVKeyArch.Key).Key, Is.EqualTo(1_000 + i), $"{Marker}: {what}: spawn {i} is incomplete");
         }
     }
 

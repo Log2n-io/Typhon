@@ -1479,8 +1479,7 @@ public unsafe partial class Transaction : EntityAccessor
             return false;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(fullBuf);
-        return header.IsVisibleAt(TSN);
+        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref _entityMapCacheAccessor, _epochManager);
     }
 
     private Result<int, BTreeLookupStatus> GetCompRevTableFirstChunkId(long pk, ComponentInfo info)
@@ -1860,7 +1859,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
             // visibility act, deferred to PublishComponent.
             //
-            // The exemption is PENDING SPAWNS, not the Created flag. FinalizeSpawns does the cluster copy for entities spawned in this transaction, so
+            // The exemption is PENDING SPAWNS, not the Created flag. PlaceSpawns does the cluster copy for entities spawned in this transaction, so
             // repeating it here would be redundant — but since #845 a component can also be CREATED mid-life on an already-published entity, via
             // EntityRefMut.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
             // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
@@ -2139,7 +2138,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// PREPARE half of the cluster commit (AP-01): resolves the cluster-slot coordinates for the publish, and says what it owes. Both the index and view
     /// reconcile (Phase A, <see cref="PublishClusterIndexes"/>) and the HEAD→cluster-slot copy (Phase B, <see cref="PublishClusterVersionedSlot"/>) run
     /// after the WAL Append: Phase A here would survive an abort before the append, which reverts revisions only (#1262). Single EntityMap lookup; the
-    /// resolved coordinates are returned so publish does not repeat it. <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles
+    /// resolved coordinates are returned so publish does not repeat it. <paramref name="copyToCluster"/> is false for spawns (PlaceSpawns handles
     /// cluster copy for those).
     /// </summary>
     private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId, ComponentTable table,
@@ -2509,7 +2508,7 @@ public unsafe partial class Transaction : EntityAccessor
                 else if (newComp != null)
                 {
                     // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
-                    // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                    // cluster tail slot so destroy/update can target this entity's entry (mirrors PlaceSpawns).
                     if (!field.AllowMultiple)
                     {
                         RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
@@ -2905,7 +2904,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Recovery aggregates the Spawn + these Slots by EntityId and applies them together (ApplySpawnedEntity → cluster slot claim + SoA value
             // write), so the entity recovers with its values. TickFence spawns stay checkpoint-durable by design (no per-commit SV WAL). Versioned
             // spawn values are already logged via their revision chains (SingleCache loop below); Transient is never logged. Read from the
-            // spawn-staging content chunk (entry.Loc[slot]) — FinalizeSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
+            // spawn-staging content chunk (entry.Loc[slot]) — PlaceSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
             // value already sits at ComponentOverhead in the staging chunk.
             if (_discipline == CommitDiscipline.Commit)
             {
@@ -2928,7 +2927,7 @@ public unsafe partial class Transaction : EntityAccessor
 
                         // #839: a SingleVersion spawn payload is staged in the transaction's arena, not in a content chunk. This read is unaffected by the
                         // move — it wants the [ComponentOverhead][value] bytes, and the arena slot has exactly that layout — so CM-06's emission keeps its
-                        // existing position BEFORE FinalizeSpawns rather than needing to be re-ordered after it.
+                        // existing position BEFORE PlaceSpawns rather than needing to be re-ordered after it.
                         int stage = s.Stage[slot];
                         if (stage <= 0)
                         {
@@ -3126,6 +3125,8 @@ public unsafe partial class Transaction : EntityAccessor
     {
         try
         {
+            // The spawns PREPARE placed go first: their records name the chain roots the rollback frees (AP-07, VIS-08).
+            UnplaceSpawns();
             var unbounded = UnitOfWorkContext.None;
             RollbackCore(ref unbounded, Typhon.Profiler.TransactionRollbackReason.AutoOnDispose);
         }
@@ -3399,6 +3400,10 @@ public unsafe partial class Transaction : EntityAccessor
             // cell needs — is checked here, after PREPARE and before the point of no return: past it a failure could only stop the engine.
             ValidatePublishBeforeAppend();
 
+            // VIS-08: every spawn exists before the commit point — its slot reserved, its record in the EntityMap with a pending born. An exit before the
+            // append un-places them (RollbackAfterFailedCommit).
+            PlaceSpawns();
+
             // ── PREPARE complete. Deferred-cleanup enqueue is prepare-side bookkeeping (no visibility) — it runs before Append. ──
             _dbe.LogCommitPhase(TSN, "DeferredCleanup");
 
@@ -3430,6 +3435,7 @@ public unsafe partial class Transaction : EntityAccessor
             _dbe.LogCommitPhase(TSN, "Append");
             // CK-13: the append records the batch's first LSN in _inFlightLsnFloor before publishing its frame. It stays there, keeping the checkpoint
             // below these records, until the publish below has put their page effects in memory.
+            _dbe.CommitBeforeAppendProbe?.Invoke();
             var walHighLsn = AppendToWal(ref ctx);
             var published = false;
 
@@ -3443,11 +3449,11 @@ public unsafe partial class Transaction : EntityAccessor
 
                 // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
                 //    CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
-                //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
+                //    inserts via PlaceSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
                 _dbe.LogCommitPhase(TSN, "Publish");
                 PublishPreparedComponents();
                 FlushEcsPendingOperations();
-                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
+                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after PlaceSpawns so a staged
                 // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
                 _dbe.CommitBeforeStagedPublishProbe?.Invoke();
                 PublishStagedCommitWrites();

@@ -720,7 +720,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
     /// <summary>
     /// Insert a key-value pair, skipping duplicate detection. Caller guarantees the key does not exist.
-    /// Used for batch inserts of known-unique keys (e.g., freshly generated EntityKeys in FinalizeSpawns).
+    /// Used for batch inserts of known-unique keys (e.g., freshly generated EntityKeys in PlaceSpawns).
     /// </summary>
     public void InsertNew(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {

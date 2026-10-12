@@ -1106,9 +1106,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             var chunkId = ids[i];
             var clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId, true) : transientAccessor.GetChunkAddress(chunkId, true);
-            if (*(ulong*)clusterBase != 0)
+            if (TakenBits(*(ulong*)clusterBase, chunkId) != 0)
             {
-                continue; // Claim re-filled this cluster after the drain — keep alive
+                continue; // Claim re-filled this cluster after the drain — keep alive (a reserved slot counts: VIS-08)
             }
 
             FinaliseEmptyClusterCellState(SpatialOfCluster(chunkId).Grid, chunkId);
@@ -4161,12 +4161,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// distinct EntityIds, so the second silently overwrites the first's component data and a thread reads back another thread's value.
     /// A retry that abandons the atomicity of the attempt it is retrying is not a retry; the loop below keeps every attempt a CAS.
     /// </remarks>
-    private static int ClaimFreeBit(ref ulong occupancy, ulong fullMask)
+    private int ClaimFreeBit(ref ulong occupancy, ulong fullMask, int clusterChunkId)
     {
         while (true)
         {
+            // Occupancy first, then the reservations (VIS-08): a slot a spawn reserved is taken in one or the other at every instant.
             var current = Volatile.Read(ref occupancy);
-            var available = ~current & fullMask;
+            var available = ~TakenBits(current, clusterChunkId) & fullMask;
             if (available == 0)
             {
                 return -1;
@@ -4174,7 +4175,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             var slot = BitOperations.TrailingZeroCount(available);
             var desired = current | (1UL << slot);
-            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current && !LostToAReservation(ref occupancy, clusterChunkId, slot))
             {
                 return slot;
             }
@@ -4186,7 +4187,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Returns the cluster chunk ID and the slot index within the cluster.
     /// </summary>
     /// <remarks>
-    /// <para><b>Multi-writer.</b> The sentence that stood here until #842 — "FinalizeSpawns is single-writer (no concurrent commit), so CAS always succeeds
+    /// <para><b>Multi-writer.</b> The sentence that stood here until #842 — "PlaceSpawns is single-writer (no concurrent commit), so CAS always succeeds
     /// on first try" — stopped being true at #708, which put concurrent Transient commits on this path, and the code kept being written as though it held:
     /// the free-cluster head was read twice around its own test, and cluster allocation ran outside the finalize latch that <c>ClaimSlotInCell</c> takes
     /// around the same work. Both are fixed below. What the CAS in <see cref="ClaimFreeBit"/> does cover is two claimants landing on the same cluster: each
@@ -4214,11 +4215,11 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Folding for a claim that then fails (cluster full) only raises the maximum, which is conservative — never a relaxation.
             NoteClusterBorn(clusterId, bornTsn);
 
-            var slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            var slot = ClaimFreeBit(ref occupancy, Layout.FullMask, clusterId);
             if (slot >= 0)
             {
                 // If the cluster is now full, reset the head — the next call allocates a new one (O(1)).
-                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
+                if ((TakenBits(Volatile.Read(ref occupancy), clusterId) & Layout.FullMask) == Layout.FullMask)
                 {
                     FreeClusterHead = -1;
                 }
@@ -4261,10 +4262,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             NoteClusterBorn(clusterId, bornTsn);   // before the publishing CAS — see the PersistentStore overload
 
-            var slot = ClaimFreeBit(ref occupancy, Layout.FullMask);
+            var slot = ClaimFreeBit(ref occupancy, Layout.FullMask, clusterId);
             if (slot >= 0)
             {
-                if ((Volatile.Read(ref occupancy) & Layout.FullMask) == Layout.FullMask)
+                if ((TakenBits(Volatile.Read(ref occupancy), clusterId) & Layout.FullMask) == Layout.FullMask)
                 {
                     FreeClusterHead = -1;
                 }
@@ -4305,8 +4306,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ref var occupancy = ref *(ulong*)clusterBase;
 
-        var current = occupancy;
-        var available = ~current & Layout.FullMask;
+        // Occupancy first, then the reservations (VIS-08).
+        var current = Volatile.Read(ref occupancy);
+        var available = ~TakenBits(current, clusterChunkId) & Layout.FullMask;
         if (available == 0)
         {
             return -1;
@@ -4323,14 +4325,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             var slot = BitOperations.TrailingZeroCount(available);
             var desired = current | (1UL << slot);
-            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current)
+            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current && !LostToAReservation(ref occupancy, clusterChunkId, slot))
             {
                 return slot;
             }
 
             // CAS lost to a concurrent writer — re-read occupancy and retry. Cluster already dirtied above; the dirty mark is idempotent.
-            current = occupancy;
-            available = ~current & Layout.FullMask;
+            current = Volatile.Read(ref occupancy);
+            available = ~TakenBits(current, clusterChunkId) & Layout.FullMask;
             if (available == 0)
             {
                 return -1;
@@ -4373,8 +4375,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ref var occupancy = ref *(ulong*)clusterBase;
 
-        var current = occupancy;
-        if ((current & bit) != 0)
+        var current = Volatile.Read(ref occupancy);
+        if ((TakenBits(current, clusterChunkId) & bit) != 0)
         {
             return false;
         }
@@ -4384,7 +4386,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // One CAS, no retry loop. A retry would have to re-test the same bit, and if a sibling took it the answer cannot change — unlike first fit, where a
         // lost CAS only means "try a different slot". Losing here degrades to the caller's fallback chain, which is the correct response.
-        return Interlocked.CompareExchange(ref occupancy, current | bit, current) == current;
+        return Interlocked.CompareExchange(ref occupancy, current | bit, current) == current
+            && !LostToAReservation(ref occupancy, clusterChunkId, slotIndex);
     }
 
     /// <summary>
@@ -4655,7 +4658,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
 
             var id = clusters[i];
-            var occupancy = *(ulong*)accessor.GetChunkAddress(id);
+            var occupancy = TakenBits(Volatile.Read(ref *(ulong*)accessor.GetChunkAddress(id)), id);   // a reserved slot is taken (VIS-08)
             if ((~occupancy & Layout.FullMask) == 0)
             {
                 continue;
@@ -6000,7 +6003,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// copy and once after the publish.
     /// </summary>
     /// <remarks>
-    /// <para><b>Why.</b> Two writers CAS into a cluster's entry holding no latch: a spawn's widen (<c>Transaction.FinalizeSpawns</c>) and
+    /// <para><b>Why.</b> Two writers CAS into a cluster's entry holding no latch: a spawn's widen (<c>Transaction.PlaceSpawns</c>) and
     /// <c>WriteSpatial</c>'s grow (<c>ClusterRef.ApplySpatialWrite</c>). A grow copies the array and publishes the copy, so a CAS into the old array after the
     /// copy read that entry is lost. The entry then misses the entity; the fence later republishes the entry to the per-cell index, and the entity drops out
     /// of every query (SQ-01). Before that, the index holds a box the entry does not, which is the bound <see cref="RefreshClusterReach"/> relies on.</para>
@@ -10188,7 +10191,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
+        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && ReservedBits(clusterChunkId) == 0;
 
         if (wasOccupied)
         {
@@ -10266,7 +10269,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0;
+        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && ReservedBits(clusterChunkId) == 0;
 
         if (wasOccupied)
         {

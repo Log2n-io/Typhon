@@ -11,7 +11,7 @@ is **registered** on a commit card, and a reader that meets one of its still-fla
 Design: `claude/design/Revision/05-commit-stamp-and-snapshot-floor.md` (option C, amended 2026-10-09); plan:
 `claude/design/Revision/06-mvcc-commit-path-implementation-plan.md` §6.
 
-**Scope of this file: family 1, revision elements.** The other five stamp families — `BornTSN`, `DiedTSN`, the cluster
+**Scope of this file: family 1, revision elements, and family 2, spawns (VIS-08, plan 06 step 5.2).** The other four stamp families — `BornTSN`, `DiedTSN`, the cluster
 born/died watermarks, enabled-bits `ChangeTSN`, view deltas — keep today's creation-TSN behaviour until plan 06 Phase 5,
 and are not covered here. Plan 06 step 3.2 built VIS-03 (the cards, the commit point, the stamp on the wire), step 3.3 the
 rest: revisions are published with the commit stamp and resolved by stamp and owner. Families 2–5 (born, died, enabled
@@ -135,16 +135,32 @@ below names the invariant that proves it.
   on_violation: a transaction of the reopened engine whose TSN equals a crashed owner's finds that owner's flagged
                 revisions as its own, or a reader resolves them through its card
 
-### VIS-08: A pending spawn is never absent from a scan, and never persisted as occupied `[fatal]` `[silent]` `[UNBUILT]`
-  invariant a spawn is placed in PREPARE: its EntityMap record with `BornTSN = Pending(owner)` (bit 47), its slot in the
-            cluster's in-memory pending mask, its occupancy bit clear; PUBLISH writes `BornTSN = stamp`, sets the occupancy
-            bit, then clears the pending bit. Every occupancy-driven scan visits `occupancy | pending` and resolves a
-            pending slot's born through the owner's card (VIS-01); a slot claim treats a pending slot as taken
-  invariant the pending mask is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes, never its
-            occupancy bit, so a crash rebuild from occupancy resurrects no uncommitted spawn (CM-01)
-  invariant an abort after PREPARE un-places the spawn — slot, record, index and spatial entries (AP-07)
-  unbuilt: plan 06 step 5.2. Today `FinalizeSpawns` places a spawn at PUBLISH, after the stamp: a reader that resolved
-           the commit's revisions through the card finds no record — half a commit
+### VIS-08: A pending spawn is never absent from a snapshot, and never persisted as occupied `[fatal]` `[silent]`
+  invariant a spawn is placed in PREPARE (Transaction.PlaceSpawns): its slot claimed and moved into the cluster's in-memory
+            reservation word (ArchetypeClusterState.ReserveClaimedSlot — the reservation set, then the occupancy bit
+            cleared), its SoA bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the
+            bounds widened — zone maps, cluster AABB, per-cell index: conservative upward, and placement reads them.
+            PUBLISH (Transaction.PublishSpawns) writes the record's stamp in place, then folds the born watermark, sets the
+            occupancy bit and clears the reservation (PublishReservedSlot), then adds the B+Tree entries
+  invariant a reader resolves a pending born through the owner's card (EntityVisibility, EntityRecordHeader.IsVisibleAt
+            with the cards), re-reading the record when no card holds the owner; a snapshot scan of the cluster SoA
+            visits `occupancy | reserved` and decides a reserved slot through its record, which must exist; the
+            occupancy count bails to the map probe while a cluster holds a reservation. A HEAD reader takes a pending born
+            for not alive (EntityRecordHeader.IsAlive)
+  invariant every claim treats a reserved slot as taken (ArchetypeClusterState.TakenBits) and re-checks the reservation
+            after its occupancy CAS: a spawn's move restores the word's old value, an ABA a stale claimer's CAS would
+            win (ArchetypeClusterState.LostToAReservation); a cluster with a reserved slot is never drained
+  invariant the reservation is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes and its
+            record, never its occupancy bit, so the crash open's EntityMap rebuild from occupancy resurrects no
+            uncommitted spawn (CM-01)
+  invariant an abort before the commit point un-places the spawn — record removed, reservation released, a cluster left
+            empty freed (Transaction.UnplaceSpawns, ArchetypeClusterState.UnreserveSlot; AP-07). The widened bounds stay
+            wider, which is safe
+  note the B+Tree is HEAD-valued (design 05's non-goal, #674): an index-path query between a commit's append and its
+       publish does not find the spawn its revisions announce
+  scope: Transaction.PlaceSpawns, Transaction.PublishSpawns, Transaction.UnplaceSpawns, ArchetypeClusterState.ReserveClaimedSlot,
+         ArchetypeClusterState.PublishReservedSlot, ArchetypeClusterState.UnreserveSlot, ArchetypeClusterState.LostToAReservation,
+         ArchetypeClusterState.TakenBits, EntityVisibility.IsVisible, EntityVisibility.IsVisibleInScan, EntityRecordHeader.IsAlive
   spec: tla/CommitStampFamilies.tla — SpawnRead (spawnatpublish, scanoccupancy)
   on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan
   requires: VIS-01, VIS-02, CM-01

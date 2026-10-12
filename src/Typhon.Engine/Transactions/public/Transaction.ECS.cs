@@ -65,8 +65,8 @@ public unsafe partial class Transaction
         var info = GetComponentInfo(compType);
 
         // An entity still pending in THIS transaction has no EntityMap record yet, so there is nothing for the mid-life publication path to write a chain root
-        // into. Worse, FinalizeSpawns writes SetCompRevFirstChunkId(recordPtr, vi, entry.Rev[slot]) unconditionally, so a root published any other way would be
-        // clobbered by a still-zero entry.Rev. The spawn owns this entity's publication: record the allocation in its SpawnEntry and let FinalizeSpawns do the
+        // into. Worse, PlaceSpawns writes SetCompRevFirstChunkId(recordPtr, vi, entry.Rev[slot]) unconditionally, so a root published any other way would be
+        // clobbered by a still-zero entry.Rev. The spawn owns this entity's publication: record the allocation in its SpawnEntry and let PlaceSpawns do the
         // one thing it already does correctly.
         int spawnIdx = SpawnedIndexOf(id);
         if (spawnIdx >= 0)
@@ -151,6 +151,13 @@ public unsafe partial class Transaction
         /// write); placement falls back to this one when that key is not a valid realm (D-2).
         /// </summary>
         public ushort SpawnRealm;
+
+        /// <summary>Set by <see cref="PlaceSpawns"/> in PREPARE, cleared by <see cref="PublishSpawns"/> or <see cref="UnplaceSpawns"/> (VIS-08).</summary>
+        public bool Placed;
+        /// <summary>The reserved slot's cluster, or -1 for a legacy (non-cluster) record.</summary>
+        public int PlacedClusterChunkId;
+        /// <summary>The reserved slot within <see cref="PlacedClusterChunkId"/>.</summary>
+        public byte PlacedSlot;
     }
 
     /// <summary>
@@ -320,6 +327,8 @@ public unsafe partial class Transaction
             TxTsn = TSN,
             Results = results,
             PendingDestroys = _pendingDestroys,
+            Cards = CommitCards,
+            Map = engineState.EntityMap,
         };
         try
         {
@@ -344,17 +353,13 @@ public unsafe partial class Transaction
         public long TxTsn;
         public List<EntityId> Results;
         public HashSet<EntityId> PendingDestroys;
+        public CommitCardTable Cards;
+        public RawValuePagedHashMap<long, PersistentStore> Map;
 
         public bool Process(long key, byte* value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
-
-            // MVCC visibility: not-yet-born or already-died entities are invisible at this snapshot.
-            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
-            {
-                return true;
-            }
-            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
+            // MVCC visibility: not-yet-born or already-died entities are invisible at this snapshot; a pending born through its owner's card (VIS-08).
+            if (!EntityVisibility.IsVisibleInScan(value, TxTsn, Cards, Map, key))
             {
                 return true;
             }
@@ -886,7 +891,7 @@ public unsafe partial class Transaction
 
             // #839: only a VERSIONED slot gets a content chunk — there the chunk IS the first revision's payload, owned by the chain and reclaimed with it.
             // A SingleVersion or Transient slot's bytes belong in the cluster slot, so it stages in the transaction arena instead; the chunk it used to get
-            // became unreachable the moment FinalizeSpawns copied the payload out, because no ClusterEntityRecord field can hold its id.
+            // became unreachable the moment PlaceSpawns copied the payload out, because no ClusterEntityRecord field can hold its id.
             var isVersioned = table.StorageMode == StorageMode.Versioned;
             int vi = valueBySlot[slot];
             var supplied = vi >= 0;
@@ -1413,13 +1418,13 @@ public unsafe partial class Transaction
             return Miss(id, throwOnMiss);
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
-
-        // Visibility check
-        if (!header.IsVisibleAt(TSN))
+        // Visibility check — a pending born through its owner's card (VIS-08)
+        if (!EntityVisibility.IsVisible(readBuf, TSN, CommitCards, es.EntityMap, id.EntityKey, ref _entityMapCacheAccessor, _epochManager))
         {
             return Miss(id, throwOnMiss);
         }
+
+        ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
 
         // Resolve EnabledBits: committed entities check MVCC overrides
         {
@@ -1689,10 +1694,10 @@ public unsafe partial class Transaction
     internal void FlushEcsPendingOperations()
     {
         // Enable/Disable for committed entities: directly upserts to EntityMap.
-        // For spawned entities: skip here, FinalizeSpawns applies the override.
+        // For spawned entities: skip here, PlaceSpawns applies the override.
         FlushPendingEnableDisable();
-        // Finalize spawned entities: set BornTSN from sentinel to actual TSN, insert SV secondary indexes.
-        FinalizeSpawns();
+        // Spawns placed in PREPARE (PlaceSpawns): stamp their records, set their occupancy bits, maintain their indexes (VIS-08).
+        PublishSpawns();
         FlushPendingDestroys();
         PublishMembershipDeltas();
     }
@@ -1704,7 +1709,7 @@ public unsafe partial class Transaction
     /// <remarks>
     /// <para>
     /// <b>Why a separate pass rather than a line inside each loop.</b> A membership entry must not become drainable before the entity it names
-    /// is queryable — a concurrent transaction with a higher TSN can drain this buffer while <c>FinalizeSpawns</c> is still running, and would
+    /// is queryable — a concurrent transaction with a higher TSN can drain this buffer while <c>PublishSpawns</c> is still running, and would
     /// otherwise hand its caller an id that <c>EntityMap</c> does not yet resolve. Running after BOTH loops makes that ordering true by
     /// construction instead of by inspection of two thousand lines of spawn code.
     /// </para>
@@ -1763,7 +1768,7 @@ public unsafe partial class Transaction
             {
                 foreach (var entry in _spawnedEntities)
                 {
-                    // Spawned and destroyed in the same transaction: FinalizeSpawns skipped the EntityMap insert, so there is nothing to announce.
+                    // Spawned and destroyed in the same transaction: PlaceSpawns skipped the EntityMap insert, so there is nothing to announce.
                     // The matching destroy below is still announced and lands on a view that never held the id, where TryRemove reports no change.
                     if (_pendingDestroys != null && _pendingDestroys.Contains(entry.Id))
                     {
@@ -1856,7 +1861,7 @@ public unsafe partial class Transaction
         var views = _membershipViewSnapshots[slot];
 
         // BeforeKey carries the entity's cluster location for stage 2's per-cluster match bits; stage 1 leaves it zero and never reads it.
-        // Populating it means threading the location out of FinalizeSpawns' cluster branch, which is only worth doing when stage 2 needs it.
+        // Populating it means threading the location out of PlaceSpawns' cluster branch, which is only worth doing when stage 2 needs it.
         byte flags = isCreation ? (byte)0x40 : (byte)0x80;
 
         // Hoisted: a [ThreadStatic] read is a TLS-base helper call, not a plain load, and this loop runs per view per entity on a path whose whole
@@ -1918,7 +1923,6 @@ public unsafe partial class Transaction
                 {
                     *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIdx)) = elementId;
                 }
-                field.ZoneMap?.Widen(clusterChunkId, fieldPtr);
 
                 // Notify views of creation (isCreation flag so incremental views detect the new entity)
                 var spawnTable = ctx.EngineState.SlotToComponentTable[ixSlot.Slot];
@@ -1953,6 +1957,31 @@ public unsafe partial class Transaction
         }
 
         ctx.ClusterState.MutationsSinceRebuild += mutations;
+    }
+
+    /// <summary>
+    /// Widens the zone maps of one index home over a placed spawn's field values (VIS-08). A bound, conservative upward, so PREPARE's: a snapshot scan of a
+    /// reserved slot must not have its cluster pruned by a zone map that does not cover it yet. An aborted spawn only leaves a map wider.
+    /// </summary>
+    private static void WidenClusterZoneMaps<TStore>(ClusterIndexSlot<TStore>[] ixSlots, byte* dataBase, ArchetypeClusterInfo layout, int clusterChunkId,
+        int slotIdx) where TStore : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return;
+        }
+
+        for (int ixs = 0; ixs < ixSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref ixSlots[ixs];
+            int compSize = layout.ComponentSize(ixSlot.Slot);
+            byte* compBase = dataBase + layout.ComponentOffset(ixSlot.Slot) + slotIdx * compSize;
+            for (int fi = 0; fi < ixSlot.Fields.Length; fi++)
+            {
+                ref var field = ref ixSlot.Fields[fi];
+                field.ZoneMap?.Widen(clusterChunkId, compBase + field.FieldOffset);
+            }
+        }
     }
 
     /// <summary>
@@ -2111,14 +2140,14 @@ public unsafe partial class Transaction
     /// <list type="bullet">
     /// <item>a spawn or Commit-discipline write that would put a key in a unique index that holds it when the write publishes — committed, or put by
     /// another spawn or write of this transaction: <see cref="UniqueConstraintViolationException"/>;</item>
-    /// <item>a spawn that leaves unset a Versioned component a unique index covers: <see cref="FinalizeSpawns"/> would index it under whatever bytes its
+    /// <item>a spawn that leaves unset a Versioned component a unique index covers: <see cref="PlaceSpawns"/> would index it under whatever bytes its
     /// claimed cluster slot holds (#1259) — <see cref="InvalidOperationException"/>;</item>
-    /// <item>a spawn of a spatial archetype that leaves its spatial component unset, which <see cref="FinalizeSpawns"/> cannot place in a cell:
+    /// <item>a spawn of a spatial archetype that leaves its spatial component unset, which <see cref="PlaceSpawns"/> cannot place in a cell:
     /// <see cref="InvalidOperationException"/>.</item>
     /// </list>
     /// </summary>
     /// <remarks>
-    /// The checks follow the publish's order: spawns (<see cref="FinalizeSpawns"/>), then destroys (<see cref="FlushPendingDestroys"/>), then the staged
+    /// The checks follow the publish's order: spawns (<see cref="PlaceSpawns"/>), then destroys (<see cref="FlushPendingDestroys"/>), then the staged
     /// writes in the order <see cref="PublishStagedCommitWrites"/> visits them. A staged write may take a key a destroy of this transaction removes from the
     /// index, or one a staged write visited before it moves away. Two transactions that put one key concurrently both pass this check; the later publish
     /// then fails and stops the engine (#1258).
@@ -2398,7 +2427,7 @@ public unsafe partial class Transaction
         }
     }
 
-    /// <summary>The spawns' checks, the per-archetype facts resolved once per run of one archetype, as <see cref="FinalizeSpawns"/> does.</summary>
+    /// <summary>The spawns' checks, the per-archetype facts resolved once per run of one archetype, as <see cref="PlaceSpawns"/> does.</summary>
     private void CheckSpawns(ref PublishCheck check)
     {
         var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
@@ -2455,7 +2484,7 @@ public unsafe partial class Transaction
     }
 
     /// <summary>
-    /// A spawn routed to a spatial cell must carry its spatial component: <see cref="FinalizeSpawns"/> reads its bounds to pick the cell. The routing
+    /// A spawn routed to a spatial cell must carry its spatial component: <see cref="PlaceSpawns"/> reads its bounds to pick the cell. The routing
     /// condition is <see cref="SetupSpawnAccessors"/>'s; only a Versioned component can be missing, as a SingleVersion one is always staged.
     /// </summary>
     private static void CheckSpawnSpatialComponent(ArchetypeEngineState es, ArchetypeClusterState cs, in SpawnEntry entry)
@@ -2687,7 +2716,13 @@ public unsafe partial class Transaction
     /// Finalize spawned entities: set BornTSN from sentinel (MaxValue) to actual TSN, making them visible.
     /// Also inserts SV secondary indexes (Versioned secondary indexes are handled by CommitComponentCore).
     /// </summary>
-    private void FinalizeSpawns()
+    /// <summary>
+    /// PREPARE half of a spawn (VIS-08, plan 06 step 5.2): the slot claimed and reserved — taken, its occupancy bit clear — the payload copied into it, and
+    /// the EntityMap record inserted with <c>BornTSN = Pending(owner)</c>, so the entity exists, flagged with its owner, before the commit point. A reader
+    /// resolves the pending born through the owner's commit card (VIS-01). PUBLISH (<see cref="PublishSpawns"/>) stamps the record, sets the occupancy bit,
+    /// and maintains the indexes and the spatial index; an abort before it un-places the spawn (<see cref="UnplaceSpawns"/>, AP-07).
+    /// </summary>
+    private void PlaceSpawns()
     {
         if (_spawnedEntities == null || _spawnedEntities.Count == 0)
         {
@@ -2734,7 +2769,7 @@ public unsafe partial class Transaction
         // Narrowphase scratch for ReadAndValidateBoundsFromPtr in the cluster spatial spawn hook (#230
         // Phase 1). Hoisted out of the per-entity loop to avoid CA2014 stack-pressure accumulation when
         // spawning many entities in one transaction — the per-iteration allocation would not release
-        // until FinalizeSpawns returns.
+        // until PlaceSpawns returns.
         // Sized for 3D ([minX, minY, minZ, maxX, maxY, maxZ]); 2D reads only populate the first 4 slots. Issue #230 Phase 3 unified 2D/3D per-cell index paths.
         Span<double> spawnSpatialCoords = stackalloc double[6];
 
@@ -2761,7 +2796,7 @@ public unsafe partial class Transaction
                 // Build EntityRecord on stack from SpawnEntry
                 ref var header = ref *(EntityRecordHeader*)recordPtr;
                 header = default;
-                header.BornTSN = PublishStamp;
+                header.BornTSN = EntityRecordHeader.PendingBorn(TSN);
 
                 ushort enabledBits = entry.EnabledBits;
                 if (_pendingEnableDisable != null && _pendingEnableDisable.TryGetValue(entry.Id, out var newBits))
@@ -2887,7 +2922,7 @@ public unsafe partial class Transaction
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, PublishStamp);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, TSN);
                         }
                         clusterBase = ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true);
                         if (ctx.HasClusterTransientAccessor)
@@ -2907,10 +2942,15 @@ public unsafe partial class Transaction
                         }
                         else
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, PublishStamp);
+                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, TSN);
                         }
                         clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
                     }
+
+                    // The claim's occupancy bit moves into the in-memory reservation word at once: the slot stays taken, and no page carries the bit of an
+                    // uncommitted spawn (VIS-08, CM-01). Recorded before anything that can throw, so an abort finds the slot to give back.
+                    ctx.ClusterState.ReserveClaimedSlot(clusterBase, clusterChunkId, slotIdx);
+                    PlacedSpawn(spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex, clusterChunkId, slotIdx);
 
                     // Copy component data from per-component chunks to cluster SoA slots.
                     // Transient slots are copied to TransientSegment; SV/V to ClusterSegment.
@@ -2979,17 +3019,11 @@ public unsafe partial class Transaction
                         }
                     }
 
-                    // OccupancyBit was already set by ClaimSlot
-
-                    // Build ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot)
+                    // Build ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot). Born pending; the H1 born fold is PUBLISH's, with the stamp,
+                    // before the occupancy bit (BIND-04, ArchetypeClusterState.PublishReservedSlot): a fresh cluster stays unestablished until then.
                     ClusterEntityRecordAccessor.InitializeRecord(recordPtr, ctx.Meta.VersionedSlotCount);
                     ref var clusterHeader = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
-                    clusterHeader.BornTSN = PublishStamp;
-                    // H1 visibility summary. For an EXISTING cluster the claim already raised the bound before publishing the occupancy bit — TSN is passed in
-                    // for exactly that — and this call is then an idempotent no-op. It is NOT redundant: a freshly allocated cluster is deliberately left
-                    // unestablished by the claim so the gate denies it until its slot has contents, and this is what establishes it. See
-                    // ArchetypeClusterState.FreshClusterStaysUnknown for why the two directions need opposite treatment.
-                    ctx.ClusterState.NoteClusterBorn(clusterChunkId, PublishStamp);
+                    clusterHeader.BornTSN = EntityRecordHeader.PendingBorn(TSN);
                     clusterHeader.EnabledBits = enabledBits;
                     ClusterEntityRecordAccessor.SetClusterChunkId(recordPtr, clusterChunkId);
                     ClusterEntityRecordAccessor.SetSlotIndex(recordPtr, (byte)slotIdx);
@@ -3010,168 +3044,8 @@ public unsafe partial class Transaction
                     // Insert ClusterEntityRecord into EntityMap
                     ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, recordPtr, ref ctx.MapAccessor, _changeSet);
 
-                    // Note: cluster pages are marked dirty at page level (GetChunkAddress(dirty:true) above).
-                    // Checkpoint persists them. We do NOT set ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch,
-                    // same as per-ComponentTable DirtyBitmap (which is also not set during FinalizeSpawns for non-cluster SV entities).
-
-                    // Insert per-archetype B+Tree entries for cluster entity, in both index homes (#655). The elementId tail always lives on the PRIMARY
-                    // (cluster) base even for a Transient slot, whose component bytes live in the Transient segment — see ProcessClusterShadowEntries.
-                    // Measured in Morton order and in arrival order (step 15 review, 4 K spawns of an archetype with one AllowMultiple index, warm,
-                    // Release): 16.6–18.6 ms inline against 18.4–20.0 ms deferred and replayed in key order — the tree does not care, and the
-                    // ordering itself costs nothing measurable warm (unsorted 17–18 ms). The matrix's "+90 % spawn" is a one-shot cold number paying
-                    // the ordering path's JIT. So the inserts stay where they are.
-                    {
-                        int clusterLocation = clusterChunkId * 64 + slotIdx;
-                        InsertClusterIndexEntries(ref ctx, ctx.ClusterState.IndexSlots, clusterBase, clusterBase, layout, clusterChunkId, slotIdx,
-                            clusterLocation, entry.Id, ref ctx.ClusterIdxAccessor, ref ctx.ClusterIdxAccessorS64, ctx.ClusterState.IndexSegmentString64);
-
-                        if (ctx.ClusterState.TransientIndexSlots != null)
-                        {
-                            // Pure-Transient archetypes have no separate Transient base — clusterBase already IS the TransientStore chunk (see the dstBase
-                            // selection above), so fall back to it rather than skipping the insert.
-                            byte* transientBase = clusterTransientBase != null ? clusterTransientBase : clusterBase;
-                            InsertClusterIndexEntries(ref ctx, ctx.ClusterState.TransientIndexSlots, transientBase, clusterBase, layout, clusterChunkId,
-                                slotIdx, clusterLocation, entry.Id, ref ctx.ClusterTransientIdxAccessor, ref ctx.ClusterTransientIdxAccessorS64,
-                                ctx.ClusterState.TransientIndexSegmentString64);
-                        }
-                    }
-
-                    // Maintain the per-cell cluster AABB index for cluster spatial archetypes (issue #230 Phase 3 Option B).
-                    // The legacy per-archetype R-Tree + back-pointer insert is gone — the per-cell index is now the single source of truth. Populates
-                    // both DynamicIndex and StaticIndex depending on the archetype's SpatialMode (see AddClusterToPerCellIndex for the split).
-                    if (ctx.ClusterState.SpatialSlot.HasSpatialIndex)
-                    {
-                        ref var ss = ref ctx.ClusterState.SpatialSlot;
-                        int spatialCompSize = layout.ComponentSize(ss.Slot);
-                        byte* spatialFieldPtr = clusterBase + layout.ComponentOffset(ss.Slot) + slotIdx * spatialCompSize + ss.FieldOffset;
-
-                        if (ctx.ClusterState.ClusterCellMap != null)
-                        {
-                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords))
-                            {
-                                ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
-                                ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
-
-                                // Latched when a cell tree could be in flight (#940): PromoteCellHalf transiently retires every back-pointer, and a plain
-                                // read crossing that window answers "not indexed" for a cluster that is — which resets its box to Empty below, wiping
-                                // concurrent spawners' widening, and then re-adds it to a tree that already holds it.
-                                ctx.ClusterState.SpawnIndexReadProbe?.Invoke();
-                                bool wasInIndex = ctx.ClusterState.IsClusterIndexed(clusterChunkId);
-                                // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full
-                                // [minX, minY, minZ, maxX, maxY, maxZ] layout. Prior to issue #230 Phase 3 this site was hardcoded to the 2D layout
-                                // regardless of tier — a latent bug that was masked because 3D archetypes only reach this hook when ConfigureSpatialGrid
-                                // was called, and the trigger/interest tests (the only 3D cluster callers) didn't call it.
-                                // Category mask comes from the archetype-level [SpatialIndex(Category=)] attribute (issue #230 Phase 3). It's the same value
-                                // for every entity in the archetype, so the cluster-level OR trivially converges to the archetype value. Defaults to
-                                // uint.MaxValue when the attribute doesn't set Category, matching pre-Phase-3 behavior.
-                                uint archetypeCategory = ss.FieldInfo.Category;
-                                bool is3D = ss.FieldInfo.FieldType.Is3D();
-
-                                // C15 (#872 step 9): the union is built in the CELL's frame, so the cell has to be resolved before it rather than after.
-                                // A cluster with no cell has no frame to be expressed in — its AABB is left at Empty rather than filled with world-space
-                                // values that would be indistinguishable from cell-relative ones on read.
-                                int cellKey = ctx.ClusterState.ClusterCellMap[clusterChunkId];
-                                double cellOriginX = 0d, cellOriginY = 0d, cellOriginZ = 0d;
-                                if (cellKey >= 0)
-                                {
-                                    // The realm the cluster is in (Realms SP-3): its grid is the frame of this cell key.
-                                    var clusterGrid = ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid;
-                                    clusterGrid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
-
-                                    // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
-                                    // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
-                                    ctx.ClusterState.RaiseClusterReachForSpawn(clusterGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ,
-                                        spawnSpatialCoords, is3D);
-                                }
-
-                                // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry
-                                // would be lost — see ArchetypeClusterState._clusterAabbsGrowth. The reset and the widen are redone in the new array.
-                                int aabbsStamp;
-                                do
-                                {
-                                    aabbsStamp = ctx.ClusterState.BeginClusterAabbsWrite();
-                                    ref var clusterAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
-                                    if (!wasInIndex)
-                                    {
-                                        // A cell-claimed cluster is indexed, with an empty box, by its allocation site under the latch (step 15 review), so
-                                        // this branch is for a cluster that reached here without one. The reset then has no concurrent widener to wipe.
-                                        clusterAabb = ClusterSpatialAabb.Empty;
-                                    }
-
-                                    if (cellKey < 0)
-                                    {
-                                        // No cell, no frame: the entry stays at Empty. Nothing to widen, but the reset above is still checked below.
-                                    }
-                                    else if (is3D)
-                                    {
-                                        ClusterSpatialAabb.WidenCas3F(ref clusterAabb,
-                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
-                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
-                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[2], cellOriginZ),
-                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginX),
-                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[4], cellOriginY),
-                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[5], cellOriginZ),
-                                            archetypeCategory);
-                                    }
-                                    else
-                                    {
-                                        ClusterSpatialAabb.WidenCas2F(ref clusterAabb,
-                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
-                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
-                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[2], cellOriginX),
-                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginY),
-                                            archetypeCategory);
-                                    }
-                                }
-                                while (!ctx.ClusterState.ClusterAabbsWriteLanded(aabbsStamp));
-
-                                if (cellKey >= 0)
-                                {
-                                    // Read back from the LIVE array: a grow after the loop copied the widen, and the index must never hold a box its
-                                    // ClusterAabbs entry does not — RefreshClusterReach computes the reach from the entries (SQ-01).
-                                    ref var liveAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
-                                    if (!wasInIndex)
-                                    {
-                                        ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, liveAabb);
-                                    }
-                                    else
-                                    {
-                                        // Routed rather than dereferenced: the mode split (Static vs Dynamic) is only half of it since #872 step 9 — a
-                                        // promoted cell has no linear index at all, so reaching for one is a null deref above the threshold. WIDEN, not
-                                        // update: this runs on a user thread beside other spawns into the same cluster and a latched grow of the same
-                                        // cell's index, and only the CAS form survives both (step 15 review).
-                                        ctx.ClusterState.WidenClusterInPerCellIndex(clusterChunkId, cellKey, in liveAabb);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // The per-ComponentTable TransientIndex insert that used to follow is gone (#629). Its own comment said Transient-indexed archetypes were
-                    // "excluded from cluster eligibility" and that the block only covered "the theoretical case where eligibility rules are relaxed in the
-                    // future" — the flip relaxed exactly that, so the block had quietly become live and was double-indexing: the per-archetype transient tree
-                    // is maintained above by InsertClusterIndexEntries(ClusterState.TransientIndexSlots, …), and that is the one reads consult.
-                    //
-                    // The entity-PK write into the chunk overhead stays: it is a layout invariant of an indexed non-Versioned component, not part of the tree.
-                    if (ctx.TrSlotCount > 0 && ctx.TrCompAccessors != null)
-                    {
-                        for (int si = 0; si < ctx.TrSlotCount; si++)
-                        {
-                            int trSlot = trSlots[si];
-                            var table = ctx.EngineState.SlotToComponentTable[trSlot];
-                            int srcStage = entry.Stage[trSlot];
-                            if (srcStage == 0 || table.Definition.EntityPKOverheadSize == 0)
-                            {
-                                continue;
-                            }
-
-                            // #839: the staged payload now lives in the spawn arena, so the PK lands there rather than in a Transient content chunk. This
-                            // stamp keeps the staged bytes a well-formed [PK][value] payload, which is what the comment above means by a layout invariant.
-                            // NOTE for review: with the chunk gone, the arena slot is discarded at commit and no reader outlives it, so this write may now be
-                            // dead. It is kept because proving that negative is a separate exercise from relocating the payload, and it costs one store.
-                            *(long*)SpawnArena.Resolve(srcStage) = (long)entry.Id.RawValue;
-                        }
-                    }
+                    // The bounds now, the B+Tree entries at PUBLISH with the record's stamp and the occupancy bit (PublishSpawns).
+                    PlaceClusterSpawnSpatial(ref ctx, in entry, clusterChunkId, slotIdx, clusterBase, clusterTransientBase, trSlots, spawnSpatialCoords);
                 }
                 else
                 {
@@ -3191,6 +3065,7 @@ public unsafe partial class Transaction
                     }
 
                     // Insert into EntityMap — skip duplicate check (EntityKey is freshly generated, guaranteed unique)
+                    PlacedSpawn(spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex, -1, 0);
                     ctx.EngineState.EntityMap.InsertNew(entry.Id.EntityKey, recordPtr, ref ctx.MapAccessor, _changeSet);
                 }
 
@@ -3216,8 +3091,336 @@ public unsafe partial class Transaction
         }
     }
 
+    private void PlacedSpawn(int index, int clusterChunkId, int slotIndex)
+    {
+        ref var e = ref CollectionsMarshal.AsSpan(_spawnedEntities)[index];
+        e.PlacedClusterChunkId = clusterChunkId;
+        e.PlacedSlot = (byte)slotIndex;
+        e.Placed = true;
+    }
+
     /// <summary>
-    /// The order <see cref="FinalizeSpawns"/> visits <c>_spawnedEntities</c> in: grouped by archetype, then by destination cell, then along the
+    /// PUBLISH half of a spawn (VIS-08): for every spawn <see cref="PlaceSpawns"/> placed, the record's born takes the commit stamp, then the cluster's
+    /// born watermark folds it and the occupancy bit is set (<see cref="ArchetypeClusterState.PublishReservedSlot"/>), then the per-archetype B+Tree entries
+    /// — a structure of HEAD values (design 05's non-goal, #674), maintained at publish as before (AP-07: an abort leaves no key no commit made).
+    /// </summary>
+    private void PublishSpawns()
+    {
+        if (_spawnedEntities == null || _spawnedEntities.Count == 0)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(_epochManager);
+        var ctx = new SpawnContext();
+        Span<int> svSlots = stackalloc int[16];
+        Span<int> svIdxAccessorBase = stackalloc int[16];
+        Span<int> trSlots = stackalloc int[16];
+        Span<int> trIdxAccessorBase = stackalloc int[16];
+        var stamp = PublishStamp;
+
+        try
+        {
+            var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+            for (var i = 0; i < spawns.Length; i++)
+            {
+                ref var entry = ref spawns[i];
+                if (!entry.Placed)
+                {
+                    continue;
+                }
+
+                if (!ctx.HasMapAccessor || entry.Id.ArchetypeId != ctx.LastArchId)
+                {
+                    DisposeSpawnAccessors(ref ctx);
+                    SetupSpawnAccessors(ref ctx, entry.Id.ArchetypeId, svSlots, svIdxAccessorBase, trSlots, trIdxAccessorBase);
+                }
+
+                // The record first, in place under its bucket's write latch: a reader that finds the occupancy bit reads a stamped born.
+                var stamper = new BornStamper { Stamp = stamp };
+                if (!ctx.EngineState.EntityMap.TryUpdateInPlace(entry.Id.EntityKey, ref stamper, ref ctx.MapAccessor))
+                {
+                    System.Diagnostics.Debug.Fail("VIS-08: a placed spawn's EntityMap record vanished before its publish");
+                }
+
+                if (ctx.UseCluster && entry.PlacedClusterChunkId >= 0)
+                {
+                    var clusterChunkId = entry.PlacedClusterChunkId;
+                    int slotIdx = entry.PlacedSlot;
+                    byte* clusterBase;
+                    byte* clusterTransientBase = null;
+                    if (ctx.ClusterState.ClusterSegment != null)
+                    {
+                        clusterBase = ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true);
+                        if (ctx.HasClusterTransientAccessor)
+                        {
+                            clusterTransientBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
+                        }
+                    }
+                    else
+                    {
+                        clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
+                    }
+
+                    ctx.ClusterState.PublishReservedSlot(clusterBase, clusterChunkId, slotIdx, stamp);
+                    PublishClusterSpawnIndexes(ref ctx, in entry, clusterChunkId, slotIdx, clusterBase, clusterTransientBase);
+                }
+
+                entry.Placed = false;
+            }
+        }
+        finally
+        {
+            DisposeSpawnAccessors(ref ctx);
+        }
+    }
+
+    /// <summary>A placed spawn's publish: its record's pending born replaced by the commit stamp (VIS-08).</summary>
+    private struct BornStamper : IRawValueUpdater
+    {
+        public long Stamp;
+
+        public void Update(byte* valueBytes) => EntityRecordAccessor.GetHeader(valueBytes).BornTSN = Stamp;
+    }
+
+    /// <summary>The per-archetype B+Tree entries of one published cluster spawn.</summary>
+    private void PublishClusterSpawnIndexes(ref SpawnContext ctx, in SpawnEntry entry, int clusterChunkId, int slotIdx, byte* clusterBase,
+        byte* clusterTransientBase)
+    {
+        var layout = ctx.ClusterState.Layout;
+        // Note: cluster pages are marked dirty at page level (GetChunkAddress(dirty:true) above).
+        // Checkpoint persists them. We do NOT set ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch,
+        // same as per-ComponentTable DirtyBitmap (which is also not set during PlaceSpawns for non-cluster SV entities).
+
+        // Insert per-archetype B+Tree entries for cluster entity, in both index homes (#655). The elementId tail always lives on the PRIMARY
+        // (cluster) base even for a Transient slot, whose component bytes live in the Transient segment — see ProcessClusterShadowEntries.
+        // Measured in Morton order and in arrival order (step 15 review, 4 K spawns of an archetype with one AllowMultiple index, warm,
+        // Release): 16.6–18.6 ms inline against 18.4–20.0 ms deferred and replayed in key order — the tree does not care, and the
+        // ordering itself costs nothing measurable warm (unsorted 17–18 ms). The matrix's "+90 % spawn" is a one-shot cold number paying
+        // the ordering path's JIT. So the inserts stay where they are.
+        {
+            int clusterLocation = clusterChunkId * 64 + slotIdx;
+            InsertClusterIndexEntries(ref ctx, ctx.ClusterState.IndexSlots, clusterBase, clusterBase, layout, clusterChunkId, slotIdx,
+                clusterLocation, entry.Id, ref ctx.ClusterIdxAccessor, ref ctx.ClusterIdxAccessorS64, ctx.ClusterState.IndexSegmentString64);
+
+            if (ctx.ClusterState.TransientIndexSlots != null)
+            {
+                // Pure-Transient archetypes have no separate Transient base — clusterBase already IS the TransientStore chunk (see the dstBase
+                // selection above), so fall back to it rather than skipping the insert.
+                byte* transientBase = clusterTransientBase != null ? clusterTransientBase : clusterBase;
+                InsertClusterIndexEntries(ref ctx, ctx.ClusterState.TransientIndexSlots, transientBase, clusterBase, layout, clusterChunkId,
+                    slotIdx, clusterLocation, entry.Id, ref ctx.ClusterTransientIdxAccessor, ref ctx.ClusterTransientIdxAccessorS64,
+                    ctx.ClusterState.TransientIndexSegmentString64);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The bounds of a cluster spawn's placement, in PREPARE with the claim: the zone maps, the cluster's AABB and the per-cell index widened over it. All
+    /// are bounds, conservative upward — a pending or aborted spawn only widens them — and readers rely on them: a snapshot scan prunes by the zone maps, and
+    /// the next spawn of the same commit chooses its cluster by how much each box grows (least enlargement, the growth cap). Also the Transient payloads' PK
+    /// stamp.
+    /// </summary>
+    private void PlaceClusterSpawnSpatial(ref SpawnContext ctx, in SpawnEntry entry, int clusterChunkId, int slotIdx, byte* clusterBase,
+        byte* clusterTransientBase, scoped Span<int> trSlots, scoped Span<double> spawnSpatialCoords)
+    {
+        var layout = ctx.ClusterState.Layout;
+        WidenClusterZoneMaps(ctx.ClusterState.IndexSlots, clusterBase, layout, clusterChunkId, slotIdx);
+        WidenClusterZoneMaps(ctx.ClusterState.TransientIndexSlots, clusterTransientBase != null ? clusterTransientBase : clusterBase, layout, clusterChunkId,
+            slotIdx);
+        // Maintain the per-cell cluster AABB index for cluster spatial archetypes (issue #230 Phase 3 Option B).
+        // The legacy per-archetype R-Tree + back-pointer insert is gone — the per-cell index is now the single source of truth. Populates
+        // both DynamicIndex and StaticIndex depending on the archetype's SpatialMode (see AddClusterToPerCellIndex for the split).
+        if (ctx.ClusterState.SpatialSlot.HasSpatialIndex)
+        {
+            ref var ss = ref ctx.ClusterState.SpatialSlot;
+            int spatialCompSize = layout.ComponentSize(ss.Slot);
+            byte* spatialFieldPtr = clusterBase + layout.ComponentOffset(ss.Slot) + slotIdx * spatialCompSize + ss.FieldOffset;
+
+            if (ctx.ClusterState.ClusterCellMap != null)
+            {
+                if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords))
+                {
+                    ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
+                    ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
+
+                    // Latched when a cell tree could be in flight (#940): PromoteCellHalf transiently retires every back-pointer, and a plain
+                    // read crossing that window answers "not indexed" for a cluster that is — which resets its box to Empty below, wiping
+                    // concurrent spawners' widening, and then re-adds it to a tree that already holds it.
+                    ctx.ClusterState.SpawnIndexReadProbe?.Invoke();
+                    bool wasInIndex = ctx.ClusterState.IsClusterIndexed(clusterChunkId);
+                    // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full
+                    // [minX, minY, minZ, maxX, maxY, maxZ] layout. Prior to issue #230 Phase 3 this site was hardcoded to the 2D layout
+                    // regardless of tier — a latent bug that was masked because 3D archetypes only reach this hook when ConfigureSpatialGrid
+                    // was called, and the trigger/interest tests (the only 3D cluster callers) didn't call it.
+                    // Category mask comes from the archetype-level [SpatialIndex(Category=)] attribute (issue #230 Phase 3). It's the same value
+                    // for every entity in the archetype, so the cluster-level OR trivially converges to the archetype value. Defaults to
+                    // uint.MaxValue when the attribute doesn't set Category, matching pre-Phase-3 behavior.
+                    uint archetypeCategory = ss.FieldInfo.Category;
+                    bool is3D = ss.FieldInfo.FieldType.Is3D();
+
+                    // C15 (#872 step 9): the union is built in the CELL's frame, so the cell has to be resolved before it rather than after.
+                    // A cluster with no cell has no frame to be expressed in — its AABB is left at Empty rather than filled with world-space
+                    // values that would be indistinguishable from cell-relative ones on read.
+                    int cellKey = ctx.ClusterState.ClusterCellMap[clusterChunkId];
+                    double cellOriginX = 0d, cellOriginY = 0d, cellOriginZ = 0d;
+                    if (cellKey >= 0)
+                    {
+                        // The realm the cluster is in (Realms SP-3): its grid is the frame of this cell key.
+                        var clusterGrid = ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid;
+                        clusterGrid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
+
+                        // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
+                        // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
+                        ctx.ClusterState.RaiseClusterReachForSpawn(clusterGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ,
+                            spawnSpatialCoords, is3D);
+                    }
+
+                    // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry
+                    // would be lost — see ArchetypeClusterState._clusterAabbsGrowth. The reset and the widen are redone in the new array.
+                    int aabbsStamp;
+                    do
+                    {
+                        aabbsStamp = ctx.ClusterState.BeginClusterAabbsWrite();
+                        ref var clusterAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
+                        if (!wasInIndex)
+                        {
+                            // A cell-claimed cluster is indexed, with an empty box, by its allocation site under the latch (step 15 review), so
+                            // this branch is for a cluster that reached here without one. The reset then has no concurrent widener to wipe.
+                            clusterAabb = ClusterSpatialAabb.Empty;
+                        }
+
+                        if (cellKey < 0)
+                        {
+                            // No cell, no frame: the entry stays at Empty. Nothing to widen, but the reset above is still checked below.
+                        }
+                        else if (is3D)
+                        {
+                            ClusterSpatialAabb.WidenCas3F(ref clusterAabb,
+                                ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
+                                ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
+                                ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[2], cellOriginZ),
+                                ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginX),
+                                ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[4], cellOriginY),
+                                ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[5], cellOriginZ),
+                                archetypeCategory);
+                        }
+                        else
+                        {
+                            ClusterSpatialAabb.WidenCas2F(ref clusterAabb,
+                                ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
+                                ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
+                                ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[2], cellOriginX),
+                                ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginY),
+                                archetypeCategory);
+                        }
+                    }
+                    while (!ctx.ClusterState.ClusterAabbsWriteLanded(aabbsStamp));
+
+                    if (cellKey >= 0)
+                    {
+                        // Read back from the LIVE array: a grow after the loop copied the widen, and the index must never hold a box its
+                        // ClusterAabbs entry does not — RefreshClusterReach computes the reach from the entries (SQ-01).
+                        ref var liveAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
+                        if (!wasInIndex)
+                        {
+                            ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, liveAabb);
+                        }
+                        else
+                        {
+                            // Routed rather than dereferenced: the mode split (Static vs Dynamic) is only half of it since #872 step 9 — a
+                            // promoted cell has no linear index at all, so reaching for one is a null deref above the threshold. WIDEN, not
+                            // update: this runs on a user thread beside other spawns into the same cluster and a latched grow of the same
+                            // cell's index, and only the CAS form survives both (step 15 review).
+                            ctx.ClusterState.WidenClusterInPerCellIndex(clusterChunkId, cellKey, in liveAabb);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The per-ComponentTable TransientIndex insert that used to follow is gone (#629). Its own comment said Transient-indexed archetypes were
+        // "excluded from cluster eligibility" and that the block only covered "the theoretical case where eligibility rules are relaxed in the
+        // future" — the flip relaxed exactly that, so the block had quietly become live and was double-indexing: the per-archetype transient tree
+        // is maintained above by InsertClusterIndexEntries(ClusterState.TransientIndexSlots, …), and that is the one reads consult.
+        //
+        // The entity-PK write into the chunk overhead stays: it is a layout invariant of an indexed non-Versioned component, not part of the tree.
+        if (ctx.TrSlotCount > 0 && ctx.TrCompAccessors != null)
+        {
+            for (int si = 0; si < ctx.TrSlotCount; si++)
+            {
+                int trSlot = trSlots[si];
+                var table = ctx.EngineState.SlotToComponentTable[trSlot];
+                int srcStage = entry.Stage[trSlot];
+                if (srcStage == 0 || table.Definition.EntityPKOverheadSize == 0)
+                {
+                    continue;
+                }
+
+                // #839: the staged payload now lives in the spawn arena, so the PK lands there rather than in a Transient content chunk. This
+                // stamp keeps the staged bytes a well-formed [PK][value] payload, which is what the comment above means by a layout invariant.
+                // NOTE for review: with the chunk gone, the arena slot is discarded at commit and no reader outlives it, so this write may now be
+                // dead. It is kept because proving that negative is a separate exercise from relocating the payload, and it costs one store.
+                *(long*)SpawnArena.Resolve(srcStage) = (long)entry.Id.RawValue;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives back what <see cref="PlaceSpawns"/> placed for a commit that ended before its commit point (AP-07): each record removed from the EntityMap, each
+    /// reserved slot released (<see cref="ArchetypeClusterState.UnreserveSlot"/>). Idempotent: a spawn it handled is no longer placed.
+    /// </summary>
+    private void UnplaceSpawns()
+    {
+        if (_spawnedEntities == null || _spawnedEntities.Count == 0)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(_epochManager);
+        var ctx = new SpawnContext();
+        Span<int> svSlots = stackalloc int[16];
+        Span<int> svIdxAccessorBase = stackalloc int[16];
+        Span<int> trSlots = stackalloc int[16];
+        Span<int> trIdxAccessorBase = stackalloc int[16];
+        try
+        {
+            var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+            for (var i = 0; i < spawns.Length; i++)
+            {
+                ref var entry = ref spawns[i];
+                if (!entry.Placed)
+                {
+                    continue;
+                }
+
+                if (!ctx.HasMapAccessor || entry.Id.ArchetypeId != ctx.LastArchId)
+                {
+                    DisposeSpawnAccessors(ref ctx);
+                    SetupSpawnAccessors(ref ctx, entry.Id.ArchetypeId, svSlots, svIdxAccessorBase, trSlots, trIdxAccessorBase);
+                }
+
+                ctx.EngineState.EntityMap.Remove(entry.Id.EntityKey, ref ctx.MapAccessor, _changeSet);
+                if (ctx.UseCluster && entry.PlacedClusterChunkId >= 0)
+                {
+                    var clusterChunkId = entry.PlacedClusterChunkId;
+                    var clusterBase = ctx.ClusterState.ClusterSegment != null
+                        ? ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true)
+                        : ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
+                    ctx.ClusterState.UnreserveSlot(clusterBase, clusterChunkId, entry.PlacedSlot, ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid);
+                }
+
+                entry.Placed = false;
+            }
+        }
+        finally
+        {
+            DisposeSpawnAccessors(ref ctx);
+        }
+    }
+
+    /// <summary>
+    /// The order <see cref="PlaceSpawns"/> visits <c>_spawnedEntities</c> in: grouped by archetype, then by destination cell, then along the
     /// intra-cell Morton curve — so first fit fills each cluster with spatial neighbours and a random-order bulk load is born packed rather than at
     /// the full extent of its cell. Rented from <see cref="ArrayPool{T}"/>; the caller returns it.
     /// </summary>
@@ -3300,7 +3503,7 @@ public unsafe partial class Transaction
                             realm = keyStage != 0 ? *(ushort*)(SpawnArena.Resolve(keyStage) + realmKeyOverhead + realmKeyOffset) : (ushort)0;
                             if (realm != orderRealm)
                             {
-                                // An invalid staged key sorts where FinalizeSpawns will place it: in the realm Spawn validated.
+                                // An invalid staged key sorts where PlaceSpawns will place it: in the realm Spawn validated.
                                 // The RESOLVED state (meta.ArchetypeId), not _archetypeStates[archId]: archId is the routing id, and indexing by it made this
                                 // check always false — every spawn sorted by the fallback (review #4).
                                 var valid = orderClusterState?.IsValidRealmForEntity(realm) ?? false;
@@ -3702,7 +3905,7 @@ public unsafe partial class Transaction
         // meta._entityRecordSize bytes — so a cluster archetype whose every component is Versioned overflowed the legacy size by 5 bytes.
         byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
-        // Hoist EntityMap accessor — reuse when archetype matches (same pattern as FinalizeSpawns)
+        // Hoist EntityMap accessor — reuse when archetype matches (same pattern as PlaceSpawns)
         ushort lastArchId = 0;
         var accessor = default(ChunkAccessor<PersistentStore>);
         bool hasAccessor = false;
@@ -3973,7 +4176,7 @@ public unsafe partial class Transaction
             foreach (var entityId in _pendingDestroys)
             {
                 // Skip entities that were spawned in this same transaction — they have no committed component data to delete
-                // (FinalizeSpawns skips spawn+destroy entities).
+                // (PlaceSpawns skips spawn+destroy entities).
                 if (SpawnedContains(entityId))
                 {
                     continue;
@@ -4263,7 +4466,7 @@ public unsafe partial class Transaction
     private void FlushPendingEnableDisableEntry(EntityId entityId, ushort newBits, byte* readBuf, ref ChunkAccessor<PersistentStore> clusterAccessor,
         ref ArchetypeClusterState clusterAccessorOwner)
     {
-        // Skip spawned entities — FinalizeSpawns applies the enable/disable override
+        // Skip spawned entities — PlaceSpawns applies the enable/disable override
         if (SpawnedContains(entityId))
         {
             return;
@@ -4325,7 +4528,7 @@ public unsafe partial class Transaction
     /// <para>
     /// Every slot's bit is set from the absolute mask; a bit already right is left alone, so a commit costs one atomic per component that actually changed.
     /// Those are <c>Interlocked</c> because the word is shared by every entity of the cluster: two transactions committing enable/disable on different
-    /// entities of one cluster each read-modify-write it, and a plain <c>|=</c> / <c>&amp;=</c> drops the other's bit — the race <see cref="FinalizeSpawns"/>
+    /// entities of one cluster each read-modify-write it, and a plain <c>|=</c> / <c>&amp;=</c> drops the other's bit — the race <see cref="PlaceSpawns"/>
     /// documents for the same words.
     /// </para>
     /// <para>
@@ -4406,7 +4609,7 @@ public unsafe partial class Transaction
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="FinalizeSpawns"/> is the commit path's only other writer of <c>CompRevFirstChunkId</c>, and it runs solely for entities spawned in the same
+    /// <see cref="PlaceSpawns"/> is the commit path's only other writer of <c>CompRevFirstChunkId</c>, and it runs solely for entities spawned in the same
     /// transaction. Without this, a component created on a LIVE entity got a correct chain and a correct content chunk that nothing pointed at, and every
     /// point-read resolver treats root 0 as absence, leaves the location 0, and the read returns zeros.
     /// </para>
@@ -4506,10 +4709,11 @@ public unsafe partial class Transaction
         // Entering one here is cheap and nesting-safe; on a committed transaction the freeing blocks are skipped, only the tail clears run.
         using var epochGuard = EpochGuard.Enter(_epochManager);
 
-        // If transaction was NOT committed, free component chunks for spawned entities.
-        // Entity was never inserted into EntityMap, so no EntityMap.Remove needed.
+        // If transaction was NOT committed, free component chunks for spawned entities. A spawn PREPARE placed and nothing un-placed yet (a failure of the
+        // rollback that should have) is given back first: its record names the chain freed below (VIS-08).
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)
         {
+            UnplaceSpawns();
             foreach (var entry in _spawnedEntities)
             {
                 var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);

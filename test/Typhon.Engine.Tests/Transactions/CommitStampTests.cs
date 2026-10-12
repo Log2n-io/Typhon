@@ -24,6 +24,21 @@ class CsWalletArch : Archetype<CsWalletArch>
     public static readonly Comp<CsWallet> Wallet = Register<CsWallet>();
 }
 
+/// <summary>An indexed Versioned component: its archetype's snapshot scans read zone maps and the cluster SoA (VIS-08).</summary>
+[Component("Typhon.Test.CommitStamp.Keyed", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct CsKeyed
+{
+    [Index(AllowMultiple = true)] public long Group;
+    public long Value;
+}
+
+[Archetype]
+class CsKeyedArch : Archetype<CsKeyedArch>
+{
+    public static readonly Comp<CsKeyed> Keyed = Register<CsKeyed>();
+}
+
 /// <summary>
 /// Plan 06 step 3.2, rule VIS-03 (<c>rules/data-engine.md</c>): the commit-stamp infrastructure. A committer reserves a commit card before PREPARE, registers
 /// and draws its stamp at the commit point, writes the stamp on TxCommit, and gives the card back after its publish or on any exit before the commit point.

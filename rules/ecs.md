@@ -434,19 +434,19 @@ Two bitmaps drive the tick fence: `ComponentTable.DirtyBitmap`, keyed by content
 already-published entities did this tick mutate?* — and both feed the same two consumers: WAL emission at the fence, and
 change-filtered system dispatch.
 
-A **spawn is not a mutation** for this purpose, and `FinalizeSpawns` says so where it publishes: *"We do NOT set
+A **spawn is not a mutation** for this purpose, and `PublishSpawns` says so where it publishes: *"We do NOT set
 ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch, same as per-ComponentTable
-DirtyBitmap (which is also not set during FinalizeSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
+DirtyBitmap (which is also not set during PlaceSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
 different route — page-level dirty marks and the checkpoint under TickFence discipline, its own CM-06 Slot record under
 Commit discipline.
 
 ### DIRTY-01: A spawn sets no dirty bit, in either bitmap `[fatal]` `[silent]`
   invariant ∀ entity e spawned in transaction T: at commit(T), e contributes no bit to `ComponentTable.DirtyBitmap` nor
             to `ClusterDirtyBitmap` — including when T also WRITES e before committing
-  never marking a spawn-staging chunk id dirty. Until `FinalizeSpawns` publishes it, a spawned entity has no cluster slot
+  never marking a spawn-staging chunk id dirty. Until `PlaceSpawns` places it in PREPARE, a spawned entity has no cluster slot
         — which is why the write lands on the pre-publish branch in the first place — so there is no correct bit to set,
         not merely an inconvenient one.
-  scope: EntityAccessor.WriteEcsComponentData, Transaction.FinalizeSpawns, DatabaseEngine.ProcessTableFence
+  scope: EntityAccessor.WriteEcsComponentData, Transaction.PlaceSpawns, DatabaseEngine.ProcessTableFence
   on_violation: a SingleVersion staging chunk reaches the fence, which reads the entity PK from its overhead and gets 0 —
                 the PK is stamped into a staging chunk only for TRANSIENT slots, while `EntityPKOverheadSize` is 8 for
                 every non-Versioned component. Routing id 0 is reserved and never assigned, so `GetMetaByRouting` returns
@@ -465,7 +465,7 @@ Commit discipline.
   rationale: nothing is lost by withholding the bit. Under TickFence discipline a spawn's SingleVersion values are
              checkpoint-durable BY DESIGN and were never WAL-logged at the fence anyway; under Commit discipline the
              spawn's own CM-06 Slot record carries them, built from the staging chunk AFTER the in-place write, because
-             own-spawns deliberately skip write staging (#713). Index entries are inserted by `FinalizeSpawns` itself
+             own-spawns deliberately skip write staging (#713). Index entries are inserted by `PublishSpawns` itself
              from the same final bytes.
   verified: SpawnThenWriteFenceTests.OwnSpawnWrite_LeavesTheTableDirtyBitmapClean [VerifiesRule] — asserts the bitmap
             directly rather than inferring it from the absence of a crash, with
@@ -476,7 +476,7 @@ Commit discipline.
 
 ## Module: STAGE — Where a spawned entity's bytes live before it is published
 
-A spawned entity has no address until `FinalizeSpawns` claims its cluster slot at commit, so its component payloads need
+A spawned entity has no address until `PlaceSpawns` claims its cluster slot at commit (PREPARE, VIS-08), so its component payloads need
 somewhere to sit in the meantime. Which "somewhere" is not a free choice: it decides whether the payload can ever be
 reclaimed.
 
@@ -492,10 +492,10 @@ reclaimed.
         header, `ClusterChunkId`, `SlotIndex`, and one `CompRevFirstChunkId` per VERSIONED slot. There is no field a
         SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
   scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
-         Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
+         Transaction.PlaceSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
          EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.WriteRef,
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
-  on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
+  on_violation: the chunk becomes unreachable the instant `PlaceSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
                 CUMULATIVE spawns rather than live entities. Measured in the SpaceBattle demo before the fix: 491,930
                 `Bullet` chunks against ~1,200 live shots, 900,096 `Pos` chunks against ~20,200 live entities, and a
@@ -526,7 +526,7 @@ reclaimed.
         must refuse, because it has no value to enable; `Enable(comp, in value)` is the way to supply one mid-life.
   scope: EntityRefMut.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
          Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
-         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
+         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.PlaceSpawns,
          ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips, DatabaseEngine.RebuildClusterFromChains,
          DatabaseEngine.CapturePreMigrationEnabledBits
   on_violation: the slot's storage is a RECYCLED chunk, so enabling an unsupplied component serves whatever a destroyed
@@ -553,7 +553,7 @@ reclaimed.
         That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
         same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
   note: the pending-spawn case must record the allocation in the `SpawnEntry`, not through the live-entity path.
-        `FinalizeSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
+        `PlaceSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
         other way is clobbered by a still-zero entry and the value is lost at commit with no error.
   verified: UnsuppliedComponentPayloadTests.Versioned_EnablingANeverSuppliedComponent_IsRefused [VerifiesRule] — the
             refusal itself, decided from the record's root and the resolved location, so it does not depend on what the
@@ -588,10 +588,10 @@ second copy is not derived on demand, so every path that changes one copy has to
             bit(cluster(e).EnabledBits[s], slotIndex(e)) = bit(record(e).EnabledBits, s), where record(e) is the COMMITTED
             EntityMap record
   invariant a change reaches both copies at commit, on every path that commits one: `FlushPendingEnableDisable` for a
-            live entity, `FinalizeSpawns` for a spawn, `RecoveryApplier` when the WAL is replayed
+            live entity, `PlaceSpawns` for a spawn, `RecoveryApplier` when the WAL is replayed
   invariant every other writer of the words keeps the mirror: a slot's bits are cleared when it is released
             (`ReleaseSlot` → `ClearSlotMetadata`; `ClearSlotBits` for an orphaned migrant's destination), and every CLAIM
-            writes the occupant's full mask, clearing as well as setting — `FinalizeSpawns`, `ApplySpawnedEntityToCluster`,
+            writes the occupant's full mask, clearing as well as setting — `PlaceSpawns`, `ApplySpawnedEntityToCluster`,
             and a cluster migration's transcription to its destination slot (`ExecuteMigrations`, step 6). A freed slot is
             therefore never trusted to be clean. The migration rebuild writes the bits from the pre-migration record
             (`RebuildClusterFromChains`); the crash rebuild without a snapshot goes the other way and copies the cluster bits
@@ -609,7 +609,7 @@ second copy is not derived on demand, so every path that changes one copy has to
         transaction (EW-01; an enable/disable commit writes the EntityMap), and the Migrate slices are carved on
         destination cell, so no two workers write the same destination cluster.
   scope: EntityRefMut.Enable, EntityRefMut.Disable, Transaction.StageEnableDisable, Transaction.FlushPendingEnableDisable,
-         Transaction.PublishClusterEnabledBits, Transaction.FinalizeSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
+         Transaction.PublishClusterEnabledBits, Transaction.PlaceSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
          RecoveryApplier.ApplySpawnedEntityToCluster, DatabaseEngine.RebuildClusterFromChains,
          DatabaseEngine.RebuildClusterEntityMapEntries, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.ClearSlotBits,
          ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.ClearSlotMetadata, ClusterRef.EnabledBits,
