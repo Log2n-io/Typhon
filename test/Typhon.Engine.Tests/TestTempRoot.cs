@@ -20,6 +20,8 @@ namespace Typhon.Engine.Tests;
 /// The root is <c>TYPHON_TEST_ROOT</c> when set; otherwise <c>&lt;temp&gt;/typhon-tests-&lt;hash&gt;</c>, keyed by the test assembly's directory, so each
 /// worktree and configuration has its own. Processes run from one output directory still share it: <c>shard.py</c>'s shards run disjoint classes, and two
 /// sessions sharing a checkout set <c>TYPHON_TEST_ROOT</c>. The variable is written back, so a child process inherits this root instead of nesting another.
+/// <c>TYPHON_TEST_ROOT</c> must not contain the test binaries: <c>DatabaseRegistryTests</c> needs a scratch area outside the temp root, and uses theirs.
+/// Roots are not swept: a removed checkout leaves its own behind.
 /// </para>
 /// <para>
 /// <see cref="Path.GetTempPath"/> reads the environment on every call (<c>TMP</c>/<c>TEMP</c> through <c>GetTempPath2W</c> on Windows, <c>TMPDIR</c>
