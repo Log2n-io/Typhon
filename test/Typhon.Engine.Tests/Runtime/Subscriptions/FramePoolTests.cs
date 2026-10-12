@@ -529,4 +529,29 @@ unsafe class FramePoolTests
         view.Release();
         pool.Return(block);
     }
+
+    /// <summary>
+    /// #1166 — a <see cref="System.Memory{T}"/> taken before a release still names the manager, and a transport that pins it afterwards must get a managed
+    /// exception rather than a handle to address 0 with the old length behind it.
+    /// </summary>
+    [Test]
+    public void PinningAReleasedViewThrowsInsteadOfHandingOutNull()
+    {
+        var owned = NativeFrameMemoryManager.Allocate(64);
+        var stale = owned.Memory;
+        owned.Release();
+
+        using var pool = NewPool(AmpleBudget);
+        Assert.That(pool.TryRent(512, out var block), Is.True);
+        var borrowed = new NativeFrameMemoryManager(block.Bytes, 512);
+        var staleBorrowed = borrowed.Memory;
+        borrowed.Release();
+        pool.Return(block);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(() => stale.Pin(), Throws.InstanceOf<System.ObjectDisposedException>(), "an owning view, freed");
+            Assert.That(() => staleBorrowed.Pin(), Throws.InstanceOf<System.ObjectDisposedException>(), "a non-owning view, dropped");
+        });
+    }
 }
