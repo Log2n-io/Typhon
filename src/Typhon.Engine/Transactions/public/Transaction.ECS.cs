@@ -1876,7 +1876,7 @@ public unsafe partial class Transaction
         for (var v = 0; v < views.Length; v++)
         {
             var reg = views[v];
-            if (reg.View.IsDisposed)
+            if (reg.DeltaBuffer.IsClosed)
             {
                 continue;
             }
@@ -1939,7 +1939,7 @@ public unsafe partial class Transaction
                 for (int v = 0; v < views.Length; v++)
                 {
                     var reg = views[v];
-                    if (reg.View.IsDisposed)
+                    if (reg.DeltaBuffer.IsClosed)
                     {
                         continue;
                     }
@@ -2069,7 +2069,7 @@ public unsafe partial class Transaction
                     for (int v = 0; v < views.Length; v++)
                     {
                         var reg = views[v];
-                        if (reg.View.IsDisposed)
+                        if (reg.DeltaBuffer.IsClosed)
                         {
                             continue;
                         }
@@ -4960,7 +4960,7 @@ public unsafe partial class Transaction
                 for (int v = 0; v < views.Length; v++)
                 {
                     var reg = views[v];
-                    if (reg.View.IsDisposed)
+                    if (reg.DeltaBuffer.IsClosed)
                     {
                         continue;
                     }

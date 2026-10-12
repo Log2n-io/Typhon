@@ -1758,7 +1758,7 @@ public partial class DatabaseEngine
                                 for (var v = 0; v < delViews.Length; v++)
                                 {
                                     var reg = delViews[v];
-                                    if (reg.View.IsDisposed)
+                                    if (reg.DeltaBuffer.IsClosed)
                                     {
                                         continue;
                                     }
@@ -1840,7 +1840,7 @@ public partial class DatabaseEngine
                                 for (var v = 0; v < views.Length; v++)
                                 {
                                     var reg = views[v];
-                                    if (reg.View.IsDisposed)
+                                    if (reg.DeltaBuffer.IsClosed)
                                     {
                                         continue;
                                     }
@@ -1905,7 +1905,7 @@ public partial class DatabaseEngine
                 for (var v = 0; v < delViews.Length; v++)
                 {
                     var reg = delViews[v];
-                    if (reg.View.IsDisposed)
+                    if (reg.DeltaBuffer.IsClosed)
                     {
                         continue;
                     }
@@ -1948,7 +1948,7 @@ public partial class DatabaseEngine
             for (var v = 0; v < views.Length; v++)
             {
                 var reg = views[v];
-                if (reg.View.IsDisposed)
+                if (reg.DeltaBuffer.IsClosed)
                 {
                     continue;
                 }

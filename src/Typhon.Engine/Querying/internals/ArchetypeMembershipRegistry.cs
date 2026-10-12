@@ -27,27 +27,6 @@ internal sealed class ArchetypeMembershipRegistry
     private ViewRegistration[] _views = [];
 
     /// <summary>
-    /// Excludes view disposal from overlapping a commit's publish pass.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Without it, a publisher reads <c>reg.View.IsDisposed == false</c>, is descheduled, the owner disposes the view, and the publisher resumes into
-    /// <c>TryAppend</c> writing 24 bytes through a pointer into freed pinned memory — or through a nulled <c>_entries</c>, which for raw pointer
-    /// arithmetic is an access violation rather than a catchable <c>NullReferenceException</c>. <c>ViewBase.Dispose</c>'s <c>Thread.SpinWait(100)</c>
-    /// is ~200 ns of hope, not a happens-before edge.
-    /// </para>
-    /// <para>
-    /// <b>Shared is taken once per COMMIT, not per entity</b> — the publisher snapshots the subscriber array once and appends under that one
-    /// acquisition, so the per-entity hot path is untouched and the cost is one uncontended enter/exit against a commit that already costs
-    /// microseconds. That is only affordable because the snapshot exists; per-entity latching would not be.
-    /// </para>
-    /// <para>
-    /// This covers the membership channel only. <c>ViewRegistry</c>'s field-channel publishers have the same unguarded shape and predate #790 —
-    /// tracked separately in #864, because fixing them means changing disposal for every view in the engine.
-    /// </para>
-    /// </remarks>
-
-    /// <summary>
     /// Monotonic counter of COMMITS that spawned or destroyed at least one entity in this archetype — not of entities, so a 50 000-entity
     /// batch moves it by one.
     /// </summary>
@@ -114,15 +93,16 @@ internal sealed class ArchetypeMembershipRegistry
     /// </remarks>
     internal ViewRegistration[] ViewsSnapshot() => Volatile.Read(ref _views);
 
-    /// <summary>Subscribe a view. Idempotent on the view reference.</summary>
+    /// <summary>Subscribe a view. Idempotent on the view id.</summary>
     internal void Register(IView view, ViewDeltaRingBuffer deltaBuffer)
     {
         lock (_writeLock)
         {
+            SweepAbandonedLocked();
             var existing = _views;
             for (var i = 0; i < existing.Length; i++)
             {
-                if (ReferenceEquals(existing[i].View, view))
+                if (existing[i].ViewId == view.ViewId)
                 {
                     return;
                 }
@@ -130,7 +110,7 @@ internal sealed class ArchetypeMembershipRegistry
 
             var updated = new ViewRegistration[existing.Length + 1];
             Array.Copy(existing, updated, existing.Length);
-            updated[existing.Length] = new ViewRegistration(view, deltaBuffer, 0);
+            updated[existing.Length] = new ViewRegistration(view.ViewId, deltaBuffer, 0);
             // Release: the publisher reads this array with no lock, and every field of the new registration must be visible to it before the
             // reference is.
             Volatile.Write(ref _views, updated);
@@ -152,11 +132,12 @@ internal sealed class ArchetypeMembershipRegistry
         // the buffer unlatched anyway — it traded a memory-safety hazard for a liveness hazard and kept both. See MEMB-04.
         lock (_writeLock)
         {
+            SweepAbandonedLocked();
             var existing = _views;
             var index = -1;
             for (var i = 0; i < existing.Length; i++)
             {
-                if (ReferenceEquals(existing[i].View, view))
+                if (existing[i].ViewId == view.ViewId)
                 {
                     index = i;
                     break;
@@ -179,5 +160,62 @@ internal sealed class ArchetypeMembershipRegistry
             Array.Copy(existing, index + 1, updated, index, existing.Length - index - 1);
             Volatile.Write(ref _views, updated);
         }
+    }
+
+    /// <summary>
+    /// Removes every registration whose view was finalized without <c>Dispose</c> and retires its buffer (#865) — the same sweep as
+    /// <c>ViewRegistry</c>'s, on every registration and deregistration. Caller holds <see cref="_writeLock"/>.
+    /// </summary>
+    private void SweepAbandonedLocked()
+    {
+        var existing = _views;
+        var removeCount = 0;
+        for (var i = 0; i < existing.Length; i++)
+        {
+            if (existing[i].DeltaBuffer.IsAbandoned)
+            {
+                removeCount++;
+            }
+        }
+
+        if (removeCount == 0)
+        {
+            return;
+        }
+
+        var updated = removeCount == existing.Length ? [] : new ViewRegistration[existing.Length - removeCount];
+        var k = 0;
+        for (var i = 0; i < existing.Length; i++)
+        {
+            if (!existing[i].DeltaBuffer.IsAbandoned)
+            {
+                updated[k++] = existing[i];
+            }
+        }
+
+        // Abandonment is monotonic, so a view abandoned between the two passes can only shorten the copy, never overrun it.
+        Volatile.Write(ref _views, k == updated.Length ? updated : updated[..k]);
+
+        // Retire after the entry left the array — see ViewRegistry.SweepAbandonedLocked.
+        for (var i = 0; i < existing.Length; i++)
+        {
+            if (existing[i].DeltaBuffer.IsAbandoned && !Contains(_views, existing[i].ViewId))
+            {
+                existing[i].DeltaBuffer.RetireAbandoned();
+            }
+        }
+    }
+
+    private static bool Contains(ViewRegistration[] regs, int viewId)
+    {
+        for (var i = 0; i < regs.Length; i++)
+        {
+            if (regs[i].ViewId == viewId)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
