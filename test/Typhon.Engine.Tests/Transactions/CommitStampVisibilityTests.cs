@@ -564,6 +564,62 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     }
 
     /// <summary>
+    /// VIS-10's window: a reader begun after a writer's commit point, before its publish, sees the component the commit disabled disabled, together with
+    /// the revision it wrote; a reader begun before sees it enabled, before the publish and after. The change was recorded pending in PREPARE.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-10")]
+    [CancelAfter(30_000)]
+    public void AReaderBegunBetweenTheAppendAndThePublish_SeesTheDisableWithTheRevision()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        EntityId p;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            p = tx.Spawn<CsPairArch>(CsPairArch.Wallet.Set(new CsWallet { Credits = 1 }), CsPairArch.Keyed.Set(new CsKeyed { Group = 1 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var older = dbe.CreateReadOnlyTransaction();
+        var gate = new Gate();
+        dbe.CommitAfterAppendProbe = gate.Probe;
+        try
+        {
+            var writer = new BackgroundCommit(dbe, tx =>
+            {
+                var e = tx.OpenMut(p);
+                e.Set(CsPairArch.Wallet, new CsWallet { Credits = 777 });
+                e.Disable(CsPairArch.Keyed);
+            });
+            gate.ThreadId = writer.ThreadId;
+            writer.Go();
+            gate.AwaitReached();
+
+            using var reader = dbe.CreateReadOnlyTransaction();
+            void AssertCut(string when)
+            {
+                var e = reader.Open(p);
+                Assert.That(e.Read(CsPairArch.Wallet).Credits, Is.EqualTo(777), $"premise ({when}): the reader sees the commit's revision");
+                Assert.That(e.IsEnabled(CsPairArch.Keyed), Is.False, $"{Marker} ({when}): the reader sees the revision and not the commit's disable");
+                var o = older.Open(p);
+                Assert.That(o.Read(CsPairArch.Wallet).Credits, Is.EqualTo(1), $"premise ({when}): the older reader keeps the old revision");
+                Assert.That(o.IsEnabled(CsPairArch.Keyed), Is.True, $"{Marker} ({when}): an older reader sees a disable committed after its snapshot");
+            }
+
+            AssertCut("before the publish");
+            gate.Release();
+            writer.Join();
+            AssertCut("after the publish");
+        }
+        finally
+        {
+            gate.Release();
+            dbe.CommitAfterAppendProbe = null;
+        }
+    }
+
+    /// <summary>
     /// The other side: a reader begun before the writer's commit point sees neither the spawn nor the revision, before the publish and after it — the
     /// pending born resolves to a stamp above its snapshot.
     /// </summary>

@@ -34,7 +34,7 @@ internal partial class EnabledBitsOverrides
     /// Resolve the EnabledBits for an entity at the given transaction TSN.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ushort ResolveEnabledBits(long entityKey, ushort inlineBits, long txTsn)
+    public ushort ResolveEnabledBits(long entityKey, ushort inlineBits, long txTsn, CommitCardTable cards)
     {
         // Fast path: no overrides exist anywhere → use inline bits
         if (_overrideCount == 0)
@@ -48,15 +48,36 @@ internal partial class EnabledBitsOverrides
             return inlineBits;
         }
 
-        return history.ResolveAt(txTsn, inlineBits);
+        return history.ResolveAt(txTsn, inlineBits, cards);
     }
 
     /// <summary>
-    /// Record an EnabledBits change for MVCC. Called at commit time when older transactions exist.
+    /// A commit's EnabledBits change, in its PREPARE (VIS-10): pending under its owner until <see cref="Publish"/>. Every change is recorded — a reader that
+    /// begins between the commit point and the publish needs it whatever was alive at PREPARE.
     /// </summary>
-    public void Record(long entityKey, long changeTSN, ushort oldBits)
+    public void AddPending(long entityKey, long owner, ushort oldBits, ushort newBits) => HistoryOf(entityKey).AddPending(owner, oldBits, newBits);
+
+    /// <summary>The owner's pending change of <paramref name="entityKey"/> takes its commit stamp, at publish.</summary>
+    public void Publish(long entityKey, long owner, long stamp)
     {
-        var history = _overrides.GetOrAdd(entityKey, _ =>
+        if (_overrides.TryGetValue(entityKey, out var history))
+        {
+            history.Publish(owner, stamp);
+        }
+    }
+
+    /// <summary>An aborted commit's pending change of <paramref name="entityKey"/> is dropped.</summary>
+    public void RemovePending(long entityKey, long owner)
+    {
+        if (_overrides.TryGetValue(entityKey, out var history))
+        {
+            history.RemovePending(owner);
+        }
+    }
+
+    private EnabledBitsHistory HistoryOf(long entityKey)
+    {
+        return _overrides.GetOrAdd(entityKey, _ =>
         {
             int count = Interlocked.Increment(ref _overrideCount);
 
@@ -80,7 +101,6 @@ internal partial class EnabledBitsOverrides
 
             return new EnabledBitsHistory();
         });
-        history.Record(changeTSN, oldBits);
     }
 
     /// <summary>

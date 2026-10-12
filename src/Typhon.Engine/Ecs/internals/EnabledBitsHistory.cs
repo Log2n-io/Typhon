@@ -1,58 +1,154 @@
-using System.Collections.Generic;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Per-entity history of EnabledBits changes for MVCC snapshot isolation.
-/// Stores (changeTSN, oldBits) pairs sorted ascending by TSN.
+/// Per-entity history of EnabledBits changes for MVCC snapshot isolation (family 5, VIS-10). Each change is a (stamp, old bits, new bits) entry; a change
+/// still committing holds its owner's TSN with the pending bit instead of a stamp, from its PREPARE until its publish stamps it.
 /// </summary>
 /// <remarks>
-/// <para>Used by the exception dictionary when concurrent transactions modify EnabledBits.
-/// Older transactions see the bits as they were before the change.</para>
-/// <para>Entries are pruned when MinTSN advances past all changeTSNs.</para>
+/// <para>
+/// <b>The value at a snapshot.</b> The new bits of the highest-stamp change at or below it; with none, the old bits of the lowest-stamp change above it;
+/// with neither, the record's inline bits. A pending change counts by its owner's commit card: registered with a stamp, it is that stamp; no card holding the
+/// owner, it is not committed — unless it was stamped since, which a re-read of the history tells. Ordered by stamp, not by when the changes were recorded:
+/// two changes after a snapshot used to answer with the newest's old bits, the bits the entity had only between the two (#1248).
+/// </para>
+/// <para>
+/// <b>Copy-on-write.</b> The entries are an immutable array a writer replaces under the lock, so a reader iterates a consistent array with no lock (#1248:
+/// the <c>List</c> was written at commit while readers walked it).
+/// </para>
+/// <para>Entries are pruned once MinTSN is past their stamp.</para>
 /// </remarks>
-internal class EnabledBitsHistory
+internal sealed class EnabledBitsHistory
 {
-    private readonly List<(long ChangeTSN, ushort OldBits)> _entries = [];
+    internal readonly record struct Change(long Stamp, ushort OldBits, ushort NewBits);
 
-    /// <summary>
-    /// Resolve the EnabledBits visible at the given transaction TSN.
-    /// Walks the history backwards to find the latest change before or at txTsn.
-    /// </summary>
-    /// <param name="txTsn">The transaction's snapshot TSN.</param>
-    /// <param name="currentBits">The inline (latest) EnabledBits from the EntityRecord.</param>
-    /// <returns>The EnabledBits visible at txTsn.</returns>
-    public ushort ResolveAt(long txTsn, ushort currentBits)
+    private Change[] _entries = [];
+    private readonly Lock _writeLock = new();
+
+    /// <summary>Resolve the EnabledBits visible at <paramref name="txTsn"/>; <paramref name="currentBits"/> is the record's inline (latest published) value.</summary>
+    public ushort ResolveAt(long txTsn, ushort currentBits, CommitCardTable cards)
     {
-        // Walk from newest to oldest. If any changeTSN > txTsn, the old bits
-        // were what the entity had before that change — that's what this tx sees.
-        for (int i = _entries.Count - 1; i >= 0; i--)
+        var found = TryResolve(Volatile.Read(ref _entries), txTsn, cards, out var bits, out var stale);
+        if (stale)
         {
-            var (changeTsn, oldBits) = _entries[i];
-            if (changeTsn > txTsn)
+            // A pending change with no card: not committing, or stamped since — the history read again says which.
+            found = TryResolve(Volatile.Read(ref _entries), txTsn, cards, out bits, out _);
+        }
+
+        return found ? bits : currentBits;
+    }
+
+    private static bool TryResolve(Change[] entries, long txTsn, CommitCardTable cards, out ushort bits, out bool stale)
+    {
+        stale = false;
+        long below = long.MinValue, above = long.MaxValue;
+        ushort belowBits = 0, aboveBits = 0;
+        foreach (var e in entries)
+        {
+            var s = e.Stamp;
+            if ((s & EntityRecordHeader.PendingBit) != 0)
             {
-                // This change happened after our snapshot — we see the old bits
-                return oldBits;
+                var owner = s & ~EntityRecordHeader.PendingBit;
+                if (owner == txTsn)
+                {
+                    s = txTsn;
+                }
+                else if (cards == null || !cards.TryGetStamp(owner, out s))
+                {
+                    stale = true;   // not committing — or stamped since this array was read
+                    continue;
+                }
+            }
+
+            if (s <= txTsn)
+            {
+                if (s > below)
+                {
+                    below = s;
+                    belowBits = e.NewBits;
+                }
+            }
+            else if (s < above)
+            {
+                above = s;
+                aboveBits = e.OldBits;
             }
         }
 
-        // All changes happened at or before our snapshot — we see the current bits
-        return currentBits;
+        bits = below != long.MinValue ? belowBits : aboveBits;
+        return below != long.MinValue || above != long.MaxValue;
     }
 
-    /// <summary>Record an EnabledBits change. Must be called in TSN order (ascending).</summary>
-    public void Record(long changeTSN, ushort oldBits) => _entries.Add((changeTSN, oldBits));
+    /// <summary>A change in PREPARE: its owner's TSN with the pending bit, until <see cref="Publish"/>.</summary>
+    public void AddPending(long owner, ushort oldBits, ushort newBits)
+    {
+        lock (_writeLock)
+        {
+            var entries = _entries;
+            var grown = new Change[entries.Length + 1];
+            entries.CopyTo(grown, 0);
+            grown[^1] = new Change(EntityRecordHeader.PendingBit | owner, oldBits, newBits);
+            Volatile.Write(ref _entries, grown);
+        }
+    }
+
+    /// <summary>The owner's pending change takes its commit stamp. Called at publish, after the record's inline bits, before the owner's card is released.</summary>
+    public void Publish(long owner, long stamp)
+    {
+        lock (_writeLock)
+        {
+            var entries = _entries;
+            var pending = EntityRecordHeader.PendingBit | owner;
+            for (var i = 0; i < entries.Length; i++)
+            {
+                if (entries[i].Stamp == pending)
+                {
+                    var copy = (Change[])entries.Clone();
+                    copy[i] = entries[i] with { Stamp = stamp };
+                    Volatile.Write(ref _entries, copy);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>An aborted owner's pending change is dropped. Returns true if the history is empty afterwards.</summary>
+    public bool RemovePending(long owner)
+    {
+        lock (_writeLock)
+        {
+            var pending = EntityRecordHeader.PendingBit | owner;
+            var entries = _entries;
+            var kept = System.Array.FindAll(entries, e => e.Stamp != pending);
+            if (kept.Length != entries.Length)
+            {
+                Volatile.Write(ref _entries, kept);
+            }
+
+            return kept.Length == 0;
+        }
+    }
 
     /// <summary>
-    /// Prune entries whose changeTSN is at or below minTSN (no active transaction needs them).
-    /// Returns true if the history is completely empty after pruning (caller can remove the entry).
+    /// Prune published entries whose stamp is at or below minTSN (no live snapshot needs them). Returns true if the history is completely empty after pruning
+    /// (the caller can remove it). Pending entries are kept.
     /// </summary>
     public bool TryPrune(long minTSN)
     {
-        _entries.RemoveAll(e => e.ChangeTSN <= minTSN);
-        return _entries.Count == 0;
+        lock (_writeLock)
+        {
+            var entries = _entries;
+            var kept = System.Array.FindAll(entries, e => (e.Stamp & EntityRecordHeader.PendingBit) != 0 || e.Stamp > minTSN);
+            if (kept.Length != entries.Length)
+            {
+                Volatile.Write(ref _entries, kept);
+            }
+
+            return kept.Length == 0;
+        }
     }
 
     /// <summary>Number of history entries.</summary>
-    public int Count => _entries.Count;
+    public int Count => Volatile.Read(ref _entries).Length;
 }

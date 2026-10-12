@@ -189,3 +189,21 @@ below names the invariant that proves it.
   on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
                 effects; an older reader's scan loses an entity its snapshot holds
   requires: VIS-01, VIS-06
+
+### VIS-10: An enable/disable change exists before the stamp, and a snapshot reads it by stamp order `[fatal]` `[silent]`
+  invariant a commit's enable/disable change of an existing entity is recorded in PREPARE as a pending history entry — its
+            owner's TSN with the pending bit, the bits it changes from and to (Transaction.MarkEnableDisablePending) —
+            dropped on an abort (UnmarkEnableDisablePending), and stamped at publish after the record's and the cluster's
+            inline bits, before the card goes (FlushPendingEnableDisableEntry, EnabledBitsOverrides.Publish)
+  invariant the bits at a snapshot are the new bits of the highest-stamp change at or below it; with none, the old bits of the
+            lowest-stamp change above it; with neither, the inline bits (EnabledBitsHistory.ResolveAt). A pending change
+            counts by its owner's card; with no card holding the owner the history is read again. Ordered by stamp: with
+            two changes after a snapshot, the newest one's old bits are the wrong answer (#1248)
+  invariant the history is an immutable array a writer replaces under a lock; readers take no lock (#1248)
+  note two concurrent changes of one entity's bits keep last-publisher-wins on the inline copy, and a change recorded against
+       bits another commit changed after this one's PREPARE carries stale old bits
+  scope: Transaction.MarkEnableDisablePending, Transaction.UnmarkEnableDisablePending, EnabledBitsHistory.ResolveAt,
+         EnabledBitsHistory.AddPending, EnabledBitsHistory.Publish, EnabledBitsOverrides.ResolveEnabledBits
+  on_violation: a reader between a commit's append and its publish sees its revisions and the entity's old enabled bits; an
+                older reader with two later changes sees bits the entity had only between them
+  requires: VIS-01, VIS-04

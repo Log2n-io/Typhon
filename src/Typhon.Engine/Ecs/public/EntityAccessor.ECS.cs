@@ -574,7 +574,7 @@ public unsafe partial class EntityAccessor
         ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
 
         // Resolve EnabledBits with MVCC overrides
-        ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN);
+        ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN, CommitCards);
 
         var result = new EntityRef(id, meta, es, this, enabledBits);
 

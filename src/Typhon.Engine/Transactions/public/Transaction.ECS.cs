@@ -1428,7 +1428,7 @@ public unsafe partial class Transaction
 
         // Resolve EnabledBits: committed entities check MVCC overrides
         {
-            ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN);
+            ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN, CommitCards);
 
             // Check for pending enable/disable override
             if (_pendingEnableDisable != null && _pendingEnableDisable.TryGetValue(id, out var pendingBits))
@@ -4628,11 +4628,8 @@ public unsafe partial class Transaction
         {
             ushort oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
 
-            // Record MVCC override if older transactions exist
             if (oldBits != newBits)
             {
-                _dbe.EnabledBitsOverrides.Record(entityId.EntityKey, PublishStamp, oldBits);
-
                 // Notify views: enable/disable changes component visibility.
                 // Enable (0→1) emits isCreation so the view re-evaluates the entity.
                 // Disable (1→0) emits isDeletion so the view removes the entity.
@@ -4652,8 +4649,73 @@ public unsafe partial class Transaction
                 PublishClusterEnabledBits(engineState.ClusterState, meta.ComponentCount, entityId, readBuf, newBits, ref clusterAccessor,
                     ref clusterAccessorOwner);
             }
+
+            // The change PREPARE recorded pending takes the stamp — after both inline copies, before the card goes (VIS-10).
+            _dbe.EnabledBitsOverrides.Publish(entityId.EntityKey, TSN, PublishStamp);
         }
         accessor.Dispose();
+    }
+
+    /// <summary>
+    /// VIS-10, in PREPARE: every enable/disable this transaction commits on an existing entity is recorded pending under its owner, with the bits it
+    /// changes from and to, so the change exists before the commit point: a reader begun after it resolves it through the owner's card. Stamped at publish
+    /// (<see cref="FlushPendingEnableDisableEntry"/>); dropped on an abort (<see cref="UnmarkEnableDisablePending"/>).
+    /// </summary>
+    private void MarkEnableDisablePending()
+    {
+        if (_pendingEnableDisable == null || _pendingEnableDisable.Count == 0)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(_epochManager);
+        byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        foreach (var kvp in _pendingEnableDisable)
+        {
+            var entityId = kvp.Key;
+            if (SpawnedContains(entityId))
+            {
+                continue;
+            }
+
+            var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
+            var engineState = meta == null ? null : _dbe._archetypeStates[meta.ArchetypeId];
+            if (engineState?.EntityMap == null)
+            {
+                continue;
+            }
+
+            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            try
+            {
+                if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+                {
+                    var oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
+                    if (oldBits != kvp.Value)
+                    {
+                        _dbe.EnabledBitsOverrides.AddPending(entityId.EntityKey, TSN, oldBits, kvp.Value);
+                    }
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+    }
+
+    /// <summary>An abort before the commit point drops the pending enable/disable changes <see cref="MarkEnableDisablePending"/> recorded.</summary>
+    private void UnmarkEnableDisablePending()
+    {
+        if (_pendingEnableDisable == null || _pendingEnableDisable.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var kvp in _pendingEnableDisable)
+        {
+            _dbe.EnabledBitsOverrides.RemovePending(kvp.Key.EntityKey, TSN);
+        }
     }
 
     /// <summary>
@@ -4854,6 +4916,7 @@ public unsafe partial class Transaction
         if (State != TransactionState.Committed)
         {
             UnmarkDestroysPending();
+            UnmarkEnableDisablePending();
         }
 
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)

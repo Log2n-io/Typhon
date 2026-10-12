@@ -39,6 +39,14 @@ class CsKeyedArch : Archetype<CsKeyedArch>
     public static readonly Comp<CsKeyed> Keyed = Register<CsKeyed>();
 }
 
+/// <summary>Two components, so one can be disabled while the other is written (VIS-10).</summary>
+[Archetype]
+class CsPairArch : Archetype<CsPairArch>
+{
+    public static readonly Comp<CsWallet> Wallet = Register<CsWallet>();
+    public static readonly Comp<CsKeyed> Keyed = Register<CsKeyed>();
+}
+
 /// <summary>
 /// Plan 06 step 3.2, rule VIS-03 (<c>rules/data-engine.md</c>): the commit-stamp infrastructure. A committer reserves a commit card before PREPARE, registers
 /// and draws its stamp at the commit point, writes the stamp on TxCommit, and gives the card back after its publish or on any exit before the commit point.

@@ -3753,7 +3753,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
@@ -3822,7 +3822,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
@@ -3878,7 +3878,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;

@@ -167,8 +167,15 @@ class EnableDisableTests : TestBase<EnableDisableTests>
         var overrides = new EnabledBitsOverrides();
         Assert.That(overrides._overrideCount, Is.EqualTo(0));
 
-        ushort result = overrides.ResolveEnabledBits(42L, 0b1111, 100);
+        ushort result = overrides.ResolveEnabledBits(42L, 0b1111, 100, null);
         Assert.That(result, Is.EqualTo(0b1111));
+    }
+
+    /// <summary>A published change: recorded pending under an owner, then stamped, as a commit does (VIS-10).</summary>
+    private static void Published(EnabledBitsHistory history, long stamp, ushort oldBits, ushort newBits)
+    {
+        history.AddPending(stamp + 100_000, oldBits, newBits);
+        history.Publish(stamp + 100_000, stamp);
     }
 
     [Test]
@@ -176,24 +183,56 @@ class EnableDisableTests : TestBase<EnableDisableTests>
     {
         var history = new EnabledBitsHistory();
         // At TSN=10, bits changed from 0b11 to 0b01
-        history.Record(10, 0b11);
+        Published(history, 10, 0b11, 0b01);
 
         // A transaction at TSN=5 (before the change) should see the old bits
-        ushort resolved = history.ResolveAt(5, currentBits: 0b01);
+        ushort resolved = history.ResolveAt(5, currentBits: 0b01, null);
         Assert.That(resolved, Is.EqualTo(0b11));
 
         // A transaction at TSN=15 (after the change) should see current bits
-        ushort resolvedAfter = history.ResolveAt(15, currentBits: 0b01);
+        ushort resolvedAfter = history.ResolveAt(15, currentBits: 0b01, null);
         Assert.That(resolvedAfter, Is.EqualTo(0b01));
+    }
+
+    /// <summary>
+    /// #1248: with two changes after a snapshot, the snapshot sees the bits from before the FIRST of them — the old bits of the lowest stamp above it. The
+    /// walk from the newest returned the newest change's old bits: the bits the entity had only between the two changes. Between the two, the first one's
+    /// new bits.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-10")]
+    public void EnabledBitsHistory_TwoLaterChanges_ResolveToTheBitsBeforeTheFirst()
+    {
+        var history = new EnabledBitsHistory();
+        Published(history, 10, 0b11, 0b01);
+        Published(history, 20, 0b01, 0b00);
+        Assert.That(history.ResolveAt(5, currentBits: 0b00, null), Is.EqualTo(0b11), "before both changes: the first change's old bits");
+        Assert.That(history.ResolveAt(15, currentBits: 0b00, null), Is.EqualTo(0b01), "between the two: the first change's new bits");
+        Assert.That(history.ResolveAt(25, currentBits: 0b00, null), Is.EqualTo(0b00), "after both");
+    }
+
+    /// <summary>
+    /// A change still pending — recorded in its commit's PREPARE, not yet stamped — resolves through its owner's card (VIS-10). With no card holding the
+    /// owner it is not committed: every snapshot sees the bits from before it. Dropped on an abort, nothing of it is left.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-10")]
+    public void EnabledBitsHistory_APendingChange_IsInvisibleUntilItsOwnerCommits()
+    {
+        var history = new EnabledBitsHistory();
+        history.AddPending(7, 0b11, 0b01);
+        Assert.That(history.ResolveAt(50, currentBits: 0b11, null), Is.EqualTo(0b11), "an owner with no card is not committed");
+        Assert.That(history.RemovePending(7), Is.True, "the abort leaves the history empty");
+        Assert.That(history.ResolveAt(50, currentBits: 0b11, null), Is.EqualTo(0b11));
     }
 
     [Test]
     public void EnabledBitsHistory_TryPrune_RemovesOldEntries()
     {
         var history = new EnabledBitsHistory();
-        history.Record(5, 0b11);
-        history.Record(10, 0b10);
-        history.Record(15, 0b01);
+        Published(history, 5, 0b11, 0b10);
+        Published(history, 10, 0b10, 0b01);
+        Published(history, 15, 0b01, 0b00);
 
         Assert.That(history.Count, Is.EqualTo(3));
 

@@ -205,7 +205,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         }
 
         ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
-        ushort enabledBits = _enabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, _tsn);
+        ushort enabledBits = _enabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, _tsn, _accessor.CommitCards);
 
         var result = new EntityRef(id, _archetype, _engineState, _accessor, enabledBits);
 
