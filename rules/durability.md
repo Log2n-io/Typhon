@@ -527,23 +527,25 @@ never by a position recorded before it: a compaction moves every kept entry towa
 append after it.
 
 ### CHAIN-01: A transaction voids its own entry, found by identity under the chain's lock, and only it `[fatal]` `[silent]`
-  invariant a rollback's void, and a last-writer-wins conflict's void of its orphan, run under the chain's exclusive lock, on
+  invariant a rollback's void, and a handler conflict's void of its orphan, run under the chain's exclusive lock, on
             the transaction's own pending entry: isolated, naming its content chunk — or, for a delete, no chunk and its TSN
             (`FindOwnPendingEntry`)
   invariant a void leaves every other entry in the chain: the item count drops only when the voided entry is the chain's last
             (`VoidEntry`); a void anywhere else is a hole. Readers skip a hole, and the compaction drops it wherever it is:
-            it counts for nothing — not the guard that keeps the last entry, not the sentinel's decision, not
-            LastCommitRevisionIndex — and when only holes follow the sentinel, the sentinel is kept as the chain's newest
+            it counts for nothing — not the guard that keeps the last entry, not the sentinel's decision — and when only
+            holes follow the sentinel, the sentinel is kept as the chain's newest
             revision; a chain of nothing but holes keeps one, as the recovery scrub leaves a chain with no commit
   invariant a rollback that finds no pending entry of its transaction voids nothing and frees nothing: the entry its
             `CurCompContentChunkId` names, if any, is committed (#1252)
   invariant a conflict's orphan is void before the conflict handler runs: a handler that throws aborts the commit, whose
             rollback finds only the commit's new entry
-  invariant a relocation's or a conflict's first entry is void as soon as its replacement is appended, before anything that
-            can throw: the rollback of an aborted commit finds only the replacement
+  invariant a conflict's first entry is void as soon as its replacement is appended, before anything that can throw: the
+            rollback of an aborted commit finds only the replacement
+  invariant a last-writer-wins conflict (no handler) voids nothing and appends nothing: its entry publishes in place with its
+            commit stamp, the newest by stamp (VIS-05) — drawn after the commit it lost to published
   enforce the rollback waits for the lock without a deadline (it has nothing to fail into; AP-05's argument for why the
           wait ends), or voids under the lock when its thread already holds the chain (a conflict handler disposing another
-          transaction of the same entity); the conflict path, a fallible PREPARE step, waits with the chain-lock timeout
+          transaction of the same entity); a handler commit's PREPARE, a fallible step, waits with the chain-lock timeout
           composed with the unit of work's deadline. The rollback's wait runs in slices (DatabaseEngine.RollbackVoidReportInterval,
           30 s), each one that runs out reported with the lock's holder (`EnterChainLockForRollback`): the one wait that does
           not end is on a conflict handler that waits on another transaction of the same entity while its commit holds the
@@ -555,32 +557,31 @@ append after it.
   scope: ComponentRevisionManager.VoidOwnPendingEntry, ComponentRevisionManager.FindOwnPendingEntry,
          ComponentRevisionManager.EnterChainLockForRollback, DatabaseEngine.NoteRollbackVoidWaiting,
          ComponentRevisionManager.VoidEntry, ComponentRevisionManager.CleanUpUnusedEntriesCore, Transaction.RollbackComponent,
-         Transaction.DetectAndResolveConflict, Transaction.ResolveConflictUnderLock, Transaction.RelocateRevisionEntry
+         Transaction.DetectAndResolveConflict, Transaction.ResolveConflictUnderLock
   rationale: without a conflict handler, concurrent writers of one entity are allowed (last writer wins), so a transaction's
              pending entry can have a newer commit after it. The rollback voided its entry through a handle located without
              the lock, then ran `--ItemCount`: with no compaction at all, the decrement cut the newer commit out of the chain;
-             with a compaction between the lookup and the void, the void zeroed the newer commit itself. The conflict path
-             voided, and freed the content chunk of, its orphan's recorded slot the same way. A first write that failed
+             with a compaction between the lookup and the void, the void zeroed the newer commit itself. The last-writer-wins
+             conflict path (before option C, which removed it) voided, and freed the content chunk of, its orphan's recorded
+             slot the same way. A first write that failed
              before adding its entry left the rollback holding the committed revision's chunk id, which the lookup by chunk
              alone then voided and freed (#1252). The compaction treated a void as an entry: a hole left last (two writers
-             rolled back in reverse order) ended its skip and freed the sentinel, the chain's last commit; a hole copied
-             between pending entries took LastCommitRevisionIndex
+             rolled back in reverse order) ended its skip and freed the sentinel, the chain's last commit
   on_violation: a committed update vanishes — a fresh reader reads the previous value, or zeros — and the rolled-back entry can
                 stay isolated for good, so the chain never shrinks (#1233)
   verified: VersionedVoidRaceTests.ARollback_AfterANewerCommit_KeepsThatCommit (no compaction),
-            ACompactionBeforeARollbacksVoid_LeavesTheNewerCommit, ACompactionBeforeALastWriterWinsVoid_LeavesTheNewerCommit
-            (the compaction staged through DatabaseEngine.ChainVoidProbe; each also checks no entry stays isolated),
+            ACompactionBeforeARollbacksVoid_LeavesTheNewerCommit (the compaction staged through DatabaseEngine.ChainVoidProbe;
+            it also checks no entry stays isolated),
             TwoRollbacksInReverseOrder_ThenACompaction_KeepTheCommittedRevision, ACompactionOverAHole_LeavesTheLastCommitOnACommit,
             AConflictHandlerThatThrows_LeavesNoOrphan, ARollbackWaitingOnAHeldChainLock_ReportsItsHolder_AndVoidsOnceReleased (#1273)
             [VerifiesRule]; mutant
             ARollbackThatVoidsItsRecordedIndex_LosesTheNewerCommit (`RollbackVoidsRecordedIndexForTest`) [RuleMutant]. Real
-            mutations: the count dropped on every void fails the first three; the orphan at its recorded index fails the
-            conflict test; the rollback at its recorded index without the lock fails both rollback tests; the compaction
+            mutations: the count dropped on every void fails the first two; the rollback at its recorded index without the lock fails both rollback tests; the compaction
             keeping voids fails the hole, reverse-rollback and handler tests; the orphan voided after the handler fails the
             handler test. Not covered: the rollback of a delete entry (a destroy's tombstone is added at its commit; a
             commit that throws after PrepareEcsDestroys leaves one to roll back, a stage step 1.4's seams can build)
-            and the conflict's destroy branch (its tombstone is added after any newer commit, so no conflict is detected
-            without a concurrent commit inside that PREPARE)
+            and the handler conflict's destroy branch (its tombstone is added after any newer commit, so no conflict is
+            detected without a concurrent commit inside that PREPARE)
 
 ### CHAIN-02: A transaction's cache entry claims a revision only once the revision exists `[fatal]` `[silent]`
   invariant a first write of a Versioned component marks its cache entry written (`Operations |= Updated`) only after

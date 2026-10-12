@@ -1625,19 +1625,23 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Detects write-write conflicts and resolves them via handler invocation or "last wins" semantics.
-    /// Must be called inside the per-entity revision chain lock (when handler is provided) or outside (last-wins path).
+    /// Detects write-write conflicts and resolves them through the handler, under the chain lock PREPARE holds since it took it; without a handler the
+    /// last writer wins and there is nothing to resolve.
     /// </summary>
     /// <remarks>
     /// With a handler, a conflict is a revision another transaction committed past this writer's snapshot (plan 06 §3.10): published with a stamp above
     /// <paramref name="tsn"/>, or flagged by a committer registered on its commit card with one — past its commit point, not yet published, which a
     /// CommitSequence test misses (it is bumped at publish). Chain position is no version order (VIS-05), so the old test of the last commit's index is
-    /// gone. Without a handler the test is best effort and takes no lock: a CommitSequence changed since the read. PREPARE holds no chain lock there, the
-    /// later commit point wins by its stamp either way, and the resolution only re-adds this transaction's value.
+    /// gone.
+    /// <para>
+    /// Without a handler the conflict is only counted: a CommitSequence changed since the read. This transaction's entry needs no relocation — its stamp is
+    /// drawn at its commit point, after the commit it lost to published, so it is the newest revision by stamp wherever it sits in the chain (VIS-05), a
+    /// tombstone as well as a value. Before option C the entry had to be re-added at the chain's end, under the chain lock, with a copy of its content.
+    /// </para>
     /// </remarks>
     private static void DetectAndResolveConflict(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
-        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, int readCompChunkId,
-        bool lockHeld, long tsn, ushort uowId, DatabaseEngine dbe)
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, int readCompChunkId, long tsn, ushort uowId,
+        DatabaseEngine dbe)
     {
         var conflictSolver = context.Solver;
 
@@ -1668,44 +1672,16 @@ public unsafe partial class Transaction : EntityAccessor
         var conflictType = (byte)(conflictSolver != null ? 0 : 1);
         TyphonEvent.EmitDataTransactionConflict(tsn, pk, 0, conflictType);
 
-        // Last-writer-wins (no handler): PREPARE holds no chain lock, and between the conflict check and here a cleanup on another thread can compact the
-        // chain, moving the orphan and the commit it lost to. The resolution takes the lock (CHAIN-01) and finds its orphan again by identity; the commit's
-        // PUBLISH takes it again for the new entry (AP-05). With a handler the lock is held since PREPARE.
-        var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
-        var lockTaken = false;
-        var ticket = default(PagedMMF.CaptureTicket);
-        if (!lockHeld)
-        {
-            dbe?.ChainVoidProbe?.Invoke(info.ComponentTable, firstChunkId);
-            ref var lockHeader = ref info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
-            ticket = ComponentRevisionManager.ChainLockTicket(ref info.CompRevTableAccessor, ref lockHeader);
-            var wc = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
-            if (!lockHeader.Control.EnterExclusiveAccess(ref wc))
-            {
-                ThrowHelper.ThrowLockTimeout("RevisionChain/ConflictResolve", TimeoutOptions.Current.RevisionChainLockTimeout);
-            }
-
-            lockTaken = true;
-        }
-
-        try
+        if (conflictSolver != null)
         {
             ResolveConflictUnderLock(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, newestIndex, readCompChunkId, tsn, uowId);
-        }
-        finally
-        {
-            if (lockTaken)
-            {
-                info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).Control.ExitExclusiveAccess();
-                ComponentRevisionManager.EndChainLockHold(ref info.CompRevTableAccessor, in ticket);
-            }
         }
     }
 
     /// <summary>
-    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock: a new revision carrying this transaction's value — resolved by
-    /// the handler, if any, against <paramref name="newestIndex"/>, the newest revision by stamp (the handler path has held the lock since detecting it) —
-    /// and this transaction's first entry, the orphan, voided where it now is.
+    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock PREPARE holds: a new revision carrying this transaction's value
+    /// resolved by the handler against <paramref name="newestIndex"/>, the newest revision by stamp, and this transaction's first entry, the orphan, voided
+    /// where it now is.
     /// </summary>
     private static void ResolveConflictUnderLock(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
         ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short newestIndex, int readCompChunkId,
@@ -1755,18 +1731,15 @@ public unsafe partial class Transaction : EntityAccessor
             elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
 
             // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
-            if (conflictSolver != null)
-            {
-                var lastCommitHandle = compRev.GetRevisionElement(newestIndex);
-                var overhead = info.ComponentTable.ComponentOverhead;
-                var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
-                var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(orphanChunkId) + overhead;
-                var toCommitChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead;
-                var committedChunkAddr = info.CompContentAccessor.GetChunkAddress(lastCommitHandle.Element.ComponentChunkId) + overhead;
+            var lastCommitHandle = compRev.GetRevisionElement(newestIndex);
+            var overhead = info.ComponentTable.ComponentOverhead;
+            var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
+            var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(orphanChunkId) + overhead;
+            var toCommitChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead;
+            var committedChunkAddr = info.CompContentAccessor.GetChunkAddress(lastCommitHandle.Element.ComponentChunkId) + overhead;
 
-                conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr);
-                context.Handler(ref conflictSolver);
-            }
+            conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr);
+            context.Handler(ref conflictSolver);
         }
         finally
         {
@@ -1862,8 +1835,7 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             // No relocation to the chain's end (plan 06 §3.3): the newest revision is the highest stamp wherever it sits (VIS-05).
-            DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
-                ref elementHandle, readCompChunkId, lockHeld, TSN, UowId, _dbe);
+            DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, readCompChunkId, TSN, UowId, _dbe);
 
             // Maintain indices/spatial (fallible PREPARE work). The visibility acts — the stamp and IsolationFlag clear, CommitSequence bump, cluster HEAD copy —
             // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.

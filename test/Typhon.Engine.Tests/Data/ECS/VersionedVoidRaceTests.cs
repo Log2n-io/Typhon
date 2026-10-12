@@ -3,6 +3,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Engine.Internals;
@@ -420,41 +421,37 @@ class VersionedVoidRaceTests : TestBase<VersionedVoidRaceTests>
     }
 
     /// <summary>
-    /// A last-writer-wins commit that finds a newer commit past its entry re-adds its value at the end and voids its first entry; the chain is compacted in
-    /// between. The newer commit stays in the chain, committed and with its content — a reader whose snapshot falls between the two commits reads it — and
-    /// the orphan does not stay isolated.
+    /// A last-writer-wins commit that finds a newer commit past its entry publishes that entry where it sits: its stamp is drawn after the newer commit
+    /// published, so it is the newest by stamp (VIS-05). No entry is added or voided, the chain lock is not taken (the void probe never runs), and the
+    /// newer commit stays in the chain for a reader whose snapshot falls between the two.
     /// </summary>
-    /// <remarks>
-    /// Checked on the chain, not through such a reader: the writer began before the newer commit, so its own commit is stamped with an older TSN and is
-    /// visible to that reader anyway (#1146).
-    /// </remarks>
     [Test]
-    [VerifiesRule("CHAIN-01")]
-    public void ACompactionBeforeALastWriterWinsVoid_LeavesTheNewerCommit()
+    [VerifiesRule("VIS-05")]
+    public void ALastWriterWinsCommitPastANewerCommit_PublishesItsEntryInPlace()
     {
         using var scope = ServiceProvider.CreateScope();
         using var dbe = OpenEngine(scope);
         var (id, newerTsn) = BuildChain(dbe, out var writer);
         var table = dbe.GetComponentTable<VrWallet>();
         var root = RootOf(dbe, id);
-        var removed = -1;
-        dbe.ChainVoidProbe = (t, r) =>
-        {
-            if (ReferenceEquals(t, table) && removed < 0)
-            {
-                removed = Compact(t, r);
-            }
-        };
+        var before = Entries(dbe, table, root);
+        var conflictsBefore = (long)dbe.GetDebugProperties()["Transactions.Conflicts"];
+        var probed = 0;
+        dbe.ChainVoidProbe = (t, _) => probed += ReferenceEquals(t, table) ? 1 : 0;
 
         using (writer)
         {
             Assert.That(writer.Commit(), Is.True);
             dbe.ChainVoidProbe = null;
-            Assert.That(removed, Is.GreaterThan(0), "premise: the conflict path ran, and the compaction moved the chain's entries");
+            Assert.That((long)dbe.GetDebugProperties()["Transactions.Conflicts"] - conflictsBefore, Is.EqualTo(1), "premise: the commit found the newer one past its read");
 
-            // Before the writer leaves: as the chain's tail, its disposal trims what no snapshot needs any more, the newer commit included.
-            Assert.That(HoldsCommit(dbe, table, root, newerTsn), Is.True, $"{Marker}: the conflict's void took the commit that moved into its orphan's slot");
-            Assert.That(IsolatedEntries(dbe, table, root), Is.Zero, $"{Marker}: the conflict's orphan is still isolated");
+            var after = Entries(dbe, table, root);
+            Assert.That(probed, Is.Zero, "the commit took the chain lock to resolve a conflict it has nothing to resolve");
+            Assert.That(after.Count, Is.EqualTo(before.Count), "the commit added an entry to the chain");
+            Assert.That(after.Select(e => e.Item2), Is.EqualTo(before.Select(e => e.Item2)), "the commit moved or voided an entry");
+            Assert.That(IsolatedEntries(dbe, table, root), Is.Zero, "the commit's entry is still isolated");
+            Assert.That(HoldsCommit(dbe, table, root, newerTsn), Is.True, "the newer commit left the chain");
+            Assert.That(HoldsCommit(dbe, table, root, writer.CommitStamp), Is.True, "the commit's entry is not published with its stamp");
         }
 
         Assert.That(Read(dbe, id), Is.EqualTo(999), "the last writer wins");

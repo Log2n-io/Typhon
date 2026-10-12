@@ -564,6 +564,7 @@ internal ref struct ComponentRevisionManager
             CompRevStorageElement sentinelEntry = default;
             int sentinelCompChunkId = 0;
             bool hasSentinel = false;
+            bool sentinelKept = false;
             bool inSkipPhase = true;
 
             while (enumerator.MoveNext())
@@ -579,10 +580,16 @@ internal ref struct ComponentRevisionManager
                     continue;
                 }
 
+                // A committed entry below the cutoff and older than the sentinel is superseded for every snapshot wherever it sits, chain order being no
+                // version order (VIS-05): a last-writer-wins commit publishes its entry in place, ahead of the commit it won against. The count guard does
+                // not keep it — the sentinel stays instead — and past the skip phase it is not copied.
+                var superseded = hasSentinel && !enumerator.Current.IsolationFlag && enumerator.Current.TSN > 0 && enumerator.Current.TSN < nextMinTSN
+                                 && enumerator.Current.TSN < sentinelEntry.TSN;
+
                 // Skip phase: remove entries older than the cutoff, track the last committed one as sentinel. Active uncommitted entries (IsolationFlag=true)
                 // must NOT enter the skip phase — they belong to transactions that will commit later. Freeing them would corrupt their data.
                 // IsolationFlag check is before maxSkipCount decrement to avoid wasting the guard count.
-                if (inSkipPhase && !enumerator.Current.IsolationFlag && (--maxSkipCount > 0) && (enumerator.Current.TSN < nextMinTSN))
+                if (inSkipPhase && !enumerator.Current.IsolationFlag && (--maxSkipCount > 0 || superseded) && (enumerator.Current.TSN < nextMinTSN))
                 {
                     var revChunkId = enumerator.Current.ComponentChunkId;
                     bool isCommitted = (enumerator.Current.TSN > 0);
@@ -637,6 +644,7 @@ internal ref struct ComponentRevisionManager
                             tempFirstHeader[0].ItemCount++;
                             curDestIndex++;
                             skipCount--; // Sentinel was counted as skipped but is being kept
+                            sentinelKept = true;
                         }
                         else
                         {
@@ -644,6 +652,13 @@ internal ref struct ComponentRevisionManager
                             PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
                         }
                     }
+                }
+
+                if (sentinelKept && superseded)
+                {
+                    PendContentFree(contentFrees, ref contentFreeCount, enumerator.Current.ComponentChunkId);
+                    skipCount++;
+                    continue;
                 }
 
                 // Copy entry to compacted output — into the root alone (#1298): what the compaction keeps past it, it would put in fresh chunks after the

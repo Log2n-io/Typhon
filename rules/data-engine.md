@@ -102,7 +102,8 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
 ### VIS-05: The newest revision is the highest commit stamp, everywhere `[fatal]` `[silent]`
   invariant one version order — the walker keeps the highest visible stamp, not the last visible in chain order; the
             cluster HEAD copy at publish writes only above the chain's highest published stamp; conflict detection weighs
-            the newest by stamp (a handler commit: a published or registered stamp above its snapshot); the compaction's
+            the newest by stamp (a handler commit: a published or registered stamp above its snapshot), and a last-writer-wins
+            commit publishes its entry where it sits, ahead of the commit it won against — no relocation; the compaction's
             sentinel is the highest-stamp skipped revision; the crash scrub (RB-03) keeps the highest stamp; the replay
             (AP-11) keeps the highest stamp per (entity, slot) for Versioned records, against the base HEAD's stamp too.
             Fence and Commit-discipline records keep CM-03's LSN order
@@ -117,7 +118,8 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
 ### VIS-06: A revision is reclaimed by stamp, never past a live snapshot `[fatal]` `[silent]`
   invariant the revision GC's cutoff is MinTSN, the oldest live snapshot; a revision superseded at stamp s is reclaimed
             only once MinTSN > s, and the one kept for the oldest snapshot is the highest-stamp revision at or below the
-            cutoff — chain [A(12), B(10)] with cutoff 13 keeps A
+            cutoff — chain [A(12), B(10)] with cutoff 13 keeps A, and A alone: a committed revision below the cutoff and older
+            than the kept one is reclaimed wherever it sits, the chain's last entry included
   scope: ComponentRevisionManager.CleanUpUnusedEntriesCore, DeferredCleanupManager.CleanupEntityRevisionsBatched
   spec: tla/CommitStamp.tla — GCSafety (gcbytsn)
   on_violation: the GC keyed by identity frees the highest-stamp revision a snapshot needs: the reader reads an older value

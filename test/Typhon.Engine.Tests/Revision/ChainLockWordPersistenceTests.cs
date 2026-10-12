@@ -426,61 +426,6 @@ class ChainLockWordPersistenceTests : TestBase<ChainLockWordPersistenceTests>
     }
 
     /// <summary>
-    /// A last-writer-wins commit that finds another committed since its read resolves the conflict under the chain's lock: that hold is ticketed. The
-    /// staged capture spans the resolution only, from just before its lock to the publish.
-    /// </summary>
-    [Test]
-    [VerifiesRule("PS-20")]
-    [CancelAfter(20_000)]
-    public void AConflictResolution_EndsItsHold()
-    {
-        using var dbe = SetupEngine();
-        var id = SpawnTrader(dbe, 1);
-        var root = WalletRootOf(dbe, id);
-        var slot = SlotOf(dbe, root);
-
-        // The loser writes first, so its entry precedes the winner's: last-writer-wins detects the conflict by index.
-        using var first = dbe.CreateQuickTransaction();
-        using var second = dbe.CreateQuickTransaction();
-        foreach (var tx in new[] { second, first })
-        {
-            var e = tx.OpenMut(id);
-            var wallet = e.Read(MkTraderArch.Wallet);
-            wallet.Credits++;
-            e.Set(MkTraderArch.Wallet, wallet);
-        }
-
-        Assert.That(first.Commit(), Is.True);
-        long before = -1, overlapped = -1;
-        dbe.ChainVoidProbe = (_, firstChunkId) =>
-        {
-            if (firstChunkId == root && before < 0)
-            {
-                before = BeginStagedCapture(dbe, slot);
-            }
-        };
-        dbe.PublishComponentProbe = (_, firstChunkId) =>
-        {
-            if (firstChunkId == root && before >= 0 && overlapped < 0)
-            {
-                overlapped = EndStagedCapture(dbe, slot, before);
-            }
-        };
-        try
-        {
-            Assert.That(second.Commit(), Is.True);
-        }
-        finally
-        {
-            dbe.ChainVoidProbe = null;
-            dbe.PublishComponentProbe = null;
-        }
-
-        Assert.That(before, Is.Not.Negative, "premise: the commit resolved a conflict on the chain");
-        Assert.That(overlapped, Is.EqualTo(1), "the resolution's hold");
-    }
-
-    /// <summary>
     /// A crash leaves no time for the rewrite: the hold copied by the checkpoint is what the data file keeps. The crash open frees every chain's lock as
     /// the table loads — before the HEAD rebuild walks the chain and the replay of an update after the capture adds a revision to it, both of which take
     /// the lock and would wait for a holder that died with the process. The hold is another thread's, so the reopen's thread cannot pass for its holder.
