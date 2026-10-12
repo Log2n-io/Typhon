@@ -373,7 +373,8 @@ internal abstract partial class BTree<TKey, TStore>
                 // left-side leaf, OR if we observed a stale `_linkList` field. If ll has a valid previous,
                 // the key could live in that earlier leaf — fall through to the general path.
                 // Mirrors the symmetric end-fast-path safety at the rll branch below.
-                else if (ll.GetPrevious(ref accessor).IsValid)
+                // #1322: an emptied root leaf stays the root, so a locked ll can hold no entries; GetFirst would read a stale slot. Nothing to pop here.
+                else if (ll.GetPrevious(ref accessor).IsValid || ll.GetCount(ref accessor) == 0)
                 {
                     ll.GetLatch(ref accessor).AbortWriteLock();
                 }
@@ -407,11 +408,10 @@ internal abstract partial class BTree<TKey, TStore>
                         ll.GetLatch(ref accessor).WriteUnlock();
                         _hasCachedLastKey = false;
                         DecCount();
-                        if (IsEmpty())
-                        {
-                            Root = _linkList = _reverseLinkList = default;
-                            Height--;
-                        }
+                        // #1322: an emptied root leaf STAYS the root. This used to wipe `Root = _linkList = _reverseLinkList = default` here, after the unlock —
+                        // so an insert landing between the unlock and the wipe put its key into the old root, the wipe then orphaned it (count 1, no root), and
+                        // every later descent dereferenced a default root (NRE in NodeWrapper.GetIsLeaf). The insert paths already handle "count 0, live root":
+                        // their init CAS on _rootChunkId loses and they insert into this leaf.
                         return;
                     }
                     ll.GetLatch(ref accessor).AbortWriteLock(); // condition failed — didn't modify node
@@ -432,7 +432,7 @@ internal abstract partial class BTree<TKey, TStore>
                 }
                 // Safety: if rll was split concurrently, it's no longer the rightmost leaf.
                 // Fall through to general path which handles stale pointers correctly.
-                else if (rll.GetNext(ref accessor).IsValid)
+                else if (rll.GetNext(ref accessor).IsValid || rll.GetCount(ref accessor) == 0)   // #1322: see the begin fast path
                 {
                     rll.GetLatch(ref accessor).AbortWriteLock();
                 }
@@ -501,14 +501,13 @@ internal abstract partial class BTree<TKey, TStore>
                 DecCount();
             }
 
-            if (merge && Root.GetLength(ref accessor) == 0)
+            // Root collapse: an INTERNAL root left with no separator hands the root to its only child. #1322: never for a LEAF root — GetChild(-1) of a leaf is
+            // default, so an emptied leaf root used to be wiped here (`_linkList = _reverseLinkList = default`), after the latches were released, with the
+            // same orphaned-insert outcome as the begin fast path's wipe. An emptied leaf root stays the root.
+            var root = Root;
+            if (merge && root.IsValid && !root.GetIsLeaf(ref accessor) && root.GetLength(ref accessor) == 0)
             {
-                Root = Root.GetChild(-1, ref accessor); // left most child becomes root. (returns null for leafs)
-                if (Root.IsValid == false)
-                {
-                    _linkList = default;
-                    _reverseLinkList = default;
-                }
+                Root = root.GetChild(-1, ref accessor); // left most child becomes root
                 Height--;
             }
 
