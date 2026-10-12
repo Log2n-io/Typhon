@@ -521,11 +521,12 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
 
         try
         {
-            // Shrinks the array on the first tick that actually has migrations to apply — an earlier tick would leave the Migrate phase with nothing to do
-            // and the guard would never be consulted.
+            // Shrinks the array on the first tick whose Migrate phase actually drains migrations — an earlier tick would leave it with nothing to do and
+            // the guard would never be consulted. The DRAIN count, not the queue length: a tick can hold queued requests and drain none of them, and the
+            // short array then reached the next Prep, whose pre-size regrew it from the truncated copy and rebound every cell tree to it (#1168).
             ArchetypeClusterState.PrepQueueProbe = (state, _) =>
             {
-                if (state != cs || state.PendingMigrationCount == 0 || Interlocked.Exchange(ref armed, 1) != 0)
+                if (state != cs || state.PendingMigrationDrainCount == 0 || Interlocked.Exchange(ref armed, 1) != 0)
                 {
                     return;
                 }
@@ -566,6 +567,62 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
             + "silent index loss MD-02 forbids");
         Assert.That(seen.Message, Does.Contain("ClusterSpatialIndexSlot").And.Contains("Migrate slice"),
             $"the tick failed for some other reason: {seen}");
+    }
+
+    /// <summary>
+    /// #1168: a fresh destination cluster opened from inside a Migrate slice must hit the same refusal as an existing one. The new-cluster path holds the
+    /// latch and calls the growers' <c>…Locked</c> bodies directly, so a refusal kept only in the wrappers let a short pre-size grow
+    /// <c>ClusterSpatialIndexSlot</c> silently under the sibling workers — and rebind every cell tree to the copy — which is how the fixture above
+    /// occasionally failed on a later tick's <c>IndexOutOfRangeException</c> instead of on the guard.
+    /// </summary>
+    /// <remarks>Deterministic: the spawn runs on the test thread marked as a Migrate slice, into an empty cell, with the array exactly as long as the
+    /// clusters that exist — so only the fresh cluster's id, known only once it is allocated under the latch, falls past it.</remarks>
+    [Test]
+    [VerifiesRule("MD-02")]
+    public void AFreshClusterOpenedInsideAMigrateSlice_RefusesToGrowAShortArray()
+    {
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = SetupEngine(scope, int.MaxValue);
+        var cs = ClusterStateOf(dbe);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(10f + i, 10f)));
+            }
+            tx.Commit();
+        }
+
+        var maxChunk = -1;
+        var ids = cs.ReadActiveClusterList(out var count);
+        for (var i = 0; i < count; i++)
+        {
+            maxChunk = Math.Max(maxChunk, ids[i]);
+        }
+
+        cs.ClusterSpatialIndexSlot = cs.ClusterSpatialIndexSlot[..(maxChunk + 1)];
+
+        Exception thrown = null;
+        ArchetypeClusterState.EnterMigrateSlice();
+        try
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            tx.Spawn<ClCohUnit>(ClCohUnit.Pos.Set(PointAt(CellSize * 2.5f, CellSize * 2.5f)));
+            tx.Commit();
+        }
+        catch (Exception e)
+        {
+            thrown = e;
+        }
+        finally
+        {
+            ArchetypeClusterState.ExitMigrateSlice();
+        }
+
+        var message = thrown?.ToString() ?? "";
+        Assert.That(message, Does.Contain("ClusterSpatialIndexSlot").And.Contains("inside a parallel Migrate slice"),
+            $"the fresh cluster grew the array from inside a Migrate slice instead of refusing (MD-02); array now {cs.ClusterSpatialIndexSlot.Length} long");
     }
 
     /// <summary>

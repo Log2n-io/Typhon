@@ -2719,9 +2719,10 @@ public unsafe partial class Transaction : EntityAccessor
         // the holdoff `using` and span try/finally inside RollbackCore (slow), this fast-path shim stays EH-free and inlinable into Dispose.
         AssertThreadAffinity();
 
-        // Nothing to do if the transaction is empty
+        // Nothing to undo if the transaction is empty, but it ends here all the same: left in Created, it kept accepting writes (TX-01, #1056)
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Rollbacked;
             return true;
         }
 
@@ -3245,23 +3246,26 @@ public unsafe partial class Transaction : EntityAccessor
     {
         AssertThreadAffinity();
 
+        // Can't commit a transaction already processed — read-only included: one that was rolled back is not committed by this call (TX-01) — nor
+        // one a failed commit's PREPARE consumed (#1262), should its rollback have failed
+        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
+        {
+            return false;
+        }
+
         // Read-only transactions have nothing to commit — trivially succeed
         if (IsReadOnly)
         {
             return true;
         }
 
-        // Nothing to commit if the transaction is empty. Its deferred cleanups wait for its Dispose: an empty commit leaves the transaction usable (still
-        // Created), and the cutoff a tail computes leaves its own snapshot out — trimming to it here took revisions this transaction can still read (TXC-01).
+        // Nothing to commit if the transaction is empty, but it is committed all the same: left in Created, it kept accepting writes its caller believed
+        // came after the commit (TX-01, #1056). Its deferred cleanups wait for its Dispose: the cutoff a tail computes leaves its own snapshot out, and
+        // trimming to it here took revisions this transaction can still read (TXC-01).
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Committed;
             return true;
-        }
-
-        // Can't commit a transaction already processed — nor one a failed commit's PREPARE consumed (#1262), should its rollback have failed
-        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
-        {
-            return false;
         }
 
         // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory. Nothing more is appended over it: the restart that recovers

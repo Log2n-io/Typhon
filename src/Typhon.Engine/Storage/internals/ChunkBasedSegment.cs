@@ -1577,6 +1577,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         // Cold path: different segment or epoch changed
         if (cache.Segment != null)
         {
+            // The dispose commits through the accessor's ChangeSet, which outside batch mode its last return dropped (#946).
+            Debug.Assert(cache.SuppressCommitChanges || cache.Accessor.ChangeSet == null, "an idle warm accessor still holds its last renter's ChangeSet");
             cache.Accessor.Dispose();
         }
         cache.Accessor = new ChunkAccessor<TStore>(this, _store, _epochManager, changeSet);
@@ -1591,6 +1593,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// Flushes dirty pages via <see cref="ChunkAccessor{TStore}.CommitChanges"/> but does NOT dispose —
     /// keeps the 16-entry SIMD page cache warm for the next operation.
     /// </summary>
+    /// <remarks>
+    /// The renter's ChangeSet is dropped once flushed (#946). It is the renter's, not the cache's: the fence returns a chunk's set to the engine's pool and
+    /// another worker rents it, so a cached accessor still holding it would flush the new owner's deferred evictions from this thread on its next cold
+    /// rent or <see cref="ExitBatchMode"/> — early (CP-12) and concurrently with the owner (PS-05a). Batch mode keeps it, because
+    /// <see cref="ExitBatchMode"/> commits the batch's dirty slots through it, and drops it there.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void ReturnWarmAccessor()
     {
@@ -1599,6 +1607,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         if (!cache.SuppressCommitChanges)
         {
             cache.Accessor.CommitChanges();  // flush dirty pages, preserve page cache
+            cache.Accessor.ChangeSet = null;
         }
         else
         {
@@ -1647,6 +1656,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         if (cache.Segment != null)
         {
             cache.Accessor.CommitChanges();
+            cache.Accessor.ChangeSet = null;   // the batch's set, flushed: see ReturnWarmAccessor
         }
 
         var sibCache = WarmSiblingAccessorCache.Instance;
@@ -1654,6 +1664,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         if (sibCache.Segment != null)
         {
             sibCache.Accessor.CommitChanges();
+            sibCache.Accessor.ChangeSet = null;
         }
     }
 
@@ -1698,6 +1709,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
 
         if (cache.Segment != null)
         {
+            Debug.Assert(cache.SuppressCommitChanges || cache.Accessor.ChangeSet == null,
+                "an idle warm sibling accessor still holds its last renter's ChangeSet");
             cache.Accessor.Dispose();
         }
         cache.Accessor = new ChunkAccessor<TStore>(this, _store, _epochManager, changeSet);
@@ -1715,6 +1728,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         if (!cache.SuppressCommitChanges)
         {
             cache.Accessor.CommitChanges();
+            cache.Accessor.ChangeSet = null;   // the renter's, not the cache's: see ReturnWarmAccessor
         }
         else
         {

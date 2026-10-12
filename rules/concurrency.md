@@ -125,7 +125,7 @@ the chain's side of that contract: a transaction's snapshot is visible to every 
 ### TXC-01: A cutoff never passes a snapshot that exists or is being created `[fatal]` `[silent]`
   invariant ∀ cutoff C = `TransactionChain.ComputeNextMinTSN()`, computed by the tail L, ∀ transaction T ≠ L alive when C is
             computed or created concurrently with it: C ≤ T.TSN. (L's own snapshot is not retained past its cutoff: L computes
-            C to clean up after itself, at its dispose. An empty commit leaves L usable, so it computes nothing.)
+            C to clean up after itself, at its dispose. An empty commit computes nothing: it ends L (TX-01), but L still reads.)
   enforce (1) a transaction is in the chain before its TSN exists: `Register` pushes it with its TSN pending (0), then draws
           the TSN and publishes it (`Volatile.Write`);
           (2) the cutoff is the minimum over every node but the leaving tail, and over `issued + 1`, the counter read BEFORE

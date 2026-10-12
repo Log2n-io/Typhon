@@ -154,12 +154,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Main Chaos Test
 
-    // QUARANTINE (#696): a nondeterministic red band across the parameterised cases — 1 to 4 of the 6 fail per run, different victims each time
-    // (observed on unmodified main: run A = HeavyWrite_4T_200E_WithDelete; run B = Light_2T_50E_NoDelete + Medium_4T_100E_WithDelete +
-    // Scale_4T_500E + HeavyWrite_4T_200E_WithDelete). #696 recorded only Scale_4T_500E at 2/3 runs, so the band is wider than the issue states.
-    // Quarantined at the METHOD, which covers every case: the victim varies, so per-case suppression would chase a moving target.
-    // Same concurrent value/index correctness family as the fixture's other quarantined tests — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// The ultimate chaos test: multiple threads performing random CRUD operations
     /// on multiple component types with varying transaction lifetimes.
@@ -167,7 +161,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     [Test]
     [TestCaseSource(nameof(ChaosTestCases))]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void ChaosTest_MultiThreadedCRUD(int threadCount, int entitiesPerThread, int operationsPerEntity, float readWriteRatio,
         bool includeDeletes, int seed)
     {
@@ -987,15 +980,11 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Rollback Stress Test
 
-    // QUARANTINE (#696): entity value is a stale intermediate after concurrent rollbacks.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Tests that rollbacks correctly restore state under concurrent load.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void RollbackStress_ConcurrentRollbacks()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1109,16 +1098,12 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Index Warfare Tests
 
-    // QUARANTINE (#696): entity carries the wrong B field after cascading index splits under contention.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Forces B+Tree node splits to cascade via monotonic insertions (worst case)
     /// while concurrent threads delete from the middle, triggering merges that race with splits.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void IndexSplit_CascadingSplitsUnderContention()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1258,9 +1243,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(survivingCount, Is.EqualTo(allEntities.Count));
     }
 
-    // QUARANTINE (#696): entities end with another writer's B value — re-confirmed on main 2026-08-07 (21 mismatches).
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Hammers AllowMultiple indexes (CompD.A) by creating many entities with the same index key,
     /// then rapidly deleting and recreating while concurrent readers access the multi-value buffer.
@@ -1268,7 +1250,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void AllowMultipleIndex_HighChurn()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -1446,9 +1427,9 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(errors, Is.Empty, $"Errors:\n{string.Join("\n", errors.Take(30))}");
     }
 
-    // QUARANTINE (#696): the unique-index winner carries the wrong B field.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#1258): two spawns of one unique key both pass the pre-append check, and the later publish throws past its append, which
+    // stops the engine (AP-03 residual). Fails 6 runs of 6 alone on 2026-10-12 main (f83ec312). Its #696 causes (a doubly freed rollback chunk,
+    // a rollback voiding by a stale position) are fixed on main (REAP-02, CHAIN-01). NOT [Ignore]d — that would hide it from the filter (#703).
     /// <summary>
     /// Multiple threads deliberately create entities with colliding unique index values (CompD.B).
     /// Exactly one should win per value. Verifies no ghost index entries from failed commits.
@@ -1873,9 +1854,10 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Multi-Entity Transaction Chaos Tests
 
-    // QUARANTINE (#696): conserved sum violated — the engine hands the conflict handler a (Read, Committing) pair that do not correspond (2 bad deltas), so units are CREATED, not misattributed.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#696): the conserved sum now holds (#1146 fixed the bad deltas), but 1-2 runs in 6 report "Lock timeout on RevisionChain/...
+    // after 5000ms". Likely cause, not yet proven: transfers commit with a conflict handler, whose PREPARE retains each chain lock in write order, so two
+    // transfers of one pair in crossed order wait each other out (the accepted AP-07 shape, see TwoHandlerCommitsAbortingInCrossedOrder_DoNotDeadlock) and
+    // readers queued behind them time out too. NOT [Ignore]d — that would hide it from the filter (#703).
     /// <summary>
     /// Bank transfer test: N entities each start with value 1000. Threads perform atomic transfers
     /// (decrement src, increment dst) in single transactions. Readers verify the global invariant:
@@ -2089,18 +2071,12 @@ class ChaosStressTests : TestBase<ChaosStressTests>
         Assert.That(errors, Is.Empty, $"Errors:\n{string.Join("\n", errors.Take(30))}");
     }
 
-    // QUARANTINE (#696), retargeted from #695. The LIVELOCK is fixed: this used to need --blame-hang to terminate at all and now completes in ~150 ms,
-    // because the pessimistic descent no longer waits on an OBSOLETE leaf as though it were merely locked (IXS-03; see BTree.Insert.cs). What it reports now
-    // is a different and pre-existing defect — "A duplicate key was detected in a unique index" under concurrency, which is #696's family (and possibly
-    // #716's mechanism, a writer inserting into a merge-detached node). Roughly 1 run in 4.
-    // Still quarantined, still NOT [Ignore]d — that would hide it from local runs and from the filter too (#703).
     /// <summary>
     /// Rapidly creates, deletes, and recreates CompD entities (3 secondary indexes each)
     /// to stress index entry insertion/removal cycling and revision chain creation/destruction.
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void CreateDeleteRecreate_RapidLifecycle()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -2464,9 +2440,9 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Combinatorial Nightmare Tests
 
-    // QUARANTINE (#696): was [Ignore("Instable")] with no issue; same fixture-wide concurrent-value defects.
-    // Excluded from every tier until #696 is fixed — NOT re-suppressed with [Ignore], which would
-    // hide it from local runs and from the filter too (#703).
+    // QUARANTINE (#696): fails or hangs every run on 2026-10-12 main (f83ec312): a destroy's RemoveValue meets "B+Tree pessimistic descent made
+    // no progress in 200 retries" (IXW-01, the residual tracked on #946) past its append, the engine stops committing (AP-03), and the other
+    // roles then time out on back-pressure or hang. NOT [Ignore]d — that would hide it from the filter (#703).
     /// <summary>
     /// The ultimate stress test: 10 threads with different roles exercise every subsystem simultaneously.
     /// Roles: CompD creators, CompD deleters, CompA updaters, long-running MVCC readers,

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Typhon.Engine.Tests;
 
@@ -735,6 +736,180 @@ class ChunkAccessorTests
 
         accessor.Dispose();
         guard.Dispose();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Warm accessor cache vs. the ChangeSet of its last renter (#946)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A warm accessor, once returned, must not reach the ChangeSet it was rented with: its renter may have handed the set on to another thread.
+    /// </summary>
+    /// <remarks>
+    /// The parallel fence returns each chunk's ChangeSet to the engine's pool, and the pool hands it to whichever worker asks next. The returning worker's
+    /// <c>[ThreadStatic]</c> warm accessor still referenced it, so that worker's next cold rent — another segment, or a new epoch — disposed the cached
+    /// accessor through the set and flushed its deferred evictions: SlotRefCount and ActiveChunkWriters decrements the new owner had deferred because it may
+    /// still hold pointers into those pages, released early (CP-12), from the wrong thread and racing the owner's own list (PS-05a). Under the parallel fence
+    /// that surfaced as <c>ChangeSet.FlushDeferredEvictions</c> throwing "Collection was modified", and as an AccessViolation in a B+Tree descent reading a
+    /// page frame that had been handed to another page.
+    /// <para>
+    /// Staged sequentially, so no timing is involved: thread A rents and returns a warm accessor with the set, the test thread then owns the set and defers
+    /// one eviction of a dirty slot through it, and thread A's next rent of the same cache, on another segment, takes the cold path. One case per site that
+    /// drops the set: the primary and the sibling cache's return, and <c>ExitBatchMode</c> for each, where a return in batch mode keeps the set on purpose.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-05a")]
+    [VerifiesRule("CP-12")]
+    [TestCase(false, false)]
+    [TestCase(true, false)]
+    [TestCase(false, true)]
+    [TestCase(true, true)]
+    public unsafe void AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn(bool sibling, bool inBatch)
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+
+        ChunkBasedSegment<PersistentStore> owned;
+        ChunkBasedSegment<PersistentStore> warmFirst;
+        ChunkBasedSegment<PersistentStore> warmNext;
+        int warmFirstChunk;
+        int warmNextChunk;
+        using (EpochGuard.Enter(epochManager))
+        {
+            owned = pmmf.AllocateChunkBasedSegment(PageBlockType.None, OwnedPages + 4, sizeof(TestChunkLarge));
+            for (var i = 0; i < FirstChunkOnPage(OwnedPages - 1) + 1; i++)
+            {
+                owned.AllocateChunk(false);
+            }
+
+            warmFirst = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 4, sizeof(TestChunk32));
+            warmFirstChunk = warmFirst.AllocateChunk(true);
+            warmNext = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 4, sizeof(TestChunk32));
+            warmNextChunk = warmNext.AllocateChunk(true);
+        }
+
+        var changeSet = pmmf.CreateChangeSet();
+        using var rentedAndReturned = new ManualResetEventSlim(false);
+        using var rentElsewhere = new ManualResetEventSlim(false);
+        Exception threadAFailure = null;
+        var threadA = new Thread(() =>
+        {
+            try
+            {
+                using (EpochGuard.Enter(epochManager))
+                {
+                    if (inBatch)
+                    {
+                        ChunkBasedSegment<PersistentStore>.EnterBatchMode();
+                    }
+
+                    RentTouchReturn(warmFirst, warmFirstChunk, changeSet, sibling);
+                    if (inBatch)
+                    {
+                        ChunkBasedSegment<PersistentStore>.ExitBatchMode();
+                    }
+                }
+
+                rentedAndReturned.Set();
+                rentElsewhere.Wait();
+
+                using (EpochGuard.Enter(epochManager))
+                {
+                    // Another segment, same cache: the cold path, which disposes the accessor cached by the rent above.
+                    RentTouchReturn(warmNext, warmNextChunk, null, sibling);
+                }
+            }
+            catch (Exception ex)
+            {
+                threadAFailure = ex;
+                rentedAndReturned.Set();
+            }
+        }) { IsBackground = true };
+        threadA.Start();
+        Assert.That(rentedAndReturned.Wait(TimeSpan.FromSeconds(4)), Is.True, "thread A never returned its warm accessor");
+        Assert.That(threadAFailure, Is.Null, () => $"thread A threw: {threadAFailure}");
+
+        try
+        {
+            // The set now belongs to this thread — what the pool does when the fence returns it and another worker rents it.
+            using (EpochGuard.Enter(epochManager))
+            {
+                var memPages = new int[OwnedPages];
+                for (var p = 0; p < OwnedPages; p++)
+                {
+                    var (pageInSegment, _) = owned.GetChunkLocation(FirstChunkOnPage(p));
+                    Assert.That(pmmf.RequestPageEpoch(owned.Pages[pageInSegment], epochManager.GlobalEpoch, out memPages[p]), Is.True);
+                }
+
+                var idle = PageCounterSums(pmmf, memPages);
+                var accessor = owned.CreateChunkAccessor(changeSet);
+                for (var p = 0; p < OwnedPages; p++)
+                {
+                    accessor.GetChunk<TestChunkLarge>(FirstChunkOnPage(p), dirty: true);
+                }
+
+                // The precondition, checked rather than assumed: the walk overflowed the accessor's slots, so the set holds one deferred eviction, and every
+                // page gained exactly one reference and one writer — the evicted one through that deferral.
+                Assert.That(changeSet.DeferredEvictionCount, Is.EqualTo(1), "precondition: the walk must evict exactly one slot into the set");
+                var before = PageCounterSums(pmmf, memPages);
+                Assert.That(before, Is.EqualTo((idle.SlotRefCount + OwnedPages, idle.ActiveChunkWriters + OwnedPages)),
+                    "precondition: one reference and one writer per page");
+
+                rentElsewhere.Set();
+                Assert.That(threadA.Join(TimeSpan.FromSeconds(4)), Is.True, "thread A never finished its second rent");
+                Assert.That(threadAFailure, Is.Null, () => $"thread A threw: {threadAFailure}");
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(changeSet.DeferredEvictionCount, Is.EqualTo(1),
+                        "thread A's cold rent flushed this thread's deferred eviction: a returned warm accessor reached the set its renter had handed on");
+                    Assert.That(PageCounterSums(pmmf, memPages), Is.EqualTo(before),
+                        "thread A's cold rent released a page reference or a writer this thread's ChangeSet had deferred");
+                });
+
+                accessor.Dispose();
+                Assert.That(PageCounterSums(pmmf, memPages), Is.EqualTo(idle), "the owner's dispose releases every reference and writer, exactly once each");
+                changeSet.ReleaseDirtyMarks();
+            }
+        }
+        finally
+        {
+            // Whatever failed above, thread A must not stay parked on an event this test is about to dispose.
+            rentElsewhere.Set();
+        }
+    }
+
+    /// <summary>One page more than a <see cref="ChunkAccessor{TStore}"/> has slots (32), so walking them evicts exactly one.</summary>
+    private const int OwnedPages = 33;
+
+    private static void RentTouchReturn(ChunkBasedSegment<PersistentStore> segment, int chunkId, ChangeSet changeSet, bool sibling)
+    {
+        if (sibling)
+        {
+            segment.RentWarmSiblingAccessor(changeSet).GetChunk<TestChunk32>(chunkId);
+            segment.ReturnWarmSiblingAccessor();
+        }
+        else
+        {
+            segment.RentWarmAccessor(changeSet).GetChunk<TestChunk32>(chunkId);
+            segment.ReturnWarmAccessor();
+        }
+    }
+
+    private static (int SlotRefCount, int ActiveChunkWriters) PageCounterSums(ManagedPagedMMF pmmf, int[] memPages)
+    {
+        var refs = 0;
+        var writers = 0;
+        foreach (var memPage in memPages)
+        {
+            var info = pmmf.GetPageInfoForDiagnostic(memPage);
+            refs += info.SlotRefCount;
+            writers += info.ActiveChunkWriters;
+        }
+
+        return (refs, writers);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

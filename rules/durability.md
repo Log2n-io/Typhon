@@ -818,17 +818,27 @@ CK-08 (flush-only cycles) are later increments.
           deferred work (e.g. EntityMap bucket pages) — page ownership is final only afterwards. The corrected bitmap is held
           dirty (DC > 0 ⇒ never evicted stale) and consolidated by the next checkpoint / clean shutdown; a re-crash before that
           simply re-derives (idempotent — `owned` depends only on persisted segment directories)
-  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap`,
-         `ManagedPagedMMF.RederiveOccupancy`, `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on
-         `CrashRecoveryAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
+  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap` and its
+         persisted walk (`ClaimPersistedSegment`, `ClaimDirectoryTwin`), `ManagedPagedMMF.RederiveOccupancy`,
+         `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on `CrashRecoveryAtOpen`; replaces FPI repair of
+         occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
   on_violation: a torn / stale occupancy page survives recovery → a clear bit over a live page double-allocates it (data
                 corruption), or a stale set bit leaks the page forever
+  note (2026-10-05, #850): the occupancy reserves and the CK-05 twins (both walks) are claimed up to the bitmap's extent, not
+        the file's page count. Both are bit-set when handed out and written only on first use, so a fresh one legitimately
+        sits past the written end of the file; bounding them by it dropped them, and the wholesale adoption wrote them free
+        while the metadata still named them. Segment pages, directory-map extensions and the reserved roots stay bounded by
+        the file.
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
             `RunStorageIntegrityCheck` reports 0 orphans / 0 phantoms; `LastOpenOccupancyRederiveWordsChanged > 0` genuineness)
             [VerifiesRule]; OwnedBitmapIsIdenticalWithAndWithoutSchema (#771 — the file-only property itself: the derived
             `owned` set is bit-identical with and without the schema registered) [VerifiesRule];
-            RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses and leaves the bitmap
-            untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
+            CrashRederiveKeepsTheUnwrittenReserveAndTwinsOwned (#850 — after a hard crash, the occupancy data reserve and a
+            directory twin both past the written end stay allocated through the re-derive; genuineness: the re-derive reclaims
+            a leaked page) [VerifiesRule], falsified for each half by Mutant_ARederiveClippedToTheWrittenEndIsCaught [RuleMutant];
+            UnwrittenTwinsAreOwnedWithAndWithoutSchema (#850 — the registered and the persisted walk each claim a twin past the
+            written end) [VerifiesRule]; RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses
+            and leaves the bitmap untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
 
 ### CK-10: A checkpoint persists the per-archetype segment pointers it consolidates `[fatal]` `[silent]`
   invariant a checkpoint that consolidates a cluster / EntityMap / per-archetype-index segment's DATA pages into the data file MUST
@@ -1558,7 +1568,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant when dirty slot evicted from ChunkAccessor 16-slot cache,
     ACW decrement deferred until CommitChanges() or Dispose()
   scope: ChunkAccessor.CommitChanges; ChangeSet.DeferEviction / FlushDeferredEvictions (the deferral queue
-         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28)
+         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28); ChunkBasedSegment.ReturnWarmAccessor /
+         ReturnWarmSiblingAccessor / ExitBatchMode (a cached warm accessor drops its renter's set once flushed, or its
+         next cold rent flushes the deferrals of whoever owns the set next — #946)
+  verified: ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn (four cases, one per drop site;
+            removing any one drop reddens exactly its case)
   on_violation: early decrement allows checkpoint to snapshot page
     while caller still holds OLC write lock on evicted slot's node;
     same corruption as CP-11
@@ -1846,9 +1860,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     downstream "not found in PK index" in Versioned copy-on-write); the failed chunks are drained, so the system processes a fraction of its entities
     with nothing reported (#1116: 12 to 192 of 600 per tick)
   scope: UnitOfWork.CreateConcurrentTransaction, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
-         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation
+         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation, ChunkBasedSegment.ReturnWarmAccessor / ReturnWarmSiblingAccessor /
+         ExitBatchMode (a [ThreadStatic] warm accessor must not keep the set past its rent: the set's owner hands it on — #946)
   verified: ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
-            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail
+            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail.
+            ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn covers the warm caches (see CP-12)
 
 ### PS-10: A page's writeback debt is discharged only by a durable write `[fatal][silent]`
   invariant every path that modifies a page's bytes records it (MarkPageModified, or IncrementDirty which implies it)
@@ -2593,10 +2609,14 @@ of the LSN value).
   invariant DELIBERATE (#1303): a torn page past the tear is taken for the grow's. Under an old lost link — the double fault — it was a
             checkpointed page, and its data is lost silently; kept suspect instead, a single torn grow made an open that could not complete. The
             exact rule needs each page's creation generation
-  invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap), right after
-            the schema and again after the archetypes load, and every page a crash-path segment load finds named: the bitmap on disk may predate
-            the grow, and the open's own allocations took its pages for a second segment before CK-09's re-derive. A directory is read for a
-            claim through its resolved CK-05 pair (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
+  invariant a crash open claims in the occupancy bitmap every page its persisted segments own (DatabaseEngine.BuildOwnedPageBitmap) right after
+            the schema, the archetype catalog read with it, before any registration can allocate, and every page a crash-path segment load finds
+            named: the bitmap on disk may predate the grow, and the open's own allocations took its pages for a second segment before CK-09's
+            re-derive. Read later, in InitializeArchetypes, the catalog came after a component registered before it had taken an archetype's
+            pages, and the archetype's committed entities were gone with the open silent (#1163). A persisted root past the file's end — a
+            checkpoint persisted the pointer and died before the root landed — is claimed too: unclaimed, an allocation made it another segment's
+            page, and the load read that page as the root. A directory is read for a claim through its resolved CK-05 pair
+            (ManagedPagedMMF.EnsureDirectoryPairsResolved), never its primary slot: read before its load,
             the older generation stayed cached and the load found the directory as of before its last grow — the chain ahead of it, refused
   invariant the opposite tear — the directory's last page, written as the segment's, linking past it: the chain ahead of the directory — is
             ended where the directory ends when the page it links to was never written as the segment's (past the file's end, another
@@ -2624,8 +2644,11 @@ of the LSN value).
             checkpointed pages keeps them (initialized empty, the items on them were gone); a torn old tail fails the open loudly (it was emptied,
             silently); a torn page of the grow is initialized and the open completes; an unwritten last page is initialized; chunk 0 is reserved
             again after its page is initialized [VerifiesRule]; PostAppendFailureTests.BackpressureOutlastingThePublishLimit_StopsTheEngine_AndARestartRecoversTheSpawns
-            (a claim over an unresolved pair failed this reopen). NOT mutation-proven: the directory's
-            trust — its trigger, a torn map-extension page, needs a segment past the root's ~2 000 page indices
+            (a claim over an unresolved pair failed this reopen);
+            TornCaptureRecoveryTests.AComponentRegisteredBeforeTheArchetypesLoad_DoesNotTakeTheirPages_FromAStaleOccupancyPage (#1163; red with
+            the catalog read in InitializeArchetypes) [VerifiesRule]; WalCrashSweepTests.PageAxis_LifecycleChurn_N4 (the root past the file's end;
+            red without its claim). NOT mutation-proven: the directory's trust — its trigger, a torn map-extension page, needs a segment past the
+            root's ~2 000 page indices
 
 ---
 
@@ -2918,10 +2941,10 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        | `NextFreeTSN` | `ScrubVersionedChains` + `RecoveryDriver` | ✅ RB-05 |
        | `ArchetypeEngineState.NextEntityKey` | `RebuildEntityMaps*` (persisted base) + `RecoveryDriver` (replayed window) | ✅ fixed #697 / #705 |
        | WAL LSN (`WalCommitBuffer._lsnBase`) | `DatabaseEngine.InitializeWal` via `Math.Max(lastValidLSN, checkpointLsn)` | 🔴 **#712** — both terms are 0 when the prior session crashed without checkpointing, because WAL v2 recovery has not run yet at that point; the writer restarts at 1 and collides with the window it is about to replay |
-       | VSBS buffer free-list | — | 🔴 **#770** — restarts from empty, re-issuing handles live recovered entities still hold. Retargeted from #389 on 2026-08-11: #389 fixed collection CONTENT redo and explicitly does not touch this allocator, so leaving the pointer on a closed issue would have read as fixed |
+       | VSBS buffer free-list | the segment's own chunk bitmap (durable to the checkpoint), found at open through the bootstrap stride → root map, which is persisted when a segment is created (`GetComponentCollectionSegment`, #1283) | ✅ #770 — before #1283 the map reached disk only at a clean close, so a crash reopened a fresh empty segment that re-issued live handles |
        | Cluster slot cursors | derived from the cluster occupancy at rebuild | ✅ |
 
-       The two open rows are the same defect shape as #697, on different allocators. #697's own acceptance asked
+       The open row is the same defect shape as #697, on another allocator. #697's own acceptance asked
        for this audit precisely because fixing one instance says nothing about the others.
   scope: RecoveryDriver (window watermarks), DatabaseEngine.RebuildEntityMaps* / InitializeWal (persisted base),
          RecoveryApplier.MaxEntityKeyByArchetype (the window's entity-key half)
