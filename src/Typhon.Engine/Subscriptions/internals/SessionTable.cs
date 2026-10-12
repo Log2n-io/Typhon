@@ -1671,10 +1671,14 @@ internal sealed unsafe class SessionTable : IDisposable
         }
     }
 
-    /// <summary><see cref="IdAt"/> without the caller gate, for the tick thread's own walk, which never runs alongside <see cref="Dispose"/>.</summary>
+    /// <summary><see cref="IdAt"/> without the caller gate, for the tick thread's own walk, which meets <see cref="Dispose"/> only when wedged.</summary>
     /// <param name="slot">The slot.</param>
-    /// <returns>The identity.</returns>
-    private SessionId OwnerIdAt(int slot) => SessionId.FromValue(GateId(Volatile.Read(ref (_rows + slot)->Gate)));
+    /// <returns>The identity; <see cref="SessionId.None"/> on a disposed table, for a tick still running past the scheduler's bounded join.</returns>
+    private SessionId OwnerIdAt(int slot)
+    {
+        var rows = _rows;
+        return rows == null ? SessionId.None : SessionId.FromValue(GateId(Volatile.Read(ref (rows + slot)->Gate)));
+    }
 
     /// <summary>Walks this tick's open sessions.</summary>
     internal struct OpenSessionEnumerator

@@ -673,14 +673,14 @@ unsafe class SessionTableTests
     /// <summary>
     /// #1165 — <see cref="SessionTable.IdAt"/> is called from transport threads (a PING, a HELLO's caps) and from send pumps, both of which run while the
     /// runtime disposes the table. A reader descheduled between loading the rows pointer and reading the gate resumed into a freed block; at this size the
-    /// block is its own virtual allocation, so the read faulted and took the process down. Twice as many readers as cores guarantees some are parked
-    /// mid-call when the table goes.
+    /// block is its own virtual allocation, so the read faulted and took the process down. Twice as many readers as cores (capped at 32) makes it all
+    /// but certain that some are parked mid-call when the table goes: the old code crashed 9 runs out of 9.
     /// </summary>
     [Test]
     [CancelAfter(10_000)]
     public void IdAtNeverReadsTheRowsDisposalFrees()
     {
-        var readers = new System.Threading.Thread[Environment.ProcessorCount * 2];
+        var readers = new System.Threading.Thread[Math.Min(Environment.ProcessorCount * 2, 32)];
         var iterations = new long[readers.Length * 16];
         var strays = 0;
 
@@ -718,7 +718,7 @@ unsafe class SessionTableTests
 
             // More readers have run than there are cores, so the scheduler has preempted at least one of them, and the loop is nothing but the call.
             var started = 0;
-            while (started <= Environment.ProcessorCount)
+            while (started <= Math.Min(Environment.ProcessorCount, readers.Length - 1))
             {
                 System.Threading.Thread.Yield();
                 started = 0;

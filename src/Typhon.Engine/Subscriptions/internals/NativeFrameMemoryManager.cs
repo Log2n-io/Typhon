@@ -121,14 +121,15 @@ internal sealed unsafe class NativeFrameMemoryManager : MemoryManager<byte>
     /// </remarks>
     public override MemoryHandle Pin(int elementIndex = 0)
     {
-        ObjectDisposedException.ThrowIf(_pointer == null, this);
+        var pointer = _pointer;
+        ObjectDisposedException.ThrowIf(pointer == null, this);
 
         if ((uint)elementIndex > (uint)_length)
         {
             throw new ArgumentOutOfRangeException(nameof(elementIndex), elementIndex, "The index is outside the frame.");
         }
 
-        return new MemoryHandle(_pointer + elementIndex);
+        return new MemoryHandle(pointer + elementIndex);
     }
 
     /// <inheritdoc />
