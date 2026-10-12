@@ -1854,10 +1854,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Multi-Entity Transaction Chaos Tests
 
-    // QUARANTINE (#696): the conserved sum now holds (#1146 fixed the bad deltas), but 1-2 runs in 6 report "Lock timeout on RevisionChain/...
-    // after 5000ms". Likely cause, not yet proven: transfers commit with a conflict handler, whose PREPARE retains each chain lock in write order, so two
-    // transfers of one pair in crossed order wait each other out (the accepted AP-07 shape, see TwoHandlerCommitsAbortingInCrossedOrder_DoNotDeadlock) and
-    // readers queued behind them time out too. NOT [Ignore]d — that would hide it from the filter (#703).
     /// <summary>
     /// Bank transfer test: N entities each start with value 1000. Threads perform atomic transfers
     /// (decrement src, increment dst) in single transactions. Readers verify the global invariant:
@@ -1865,7 +1861,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void CrossEntityTransaction_AtomicMultiUpdate()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -2440,9 +2435,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
 
     #region Combinatorial Nightmare Tests
 
-    // QUARANTINE (#696): fails or hangs every run on 2026-10-12 main (f83ec312): a destroy's RemoveValue meets "B+Tree pessimistic descent made
-    // no progress in 200 retries" (IXW-01, the residual tracked on #946) past its append, the engine stops committing (AP-03), and the other
-    // roles then time out on back-pressure or hang. NOT [Ignore]d — that would hide it from the filter (#703).
     /// <summary>
     /// The ultimate stress test: 10 threads with different roles exercise every subsystem simultaneously.
     /// Roles: CompD creators, CompD deleters, CompA updaters, long-running MVCC readers,
@@ -2450,7 +2442,6 @@ class ChaosStressTests : TestBase<ChaosStressTests>
     /// </summary>
     [Test]
     [Property("CacheSize", StressCacheSize)]
-    [Category("Quarantine")]
     public void UltimateStress_AllSubsystems()
     {
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();

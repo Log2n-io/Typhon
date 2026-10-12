@@ -1,5 +1,7 @@
 using System.Threading;
 
+using System;
+
 namespace Typhon.Engine.Internals;
 
 internal abstract partial class BTree<TKey, TStore>
@@ -34,6 +36,21 @@ internal abstract partial class BTree<TKey, TStore>
     /// </para>
     /// </remarks>
     public bool TryUpdateValue(TKey key, int newValue, ref ChunkAccessor<TStore> accessor)
+    {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            return TryUpdateValueUnguarded(key, newValue, ref accessor);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private bool TryUpdateValueUnguarded(TKey key, int newValue, ref ChunkAccessor<TStore> accessor)
     {
         _fenceWindow?.NoteMutation("BTree.TryUpdateValue");
         // On an AllowMultiple tree the leaf slot holds a bufferId, not a value (see CreateInsertValue in BTree.Insert.cs), so SetValueOnly below would
@@ -189,6 +206,21 @@ internal abstract partial class BTree<TKey, TStore>
     /// </para>
     /// </remarks>
     public bool TryUpdateValueAt(TKey key, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> accessor)
+    {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            return TryUpdateValueAtUnguarded(key, elementId, oldValue, newValue, ref accessor);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private bool TryUpdateValueAtUnguarded(TKey key, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> accessor)
     {
         _fenceWindow?.NoteMutation("BTree.TryUpdateValueAt");
 

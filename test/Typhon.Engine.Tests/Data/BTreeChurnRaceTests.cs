@@ -47,6 +47,111 @@ class BTreeChurnRaceTests
 
     private const int MaxLive = 20_000;
 
+    private static string FirstFrame(Exception ex) => ex.StackTrace?.Split((char)10)[0].Trim();
+
+    /// <summary>
+    /// #1321: removing a key that is ABSENT from its leaf, where the key falls between the leaf's last entry and its HighKey. The B-link right-walk in
+    /// OptimisticDescendToLeaf decides "past this leaf" by content (key &gt; last), so it overshot into the next leaf; the authoritative-leaf search then
+    /// rejected that leaf (key below its lower bound) and re-descended into the same overshoot until it threw "no progress in 200 retries" — past the WAL
+    /// append in the engine, which halts it. Single-threaded and deterministic: a random removal order puts many removed keys in that band.
+    /// </summary>
+    [Test]
+    public unsafe void RemoveOfAnAbsentKeyBetweenLastAndHighKey_ReportsNotFound()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 400, sizeof(Index64Chunk));
+        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            const int n = 2000;
+            var elementIds = new int[n + 1];
+            for (var i = 1; i <= n; i++)
+            {
+                elementIds[i] = tree.Add(i, i, ref accessor);
+            }
+
+            var order = new int[n];
+            for (var i = 0; i < n; i++)
+            {
+                order[i] = i + 1;
+            }
+            new Random(1321).Shuffle(order);
+
+            foreach (var k in order)
+            {
+                Assert.That(tree.RemoveValue(k, elementIds[k], k, ref accessor), Is.True, $"present key {k}");
+                Assert.That(tree.RemoveValue(k, elementIds[k], k, ref accessor), Is.False, $"absent key {k} must report not-found");
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
+        }
+    }
+
+    /// <summary>
+    /// #1321: a write that throws while it holds a node latch faults the tree. A new AllowMultiple key allocates its value buffer under the leaf's latch;
+    /// failing that allocation left the latch held, and the next write into the leaf spun on it for good — UltimateStress's hang. Now that write throws.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXW-09")]
+    [CancelAfter(20_000)]
+    public unsafe void AFaultUnderALeafLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 40, sizeof(Index64Chunk));
+        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+
+        void Add(double key)
+        {
+            var scope = epochManager.EnterScope();
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                tree.Add(key, (int)key, ref accessor);
+            }
+            finally
+            {
+                accessor.Dispose();
+                epochManager.ExitScope(scope);
+            }
+        }
+
+        for (var k = 1; k <= 5; k++)
+        {
+            Add(k);
+        }
+
+        var faultingThread = Environment.CurrentManagedThreadId;
+        ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = _ =>
+        {
+            if (Environment.CurrentManagedThreadId == faultingThread)
+            {
+                throw new System.IO.IOException("injected allocation fault");
+            }
+        };
+        try
+        {
+            Assert.That(() => Add(10), Throws.TypeOf<System.IO.IOException>(), "premise: the new key's buffer allocation fails");
+        }
+        finally
+        {
+            ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = null;
+        }
+
+        var later = Task.Run(() => Add(11));
+        Assert.That(() => later.Wait(TimeSpan.FromSeconds(5)), Throws.InstanceOf<AggregateException>()
+            .With.InnerException.TypeOf<InvalidOperationException>().And.InnerException.Message.Contains("faulted"),
+            "the next write into the leaf throws instead of spinning on the abandoned latch");
+        Assert.That(tree.IsFaulted, Is.True);
+    }
+
     [TestCase(2, 2, 0, 0, 500)]
     [TestCase(4, 4, 0, 0, 500)]
     [TestCase(2, 2, 1, 0, 500)]
@@ -123,7 +228,7 @@ class BTreeChurnRaceTests
                     }
                     catch (Exception ex)
                     {
-                        errors.Add($"insert: {ex.GetType().Name}: {ex.Message} @ {ex.StackTrace?.Split((char)10)[0]?.Trim()} <- {(ex.StackTrace?.Split((char)10).Length > 1 ? ex.StackTrace.Split((char)10)[1].Trim() : "")}");
+                        errors.Add($"insert: {ex.GetType().Name}: {ex.Message} @ {FirstFrame(ex)}");
                     }
                     finally
                     {
@@ -162,7 +267,7 @@ class BTreeChurnRaceTests
                     }
                     catch (Exception ex)
                     {
-                        errors.Add($"remove: {ex.GetType().Name}: {ex.Message} @ {ex.StackTrace?.Split((char)10)[0]?.Trim()} <- {(ex.StackTrace?.Split((char)10).Length > 1 ? ex.StackTrace.Split((char)10)[1].Trim() : "")}");
+                        errors.Add($"remove: {ex.GetType().Name}: {ex.Message} @ {FirstFrame(ex)}");
                     }
                     finally
                     {

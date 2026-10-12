@@ -389,10 +389,15 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
         overwrite it
   never retry PREPARE on entries a failed attempt consumed: it resets each entry's read revision (`PrevCompContentChunkId = -1`),
         so a second pass reads chunk -1 as the old value
+  invariant a conflict-handler commit takes the chain locks it retains in one global order: component type id
+            (`Transaction.PrepareOrder`), then primary key (`ComponentInfo.ForEachMutableEntryOrdered`). Taken in write order, two
+            commits writing the same entities in opposite orders each held one and waited out the other's for
+            RevisionChainLockTimeout, and every reader of those chains with them (#1321)
   never roll back while holding the retained chain locks: the rollback frees a spawn's chain, lock word included, and voids
-        with no deadline on chains another aborting conflict-handler commit may hold. Two that took their chains in crossed
-        order then wait for each other for good, and every later publish of those entities waits behind them
+        with no deadline on chains another aborting conflict-handler commit may hold. Two that held their chains in crossed
+        order would wait for each other for good; the global order above keeps that from arising, this is the second line
   scope: Transaction.PrepareClusterVersionedSlot, Transaction.AnyIndexedFieldChanged, Transaction.PublishClusterIndexes,
+         Transaction.PrepareOrder, ComponentInfo.ForEachMutableEntryOrdered,
          Transaction.PublishComponent, Transaction.PublishPreparedComponents, Transaction.Commit,
          Transaction.RollbackAfterFailedCommit, Transaction.CheckVersionedUniqueKeys, ArchetypeClusterState.IndexedSlots,
          Transaction.UnplaceSpawns, Transaction.UnmarkDestroysPending, Transaction.UnmarkEnableDisablePending
@@ -415,14 +420,15 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             PREPARE: the index keeps the committed key, a refreshed view keeps the entity, the same change then commits),
             AnAbortedWrite_LeavesNoPhantomInAView (an AllowMultiple field: no phantom, then the same write committed and the
             entity destroyed), AVersionedWriteOntoAHeldKey_IsRejectedBeforeTheAppend,
-            AnAbortedHandlerCommit_ReleasesItsChainLocksBeforeRollingBack, TwoHandlerCommitsAbortingInCrossedOrder_DoNotDeadlock
-            (each conflict handler holds its first chain at a barrier while the other's second wait times out),
+            AnAbortedHandlerCommit_ReleasesItsChainLocksBeforeRollingBack, ConcurrencyConflictTests.OppositeOrderHandlerCommits_DoNotDeadlock
+            (each commit held at its first chain lock until the other has its own: in write order both get there),
             AnAbortedDestroy_LeavesTheIndexAndTheView (a guard: the destroy's index work was already in the publish); each
             also checks the failed commit ended the transaction [VerifiesRule]; mutants
             APrepareThatReconcilesIndexes_LeavesTheAbortedKey and APrepareThatAppendsViewDeltas_LeavesAPhantom
             (`PrepareReconcilesIndexesForTest`) [RuleMutant]. Real mutations: the terminal rollback removed fails the abort
-            tests; the locks released after the rollback hangs the crossed-order test (both rollbacks wait on each other).
-            Not covered by a test: a rollback that throws (`_prepareConsumed` then refuses the retry)
+            tests; the write-order PREPARE times the opposite-order test out. Not covered by a test: a rollback that throws
+            (`_prepareConsumed` then refuses the retry), and the locks released after the rollback (no API reaches crossed holds
+            under the global order)
 
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths

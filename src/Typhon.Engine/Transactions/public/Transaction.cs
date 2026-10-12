@@ -1749,6 +1749,33 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    private KeyValuePair<Type, ComponentInfo>[] _prepareOrder;
+
+    /// <summary>
+    /// The component types in the order PREPARE visits them. A handler commit holds every chain lock it takes there until its publish, so it takes them
+    /// in one global order — component type id, then primary key (<see cref="ComponentInfo.ForEachMutableEntryOrdered{TAction}"/>). In insertion order,
+    /// two commits writing the same entities in opposite orders each held one lock and waited for the other's until RevisionChainLockTimeout (#1321).
+    /// </summary>
+    private ReadOnlySpan<KeyValuePair<Type, ComponentInfo>> PrepareOrder(bool ordered)
+    {
+        var count = _componentInfos.Count;
+        if (_prepareOrder == null || _prepareOrder.Length < count)
+        {
+            _prepareOrder = new KeyValuePair<Type, ComponentInfo>[Math.Max(count, 8)];
+        }
+
+        ((ICollection<KeyValuePair<Type, ComponentInfo>>)_componentInfos).CopyTo(_prepareOrder, 0);
+        var span = _prepareOrder.AsSpan(0, count);
+        if (ordered && count > 1)
+        {
+            span.Sort(static (a, b) => a.Value.ComponentTypeId != b.Value.ComponentTypeId
+                ? a.Value.ComponentTypeId.CompareTo(b.Value.ComponentTypeId)
+                : string.CompareOrdinal(a.Key.FullName, b.Key.FullName));
+        }
+
+        return span;
+    }
+
     /// <summary>Action struct for commit PREPARE iteration: delegates to <see cref="PrepareComponent"/>.</summary>
     private struct PrepareAction : IEntryAction
     {
@@ -3345,7 +3372,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Process every Component Type and their components (old CRUD path — Versioned only). AP-01: this is the PREPARE pass — all fallible work,
             // no visibility. The matching PUBLISH pass (PublishPreparedComponents) runs after the WAL Append.
             var prepareAction = new PrepareAction { Tx = this };
-            foreach (var kvp in _componentInfos)
+            foreach (var kvp in PrepareOrder(handler != null))
             {
                 var info = kvp.Value;
 
@@ -3378,7 +3405,14 @@ public unsafe partial class Transaction : EntityAccessor
 
                     try
                     {
-                        kvp.Value.ForEachMutableEntry(ref context, ref prepareAction);
+                        if (handler != null)
+                        {
+                            kvp.Value.ForEachMutableEntryOrdered(ref context, ref prepareAction);
+                        }
+                        else
+                        {
+                            kvp.Value.ForEachMutableEntry(ref context, ref prepareAction);
+                        }
                     }
                     finally
                     {
