@@ -670,6 +670,77 @@ unsafe class SessionTableTests
         });
     }
 
+    /// <summary>
+    /// #1165 — <see cref="SessionTable.IdAt"/> is called from transport threads (a PING, a HELLO's caps) and from send pumps, both of which run while the
+    /// runtime disposes the table. A reader descheduled between loading the rows pointer and reading the gate resumed into a freed block; at this size the
+    /// block is its own virtual allocation, so the read faulted and took the process down. Twice as many readers as cores guarantees some are parked
+    /// mid-call when the table goes.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void IdAtNeverReadsTheRowsDisposalFrees()
+    {
+        var readers = new System.Threading.Thread[Environment.ProcessorCount * 2];
+        var iterations = new long[readers.Length * 16];
+        var strays = 0;
+
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var table = NewTable(SessionTable.MaxSlots, $"Sessions{cycle}");
+            Assert.That(Admit(table, out var session, out _), Is.True);
+            var slot = session.Slot;
+            var stop = 0;
+            Array.Clear(iterations);
+            using var go = new System.Threading.ManualResetEventSlim();
+
+            for (var r = 0; r < readers.Length; r++)
+            {
+                var index = r * 16;
+                readers[r] = new System.Threading.Thread(() =>
+                {
+                    // Parked until every thread exists: Thread.Start waits for the new thread to run, which on saturated cores costs a quantum each.
+                    go.Wait();
+                    while (System.Threading.Volatile.Read(ref stop) == 0)
+                    {
+                        var id = table.IdAt(slot);
+                        if (id.IsValid && id != session)
+                        {
+                            System.Threading.Interlocked.Increment(ref strays);
+                        }
+
+                        iterations[index]++;
+                    }
+                }) { IsBackground = true };
+                readers[r].Start();
+            }
+
+            go.Set();
+
+            // More readers have run than there are cores, so the scheduler has preempted at least one of them, and the loop is nothing but the call.
+            var started = 0;
+            while (started <= Environment.ProcessorCount)
+            {
+                System.Threading.Thread.Yield();
+                started = 0;
+                for (var r = 0; r < readers.Length; r++)
+                {
+                    started += System.Threading.Volatile.Read(ref iterations[r * 16]) > 0 ? 1 : 0;
+                }
+            }
+
+            table.Dispose();
+            System.Threading.Volatile.Write(ref stop, 1);
+            foreach (var reader in readers)
+            {
+                reader.Join();
+            }
+
+            Assert.That(table.IdAt(slot), Is.EqualTo(SessionId.None), "a disposed table names no one");
+        }
+
+        Assert.That(strays, Is.Zero, "a reader saw an identity the table never held: it read memory disposal had freed");
+    }
+
     [Test]
     public void ATableWiderThanASlotNumberIsRefused()
     {

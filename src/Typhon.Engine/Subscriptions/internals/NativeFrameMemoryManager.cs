@@ -115,9 +115,14 @@ internal sealed unsafe class NativeFrameMemoryManager : MemoryManager<byte>
     public override Span<byte> GetSpan() => new(_pointer, _length);
 
     /// <inheritdoc />
-    /// <remarks>The memory is native and never moves, so pinning is a bounds check and an address. There is nothing to unpin.</remarks>
+    /// <remarks>
+    /// The memory is native and never moves, so pinning is a bounds check and an address. There is nothing to unpin. A released view throws (#1166): a
+    /// <see cref="Memory{T}"/> taken before the release still carries its old length, so a null handle would be dereferenced as that many bytes at address 0.
+    /// </remarks>
     public override MemoryHandle Pin(int elementIndex = 0)
     {
+        ObjectDisposedException.ThrowIf(_pointer == null, this);
+
         if ((uint)elementIndex > (uint)_length)
         {
             throw new ArgumentOutOfRangeException(nameof(elementIndex), elementIndex, "The index is outside the frame.");
