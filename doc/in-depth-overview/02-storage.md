@@ -282,7 +282,7 @@ The page cache tracks three independent things per page:
 
 | Field | Set by | Cleared by | Blocks |
 |---|---|---|---|
-| `DirtyCounter` (`DC`) — mutator marks | `IncrementDirty`, through a `ChangeSet` (`AddByMemPageIndex`, one mark per page per set) | `DecrementDirty`, only by the `ChangeSet` that took the mark | **Eviction** while > 0 |
+| `DirtyCounter` (`DC`) — mutator marks | `IncrementDirty`, through a `ChangeSet` (`AddByMemPageIndex`, one mark per page per set) | `DecrementDirtyByDelta`, only by the `ChangeSet` that took the mark (via `ReleaseDirtyMarks()`) | **Eviction** while > 0 |
 | `WritebackGen` / `CapturedGen` — writeback debt | `WritebackGen`: every modification (`IncrementDirty`, `MarkPageModified`) | `CapturedGen`: `MarkCaptured`, after the checkpoint's fsync | **Eviction** while they differ |
 | `ActiveChunkWriters` (`ACW`) | `IncrementActiveChunkWriters` (in `MarkSlotDirty`) | `DecrementActiveChunkWriters` (in `CommitChanges`, eviction queue) | **Checkpoint snapshot** and eviction while > 0 |
 
