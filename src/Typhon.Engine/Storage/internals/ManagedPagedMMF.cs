@@ -907,7 +907,26 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             return false; // Already registered — caller should fall back to fresh allocation
         }
 
-        var directory = ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
+        // CK-05 (C2): register directory-page slot state before the load walks them. A root whose only write tore is the state of a root never written,
+        // and takes the same way out (#936); any other both-invalid directory page throws, and leaves no registration behind.
+        List<int> directory;
+        try
+        {
+            directory = ResolveDirectoryPairsForLoad(filePageIndex, tolerateTornForRebuild);
+        }
+        catch
+        {
+            dic.TryRemove(filePageIndex, out _);
+            throw;
+        }
+
+        if (directory == null)
+        {
+            dic.TryRemove(filePageIndex, out _);
+            Interlocked.Increment(ref _chunkSegmentsReplacedAsTorn);
+            return false;
+        }
+
         try
         {
             if (!LoadChunkSegment(segment, filePageIndex))
@@ -1370,9 +1389,18 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// <see cref="MapReadOffset"/>. Walks the directory map chain through the CURRENT slot's
     /// <see cref="LogicalSegmentHeader.LogicalSegmentNextMapPBID"/>. The immutable identity (the <c>IsLogicalSegment</c>
     /// flag + <c>TwinPageIndex</c>) survives a torn primary because it lives in the first 4 KiB sector and never changes
-    /// across generations. Both-slots-invalid for any directory page → throws (the segment cannot be loaded).
+    /// across generations. Both-slots-invalid for any directory page → throws (the segment cannot be loaded), but for the root below.
     /// </summary>
-    internal List<int> ResolveDirectoryPairsForLoad(int rootPageIndex) => ResolveDirectoryPairs(rootPageIndex);
+    /// <param name="rootPageIndex">The segment's root directory page.</param>
+    /// <param name="tolerateUnpersistedRoot">
+    /// Crash path only (#936): the ROOT has no valid slot and the generation in its first sector — torn-safe like the identity fields (WP-12) — is 1, so
+    /// the write that tore was the pair's first persist (the seed lands it on the primary at generation 1; the twin is written from generation 2). The root
+    /// never had a durable copy: the segment is reported unloadable rather than corrupt, the state of a root never written, every write it received in the
+    /// WAL window. Any other both-invalid page — a map-extension page, whose segment may hold checkpointed data, or a root persisted before — still throws.
+    /// </param>
+    /// <returns>The directory pages resolved; <c>null</c> for the tolerated unpersisted root, with nothing registered.</returns>
+    internal List<int> ResolveDirectoryPairsForLoad(int rootPageIndex, bool tolerateUnpersistedRoot = false)
+        => ResolveDirectoryPairs(rootPageIndex, tolerateUnpersistedRoot);
 
     /// <summary>
     /// Drops the CK-05 pair state of a segment's directory pages that a load abandoned (#1302). Left registered, the abandoned segment's twins stayed
@@ -1426,9 +1454,10 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
     }
 
-    private List<int> ResolveDirectoryPairs(int rootPageIndex)
+    private List<int> ResolveDirectoryPairs(int rootPageIndex, bool tolerateUnpersistedRoot = false)
     {
         var resolved = new List<int>(1);
+        List<int> added = null;
         Span<byte> bufPrimary = new byte[PageSize];
         Span<byte> bufTwin = new byte[PageSize];
 
@@ -1470,9 +1499,31 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             if (!pValid && !tValid)
             {
+                if (tolerateUnpersistedRoot && primary == rootPageIndex && PageBaseHeader.ReadPairGeneration(bufPrimary) == 1)
+                {
+                    return null;
+                }
+
+                // The pairs this walk added die with it: the segment is not loaded, and a pair left for a page it abandons mis-routes that page (CK-05).
+                if (added != null)
+                {
+                    lock (_pairLock)
+                    {
+                        foreach (var page in added)
+                        {
+                            _pairState.TryRemove(page, out _);
+                        }
+                    }
+                }
+
                 throw new InvalidOperationException(
                     $"Both slots of directory page {primary} (twin {twin}) are corrupt — the segment cannot be loaded. " +
                     $"File: {Options.BuildDatabasePathFileName()}");
+            }
+
+            if (!_pairState.ContainsKey(primary))
+            {
+                (added ??= []).Add(primary);
             }
 
             int next;

@@ -4,6 +4,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace Typhon.Engine.Tests;
 
@@ -635,5 +636,150 @@ internal sealed class WalCrashSweepTests
             dbe.InitializeArchetypes();
             RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
         }
+    }
+
+    // ── #936: a torn FIRST write of a segment's directory root ──────────────────────────────────────────────────────────────────
+    // A directory pair is seeded with the twin as its current slot, so its first persist writes the primary and the twin holds nothing until the
+    // second. A crash that tears that first write leaves the root with no valid slot at all, while the checkpoint has already persisted the SPI that
+    // names it (PersistArchetypeState runs at cycle start). The cycle died before advancing CheckpointLSN, so the WAL window still covers every write
+    // the segment ever received. The EntityMap root is the target because its load is the first one reopen attempts: when it fails, the archetype's
+    // other segments are fresh-allocated without being read.
+
+    private static IEnumerable<TestCaseData> TornFirstRootWriteCases()
+    {
+        yield return new TestCaseData("SingleTxSpawn").SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_SingleTxSpawn");
+        yield return new TestCaseData("MixedDiscipline").SetName("TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal_MixedDiscipline");
+    }
+
+    private string DataFilePath => Path.Combine(_dbDir, $"{CurrentDatabaseName}.typhon", "data");
+
+    /// <summary>The occupancy segment's first data page (genesis page 4): its L0 words hold the bits of every page these small databases use.</summary>
+    private const int OccupancyDataPage = 4;
+
+    /// <summary>
+    /// Runs <paramref name="workload"/>, then a checkpoint that dies on the first page write after the EntityMap's root landed for the first time,
+    /// hard-crashes, and tears that root on disk: the first 4 KiB sector (flag, twin index, generation) survives, the rest does not. Returns the root.
+    /// </summary>
+    private int StageTornFirstEntityMapRootWrite(IRecoveryWorkload workload, RecoveryShadowModel shadow)
+    {
+        int root;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            var mmf = scope1.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+            workload.Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                workload.Execute(uow, shadow);
+                uow.Flush();
+            }
+
+            shadow.CaptureValues(dbe);
+
+            root = dbe._stateByRouting[shadow.Entities.Keys.First().ArchetypeId].EntityMap.Segment.RootPageIndex;
+            var twin = 0;
+            foreach (var (primary, t) in mmf.DirectoryPairs)
+            {
+                if (primary == root)
+                {
+                    twin = t;
+                }
+            }
+
+            Assert.That(twin, Is.GreaterThan(0), "precondition: the EntityMap root is a paired directory page");
+            Assert.That(ReadPairGenerationOnDisk(mmf, root), Is.EqualTo(0UL), "precondition: the EntityMap root has never been persisted");
+
+            // Stage: the root's occupancy bit is already durable. A cycle writes the occupancy page AFTER the directory roots, so a crash on the root
+            // leaves the bit unpersisted, and the reopen hands the page to the first segment it allocates before the archetype loads — which masks the
+            // throw. The bit is durable when the root was allocated after an earlier cycle collected its dirty pages but before that cycle wrote the
+            // occupancy page.
+            using (var guard = EpochGuard.Enter(mmf.EpochManager))
+            {
+                mmf.RequestPageEpoch(OccupancyDataPage, guard.Epoch, out var occupancyMem);
+                var cs = mmf.CreateChangeSet();
+                cs.AddByMemPageIndex(occupancyMem);
+                cs.SaveChanges();
+            }
+
+            // Let the root's first persist land, then kill the cycle at the very next write: the SPI is already on disk (PersistArchetypeState runs at
+            // cycle start), CheckpointLSN is not advanced.
+            var rootLanded = false;
+            var crashed = false;
+            mmf.PageWriteInterceptor = filePageIndex =>
+            {
+                if (rootLanded)
+                {
+                    crashed = true;
+                    throw new ChaosSimulatedCrashException(0, IoSubsystem.DataFile);
+                }
+
+                rootLanded = filePageIndex == root;
+            };
+            dbe.CheckpointManager.RunCheckpointCycle(dbe.WalManager.DurableLsn);
+            mmf.PageWriteInterceptor = null;
+
+            Assert.That(crashed, Is.True, "precondition: the cycle must die after the root's first write, before it can advance CheckpointLSN");
+            Assert.That(ReadPairGenerationOnDisk(mmf, root), Is.EqualTo(1UL), "precondition: the root's first persist landed at generation 1");
+            Assert.That(ReadPairGenerationOnDisk(mmf, twin), Is.EqualTo(0UL), "precondition: the twin was never written");
+
+            dbe.SimulateHardCrash();
+        }
+
+        ChaosPageIO.DamagePageOnDisk(DataFilePath, root, PageDamageType.TornPage, PagedMMF.PageSize);
+        return root;
+    }
+
+    private static ulong ReadPairGenerationOnDisk(ManagedPagedMMF mmf, int filePageIndex)
+    {
+        if ((filePageIndex + 1L) * PagedMMF.PageSize > mmf.FileSize)
+        {
+            return 0;
+        }
+
+        var buf = new byte[PagedMMF.PageSize];
+        mmf.ReadPageDirect(filePageIndex, buf);
+        return PageBaseHeader.ReadPairGeneration(buf);
+    }
+
+    [Test]
+    [CancelAfter(20_000)]
+    [TestCaseSource(nameof(TornFirstRootWriteCases))]
+    public void TornFirstEntityMapRootWrite_WithWal_RebuildsFromWal(string workloadName)
+    {
+        var workload = MakeWorkload(workloadName);
+        var shadow = new RecoveryShadowModel();
+        StageTornFirstEntityMapRootWrite(workload, shadow);
+
+        // The open must reach the torn root, not skip it — TornFirstEntityMapRootWrite_WithoutWal_FailsLoudly proves that for this same staging.
+        using var scope2 = _serviceProvider.CreateScope();
+        var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        workload.Register(dbe);
+        dbe.InitializeArchetypes();
+        RecoveryOracle.AssertPrimaryAxis(dbe, shadow);
+    }
+
+    [Test]
+    [CancelAfter(20_000)]
+    public void TornFirstEntityMapRootWrite_WithoutWal_FailsLoudly()
+    {
+        var workload = MakeWorkload("SingleTxSpawn");
+        var shadow = new RecoveryShadowModel();
+        var root = StageTornFirstEntityMapRootWrite(workload, shadow);
+
+        // No WAL ⇒ the clean path: nothing can rebuild the segment, so the damage must refuse the open rather than open without it.
+        foreach (var file in Directory.GetFiles(_walDir))
+        {
+            File.Delete(file);
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        Assert.That(() =>
+            {
+                var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+                workload.Register(dbe);
+                dbe.InitializeArchetypes();
+            },
+            Throws.InstanceOf<InvalidOperationException>().With.Message.Contains($"Both slots of directory page {root}"));
     }
 }

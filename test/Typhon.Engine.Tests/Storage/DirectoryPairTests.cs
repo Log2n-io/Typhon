@@ -512,4 +512,176 @@ public class DirectoryPairTests
             Throws.InstanceOf<InvalidOperationException>().With.Message.Contains("Both slots of directory page"),
             "both slots of a map-extension directory page corrupt → load must fail loudly mid-walk, never hang or silently truncate the directory");
     }
+
+    // ── #936: the crash path's tolerant load (TryLoadChunkBasedSegment) over a directory page whose first persist tore ──
+
+    private const int Stride = 64;
+
+    /// <summary>Tears <paramref name="filePageIndex"/> on disk the way a power loss does: its first 4 KiB sector landed, the second did not.</summary>
+    private static void TearSecondSector(ManagedPagedMMF mmf, int filePageIndex)
+    {
+        var buf = new byte[PagedMMF.PageSize];
+        mmf.ReadPageDirect(filePageIndex, buf);
+        buf.AsSpan(PagedMMF.PageSize / 2).Fill(0xFF);
+        mmf.WritePageDirect(filePageIndex, buf);
+        mmf.FlushToDisk();
+    }
+
+    /// <summary>Allocates a chunk segment, persists it once (its root's first write: the primary slot at generation 1) and tears that write.</summary>
+    private int StageTornFirstRootWrite()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        var cs = mmf.CreateChangeSet();
+        var seg = mmf.AllocateChunkBasedSegment(PageBlockType.None, 4, Stride, cs);
+        cs.SaveChanges();
+        var root = seg.RootPageIndex;
+
+        Assert.That(ReadSlotGeneration(mmf, root), Is.EqualTo(1UL), "precondition: the root's first persist lands on the primary at generation 1");
+        TearSecondSector(mmf, root);
+        return root;
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_TornFirstRootWrite_TolerantLoad_ReturnsFalseAndLeavesNothingRegistered()
+    {
+        var root = StageTornFirstRootWrite();
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        var registeredBefore = mmf2.RegisteredSegments.Count;
+
+        Assert.That(mmf2.TryLoadChunkBasedSegment(root, Stride, out var loaded, tolerateTornForRebuild: true), Is.False,
+            "a root whose only write tore never had a durable copy — the crash path must fall back to a fresh allocation, not fail the open");
+        Assert.That(loaded, Is.Null);
+        Assert.That(mmf2.RegisteredSegments.Count, Is.EqualTo(registeredBefore), "the failed load must not stay registered");
+        Assert.That(mmf2.DirectoryPairs.Any(p => p.Primary == root), Is.False, "the failed load must leave no directory pair for the abandoned root");
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_TornFirstRootWrite_StrictLoad_FailsLoudlyAndLeavesNothingRegistered()
+    {
+        var root = StageTornFirstRootWrite();
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        var registeredBefore = mmf2.RegisteredSegments.Count;
+
+        Assert.That(() => mmf2.TryLoadChunkBasedSegment(root, Stride, out _),
+            Throws.InstanceOf<InvalidOperationException>().With.Message.Contains($"Both slots of directory page {root}"),
+            "with no WAL to rebuild from, the same damage must fail loudly");
+        Assert.That(mmf2.RegisteredSegments.Count, Is.EqualTo(registeredBefore), "a load that throws must not stay registered either");
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_TolerantLoadOfAnIncompleteSegment_DropsItsPairs()
+    {
+        int root;
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+            var cs = mmf.CreateChangeSet();
+            var seg = mmf.AllocateChunkBasedSegment(PageBlockType.None, 4, Stride, cs);
+            cs.SaveChanges();
+            root = seg.RootPageIndex;
+
+            // A data page that never landed: the forward chain stops there, short of what the (valid) directory lists.
+            mmf.WritePageDirect(seg.Pages[2], new byte[PagedMMF.PageSize]);
+            mmf.FlushToDisk();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        Assert.That(mmf2.TryLoadChunkBasedSegment(root, Stride, out _, tolerateTornForRebuild: true), Is.False,
+            "precondition: the directory↔chain mismatch takes the tolerant fallback");
+        Assert.That(mmf2.DirectoryPairs.Any(p => p.Primary == root), Is.False,
+            "the walk registered the root's pair before Load failed; the abandoned root must not keep it");
+    }
+
+    [Test]
+    [CancelAfter(10000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_TornFirstMapExtensionWrite_TolerantLoad_StillFailsLoudly()
+    {
+        int root;
+        int mapExt;
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+            var cs = mmf.CreateChangeSet();
+            var seg = mmf.AllocateChunkBasedSegment(PageBlockType.None, 2100, Stride, cs);   // forces a map-extension directory page
+            cs.SaveChanges();
+            root = seg.RootPageIndex;
+
+            var dirPages = new List<int> { root };
+            using (var guard = EpochGuard.Enter(mmf.EpochManager))
+            {
+                seg.CollectDirectoryMapExtensionPages(guard.Epoch, dirPages);
+            }
+            Assert.That(dirPages.Count, Is.GreaterThan(1), "precondition: the segment has a map-extension directory page");
+            mapExt = dirPages[1];
+
+            TearSecondSector(mmf, mapExt);
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        var registeredBefore = mmf2.RegisteredSegments.Count;
+
+        // Only a root can be "never persisted": a map-extension page joins a segment whose other pages may already hold checkpointed data the WAL no
+        // longer covers, so discarding the segment would lose it silently.
+        Assert.That(() => mmf2.TryLoadChunkBasedSegment(root, Stride, out _, tolerateTornForRebuild: true),
+            Throws.InstanceOf<InvalidOperationException>().With.Message.Contains($"Both slots of directory page {mapExt}"),
+            "a torn map-extension page must fail loudly even on the crash path");
+        Assert.That(mmf2.RegisteredSegments.Count, Is.EqualTo(registeredBefore), "the failed load must not stay registered");
+        Assert.That(mmf2.DirectoryPairs.Any(p => p.Primary == root), Is.False,
+            "the root's pair, registered before the walk reached the extension, must be dropped with the failed load");
+    }
+
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_BothSlotsOfPersistedRootCorrupt_TolerantLoad_StillFailsLoudly()
+    {
+        int root;
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+            var cs0 = mmf.CreateChangeSet();
+            var seg = mmf.AllocateChunkBasedSegment(PageBlockType.None, 4, Stride, cs0);
+            cs0.SaveChanges();
+            root = seg.RootPageIndex;
+            var twin = TwinOf(mmf, root);
+
+            using (var guard = EpochGuard.Enter(mmf.EpochManager))
+            {
+                mmf.RequestPageEpoch(root, guard.Epoch, out var rootMem);
+                var cs1 = mmf.CreateChangeSet();
+                cs1.AddByMemPageIndex(rootMem);
+                cs1.SaveChanges();                             // second persist: both slots now valid
+            }
+
+            mmf.WritePageDirect(root, GarbagePage());
+            mmf.WritePageDirect(twin, GarbagePage());
+            mmf.FlushToDisk();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        Assert.That(() => mmf2.TryLoadChunkBasedSegment(root, Stride, out _, tolerateTornForRebuild: true),
+            Throws.InstanceOf<InvalidOperationException>().With.Message.Contains($"Both slots of directory page {root}"),
+            "a root that had a durable copy and lost both slots is corruption, not a torn first write — loud even on the crash path");
+    }
 }
