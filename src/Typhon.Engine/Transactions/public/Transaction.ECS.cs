@@ -2719,20 +2719,22 @@ public unsafe partial class Transaction
     }
 
     /// <summary>
-    /// Finalize spawned entities: set BornTSN from sentinel (MaxValue) to actual TSN, making them visible.
-    /// Also inserts SV secondary indexes (Versioned secondary indexes are handled by CommitComponentCore).
-    /// </summary>
-    /// <summary>
     /// PREPARE half of a spawn (VIS-08, plan 06 step 5.2): the slot claimed and reserved — taken, its occupancy bit clear — the payload copied into it, and
     /// the EntityMap record inserted with <c>BornTSN = Pending(owner)</c>, so the entity exists, flagged with its owner, before the commit point. A reader
     /// resolves the pending born through the owner's commit card (VIS-01). PUBLISH (<see cref="PublishSpawns"/>) stamps the record, sets the occupancy bit,
-    /// and maintains the indexes and the spatial index; an abort before it un-places the spawn (<see cref="UnplaceSpawns"/>, AP-07).
+    /// and adds the B+Tree entries; an abort before it un-places the spawn (<see cref="UnplaceSpawns"/>, AP-07).
     /// </summary>
     private void PlaceSpawns()
     {
         if (_spawnedEntities == null || _spawnedEntities.Count == 0)
         {
             return;
+        }
+
+        // Nothing placed yet: a reused list (SetCount) keeps stale placement fields, and an undo after a throw part-way must see only this pass's.
+        foreach (ref var spawn in CollectionsMarshal.AsSpan(_spawnedEntities))
+        {
+            spawn.Placed = false;
         }
 
         // Pre-size EntityMaps to avoid per-insert splits
@@ -2793,6 +2795,7 @@ public unsafe partial class Transaction
             for (var spawnIndex = 0; spawnIndex < spawnCount; spawnIndex++)
             {
                 var entry = _spawnedEntities[spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex];
+
                 // Skip entities that were also destroyed in this transaction — no EntityMap insert needed
                 if (_pendingDestroys != null && _pendingDestroys.Contains(entry.Id))
                 {
@@ -2930,6 +2933,7 @@ public unsafe partial class Transaction
                         {
                             (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterAccessor, _changeSet, TSN);
                         }
+                        PlacedSpawn(spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex, clusterChunkId, slotIdx);
                         clusterBase = ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true);
                         if (ctx.HasClusterTransientAccessor)
                         {
@@ -2950,13 +2954,13 @@ public unsafe partial class Transaction
                         {
                             (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlot(ref ctx.ClusterTransientAccessor, TSN);
                         }
+                        PlacedSpawn(spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex, clusterChunkId, slotIdx);
                         clusterBase = ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
                     }
 
-                    // The claim's occupancy bit moves into the in-memory reservation word at once: the slot stays taken, and no page carries the bit of an
-                    // uncommitted spawn (VIS-08, CM-01). Recorded before anything that can throw, so an abort finds the slot to give back.
+                    // The claim's occupancy bit is cleared at once, the claim kept: the slot stays taken and is out of the published set until PUBLISH
+                    // (VIS-08). The page the claim dirtied has an active writer until this pass ends, so a checkpoint never captures the bit in between (CM-01).
                     ctx.ClusterState.ReserveClaimedSlot(clusterBase, clusterChunkId, slotIdx);
-                    PlacedSpawn(spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex, clusterChunkId, slotIdx);
 
                     // Copy component data from per-component chunks to cluster SoA slots.
                     // Transient slots are copied to TransientSegment; SV/V to ClusterSegment.
@@ -4129,10 +4133,10 @@ public unsafe partial class Transaction
                     var diedStamper = new DiedStamper { Stamp = PublishStamp, Owner = TSN, Cards = CommitCards };
                     engineState.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref diedStamper, ref accessor);
 
-                    // Last: the watermark folded and the slot hidden above, the cluster's gate may vouch for it again (VIS-09).
-                    if (diedStamper.WasMarked && destroyClusterState != null)
+                    // Last: the watermark folded and the slot hidden above, the cluster's gate may vouch for it again (VIS-09) — the cluster PREPARE counted.
+                    if (destroyClusterState != null && _pendingDeathClusters != null && _pendingDeathClusters.Remove(entityId, out var markedCluster))
                     {
-                        destroyClusterState.AddPendingDeath(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), -1);
+                        destroyClusterState.AddPendingDeath(markedCluster, -1);
                     }
 
                     // Enqueue for deferred GC (LinearHash removal, chunk freeing, the hidden slot's release) once MinTSN is past the died STAMP: keyed by the
@@ -4231,10 +4235,18 @@ public unsafe partial class Transaction
                 }
 
                 var marker = new DiedMarker { Owner = TSN, Pending = pending };
-                if (state.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref marker, ref accessor) && marker.Changed && meta.IsClusterEligible
-                    && state.ClusterState != null)
+                var updated = state.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref marker, ref accessor);
+
+                // The count is keyed by the cluster PREPARE found, and given back by this transaction whatever the died holds by then: another destroy's
+                // publish may have replaced this one's pending value, and a migration before the publish moves the record, not the count.
+                if (pending && updated && marker.Changed && meta.IsClusterEligible && state.ClusterState != null)
                 {
-                    state.ClusterState.AddPendingDeath(marker.ClusterChunkId, pending ? 1 : -1);
+                    (_pendingDeathClusters ??= new Dictionary<EntityId, int>()).Add(entityId, marker.ClusterChunkId);
+                    state.ClusterState.AddPendingDeath(marker.ClusterChunkId, 1);
+                }
+                else if (!pending && _pendingDeathClusters != null && _pendingDeathClusters.Remove(entityId, out var marked))
+                {
+                    state.ClusterState?.AddPendingDeath(marked, -1);
                 }
             }
         }
@@ -4246,6 +4258,15 @@ public unsafe partial class Transaction
             }
         }
     }
+
+    /// <summary>
+    /// PREPARE staged effects a failure before the commit point must undo (VIS-08–10): set before the first, cleared once they are published or undone. Gates
+    /// the undo passes so a rollback that never reached PREPARE pays nothing for them.
+    /// </summary>
+    private bool _prepareStaged;
+
+    /// <summary>The cluster each destroy marked pending was counted in (VIS-09), for the decrement at publish or abort.</summary>
+    private Dictionary<EntityId, int> _pendingDeathClusters;
 
     /// <summary>Writes (<see cref="Pending"/>) or clears this owner's pending died — a died already holding another value is left.</summary>
     private struct DiedMarker : IRawValueUpdater
@@ -4643,23 +4664,48 @@ public unsafe partial class Transaction
             }
 
             // Both copies of the enabled state are published here, at commit, and nowhere earlier: the EntityMap record read by Open and queries, then
-            // the cluster EnabledBits words read by bulk iteration and the rebuilds (ENABLE-01).
+            // the cluster EnabledBits words read by bulk iteration and the rebuilds (ENABLE-01). In place, the bits and the chain roots this commit
+            // created only: a whole-record write from this copy would undo a field another commit wrote meanwhile — a concurrent destroy's pending died.
             EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
             PublishNewVersionedChainRoots(entityId, meta, readBuf);
-            engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
+            var publisher = new EnabledBitsPublisher { Bits = newBits, Source = readBuf, VersionedCount = meta.IsClusterEligible ? meta.VersionedSlotCount : 0 };
+            engineState.EntityMap.TryUpdateInPlace(entityId.EntityKey, ref publisher, ref accessor);
 
             // Nothing to publish when the mask did not change (a Disable+Enable in one transaction), and nothing worth publishing for an entity this
-            // commit destroys: FlushPendingDestroys runs next and its ReleaseSlot clears every one of the slot's bits.
+            // commit destroys: FlushPendingDestroys runs next, and its ReleaseSlot clears the slot (or HideDestroyedSlot takes it out of occupancy, VIS-09).
             if (oldBits != newBits && (_pendingDestroys == null || !_pendingDestroys.Contains(entityId)))
             {
                 PublishClusterEnabledBits(engineState.ClusterState, meta.ComponentCount, entityId, readBuf, newBits, ref clusterAccessor,
                     ref clusterAccessorOwner);
             }
 
-            // The change PREPARE recorded pending takes the stamp — after both inline copies, before the card goes (VIS-10).
-            _dbe.EnabledBitsOverrides.Publish(entityId.EntityKey, TSN, PublishStamp);
         }
         accessor.Dispose();
+
+        // The change PREPARE recorded pending takes the stamp — after both inline copies, before the card goes (VIS-10) — the record found or not: left
+        // pending, it would never be stamped or pruned.
+        _dbe.EnabledBitsOverrides.Publish(entityId.EntityKey, TSN, PublishStamp);
+    }
+
+    /// <summary>An enable/disable's publish: the record's enabled bits, and each chain root this commit created where the record has none, in place.</summary>
+    private struct EnabledBitsPublisher : IRawValueUpdater
+    {
+        public ushort Bits;
+        public byte* Source;
+        public int VersionedCount;
+
+        public void Update(byte* valueBytes)
+        {
+            EntityRecordAccessor.GetHeader(valueBytes).EnabledBits = Bits;
+            for (var vi = 0; vi < VersionedCount; vi++)
+            {
+                var root = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(Source, vi);
+                if (root != 0 && ClusterEntityRecordAccessor.GetCompRevFirstChunkId(valueBytes, vi) == 0)
+                {
+                    ClusterEntityRecordAccessor.SetCompRevFirstChunkId(valueBytes, vi, root);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -4676,25 +4722,41 @@ public unsafe partial class Transaction
 
         using var guard = EpochGuard.Enter(_epochManager);
         byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
-        foreach (var kvp in _pendingEnableDisable)
+        ArchetypeEngineState state = null;
+        ushort lastArch = 0;
+        var accessor = default(ChunkAccessor<PersistentStore>);
+        var has = false;
+        try
         {
-            var entityId = kvp.Key;
-            if (SpawnedContains(entityId))
+            foreach (var kvp in _pendingEnableDisable)
             {
-                continue;
-            }
+                var entityId = kvp.Key;
+                if (SpawnedContains(entityId))
+                {
+                    continue;
+                }
 
-            var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
-            var engineState = meta == null ? null : _dbe._archetypeStates[meta.ArchetypeId];
-            if (engineState?.EntityMap == null)
-            {
-                continue;
-            }
+                if (!has || entityId.ArchetypeId != lastArch)
+                {
+                    if (has)
+                    {
+                        accessor.Dispose();
+                        has = false;
+                    }
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
-            try
-            {
-                if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+                    var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
+                    state = meta == null ? null : _dbe._archetypeStates[meta.ArchetypeId];
+                    if (state?.EntityMap == null)
+                    {
+                        continue;
+                    }
+
+                    accessor = state.EntityMap.Segment.CreateChunkAccessor();
+                    lastArch = entityId.ArchetypeId;
+                    has = true;
+                }
+
+                if (state.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
                 {
                     var oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
                     if (oldBits != kvp.Value)
@@ -4703,7 +4765,10 @@ public unsafe partial class Transaction
                     }
                 }
             }
-            finally
+        }
+        finally
+        {
+            if (has)
             {
                 accessor.Dispose();
             }
@@ -4919,15 +4984,16 @@ public unsafe partial class Transaction
 
         // If transaction was NOT committed, free component chunks for spawned entities. A spawn PREPARE placed and nothing un-placed yet (a failure of the
         // rollback that should have) is given back first: its record names the chain freed below (VIS-08).
-        if (State != TransactionState.Committed)
+        if (State != TransactionState.Committed && _prepareStaged)
         {
+            UnplaceSpawns();
             UnmarkDestroysPending();
             UnmarkEnableDisablePending();
+            _prepareStaged = false;
         }
 
         if (_spawnedEntities is { Count: > 0 } && State != TransactionState.Committed)
         {
-            UnplaceSpawns();
             foreach (var entry in _spawnedEntities)
             {
                 var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
@@ -5018,6 +5084,7 @@ public unsafe partial class Transaction
         _spawnedEntities?.Clear();
         _spawnedEntityIndex?.Clear();
         _pendingDestroys?.Clear();
+        _pendingDeathClusters?.Clear();
         _pendingEnableDisable?.Clear();
     }
 }

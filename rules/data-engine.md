@@ -131,38 +131,48 @@ below names the invariant that proves it.
 ### VIS-07: No staged revision survives an open `[fatal]`
   invariant a crash open discards every revision still flagged with an owner (the recovery scrub drops isolated
             elements, RB-03): a resumed TSN equal to a dead owner must not adopt its staged revisions
-  note: family-1 scope; the `Pending(owner)` marks of families 2–6 join it in Phase 5
+  note: the `Pending(owner)` marks of families 2–3 on EntityMap records do not survive either: the crash open re-derives the
+        EntityMap from occupancy (DatabaseEngine.RebuildEntityMapOnCrash), and no pending slot is occupied on a page
+        (VIS-08). Family 5's pending changes and the claim word are memory only
   scope: ComponentRevisionManager.ScrubChainToHead
   on_violation: a transaction of the reopened engine whose TSN equals a crashed owner's finds that owner's flagged
                 revisions as its own, or a reader resolves them through its card
 
 ### VIS-08: A pending spawn is never absent from a snapshot, and never persisted as occupied `[fatal]` `[silent]`
-  invariant a spawn is placed in PREPARE (Transaction.PlaceSpawns): its slot claimed and moved into the cluster's in-memory
-            reservation word (ArchetypeClusterState.ReserveClaimedSlot — the reservation set, then the occupancy bit
-            cleared), its SoA bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the
-            bounds widened — zone maps, cluster AABB, per-cell index: conservative upward, and placement reads them.
-            PUBLISH (Transaction.PublishSpawns) writes the record's stamp in place, then folds the born watermark, sets the
-            occupancy bit and clears the reservation (PublishReservedSlot), then adds the B+Tree entries
+  invariant a slot is claimed in the cluster's in-memory claim word, by CAS, from its claim to its final release; the page
+            occupancy word is the published set, written only by the slot's owner. A spawn is placed in PREPARE
+            (Transaction.PlaceSpawns): its slot claimed, its occupancy bit cleared again at once (ReserveClaimedSlot), its SoA
+            bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the bounds widened —
+            zone maps, cluster AABB, per-cell index: conservative upward, and placement reads them. PUBLISH
+            (Transaction.PublishSpawns) writes the record's stamp in place, then folds the born watermark and sets the
+            occupancy bit, the claim kept (PublishReservedSlot), then adds the B+Tree entries
   invariant a reader resolves a pending born through the owner's card (EntityVisibility, EntityRecordHeader.IsVisibleAt
-            with the cards), re-reading the record when no card holds the owner; a snapshot scan of the cluster SoA
-            visits `occupancy | reserved` and decides a reserved slot through its record, which must exist; the
-            occupancy count bails to the map probe while a cluster holds a reservation. A HEAD reader takes a pending born
-            for not alive (EntityRecordHeader.IsAlive)
-  invariant every claim treats a reserved slot as taken (ArchetypeClusterState.TakenBits) and re-checks the reservation
-            after its occupancy CAS: a spawn's move restores the word's old value, an ABA a stale claimer's CAS would
-            win (ArchetypeClusterState.LostToAReservation); a cluster with a reserved slot is never drained
-  invariant the reservation is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes and its
-            record, never its occupancy bit, so the crash open's EntityMap rebuild from occupancy resurrects no
-            uncommitted spawn (CM-01)
-  invariant an abort before the commit point un-places the spawn — record removed, reservation released, a cluster left
-            empty freed (Transaction.UnplaceSpawns, ArchetypeClusterState.UnreserveSlot; AP-07). The widened bounds stay
-            wider, which is safe
-  note the B+Tree is HEAD-valued (design 05's non-goal, #674): an index-path query between a commit's append and its
-       publish does not find the spawn its revisions announce
+            with the cards), re-reading the record when no card holds the owner. A snapshot scan of the cluster SoA reads the
+            occupancy word, then the claim word, visits both, and decides a slot claimed and not occupied
+            (ArchetypeClusterState.PendingBits) through its record, which must exist — the spawn's claim outlives its
+            publish, so a scan whose occupancy read precedes the publish still finds the slot claimed. The occupancy count
+            bails to the map probe while a cluster holds such a slot. A HEAD reader takes a pending born for not alive
+            (EntityRecordHeader.IsAlive)
+  invariant a slot is free when clear in both words (TakenBits): occupancy covers the slots a load or a recovery set
+            without a claim. A claim only sets claim bits and only an owner clears them, so a stale claimer's CAS takes only
+            a slot free again — no ABA (ArchetypeClusterState.ClaimFirstFree, ClaimExact); a cluster with a claimed slot is
+            never drained
+  invariant the claim word is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes and its
+            record, never its occupancy bit — the page the claim set it on has an active writer until the placement clears
+            it — so the crash open's EntityMap rebuild from occupancy resurrects no uncommitted spawn (CM-01)
+  invariant an abort before the commit point un-places the spawn — record removed, claim released, a cluster left empty
+            freed (Transaction.UnplaceSpawns, ArchetypeClusterState.UnreserveSlot; AP-07). The widened bounds stay wider,
+            which is safe
+  note the B+Tree and the spatial enumerators (AabbClusterEnumerator, ClusterRadiusBatch) read HEAD (design 05's non-goal,
+       #674): an index-path or spatial query between a commit's append and its publish does not find the spawn its
+       revisions announce, and an older snapshot's spatial query does not find a hidden destroy. The cluster-free race of
+       a drain outside the fence is #1315
   scope: Transaction.PlaceSpawns, Transaction.PublishSpawns, Transaction.UnplaceSpawns, ArchetypeClusterState.ReserveClaimedSlot,
-         ArchetypeClusterState.PublishReservedSlot, ArchetypeClusterState.UnreserveSlot, ArchetypeClusterState.LostToAReservation,
-         ArchetypeClusterState.TakenBits, EntityVisibility.IsVisible, EntityVisibility.IsVisibleInScan, EntityRecordHeader.IsAlive
-  spec: tla/CommitStampFamilies.tla — SpawnRead (spawnatpublish, scanoccupancy)
+         ArchetypeClusterState.PublishReservedSlot, ArchetypeClusterState.UnreserveSlot, ArchetypeClusterState.ClaimFirstFree,
+         ArchetypeClusterState.ClaimExact, ArchetypeClusterState.TakenBits, ArchetypeClusterState.PendingBits, EntityVisibility.IsVisible,
+         EntityVisibility.IsVisibleInScan, EntityRecordHeader.IsAlive
+  spec: tla/CommitStampFamilies.tla — SpawnRead (spawnatpublish, scanoccupancy, publishclearsclaim: the publish clearing the claim
+        lets a scan that read occupancy before it and the claim after it miss the spawn)
   on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan
   requires: VIS-01, VIS-02, CM-01
 
@@ -173,11 +183,12 @@ below names the invariant that proves it.
             owner's pending died weighed by that owner's card. A reader resolves a pending died through the card; a HEAD
             reader takes it for alive
   invariant while a destroy is pending, its cluster's gate denies (ArchetypeClusterState.PendingDeaths, read by
-            IsClusterFullyVisibleAt): its slot is still occupied and its died watermark not folded. The publish folds the
-            watermark, then hides the slot, then lifts the count
+            IsClusterFullyVisibleAt, and by the scans BEFORE the occupancy word): its slot is still occupied and its died
+            watermark not folded. The publish folds the watermark, then hides the slot, then lifts the count — counted and
+            lifted on the cluster the PREPARE found, whatever the record says by the publish
   invariant in an archetype with a Versioned component — the one that promises snapshot isolation — the publish hides the slot
             rather than release it (ArchetypeClusterState.HideDestroyedSlot): out of HEAD (change signals, cell count,
-            shrink flag, occupancy bit) and reserved, its bytes and entity id kept, so an older snapshot still finds the
+            shrink flag, occupancy bit) and still claimed, its bytes and entity id kept, so an older snapshot still finds the
             entity by scan. The cleanup, keyed by the died STAMP, releases it once MinTSN is past that stamp
             (DatabaseEngine.ReleaseHiddenDestroySlot, ArchetypeClusterState.ReleaseHiddenSlot), then removes the record.
             SingleVersion and Transient archetypes release at publish, as before: they promise no isolation

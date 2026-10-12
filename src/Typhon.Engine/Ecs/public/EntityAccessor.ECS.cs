@@ -680,7 +680,7 @@ public unsafe partial class EntityAccessor
         byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, ref info.TransientCompContentAccessor, ref info.CompContentAccessor);
         // Commit-discipline read-your-own-writes: return this tx's staged value if it has staged this (component, entity). The staging map is keyed by
         // entity PK, which the CALLER supplies — reading it back out of the chunk header instead was #713: a spawn-staging chunk has no PK written yet
-        // (PlaceSpawns stamps it at publish), so every own-spawn lookup keyed on 0.
+        // (PublishSpawns stamps it), so every own-spawn lookup keyed on 0.
         if (_discipline == CommitDiscipline.Commit && table.StorageMode == StorageMode.SingleVersion
             && info.CommitStaged != null && info.CommitStaged.TryGetValue(pk, out var slot))
         {
@@ -745,7 +745,7 @@ public unsafe partial class EntityAccessor
             }
 
             // #713: an entity this transaction spawned has no HEAD to protect — it lives in a spawn-staging chunk that no other transaction can see until
-            // PlaceSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
+            // PublishSpawns publishes it, so writing in place IS the atomic behaviour CM-01 asks for, and it is what TickFence already does. Staging it
             // was wrong three ways: StagedSlot.Location would carry a content chunk id where PublishStagedEntry expects a cluster location, the publish
             // would run against a HEAD that does not exist yet, and PlaceSpawns would then overwrite it with the spawn value. Skipping the staging
             // leaves the spawn's own SV Slot record (BuildCommitBatch, #395 D5 / CM-06) carrying the final value — one record, still atomic.

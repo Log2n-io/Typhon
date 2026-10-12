@@ -1106,7 +1106,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             var chunkId = ids[i];
             var clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId, true) : transientAccessor.GetChunkAddress(chunkId, true);
-            if (TakenBits(*(ulong*)clusterBase, chunkId) != 0)
+            if (TakenBits(Volatile.Read(ref *(ulong*)clusterBase), chunkId) != 0)
             {
                 continue; // Claim re-filled this cluster after the drain — keep alive (a reserved slot counts: VIS-08)
             }
@@ -1233,6 +1233,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         ClusterStructureChanges?.ClearWord(clusterChunkId);
 
         ResetClusterVisibility(clusterChunkId);
+        ResetClaimWords(clusterChunkId);
         ReplicationState?.ReleaseBlockForDrain(clusterChunkId);
     }
 
@@ -1794,7 +1795,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var accessor = ClusterSegment.CreateChunkAccessor(changeSet);
             try
             {
-                ClearSlotBits(accessor.GetChunkAddress(dstChunkId, true), dstSlot);
+                ClearSlotBits(accessor.GetChunkAddress(dstChunkId, true), dstSlot, dstChunkId);
             }
             finally
             {
@@ -1806,7 +1807,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var accessor = TransientSegment.CreateChunkAccessor();
             try
             {
-                ClearSlotBits(accessor.GetChunkAddress(dstChunkId, true), dstSlot);
+                ClearSlotBits(accessor.GetChunkAddress(dstChunkId, true), dstSlot, dstChunkId);
             }
             finally
             {
@@ -1817,9 +1818,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         ReportOrphanedMigrant(entityKey, dstChunkId, dstSlot);
     }
 
-    private void ClearSlotBits(byte* clusterBase, int dstSlot)
+    private void ClearSlotBits(byte* clusterBase, int dstSlot, int dstChunkId)
     {
         Interlocked.And(ref *(long*)clusterBase, ~(1L << dstSlot));
+        ReleaseClaim(dstChunkId, dstSlot);
         *(long*)(clusterBase + Layout.EntityIdsOffset + dstSlot * 8) = 0;
         for (var s = 0; s < Layout.ComponentCount; s++)
         {
@@ -4167,33 +4169,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// distinct EntityIds, so the second silently overwrites the first's component data and a thread reads back another thread's value.
     /// A retry that abandons the atomicity of the attempt it is retrying is not a retry; the loop below keeps every attempt a CAS.
     /// </remarks>
-    private int ClaimFreeBit(ref ulong occupancy, ulong fullMask, int clusterChunkId)
-    {
-        while (true)
-        {
-            // Occupancy first, then the reservations (VIS-08): a slot a spawn reserved is taken in one or the other at every instant.
-            var current = Volatile.Read(ref occupancy);
-            var available = ~TakenBits(current, clusterChunkId) & fullMask;
-            if (available == 0)
-            {
-                return -1;
-            }
-
-            var slot = BitOperations.TrailingZeroCount(available);
-            var desired = current | (1UL << slot);
-            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current && !LostToAReservation(ref occupancy, clusterChunkId, slot))
-            {
-                return slot;
-            }
-        }
-    }
+    private int ClaimFreeBit(ref ulong occupancy, ulong fullMask, int clusterChunkId) => ClaimFirstFree(ref occupancy, clusterChunkId, fullMask);
 
     /// <summary>
     /// Claim a free slot in an existing cluster, or allocate a new cluster.
     /// Returns the cluster chunk ID and the slot index within the cluster.
     /// </summary>
     /// <remarks>
-    /// <para><b>Multi-writer.</b> The sentence that stood here until #842 — "PlaceSpawns is single-writer (no concurrent commit), so CAS always succeeds
+    /// <para><b>Multi-writer.</b> The sentence that stood here until #842 — "FinalizeSpawns is single-writer (no concurrent commit), so CAS always succeeds
     /// on first try" — stopped being true at #708, which put concurrent Transient commits on this path, and the code kept being written as though it held:
     /// the free-cluster head was read twice around its own test, and cluster allocation ran outside the finalize latch that <c>ClaimSlotInCell</c> takes
     /// around the same work. Both are fixed below. What the CAS in <see cref="ClaimFreeBit"/> does cover is two claimants landing on the same cluster: each
@@ -4246,7 +4229,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var newBase = accessor.GetChunkAddress(newClusterId, true);
 
         // Claim slot 0 in the fresh cluster. NO fold here — see FreshClusterStaysUnknown. Release store, paired with the reader's acquire read of the word.
-        Volatile.Write(ref *(ulong*)newBase, 1UL); // OccupancyBit 0 set
+        InitFreshCluster(newBase, newClusterId); // OccupancyBit 0 set
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -4283,7 +4266,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         var newClusterId = AllocateNewClusterLatched(null);   // see the PersistentStore overload and #842
         var newBase = accessor.GetChunkAddress(newClusterId, true);
-        Volatile.Write(ref *(ulong*)newBase, 1UL);   // no fold — see FreshClusterStaysUnknown
+        InitFreshCluster(newBase, newClusterId);   // no fold — see FreshClusterStaysUnknown
         FreeClusterHead = Layout.ClusterSize > 1 ? newClusterId : -1;
 
         return (newClusterId, 0);
@@ -4327,23 +4310,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // cluster does not raise its maximum for nothing; a fold whose CAS loop then finds the cluster full is only conservative, never wrong.
         NoteClusterBorn(clusterChunkId, bornTsn);
 
-        while (true)
-        {
-            var slot = BitOperations.TrailingZeroCount(available);
-            var desired = current | (1UL << slot);
-            if (Interlocked.CompareExchange(ref occupancy, desired, current) == current && !LostToAReservation(ref occupancy, clusterChunkId, slot))
-            {
-                return slot;
-            }
-
-            // CAS lost to a concurrent writer — re-read occupancy and retry. Cluster already dirtied above; the dirty mark is idempotent.
-            current = Volatile.Read(ref occupancy);
-            available = ~TakenBits(current, clusterChunkId) & Layout.FullMask;
-            if (available == 0)
-            {
-                return -1;
-            }
-        }
+        // The claim word's CAS, retried against a concurrent claimer (VIS-08). Cluster already dirtied above; the dirty mark is idempotent.
+        return ClaimFirstFree(ref occupancy, clusterChunkId, Layout.FullMask);
     }
 
     /// <summary>
@@ -4392,8 +4360,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // One CAS, no retry loop. A retry would have to re-test the same bit, and if a sibling took it the answer cannot change — unlike first fit, where a
         // lost CAS only means "try a different slot". Losing here degrades to the caller's fallback chain, which is the correct response.
-        return Interlocked.CompareExchange(ref occupancy, current | bit, current) == current
-            && !LostToAReservation(ref occupancy, clusterChunkId, slotIndex);
+        return ClaimExact(ref occupancy, clusterChunkId, slotIndex);
     }
 
     /// <summary>
@@ -4489,7 +4456,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
-            Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
+            InitFreshCluster(accessor.GetChunkAddress(newChunkId, true), newChunkId); // no fold — see FreshClusterStaysUnknown
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
             ClusterCellMap[newChunkId] = cellKey;
@@ -4796,7 +4763,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
-            Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
+            InitFreshCluster(accessor.GetChunkAddress(newChunkId, true), newChunkId); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
@@ -5013,7 +4980,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
-            Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
+            InitFreshCluster(accessor.GetChunkAddress(newChunkId, true), newChunkId); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
@@ -5124,7 +5091,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // cell could CAS a slot in the fresh cluster and have its bit clobbered by this store — a lost entity, measured 1 in 12 runs of
             // ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell once least enlargement scanned every cluster (step 15). On arm64 the
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
-            Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
+            InitFreshCluster(accessor.GetChunkAddress(newChunkId, true), newChunkId); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
@@ -10197,7 +10164,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && ReservedBits(clusterChunkId) == 0;
+        var claimsLeft = ReleaseClaim(clusterChunkId, slotIndex);
+        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && claimsLeft == 0;
 
         if (wasOccupied)
         {
@@ -10275,7 +10243,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && ReservedBits(clusterChunkId) == 0;
+        var claimsLeft = ReleaseClaim(clusterChunkId, slotIndex);
+        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && claimsLeft == 0;
 
         if (wasOccupied)
         {

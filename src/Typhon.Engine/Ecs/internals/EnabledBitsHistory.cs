@@ -25,6 +25,7 @@ internal sealed class EnabledBitsHistory
 
     private Change[] _entries = [];
     private readonly Lock _writeLock = new();
+    private bool _retired;
 
     /// <summary>Resolve the EnabledBits visible at <paramref name="txTsn"/>; <paramref name="currentBits"/> is the record's inline (latest published) value.</summary>
     public ushort ResolveAt(long txTsn, ushort currentBits, CommitCardTable cards)
@@ -80,16 +81,25 @@ internal sealed class EnabledBitsHistory
         return below != long.MinValue || above != long.MaxValue;
     }
 
-    /// <summary>A change in PREPARE: its owner's TSN with the pending bit, until <see cref="Publish"/>.</summary>
-    public void AddPending(long owner, ushort oldBits, ushort newBits)
+    /// <summary>
+    /// A change in PREPARE: its owner's TSN with the pending bit, until <see cref="Publish"/>. False when the history was retired by a prune that emptied it —
+    /// the caller then records into the history that replaces it.
+    /// </summary>
+    public bool AddPending(long owner, ushort oldBits, ushort newBits)
     {
         lock (_writeLock)
         {
+            if (_retired)
+            {
+                return false;
+            }
+
             var entries = _entries;
             var grown = new Change[entries.Length + 1];
             entries.CopyTo(grown, 0);
             grown[^1] = new Change(EntityRecordHeader.PendingBit | owner, oldBits, newBits);
             Volatile.Write(ref _entries, grown);
+            return true;
         }
     }
 
@@ -120,13 +130,28 @@ internal sealed class EnabledBitsHistory
         {
             var pending = EntityRecordHeader.PendingBit | owner;
             var entries = _entries;
-            var kept = System.Array.FindAll(entries, e => e.Stamp != pending);
-            if (kept.Length != entries.Length)
+            var kept = 0;
+            foreach (var e in entries)
             {
-                Volatile.Write(ref _entries, kept);
+                kept += e.Stamp != pending ? 1 : 0;
             }
 
-            return kept.Length == 0;
+            if (kept != entries.Length)
+            {
+                var copy = new Change[kept];
+                var k = 0;
+                foreach (var e in entries)
+                {
+                    if (e.Stamp != pending)
+                    {
+                        copy[k++] = e;
+                    }
+                }
+
+                Volatile.Write(ref _entries, copy);
+            }
+
+            return kept == 0;
         }
     }
 
@@ -139,15 +164,34 @@ internal sealed class EnabledBitsHistory
         lock (_writeLock)
         {
             var entries = _entries;
-            var kept = System.Array.FindAll(entries, e => (e.Stamp & EntityRecordHeader.PendingBit) != 0 || e.Stamp > minTSN);
-            if (kept.Length != entries.Length)
+            var kept = 0;
+            foreach (var e in entries)
             {
-                Volatile.Write(ref _entries, kept);
+                kept += Keeps(e, minTSN) ? 1 : 0;
             }
 
-            return kept.Length == 0;
+            if (kept != entries.Length)
+            {
+                var copy = kept == 0 ? [] : new Change[kept];
+                var k = 0;
+                foreach (var e in entries)
+                {
+                    if (Keeps(e, minTSN))
+                    {
+                        copy[k++] = e;
+                    }
+                }
+
+                Volatile.Write(ref _entries, copy);
+            }
+
+            // Emptied, the history is retired under its lock: a change recorded after this goes to the history replacing it, not to one being removed.
+            _retired = kept == 0;
+            return _retired;
         }
     }
+
+    private static bool Keeps(Change e, long minTSN) => (e.Stamp & EntityRecordHeader.PendingBit) != 0 || e.Stamp > minTSN;
 
     /// <summary>Number of history entries.</summary>
     public int Count => Volatile.Read(ref _entries).Length;

@@ -7,6 +7,12 @@
 (* effect of a commit exists before its stamp, flagged with the owner, and  *)
 (* PUBLISH only replaces the flag with the stamp.                           *)
 (*                                                                         *)
+(* Slots are claimed in an in-memory claim word, the page occupancy bit     *)
+(* being the published set: a spawn is claimed in PREPARE and occupied at   *)
+(* PUBLISH, the claim kept; a destroy's slot is hidden at PUBLISH (claim     *)
+(* kept, occupancy cleared) and released by the GC.  A scan reads the       *)
+(* occupancy word, then the claim word, in two steps.                       *)
+(*                                                                         *)
 (* Writer 1 spawns X1 and updates Y.  Writer 2 destroys X0 (born before    *)
 (* everything) and updates Y.  A reader takes a snapshot and, twice, reads *)
 (* Y's revision chain, looks X1 up by id, finds X1 by an occupancy scan,   *)
@@ -26,16 +32,16 @@
 (*                                                                         *)
 (* The protocol, per writer: begin (TSN) -> reserve a card (Owner -TSN,   *)
 (* Stamp 0) -> PREPARE (stage Y's flagged revision; writer 1 places X1:    *)
-(* EntityMap record born = Pending(TSN), its slot in the pending mask, the  *)
-(* occupancy bit clear; writer 2 sets X0's died = Pending(TSN)) -> APPEND   *)
+(* EntityMap record born = Pending(TSN), its slot claimed, the occupancy    *)
+(* bit clear; writer 2 sets X0's died = Pending(TSN)) -> APPEND             *)
 (* (may fail: everything staged is removed, the card released) -> register *)
 (* (Owner TSN) -> draw -> store -> publish each effect (Y: stamp, unflag;  *)
-(* X1: born = stamp, occupancy set, pending bit cleared; X0: died = stamp,  *)
-(* its slot stays occupied) -> release the card.  The GC compacts Y by     *)
-(* stamp and releases X0's slot once the oldest snapshot is past its died. *)
+(* X1: born = stamp, occupancy set, the claim kept; X0: died = stamp, its   *)
+(* slot hidden) -> release the card.  The GC compacts Y by stamp and        *)
+(* releases X0's claim once the oldest snapshot is past its died.           *)
 (* A reader resolves a pending value through the owner's card (Owner,      *)
 (* Stamp, Owner; spin on Stamp 0), and, with no card holding the owner, by *)
-(* re-reading the live value.  Scans visit occupancy | pending mask.       *)
+(* re-reading the live value.  Scans visit occupancy | claim.              *)
 (*                                                                         *)
 (* DELIBERATE ABSTRACTIONS:                                                *)
 (*   - no chain locks, no handler path, no conflict detection: those are   *)
@@ -46,9 +52,13 @@
 (*     (CM-01, VIS-07) is tested on the engine (plan 06 step 5.2)          *)
 (*                                                                         *)
 (* GENUINENESS — each mutant (Mutant constant) MUST fail:                  *)
-(*   spawnatpublish    X1 placed at PUBLISH, born = stamp (today's code)    *)
-(*                     -> SpawnRead                                        *)
+(*   spawnatpublish    X1 placed at PUBLISH, born = stamp (the code before  *)
+(*                     plan 06 step 5.2) -> SpawnRead                      *)
 (*   scanoccupancy     scans visit the occupancy bits only -> SpawnRead    *)
+(*   publishclearsclaim  the publish sets occupancy and clears the claim   *)
+(*                     (step 5.2's first protocol): a scan reading         *)
+(*                     occupancy before and the claim after misses the     *)
+(*                     spawn -> SpawnRead                                  *)
 (*   destroyatpublish  died written at PUBLISH, never pending -> DestroyRead *)
 (*   releaseatpublish  X0's slot released at PUBLISH -> DestroyRead        *)
 (***************************************************************************)
@@ -70,17 +80,17 @@ VARIABLES
   next, owner, cstamp,
   chain,                \* Y's revisions: Seq of [tsn, stamp, flag, w]
   x1rec,                \* X1's EntityMap record: FALSE (absent) or its born value
-  x1born, x1occ, x1pm,  \* X1's born, occupancy bit, pending-mask bit
-  x0died, x0occ,        \* X0's died, occupancy bit (and record)
+  x1born, x1occ, x1cl,  \* X1's born, occupancy bit, claim bit
+  x0died, x0occ, x0cl,  \* X0's died, occupancy bit, claim bit (a loaded slot: occupied, not claimed)
   wpc, wtsn, wslot, wstamp, wleft, aborted,
-  rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres
+  rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres, rocc
 
-vars == <<next, owner, cstamp, chain, x1rec, x1born, x1occ, x1pm, x0died, x0occ,
+vars == <<next, owner, cstamp, chain, x1rec, x1born, x1occ, x1cl, x0died, x0occ, x0cl,
           wpc, wtsn, wslot, wstamp, wleft, aborted,
-          rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres>>
-dvars == <<chain, x1rec, x1born, x1occ, x1pm, x0died, x0occ>>
+          rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres, rocc>>
+dvars == <<chain, x1rec, x1born, x1occ, x1cl, x0died, x0occ, x0cl>>
 wvars == <<wpc, wtsn, wslot, wstamp, wleft, aborted>>
-rvars == <<rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres>>
+rvars == <<rpc, rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres, rocc>>
 
 Base == [tsn |-> 0, stamp |-> 0, flag |-> FALSE, w |-> 0]
 Unset == -1
@@ -91,8 +101,8 @@ Init ==
   /\ owner = [s \in S |-> 0]
   /\ cstamp = [s \in S |-> 0]
   /\ chain = <<Base>>
-  /\ x1rec = FALSE /\ x1born = NoV /\ x1occ = FALSE /\ x1pm = FALSE
-  /\ x0died = NoV /\ x0occ = TRUE
+  /\ x1rec = FALSE /\ x1born = NoV /\ x1occ = FALSE /\ x1cl = FALSE
+  /\ x0died = NoV /\ x0occ = TRUE /\ x0cl = FALSE
   /\ wpc = [w \in W |-> "begin"]
   /\ wtsn = [w \in W |-> 0]
   /\ wslot = [w \in W |-> 0]
@@ -100,7 +110,7 @@ Init ==
   /\ wleft = [w \in W |-> {}]
   /\ aborted = [w \in W |-> FALSE]
   /\ rpc = "begin" /\ rsnap = 0 /\ ritem = 1 /\ rround = 1 /\ rcopy = <<>> /\ ridx = 1 /\ rbest = [s |-> -1, w |-> -1]
-  /\ rslot = 1 /\ rst = 0 /\ rtsn = 0
+  /\ rslot = 1 /\ rst = 0 /\ rtsn = 0 /\ rocc = FALSE
   /\ rres = [rd \in 1..2 |-> [i \in Items |-> Unset]]
 
 -----------------------------------------------------------------------------
@@ -136,24 +146,24 @@ WStageY(w) ==
   /\ chain' = Append(chain, [tsn |-> wtsn[w], stamp |-> 0, flag |-> TRUE, w |-> w])
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"Y"}] /\ StageDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<x1rec, x1born, x1occ, x1pm, x0died, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<x1rec, x1born, x1occ, x1cl, x0died, x0occ, x0cl>> /\ UNCHANGED rvars
 
 \* The spawn's placement: the record with a pending born, the slot in the pending mask, occupancy clear.  The mutant places nothing here.
 WStageSpawn(w) ==
   /\ wpc[w] = "stage" /\ "S" \in wleft[w]
   /\ IF Mutant = "spawnatpublish"
-     THEN UNCHANGED <<x1rec, x1born, x1pm>>
-     ELSE /\ x1rec' = TRUE /\ x1born' = Pend(wtsn[w]) /\ x1pm' = TRUE
+     THEN UNCHANGED <<x1rec, x1born, x1cl>>
+     ELSE /\ x1rec' = TRUE /\ x1born' = Pend(wtsn[w]) /\ x1cl' = TRUE
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"S"}] /\ StageDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<chain, x1occ, x0died, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<chain, x1occ, x0died, x0occ, x0cl>> /\ UNCHANGED rvars
 
 WStageDestroy(w) ==
   /\ wpc[w] = "stage" /\ "D" \in wleft[w]
   /\ x0died' = IF Mutant = "destroyatpublish" THEN x0died ELSE Pend(wtsn[w])
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"D"}] /\ StageDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<chain, x1rec, x1born, x1occ, x1pm, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<chain, x1rec, x1born, x1occ, x1cl, x0occ, x0cl>> /\ UNCHANGED rvars
 
 WAppendOk(w) ==
   /\ wpc[w] = "append"
@@ -164,12 +174,12 @@ WAppendOk(w) ==
 WAppendFail(w) ==
   /\ wpc[w] = "append"
   /\ chain' = SelectSeq(chain, LAMBDA x : ~(x.flag /\ x.tsn = wtsn[w]))
-  /\ IF w = 1 THEN x1rec' = FALSE /\ x1born' = NoV /\ x1pm' = FALSE ELSE UNCHANGED <<x1rec, x1born, x1pm>>
+  /\ IF w = 1 THEN x1rec' = FALSE /\ x1born' = NoV /\ x1cl' = FALSE ELSE UNCHANGED <<x1rec, x1born, x1cl>>
   /\ x0died' = IF w = 2 THEN NoV ELSE x0died
   /\ owner' = [owner EXCEPT ![wslot[w]] = 0]
   /\ aborted' = [aborted EXCEPT ![w] = TRUE]
   /\ wpc' = [wpc EXCEPT ![w] = "done"]
-  /\ UNCHANGED <<next, cstamp, wtsn, wslot, wstamp, wleft>> /\ UNCHANGED <<x1occ, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<next, cstamp, wtsn, wslot, wstamp, wleft>> /\ UNCHANGED <<x1occ, x0occ, x0cl>> /\ UNCHANGED rvars
 
 WRegister(w) ==
   /\ wpc[w] = "register"
@@ -199,24 +209,25 @@ WPublishY(w) ==
                                         THEN [chain[i] EXCEPT !.stamp = wstamp[w], !.flag = FALSE] ELSE chain[i]]
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"Y"}] /\ PubDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<x1rec, x1born, x1occ, x1pm, x0died, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<x1rec, x1born, x1occ, x1cl, x0died, x0occ, x0cl>> /\ UNCHANGED rvars
 
-\* born = stamp, the occupancy bit set, then (same step) the pending bit cleared.  The mutant inserts the record here.
+\* born = stamp, the occupancy bit set, the claim kept.  The spawnatpublish mutant inserts the record here.
 WPublishSpawn(w) ==
   /\ wpc[w] = "publish" /\ "S" \in wleft[w]
-  /\ x1rec' = TRUE /\ x1born' = Pub(wstamp[w]) /\ x1occ' = TRUE /\ x1pm' = FALSE
+  /\ x1rec' = TRUE /\ x1born' = Pub(wstamp[w]) /\ x1occ' = TRUE /\ x1cl' = (Mutant # "publishclearsclaim")
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"S"}] /\ PubDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<chain, x0died, x0occ>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<chain, x0died, x0occ, x0cl>> /\ UNCHANGED rvars
 
-\* died = stamp; the slot stays occupied until the GC (the mutant releases it here).
+\* died = stamp; the slot hidden — claimed, not occupied — until the GC releases it (the mutant releases it here).
 WPublishDestroy(w) ==
   /\ wpc[w] = "publish" /\ "D" \in wleft[w]
   /\ x0died' = Pub(wstamp[w])
-  /\ x0occ' = IF Mutant = "releaseatpublish" THEN FALSE ELSE x0occ
+  /\ x0occ' = FALSE
+  /\ x0cl' = (Mutant # "releaseatpublish")
   /\ wleft' = [wleft EXCEPT ![w] = @ \ {"D"}] /\ PubDone(w)
   /\ UNCHANGED <<next, owner, cstamp, wtsn, wslot, wstamp, aborted>>
-  /\ UNCHANGED <<chain, x1rec, x1born, x1occ, x1pm>> /\ UNCHANGED rvars
+  /\ UNCHANGED <<chain, x1rec, x1born, x1occ, x1cl>> /\ UNCHANGED rvars
 
 WRelease(w) ==
   /\ wpc[w] = "release"
@@ -241,7 +252,7 @@ RBegin ==
   /\ next' = next + 1
   /\ rpc' = "item"
   /\ UNCHANGED <<owner, cstamp>> /\ UNCHANGED dvars /\ UNCHANGED wvars
-  /\ UNCHANGED <<ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres>>
+  /\ UNCHANGED <<ritem, rround, rcopy, ridx, rbest, rslot, rst, rtsn, rres, rocc>>
 
 \* Record the item's result and move to the next item (the second round reads them all again).
 Done(v) ==
@@ -264,18 +275,27 @@ RItem ==
                ELSE IF x1born.k = "pend" THEN Resolve(x1born.v) /\ UNCHANGED <<ritem, rround, rres>>
                ELSE Done(B2I(x1born.v <= rsnap)) /\ UNCHANGED <<rslot, rtsn>>
             /\ UNCHANGED <<rcopy, ridx, rbest>>
-       [] Item = "X1scan" ->
-            /\ LET visited == IF Mutant = "scanoccupancy" THEN x1occ ELSE x1occ \/ x1pm
+       [] Item \in {"X1scan", "X0scan"} ->
+            /\ rocc' = IF Item = "X1scan" THEN x1occ ELSE x0occ
+            /\ rpc' = "claim"
+            /\ UNCHANGED <<ritem, rround, rres, rslot, rtsn, rcopy, ridx, rbest>>
+  /\ (Item \notin {"X1scan", "X0scan"} => UNCHANGED rocc)
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rst>>
+
+\* A scan's second read: the claim word.  A slot occupied at the first read, or claimed at this one, is visited and decided by its record.
+RClaim ==
+  /\ rpc = "claim"
+  /\ CASE Item = "X1scan" ->
+            /\ LET visited == IF Mutant = "scanoccupancy" THEN rocc ELSE rocc \/ x1cl
                IN IF ~visited THEN Done(B2I(FALSE)) /\ UNCHANGED <<rslot, rtsn>>
                   ELSE IF x1born.k = "pend" THEN Resolve(x1born.v) /\ UNCHANGED <<ritem, rround, rres>>
                   ELSE Done(B2I(x1born.k = "pub" /\ x1born.v <= rsnap)) /\ UNCHANGED <<rslot, rtsn>>
-            /\ UNCHANGED <<rcopy, ridx, rbest>>
        [] Item = "X0scan" ->
-            /\ IF ~x0occ THEN Done(B2I(FALSE)) /\ UNCHANGED <<rslot, rtsn>>
-               ELSE IF x0died.k = "pend" THEN Resolve(x0died.v) /\ UNCHANGED <<ritem, rround, rres>>
-               ELSE Done(B2I(x0died.k = "none" \/ x0died.v > rsnap)) /\ UNCHANGED <<rslot, rtsn>>
-            /\ UNCHANGED <<rcopy, ridx, rbest>>
-  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rst>>
+            /\ LET visited == IF Mutant = "scanoccupancy" THEN rocc ELSE rocc \/ x0cl
+               IN IF ~visited THEN Done(B2I(FALSE)) /\ UNCHANGED <<rslot, rtsn>>
+                  ELSE IF x0died.k = "pend" THEN Resolve(x0died.v) /\ UNCHANGED <<ritem, rround, rres>>
+                  ELSE Done(B2I(x0died.k = "none" \/ x0died.v > rsnap)) /\ UNCHANGED <<rslot, rtsn>>
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rst, rcopy, ridx, rbest, rocc>>
 
 \* Y's walk over the copy: a published revision is taken by stamp; a flagged one is resolved through its owner.
 RWalk ==
@@ -288,7 +308,7 @@ RWalk ==
                            THEN [s |-> rcopy[ridx].stamp, w |-> rcopy[ridx].w] ELSE rbest
                /\ ridx' = ridx + 1
                /\ UNCHANGED <<rpc, ritem, rround, rres, rslot, rtsn>>
-  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rst>>
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rst, rocc>>
 
 \* The live value of what is being resolved, when no card holds its owner: a stamp, or -1 (not committed, or gone).
 LiveStamp ==
@@ -313,13 +333,13 @@ RO1 ==
      ELSE IF owner[rslot] = rtsn
           THEN rpc' = "st" /\ UNCHANGED <<rslot, rst, ridx, rbest, ritem, rround, rres>>
           ELSE rslot' = rslot + 1 /\ UNCHANGED <<rpc, rst, ridx, rbest, ritem, rround, rres>>
-  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rtsn>>
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rtsn, rocc>>
 
 RSt ==
   /\ rpc = "st"
   /\ rst' = cstamp[rslot]
   /\ rpc' = "o2"
-  /\ RUnchangedBut /\ UNCHANGED <<rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rtsn, rres>>
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, ritem, rround, rcopy, ridx, rbest, rslot, rtsn, rres, rocc>>
 
 RO2 ==
   /\ rpc = "o2"
@@ -327,9 +347,9 @@ RO2 ==
      THEN IF rst = 0 THEN rpc' = "o1" /\ UNCHANGED <<rslot, ridx, rbest, ritem, rround, rres>>
           ELSE Resolved(rst) /\ UNCHANGED rslot
      ELSE rpc' = "o1" /\ rslot' = rslot + 1 /\ UNCHANGED <<ridx, rbest, ritem, rround, rres>>
-  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rst, rtsn>>
+  /\ RUnchangedBut /\ UNCHANGED <<rsnap, rcopy, rst, rtsn, rocc>>
 
-Reader == RBegin \/ RItem \/ RWalk \/ RO1 \/ RSt \/ RO2
+Reader == RBegin \/ RItem \/ RClaim \/ RWalk \/ RO1 \/ RSt \/ RO2
 
 -----------------------------------------------------------------------------
 (* The GC: cutoff = the reader's snapshot while it reads *)
@@ -342,13 +362,13 @@ GCY ==
       dropped == {chain[i] : i \in old \ keep}
   IN /\ dropped # {}
      /\ chain' = SelectSeq(chain, LAMBDA x : x \notin dropped)
-     /\ UNCHANGED <<next, owner, cstamp, x1rec, x1born, x1occ, x1pm, x0died, x0occ>> /\ UNCHANGED wvars /\ UNCHANGED rvars
+     /\ UNCHANGED <<next, owner, cstamp, x1rec, x1born, x1occ, x1cl, x0died, x0occ, x0cl>> /\ UNCHANGED wvars /\ UNCHANGED rvars
 
 \* A destroyed entity's slot is released once no snapshot can see it alive.
 GCX0 ==
-  /\ x0occ /\ x0died.k = "pub" /\ x0died.v < Cutoff
-  /\ x0occ' = FALSE
-  /\ UNCHANGED <<next, owner, cstamp, chain, x1rec, x1born, x1occ, x1pm, x0died>> /\ UNCHANGED wvars /\ UNCHANGED rvars
+  /\ x0cl /\ x0died.k = "pub" /\ x0died.v < Cutoff
+  /\ x0cl' = FALSE
+  /\ UNCHANGED <<next, owner, cstamp, chain, x1rec, x1born, x1occ, x1cl, x0died, x0occ>> /\ UNCHANGED wvars /\ UNCHANGED rvars
 
 -----------------------------------------------------------------------------
 
@@ -377,5 +397,5 @@ RepeatableRead == \A i \in Items : Read(2, i) => Res(2, i) = Res(1, i)
 
 TypeOK ==
   /\ next \in Nat
-  /\ rpc \in {"begin", "item", "walk", "o1", "st", "o2", "done"}
+  /\ rpc \in {"begin", "item", "claim", "walk", "o1", "st", "o2", "done"}
 =============================================================================

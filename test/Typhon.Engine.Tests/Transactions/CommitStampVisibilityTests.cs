@@ -218,6 +218,28 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
     }
 
+    /// <summary>The slots of <paramref name="state"/>'s clusters claimed and not occupied — placed spawns and hidden destroys (VIS-08, VIS-09).</summary>
+    private static unsafe int PendingSlots(DatabaseEngine dbe, ArchetypeClusterState state)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var ids = state.ReadActiveClusterList(out var count);
+        var accessor = state.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var pending = 0;
+            for (var c = 0; c < count; c++)
+            {
+                pending += BitOperations.PopCount(state.PendingBits(*(ulong*)accessor.GetChunkAddress(ids[c]), ids[c]));
+            }
+
+            return pending;
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
     /// <summary>The reserved (pending-spawn) slots and the occupied ones of the archetype's clusters (VIS-08).</summary>
     private static (int Reserved, int Occupied) SlotCensus(DatabaseEngine dbe)
     {
@@ -230,10 +252,11 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
             int reserved = 0, occupied = 0;
             for (var c = 0; c < count; c++)
             {
-                reserved += BitOperations.PopCount(state.ReservedBits(ids[c]));
                 unsafe
                 {
-                    occupied += BitOperations.PopCount(*(ulong*)accessor.GetChunkAddress(ids[c]));
+                    var occupancy = *(ulong*)accessor.GetChunkAddress(ids[c]);
+                    occupied += BitOperations.PopCount(occupancy);
+                    reserved += BitOperations.PopCount(state.PendingBits(occupancy, ids[c]));
                 }
             }
 
@@ -443,27 +466,11 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
 
         int reservedBefore, reservedAfter;
-        using (EpochGuard.Enter(dbe.EpochManager))
-        {
-            var ids = state.ReadActiveClusterList(out var count);
-            reservedBefore = 0;
-            for (var c = 0; c < count; c++)
-            {
-                reservedBefore += BitOperations.PopCount(state.ReservedBits(ids[c]));
-            }
-        }
+        reservedBefore = PendingSlots(dbe, state);
 
         older.Dispose();
         dbe.FlushDeferredCleanups();
-        using (EpochGuard.Enter(dbe.EpochManager))
-        {
-            var ids = state.ReadActiveClusterList(out var count);
-            reservedAfter = 0;
-            for (var c = 0; c < count; c++)
-            {
-                reservedAfter += BitOperations.PopCount(state.ReservedBits(ids[c]));
-            }
-        }
+        reservedAfter = PendingSlots(dbe, state);
 
         Assert.That(reservedBefore, Is.EqualTo(1), "premise: the destroyed entity's slot is held, reserved, while an older snapshot lives");
         Assert.That(reservedAfter, Is.Zero, $"{Marker}: the cleanup did not release the hidden slot");
@@ -508,6 +515,107 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
 
         Assert.That(reader.TryOpen(x, out _), Is.True, $"{Marker}: the cleanup took an entity a live snapshot holds");
         Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker}: the cleanup dropped an entity from a live snapshot's count");
+    }
+
+    /// <summary>
+    /// An aborted spawn that opened a cluster of its own gives the cluster back (AP-07, VIS-08): the spawn was its only claim, so the drain frees it, and the
+    /// archetype is left with no active cluster.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-08")]
+    [VerifiesRule("AP-07")]
+    [CancelAfter(30_000)]
+    public void AnAbortedSpawnInAClusterOfItsOwn_GivesTheClusterBack()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var state = dbe._archetypeStates[Archetype<CsKeyedArch>.Metadata.ArchetypeId].ClusterState;
+        int ActiveClusters()
+        {
+            using var guard = EpochGuard.Enter(dbe.EpochManager);
+            state.ReadActiveClusterList(out var n);
+            return n;
+        }
+
+        Assert.That(ActiveClusters(), Is.Zero, "premise: the archetype has no cluster yet");
+        var opened = -1;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 1 }));
+            dbe.CommitBeforeAppendProbe = () =>
+            {
+                opened = ActiveClusters();
+                throw new InvalidOperationException("staged: an abort after the placement, before the append");
+            };
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => tx.Commit());
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+            }
+
+            Assert.That(opened, Is.EqualTo(1), "premise: the placement opened a cluster for the spawn");
+            Assert.That(ActiveClusters(), Is.Zero, $"{Marker}: the aborted spawn's cluster was not given back");
+        }
+
+        using var next = dbe.CreateQuickTransaction();
+        next.Spawn<CsKeyedArch>(CsKeyedArch.Keyed.Set(new CsKeyed { Group = 2 }));
+        Assert.That(next.Commit(), Is.True, "the archetype spawns on after the abort");
+        using var reader = dbe.CreateReadOnlyTransaction();
+        Assert.That(reader.Query<CsKeyedArch>().Count(), Is.EqualTo(1));
+    }
+
+    /// <summary>
+    /// An enable/disable whose commit aborts before its commit point leaves no trace (AP-07, VIS-10): its pending history entry is dropped, every reader sees
+    /// the component enabled, and a later disable commits as usual.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-10")]
+    [VerifiesRule("AP-07")]
+    [CancelAfter(30_000)]
+    public void AnAbortedDisable_LeavesTheComponentEnabled()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        EntityId p;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            p = tx.Spawn<CsPairArch>(CsPairArch.Wallet.Set(new CsWallet { Credits = 1 }), CsPairArch.Keyed.Set(new CsKeyed { Group = 1 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var older = dbe.CreateReadOnlyTransaction();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(p).Disable(CsPairArch.Keyed);
+            dbe.CommitBeforeAppendProbe = () => throw new InvalidOperationException("staged: an abort after the change was recorded, before the append");
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => tx.Commit());
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+            }
+        }
+
+        using (var newer = dbe.CreateReadOnlyTransaction())
+        {
+            Assert.That(newer.Open(p).IsEnabled(CsPairArch.Keyed), Is.True, $"{Marker}: the aborted disable reached a newer reader");
+            Assert.That(older.Open(p).IsEnabled(CsPairArch.Keyed), Is.True, $"{Marker}: the aborted disable reached an older reader");
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(p).Disable(CsPairArch.Keyed);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var after = dbe.CreateReadOnlyTransaction();
+        Assert.That(after.Open(p).IsEnabled(CsPairArch.Keyed), Is.False, "a later disable commits");
+        Assert.That(older.Open(p).IsEnabled(CsPairArch.Keyed), Is.True, "the older snapshot keeps the component enabled");
     }
 
     /// <summary>A commit that aborts after marking its destroys pending, before its commit point, leaves the entity alive and its died clear (AP-07).</summary>
@@ -558,6 +666,24 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
         }
 
         Assert.That(marked, Is.True, "premise: the destroy's died was pending when the commit aborted");
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var map = state.EntityMap.Segment.CreateChunkAccessor();
+            try
+            {
+                unsafe
+                {
+                    var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+                    Assert.That(state.EntityMap.TryGet(x.EntityKey, record, ref map), Is.True);
+                    Assert.That(EntityRecordAccessor.GetHeader(record).DiedTSN, Is.Zero, $"{Marker}: the aborted destroy left its died on the record");
+                }
+            }
+            finally
+            {
+                map.Dispose();
+            }
+        }
+
         using var reader = dbe.CreateReadOnlyTransaction();
         Assert.That(reader.TryOpen(x, out _), Is.True, $"{Marker}: the aborted destroy took the entity");
         Assert.That(reader.Query<CsWalletArch>().Count(), Is.EqualTo(1), $"{Marker}: the aborted destroy dropped the entity from the count");
@@ -767,7 +893,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
                         var cluster = ClusterEntityRecordAccessor.GetClusterChunkId(record);
                         var bit = 1UL << ClusterEntityRecordAccessor.GetSlotIndex(record);
                         onPage = (*(ulong*)clusters.GetChunkAddress(cluster) & bit) != 0;
-                        reserved = (state.ClusterState.ReservedBits(cluster) & bit) != 0;
+                        reserved = (state.ClusterState.ClaimedBits(cluster) & bit) != 0;
                     }
                 }
                 finally

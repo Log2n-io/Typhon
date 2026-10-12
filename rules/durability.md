@@ -1099,7 +1099,9 @@ file; until now the module did not exist here, so an immutable ADR pointed at no
 rejected and is the TLA+ mutant.
 
 ### CM-01: No uncommitted staged bytes in page memory `[fatal]`
-  never a Commit-discipline transaction writes staged values into cluster/page memory before its Append
+  never a Commit-discipline transaction writes staged values into cluster/page memory before its Append. A spawn's bytes placed in
+        PREPARE (VIS-08) are not staged values: they sit in a slot claimed and not occupied, which no page's occupancy word
+        names and the crash open's rebuild from occupancy never reads
   never a staged write published to an entity its own commit destroys: the destroy released the slot first
         (FlushPendingDestroys), and a concurrent spawn may hold it — the staged value overwrote that spawn's component, with no
         error (#1261). The publish skips such entries, as the check before the append does (Transaction.PublishStagedCommitWrites)

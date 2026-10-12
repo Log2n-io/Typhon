@@ -356,7 +356,7 @@ public unsafe ref struct EntityRefMut
             }
 
             // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: PlaceSpawns inserts this entity's index entries fresh from
+            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: PublishSpawns inserts this entity's index entries fresh from
             // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
             // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
             // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.

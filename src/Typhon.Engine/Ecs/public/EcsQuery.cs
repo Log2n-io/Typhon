@@ -1896,13 +1896,19 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
 
                 var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+
+                // The pending destroys BEFORE the occupancy word (VIS-09): a destroy's publish hides its slot, then lifts the count, so a zero read here means
+                // the occupancy read below reflects the hide — read after, a stale bit passed the gate.
+                var pendingDeaths = visGated ? clusterState.PendingDeaths(clusterChunkId) : 0;
+
                 // Acquire, not a plain load: IsClusterFullyVisibleAt below opens with an acquire of its own, and an acquire does not stop an EARLIER plain
                 // load from sinking past it. Plain here would let arm64 pair a fresh occupancy word with a stale watermark — the phantom BIND-04 forbids.
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
 
-                // VIS-08: a spawn placed in PREPARE holds a reserved slot, its occupancy bit clear until PUBLISH. A snapshot scan visits it — read after the
-                // occupancy word, as a claim reads them — and decides it through its record and its owner's card. HEAD readers never see a reserved slot.
-                var reserved = visGated ? clusterState.ReservedBits(clusterChunkId) & ~occupancy : 0;
+                // VIS-08/09: a slot claimed and not occupied — a spawn placed in PREPARE, or a destroyed entity hidden until the cleanup. A snapshot scan visits
+                // it, the claims read after the occupancy word (a spawn's claim outlives its publish), and decides it through its record and its owner's card.
+                // HEAD readers never see one.
+                var reserved = visGated ? clusterState.PendingBits(occupancy, clusterChunkId) : 0;
                 if ((occupancy | reserved) == 0)
                 {
                     continue;
@@ -1914,7 +1920,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // cluster, so the probe count collapses to ~0. A cluster that fails the summary keeps the exact per-entity check, so correctness is unchanged.
                 // Read AFTER the occupancy word on purpose: the summary is published by the same commit that sets the occupancy bit, so a reader that cannot
                 // see the bit cannot be misled by a summary that predates it.
-                var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+                var clusterVisGated = visGated && (pendingDeaths != 0 || !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn));
 
                 // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
                 // lockstep between the two segments, so the same clusterChunkId addresses both.
@@ -2359,6 +2365,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
 
                     var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    var pendingDeaths = visGated ? clusterState.PendingDeaths(clusterChunkId) : 0;   // before the occupancy word — see ScanClusterSoa
                     var occupancy = Volatile.Read(ref *(ulong*)clusterBase);   // acquire — see ScanClusterSoa for why plain is wrong here
                     var remaining = candidateBits & occupancy; // intersection with live entities
 
@@ -2369,7 +2376,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                     // H1 — same cluster-granularity visibility as the SoA scan (see ScanClusterSoa). Path A raised the stake rather than lowering it: the
                     // tree has already narrowed the candidate set, so the per-match probe is a LARGER share of what remains than it is on a full scan.
-                    var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+                    var clusterVisGated = visGated && (pendingDeaths != 0 || !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn));
 
                     // The cluster's entities written since the last fence: one word, as the shadow bitmap indexes entities by chunkId * 64 + slot.
                     var fenceDirty = shadowBitmap?.ReadWord(clusterChunkId) ?? 0;
@@ -3565,11 +3572,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // Occupancy BEFORE the summary, and with acquire ordering: NoteClusterBorn stores the maximum plainly, on the premise that the reader reaches
                 // it only after an acquire-ordered read of this word. Reading them the other way round could pair a fresh maximum with a stale occupancy word.
                 var clusterBase = accessor.GetChunkAddress(clusterChunkId);
+                var pendingDeaths = clusterState.PendingDeaths(clusterChunkId);   // before the occupancy word — see ScanClusterSoa
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
 
-                // A reserved slot — a spawn placed in PREPARE, its occupancy bit clear until PUBLISH (VIS-08) — is visible to a snapshot its owner's stamp is
-                // at or below, which a popcount cannot tell: the map probe decides it through the card.
-                if (!clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn) || clusterState.ReservedBits(clusterChunkId) != 0)
+                // A slot claimed and not occupied — a spawn placed in PREPARE (VIS-08), a destroy hidden until the cleanup (VIS-09) — is decided by its
+                // owner's stamp or its died, which a popcount cannot tell: the map probe decides it.
+                if (pendingDeaths != 0 || !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn) || clusterState.PendingBits(occupancy, clusterChunkId) != 0)
                 {
                     return false;
                 }

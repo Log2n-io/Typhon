@@ -2904,7 +2904,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Recovery aggregates the Spawn + these Slots by EntityId and applies them together (ApplySpawnedEntity → cluster slot claim + SoA value
             // write), so the entity recovers with its values. TickFence spawns stay checkpoint-durable by design (no per-commit SV WAL). Versioned
             // spawn values are already logged via their revision chains (SingleCache loop below); Transient is never logged. Read from the
-            // spawn-staging content chunk (entry.Loc[slot]) — PlaceSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
+            // spawn-staging content chunk (entry.Loc[slot]) — PlaceSpawns runs later (the end of PREPARE), so the cluster SoA is not populated yet, but the
             // value already sits at ComponentOverhead in the staging chunk.
             if (_discipline == CommitDiscipline.Commit)
             {
@@ -3129,6 +3129,7 @@ public unsafe partial class Transaction : EntityAccessor
             UnplaceSpawns();
             UnmarkDestroysPending();
             UnmarkEnableDisablePending();
+            _prepareStaged = false;
             var unbounded = UnitOfWorkContext.None;
             RollbackCore(ref unbounded, Typhon.Profiler.TransactionRollbackReason.AutoOnDispose);
         }
@@ -3404,6 +3405,7 @@ public unsafe partial class Transaction : EntityAccessor
 
             // VIS-08: every spawn exists before the commit point — its slot reserved, its record in the EntityMap with a pending born. VIS-09: every destroy
             // too — its record's died pending. An exit before the append un-places and un-marks them (RollbackAfterFailedCommit).
+            _prepareStaged = true;
             PlaceSpawns();
             MarkDestroysPending();
             MarkEnableDisablePending();
@@ -3453,11 +3455,12 @@ public unsafe partial class Transaction : EntityAccessor
 
                 // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
                 //    CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
-                //    inserts via PlaceSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
+                //    publication via PublishSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
                 _dbe.LogCommitPhase(TSN, "Publish");
                 PublishPreparedComponents();
                 FlushEcsPendingOperations();
-                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after PlaceSpawns so a staged
+                _prepareStaged = false;   // every staged effect published
+                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after PublishSpawns so a staged
                 // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
                 _dbe.CommitBeforeStagedPublishProbe?.Invoke();
                 PublishStagedCommitWrites();

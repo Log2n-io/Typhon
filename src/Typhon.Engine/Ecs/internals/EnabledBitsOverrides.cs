@@ -55,7 +55,14 @@ internal partial class EnabledBitsOverrides
     /// A commit's EnabledBits change, in its PREPARE (VIS-10): pending under its owner until <see cref="Publish"/>. Every change is recorded — a reader that
     /// begins between the commit point and the publish needs it whatever was alive at PREPARE.
     /// </summary>
-    public void AddPending(long entityKey, long owner, ushort oldBits, ushort newBits) => HistoryOf(entityKey).AddPending(owner, oldBits, newBits);
+    public void AddPending(long entityKey, long owner, ushort oldBits, ushort newBits)
+    {
+        // A history retired by a concurrent prune refuses the change; the prune removes it, and the retry records into its replacement.
+        while (!HistoryOf(entityKey).AddPending(owner, oldBits, newBits))
+        {
+            Thread.Yield();
+        }
+    }
 
     /// <summary>The owner's pending change of <paramref name="entityKey"/> takes its commit stamp, at publish.</summary>
     public void Publish(long entityKey, long owner, long stamp)
@@ -77,30 +84,30 @@ internal partial class EnabledBitsOverrides
 
     private EnabledBitsHistory HistoryOf(long entityKey)
     {
-        return _overrides.GetOrAdd(entityKey, _ =>
+        return _overrides.GetOrAdd(entityKey, static (_, self) =>
         {
-            int count = Interlocked.Increment(ref _overrideCount);
+            int count = Interlocked.Increment(ref self._overrideCount);
 
             // Track peak for diagnostics
             int peak;
             do
             {
-                peak = _peakOverrideCount;
+                peak = self._peakOverrideCount;
                 if (count <= peak)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref _peakOverrideCount, count, peak) != peak);
+            } while (Interlocked.CompareExchange(ref self._peakOverrideCount, count, peak) != peak);
 
             // Warn once if override count grows suspiciously large (stale transactions blocking cleanup)
-            if (count >= HighWaterMarkWarningThreshold && !_highWaterMarkWarned)
+            if (count >= HighWaterMarkWarningThreshold && !self._highWaterMarkWarned)
             {
-                _highWaterMarkWarned = true;
-                LogHighOverrideCount(count);
+                self._highWaterMarkWarned = true;
+                self.LogHighOverrideCount(count);
             }
 
             return new EnabledBitsHistory();
-        });
+        }, this);
     }
 
     /// <summary>
@@ -124,7 +131,8 @@ internal partial class EnabledBitsOverrides
 
         foreach (var key in toRemove)
         {
-            if (_overrides.TryRemove(key, out _))
+            // Only the history the prune retired: a replacement a concurrent change created under the same key stays.
+            if (_overrides.TryGetValue(key, out var retired) && retired.Count == 0 && _overrides.TryRemove(new KeyValuePair<long, EnabledBitsHistory>(key, retired)))
             {
                 // Clamp to 0 — concurrent Record() may have incremented between our TryPrune and TryRemove
                 int prev;

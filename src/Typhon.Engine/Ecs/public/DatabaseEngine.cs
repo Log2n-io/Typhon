@@ -1742,7 +1742,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
-    /// <summary>The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record; a slot not reserved is not one.</summary>
+    /// <summary>The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record; a slot not claimed-and-unoccupied is not one.</summary>
     private unsafe void ReleaseHiddenDestroySlot(ArchetypeMetadata meta, ArchetypeEngineState engineState, byte* record, ChangeSet changeSet)
     {
         if (!meta.IsClusterEligible || engineState.ClusterState is not { ClusterSegment: not null } clusterState)
@@ -1752,16 +1752,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(record);
         int slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(record);
-        if (!clusterState.IsReserved(clusterChunkId, slotIndex))
-        {
-            return;
-        }
-
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(changeSet);
         try
         {
-            clusterState.ReleaseHiddenSlot(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterChunkId, slotIndex, changeSet,
-                clusterState.SpatialOfCluster(clusterChunkId).Grid);
+            var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+            if (clusterState.IsHidden(clusterBase, clusterChunkId, slotIndex))
+            {
+                clusterState.ReleaseHiddenSlot(clusterBase, clusterChunkId, slotIndex, changeSet, clusterState.SpatialOfCluster(clusterChunkId).Grid);
+            }
         }
         finally
         {
