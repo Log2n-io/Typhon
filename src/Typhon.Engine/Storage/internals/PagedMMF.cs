@@ -149,10 +149,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return task.Result;
     };
 
-    private static readonly Action<Task, object> SWriteCompletionHandler = static (_, stateObj) =>
+    private static readonly Action<Task, object> SWriteCompletionHandler = static (task, stateObj) =>
     {
         var state = (PageCacheWriteCompletionState)stateObj;
         TyphonEvent.EmitPageCacheDiskWriteCompleted(state.SpanId, state.BeginTs, state.FilePageIndex, Stopwatch.GetTimestamp());
+        task.GetAwaiter().GetResult();   // re-throws the write's fault, as the read handler does, so the wrapper does not report it landed
     };
 
     #endregion
@@ -4008,9 +4009,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             throw;
         }
 
-        var saveTask = Task.WhenAll(tasks).ContinueWith(_ =>
+        var saveTask = Task.WhenAll(tasks).ContinueWith(t =>
         {
             EndCaptures(normalPages);
+
+            // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never
+            // got. The fault fails the save; the pages keep their debt, so the next checkpoint writes them again.
+            if (t.IsFaulted)
+            {
+                t.GetAwaiter().GetResult();
+            }
 
             // CP-03: fsync data file before decrementing DirtyCounter.
             // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,

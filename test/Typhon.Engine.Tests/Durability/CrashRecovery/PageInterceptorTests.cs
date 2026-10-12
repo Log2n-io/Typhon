@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Threading;
 
 namespace Typhon.Engine.Tests;
@@ -255,6 +256,45 @@ public class PageInterceptorTests : AllocatorTestBase
             "precondition: the blocker was inside its write, holding the inode lock, from before the first write was issued until the batch reached the second");
         Assert.That(firstWriteRevisionAtThrow, Is.Not.EqualTo(firstWriteRevisionBefore),
             $"page {firstWrite}'s write was issued before the crash but had not landed when SaveChanges threw — it was left running behind the throw");
+    }
+
+    /// <summary>
+    /// A structural write that faults once issued fails <c>SaveChanges</c>, and its page keeps its writeback debt.
+    /// </summary>
+    /// <remarks>
+    /// The batch's completion ran on every outcome: a faulted write was fsynced, its page's debt discharged and the file-size watermark moved past it,
+    /// and the save reported success. The page could then be evicted over bytes that never reached the file. Staged with a byte-range lock from
+    /// another handle, which makes Windows fail the write; Linux locks are advisory, so there is nothing to stage with there.
+    /// </remarks>
+    [Test]
+    [CancelAfter(10_000)]
+    [Platform("Win")]
+    [SupportedOSPlatform("windows")]
+    public void SavePagesWriteFaults_SaveChangesThrowsAndThePageKeepsItsDebt()
+    {
+        _mmf = Open(fresh: true);
+        var cs0 = _mmf.CreateChangeSet();
+        var segment = _mmf.AllocateChunkBasedSegment(PageBlockType.None, 4, 64, cs0);
+        cs0.SaveChanges();
+
+        var filePageIndex = segment.Pages[1];
+        int memPageIndex;
+        var cs = _mmf.CreateChangeSet();
+        using (var guard = EpochGuard.Enter(_epochManager))
+        {
+            _mmf.RequestPageEpoch(filePageIndex, guard.Epoch, out memPageIndex);
+            cs.AddByMemPageIndex(memPageIndex);
+        }
+
+        Assert.That(_mmf.HasWritebackDebt(memPageIndex), Is.True, "premise: the page owes a write");
+        using (var locker = new FileStream(_options.BuildDatabasePathFileName(), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            locker.Lock(filePageIndex * (long)PagedMMF.PageSize, PagedMMF.PageSize);
+            Assert.That(() => cs.SaveChanges(), Throws.InstanceOf<IOException>(), "the write's fault surfaces from SaveChanges");
+            locker.Unlock(filePageIndex * (long)PagedMMF.PageSize, PagedMMF.PageSize);
+        }
+
+        Assert.That(_mmf.HasWritebackDebt(memPageIndex), Is.True, "a write that never landed must not discharge the page's debt");
     }
 
     [Test]
