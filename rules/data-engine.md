@@ -17,7 +17,9 @@ and are not covered here. Plan 06 step 3.2 built VIS-03 (the cards, the commit p
 rest: revisions are published with the commit stamp and resolved by stamp and owner. Families 2–5 (born, died, enabled
 bits, cluster watermarks) are written with the stamp at publish since 3.3, without staging; their staging is Phase 5.
 
-Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below names the invariant that proves it.
+Formal models: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) (family 1) and
+[`tla/CommitStampFamilies.tla`](tla/CommitStampFamilies.tla) (a spawn and a destroy beside revisions, one cut) — every rule
+below names the invariant that proves it.
 
 ## Module: VIS — commit stamps and the visibility predicate
 
@@ -132,3 +134,28 @@ Formal model: [`tla/CommitStamp.tla`](tla/CommitStamp.tla) — every rule below 
   scope: ComponentRevisionManager.ScrubChainToHead
   on_violation: a transaction of the reopened engine whose TSN equals a crashed owner's finds that owner's flagged
                 revisions as its own, or a reader resolves them through its card
+
+### VIS-08: A pending spawn is never absent from a scan, and never persisted as occupied `[fatal]` `[silent]` `[UNBUILT]`
+  invariant a spawn is placed in PREPARE: its EntityMap record with `BornTSN = Pending(owner)` (bit 47), its slot in the
+            cluster's in-memory pending mask, its occupancy bit clear; PUBLISH writes `BornTSN = stamp`, sets the occupancy
+            bit, then clears the pending bit. Every occupancy-driven scan visits `occupancy | pending` and resolves a
+            pending slot's born through the owner's card (VIS-01); a slot claim treats a pending slot as taken
+  invariant the pending mask is never written to a page: a fuzzy checkpoint can persist a pending slot's bytes, never its
+            occupancy bit, so a crash rebuild from occupancy resurrects no uncommitted spawn (CM-01)
+  invariant an abort after PREPARE un-places the spawn — slot, record, index and spatial entries (AP-07)
+  unbuilt: plan 06 step 5.2. Today `FinalizeSpawns` places a spawn at PUBLISH, after the stamp: a reader that resolved
+           the commit's revisions through the card finds no record — half a commit
+  spec: tla/CommitStampFamilies.tla — SpawnRead (spawnatpublish, scanoccupancy)
+  on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan
+  requires: VIS-01, VIS-02, CM-01
+
+### VIS-09: A destroy is pending before the stamp, and its slot outlives every snapshot that sees the entity `[fatal]` `[silent]` `[UNBUILT]`
+  invariant a destroy writes `DiedTSN = Pending(owner)` in PREPARE and the stamp at PUBLISH; of two concurrent destroys the
+            first stamp wins, by CAS
+  invariant the occupancy bit and the EntityMap record of a destroyed entity are released by the cleanup once MinTSN is past
+            its died stamp, not at PUBLISH: an older snapshot still finds it by scan
+  unbuilt: plan 06 step 5.3. Today the destroy's died stamp is written at PUBLISH, and its slot released there
+  spec: tla/CommitStampFamilies.tla — DestroyRead (destroyatpublish, releaseatpublish)
+  on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
+                effects; an older reader's scan loses an entity its snapshot holds
+  requires: VIS-01, VIS-06
