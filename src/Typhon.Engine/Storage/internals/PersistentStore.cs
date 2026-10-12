@@ -86,6 +86,12 @@ public readonly unsafe struct PersistentStore : IPageStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkPageModified(int memPageIndex) => _mmf.MarkPageModified(memPageIndex);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public PagedMMF.CaptureTicket TakeCaptureTicket(ref byte lockWord) => _mmf.TakeCaptureTicket(ref lockWord);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void EndLockHold(in PagedMMF.CaptureTicket ticket) => _mmf.EndLockHold(in ticket);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting
     // ═══════════════════════════════════════════════════════════════════════
@@ -120,7 +126,7 @@ public readonly unsafe struct PersistentStore : IPageStore
     public int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet) => _mmf.GetOrAllocateDirectoryTwin(primaryPageIndex, changeSet);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ChangeSet CreateChangeSet() => new(_mmf);
+    public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => _mmf.CreateChangeSet(drainedByCheckpoint);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetFilePageIndex(int memPageIndex) => _mmf.GetFilePageIndex(memPageIndex);

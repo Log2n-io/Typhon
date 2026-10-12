@@ -174,8 +174,9 @@ public partial class DatabaseEngine
     /// </summary>
     internal void RemoveEmptyClosingRealms()
     {
+        // A stopped engine writes nothing more to its data file (AP-03, #1271): the realm stays Closing, and the next open resolves it (RLM-06).
         var table = _realms;
-        if (table == null || table.ClosingCount == 0)
+        if (table == null || table.ClosingCount == 0 || CommitPipelineFailure != null)
         {
             return;
         }

@@ -47,6 +47,9 @@ internal sealed class EpochThreadRegistry : IDisposable
     internal const int SlotFree = 0;
     internal const int SlotActive = 1;
 
+    // Taken by a claimer that has not published its owner yet: no scanner acts on it and no other claimer can take it.
+    internal const int SlotClaiming = 2;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Padded Slot Storage
     // ═══════════════════════════════════════════════════════════════════════
@@ -94,6 +97,12 @@ internal sealed class EpochThreadRegistry : IDisposable
     /// </remarks>
     internal long CurrentThreadPinnedEpoch =>
         _threadRegistry == this ? Volatile.Read(ref _slots[_threadSlotIndex].PinnedEpoch) : 0;
+
+    /// <summary>Test seam: the current thread's slot in this registry, or -1.</summary>
+    internal int CurrentThreadSlotIndexForTest => _threadRegistry == this ? _threadSlotIndex : -1;
+
+    /// <summary>Test seam: every fresh slot handed out, so the next claim takes the slow path that reclaims dead threads' slots.</summary>
+    internal void ExhaustFreshSlotsForTest() => Volatile.Write(ref _highWaterMark, MaxSlots);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Management
@@ -263,29 +272,31 @@ internal sealed class EpochThreadRegistry : IDisposable
 
     private bool TryClaimSlot(int index, Thread thread)
     {
-        // The owner reference is published BEFORE the slot is marked Active, not after. Published after, a scanner that observes SlotActive can
-        // still read a STALE owner — the previous thread, now dead — and free the slot out from under the thread that just claimed it. Two threads
-        // then share one PaddedEpochSlot: Depth corrupts (UnpinCurrentThread throws its mismatch) and one thread's pin can be overwritten by the
-        // other's, which is a pin no reclaimer will see. That last consequence used to be an early page eviction; since #864 it is a
-        // NativeMemory.AlignedFree under a live publisher, which is why the ordering is now load-bearing rather than merely tidy.
-        Volatile.Write(ref _ownerThreads[index], thread);
-
-        if (Interlocked.CompareExchange(ref _slots[index].SlotState, SlotActive, SlotFree) == SlotFree)
+        // The slot is taken first (Free → Claiming), then its owner published, then it is marked Active. The owner must be published before the
+        // slot reads Active: a scanner that observes SlotActive with a STALE owner — the previous thread, now dead — would free the slot out from
+        // under the thread that just claimed it. And it must be written only by the claimer that won: written before the CAS, a claimer that then
+        // lost overwrote the owner of a slot another thread had just taken, and when the loser died the slot was freed under the live one. Either
+        // way two threads share one PaddedEpochSlot: Depth corrupts (UnpinCurrentThread throws its mismatch) and one thread's pin can be overwritten
+        // by the other's, which is a pin no reclaimer will see. That last consequence used to be an early page eviction; since #864 it is a
+        // NativeMemory.AlignedFree under a live publisher, which is why the ordering is load-bearing rather than merely tidy.
+        if (Interlocked.CompareExchange(ref _slots[index].SlotState, SlotClaiming, SlotFree) != SlotFree)
         {
-            _slots[index].PinnedEpoch = 0;
-            _slots[index].Depth = 0;
-            _threadSlotIndex = index;
-            _threadRegistry = this;
-            var newCount = Interlocked.Increment(ref _activeSlotCount);
-
-            // Register finalizer for thread death cleanup.
-            // Store in [ThreadStatic] field to root the handle for the thread's lifetime.
-            _threadSlotHandle = new EpochSlotHandle(this, index);
-            TyphonEvent.EmitConcurrencyEpochSlotClaim((ushort)index, (ushort)thread.ManagedThreadId, (ushort)newCount);
-            return true;
+            return false;
         }
 
-        return false;
+        _slots[index].PinnedEpoch = 0;
+        _slots[index].Depth = 0;
+        Volatile.Write(ref _ownerThreads[index], thread);
+        Volatile.Write(ref _slots[index].SlotState, SlotActive);
+        _threadSlotIndex = index;
+        _threadRegistry = this;
+        var newCount = Interlocked.Increment(ref _activeSlotCount);
+
+        // Register finalizer for thread death cleanup.
+        // Store in [ThreadStatic] field to root the handle for the thread's lifetime.
+        _threadSlotHandle = new EpochSlotHandle(this, index, thread);
+        TyphonEvent.EmitConcurrencyEpochSlotClaim((ushort)index, (ushort)thread.ManagedThreadId, (ushort)newCount);
+        return true;
     }
 
     private bool TryReclaimDeadSlot(int index, Thread newOwner)
@@ -302,8 +313,8 @@ internal sealed class EpochThreadRegistry : IDisposable
             _threadRegistry = this;
             // activeSlotCount doesn't change — we're reusing an active slot
 
-            // Root the handle for this thread
-            _threadSlotHandle = new EpochSlotHandle(this, index);
+            // Root the handle for this thread. The dead owner's handle, still to be finalized, frees nothing: the slot is no longer its owner's.
+            _threadSlotHandle = new EpochSlotHandle(this, index, newOwner);
             TyphonEvent.EmitConcurrencyEpochSlotReclaim((ushort)index, (ushort)oldOwner.ManagedThreadId, (ushort)newOwner.ManagedThreadId);
             return true;
         }
@@ -312,16 +323,25 @@ internal sealed class EpochThreadRegistry : IDisposable
     }
 
     /// <summary>
-    /// Release a slot. Called by <see cref="EpochSlotHandle"/> finalizer on thread death.
+    /// Releases <paramref name="index"/> if it still belongs to <paramref name="owner"/>, a dead thread. Called by the <see cref="EpochSlotHandle"/>
+    /// finalizer on thread death, and by <see cref="ComputeMinActiveEpoch"/> for a slot whose owner died pinned.
     /// </summary>
-    internal void FreeSlot(int index)
+    /// <remarks>
+    /// Conditional on the owner, taken by CAS: a dead thread's slot can be reclaimed by a live one (<see cref="TryReclaimDeadSlot"/>) before the dead
+    /// thread's handle is finalized, and a scanner can act on an owner it read before the slot changed hands. Freed unconditionally, the live thread's
+    /// slot went back to the pool while it used it: its pin erased, the slot handed to the next claimer. The CAS also makes the free idempotent —
+    /// the finalizer and a scanner can both reach it for the same dead thread.
+    /// </remarks>
+    internal void FreeSlot(int index, Thread owner)
     {
+        if (owner == null || Interlocked.CompareExchange(ref _ownerThreads[index], null, owner) != owner)
+        {
+            return;
+        }
+
+        // The slot is this caller's alone now: no claimer takes an Active slot, and no reclaimer one whose owner is null.
         _slots[index].PinnedEpoch = 0;
         _slots[index].Depth = 0;
-        _ownerThreads[index] = null;
-
-        // CAS to make FreeSlot idempotent: ComputeMinActiveEpoch and EpochSlotHandle finalizer
-        // can both call FreeSlot for the same dead-thread slot concurrently.
         if (Interlocked.CompareExchange(ref _slots[index].SlotState, SlotFree, SlotActive) == SlotActive)
         {
             Interlocked.Decrement(ref _activeSlotCount);
@@ -365,7 +385,7 @@ internal sealed class EpochThreadRegistry : IDisposable
                 var thread = Volatile.Read(ref _ownerThreads[i]);
                 if (thread != null && !thread.IsAlive)
                 {
-                    FreeSlot(i);
+                    FreeSlot(i, thread);
                     continue;
                 }
             }
@@ -428,15 +448,17 @@ internal sealed class EpochSlotHandle : System.Runtime.ConstrainedExecution.Crit
 {
     private readonly EpochThreadRegistry _registry;
     private readonly int _slotIndex;
+    private readonly Thread _owner;
 
-    internal EpochSlotHandle(EpochThreadRegistry registry, int slotIndex)
+    internal EpochSlotHandle(EpochThreadRegistry registry, int slotIndex, Thread owner)
     {
         _registry = registry;
         _slotIndex = slotIndex;
+        _owner = owner;
     }
 
     ~EpochSlotHandle()
     {
-        _registry.FreeSlot(_slotIndex);
+        _registry.FreeSlot(_slotIndex, _owner);
     }
 }

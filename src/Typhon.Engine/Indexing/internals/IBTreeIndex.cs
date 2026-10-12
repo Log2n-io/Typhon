@@ -27,4 +27,13 @@ internal interface IBTreeIndex
 
     /// <summary>Returns the maximum key encoded as a <see cref="long"/>.</summary>
     long GetMaxKeyAsLong();
+
+    /// <summary>
+    /// Whether the keys at <paramref name="left"/> and <paramref name="right"/> are one key to this index — its own comparison, so for a floating-point
+    /// key -0 and +0 are one key, as are any two NaNs.
+    /// </summary>
+    unsafe bool KeysEqual(void* left, void* right);
+
+    /// <summary>A hash of the key at <paramref name="key"/>, equal for any two keys <see cref="KeysEqual"/> holds equal.</summary>
+    unsafe int KeyHash(void* key);
 }

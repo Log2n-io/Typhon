@@ -50,6 +50,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private byte _mruSlot;                     // 1 byte — most recently used slot
     private byte _usedSlots;                   // 1 byte — high water mark (0-32)
     private bool _scan;                        // 1 byte — scan mode: window pins only, no epoch tag (EP-02)
+    private byte _keptSlotPlusOne;             // 1 byte — the slot the clock hand never takes (KeepInWindow), plus one; 0: none
 
     // === Cached hot-path values ===
     private int _stride;                       // 4 bytes — chunk size in bytes
@@ -60,6 +61,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private ChunkBasedSegment<TStore> _segment;
     private ChangeSet _changeSet;
     private TStore _store;
+
+    /// <summary>The page store this accessor reads through. For a <see cref="PersistentStore"/>, whose state is the MMF it names; a by-value
+    /// <see cref="TransientStore"/> snapshot can be stale (see the remark on its page growth).</summary>
+    internal TStore Store
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => _store;
+    }
     private EpochManager _epochManager;
     private ResolveGeneration _generation;     // bumped when a slot lets go of its page (#1199); null unless a handle resolves through this accessor
 
@@ -107,8 +116,12 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetMemPageIndexFromSlot(int slot) =>
-        // _baseAddresses[slot] points to raw data (after PageHeaderSize). Exact because the cache is one contiguous block (PS-13).
-        PagedMMF.MemPageIndexOfRawData((byte*)_baseAddresses[slot], _memPagesBaseAddr);
+        // _baseAddresses[slot] points to raw data (after PageHeaderSize). Exact because the cache is one contiguous block (PS-13). A transient store's
+        // pages are separate blocks, its memory page the segment's page: the address arithmetic, from a null base, gave a garbage index — the latches
+        // a buffer reader takes indexed their arrays with it.
+        typeof(TStore) == typeof(TransientStore)
+            ? _segment.Pages[_pageIndices[slot]]
+            : PagedMMF.MemPageIndexOfRawData((byte*)_baseAddresses[slot], _memPagesBaseAddr);
 
     /// <summary>
     /// Create a new ChunkAccessor. All storage is stack-allocated — zero heap allocations.
@@ -125,6 +138,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         _changeSet = changeSet;
         _mruSlot = 0;
         _usedSlots = 0;
+        _keptSlotPlusOne = 0;
         _clockHand = 0;
         _dirtyFlags = 0;
         _stride = segment.Stride;
@@ -299,7 +313,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Acquire exclusive latch on an epoch-protected page (Idle → Exclusive).
     /// The chunk must already be loaded into a slot.
     /// </summary>
-    public bool TryLatchExclusive(int chunkId)
+    public bool TryLatchExclusive(int chunkId) => TryLatchExclusive(chunkId, out _);
+
+    /// <summary>
+    /// Acquire exclusive latch on an epoch-protected page (Idle → Exclusive), the memory page latched in <paramref name="memPageIndex"/>. The chunk must
+    /// already be loaded into a slot. <see cref="UnlatchExclusivePage"/> releases it with no window lookup: while latched the page stays in the cache,
+    /// but not in the window, which later fetches can take it out of (#1290).
+    /// </summary>
+    public bool TryLatchExclusive(int chunkId, out int memPageIndex)
     {
         (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
 
@@ -312,15 +333,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
             if (mask != 0)
             {
-                return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
+                memPageIndex = GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask));
+                return _store.TryLatchPageExclusive(memPageIndex);
             }
         }
 
+        memPageIndex = -1;
         return false; // Page not cached
     }
 
     /// <summary>
-    /// Release exclusive latch on an epoch-protected page (Exclusive → Idle).
+    /// Release exclusive latch on an epoch-protected page (Exclusive → Idle). The page must still be in the window: one it has let go of is released
+    /// by its memory page (<see cref="UnlatchExclusivePage"/>).
     /// </summary>
     public void UnlatchExclusive(int chunkId)
     {
@@ -339,6 +363,36 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
                 return;
             }
         }
+
+        Debug.Assert(false, "a latched page the window has let go of: it stays latched — release it by its memory page (#1290)");
+    }
+
+    /// <summary>Release the exclusive latch <see cref="TryLatchExclusive(int, out int)"/> took on <paramref name="memPageIndex"/> (Exclusive → Idle).</summary>
+    public void UnlatchExclusivePage(int memPageIndex) => _store.UnlatchPageExclusive(memPageIndex);
+
+    /// <summary>
+    /// Keeps the slot holding <paramref name="chunkId"/>'s page in the window for the accessor's life: the clock hand never takes it, so the window's
+    /// hold keeps the page in the cache whatever its epoch tag — an unlatch by any thread clears the tag (PS-03), a transaction's epoch refresh moves
+    /// past it. For a caller that keeps an address into the page for that long: a buffer reader its root, for its lock and its capture ticket (#1290).
+    /// One slot per accessor; the chunk must be loaded.
+    /// </summary>
+    internal void KeepInWindow(int chunkId)
+    {
+        (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
+
+        ref int indices = ref _pageIndices[0];
+        var target = Vector256.Create(pageIndex);
+        for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        {
+            var mask = Vector256.Equals(Vector256.LoadUnsafe(ref indices, (nuint)baseSlot), target).ExtractMostSignificantBits();
+            if (mask != 0)
+            {
+                _keptSlotPlusOne = (byte)(baseSlot + BitOperations.TrailingZeroCount(mask) + 1);
+                return;
+            }
+        }
+
+        Debug.Assert(false, "KeepInWindow: the chunk's page is not in the window");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -454,9 +508,9 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
             return _usedSlots++;
         }
 
-        // Clock-hand: advance, skip MRU
+        // Clock-hand: advance, skip MRU and the kept slot
         var hand = (byte)((_clockHand + 1) & CapacityMask);
-        if (hand == _mruSlot)
+        while (hand == _mruSlot || hand + 1 == _keptSlotPlusOne)
         {
             hand = (byte)((hand + 1) & CapacityMask);
         }
@@ -474,7 +528,8 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </para>
     /// <para>
     /// <b>Standalone path</b> (no ChangeSet): SlotRefCount is decremented immediately. Without a
-    /// Transaction, no epoch refresh can occur during the accessor's lifetime, so epoch protection
+    /// Transaction, no epoch refresh occurs during the accessor's lifetime — save a crash open's batch points
+    /// (<see cref="DatabaseEngine.RecoveryBatchPoint"/>), where the pass holds no address across the refresh — so epoch protection
     /// alone prevents page eviction. ACW is also decremented immediately for dirty slots.
     /// </para>
     /// </summary>
@@ -600,6 +655,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         if (_store.IsDisposed)
         {
             _usedSlots = 0;
+            _keptSlotPlusOne = 0;
             _segment = null!;
             return;
         }
@@ -626,6 +682,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         }
 
         _usedSlots = 0;
+        _keptSlotPlusOne = 0;
         _segment = null!;
     }
 }

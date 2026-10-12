@@ -1288,9 +1288,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         var meta = Archetype<ClMigUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         var (dstChunk, _) = ReadLocation(dbe, resident);
-        var dstBornBefore = cs.ClusterMaxBornTsn[dstChunk];
+        var dstBornBefore = cs.ClusterMaxBorn(dstChunk);
         var (srcChunk, _) = ReadLocation(dbe, migrant);
-        var migrantBorn = cs.ClusterMaxBornTsn[srcChunk];
+        var migrantBorn = cs.ClusterMaxBorn(srcChunk);
         Assert.That(migrantBorn, Is.GreaterThan(dstBornBefore),
             "the migrant must be younger than the destination's residents, or the fold cannot be distinguished from doing nothing");
 
@@ -1318,7 +1318,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         // visible through the audit alone — that is the property this fixture is here to pin, since a future site has no direct assertion watching it.
         Assert.Multiple(() =>
         {
-            Assert.That(cs.ClusterMaxBornTsn[dstChunk], Is.GreaterThanOrEqualTo(migrantBorn),
+            Assert.That(cs.ClusterMaxBorn(dstChunk), Is.GreaterThanOrEqualTo(migrantBorn),
                 "the destination summary must now bound the migrant's BornTSN — migration carries the entity's TSNs across unchanged");
             Assert.That(report.Issues, Has.None.Matches<StorageIntegrityIssue>(i => i.Kind == StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound),
                 "the recomputed summary must match after migration");

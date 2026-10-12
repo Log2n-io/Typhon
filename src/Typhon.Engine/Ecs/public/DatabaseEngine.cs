@@ -693,6 +693,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// fixture can hold a commit in that window while a checkpoint runs. Null in production: one null check per commit.</summary>
     internal Action CommitAfterAppendProbe { get; set; }
 
+    /// <summary>Test seam (VIS-03): invoked by every writing <see cref="Transaction"/> commit once its commit card is reserved, before its PREPARE takes
+    /// any lock, so a fixture can hold a reserving committer there. Null in production: one null check per commit.</summary>
+    internal Action CommitAfterReserveProbe { get; set; }
+
+    /// <summary>Test seam: runs at the end of PREPARE — every spawn placed (VIS-08) — just before the commit's append. A throw here is an abort before it.</summary>
+    internal Action CommitBeforeAppendProbe { get; set; }
+
+    /// <summary>Test seam: runs in PREPARE right after a spawn's slot is claimed, before its data is copied (VIS-08). Null in production.</summary>
+    internal Action SpawnClaimedProbe { get; set; }
+
+    /// <summary>Test seam: keep the crash open's identity → commit stamp map in <see cref="LastWalV2RecoveryResult"/> (dropped otherwise: one entry per
+    /// committed transaction of the window, for the engine's lifetime). Set before <see cref="InitializeArchetypes"/>.</summary>
+    internal bool RetainRecoveryCommitStampsForTest { get; set; }
+
     /// <summary>Test seam (CK-13): invoked by every <see cref="Transaction"/> commit just before it publishes its Commit-discipline staged writes,
     /// its last page effect, so a fixture can show the checkpoint still stays below the commit's records there. Null in production.</summary>
     internal Action CommitBeforeStagedPublishProbe { get; set; }
@@ -850,6 +864,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public ushort ArchetypeIdOf<TArch>() where TArch : Archetype<TArch> => RoutingIdForCatalog(Archetype<TArch>.CatalogId);
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
+    private readonly object _componentCollectionSegmentCreation = new();   // one creation at a time: each saves the bootstrap's map (#1283)
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
     private MigrationRegistry _migrationRegistry;
 
@@ -1468,6 +1483,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal DeadlineWatchdog Watchdog { get; }
 
     internal TransactionChain TransactionChain { get; }
+
+    /// <summary>The commit cards (VIS-03): a committer's reservation, then its registration and stamp at the commit point.</summary>
+    internal CommitCardTable CommitCards { get; }
     internal DeferredCleanupManager DeferredCleanupManager { get; }
 
     /// <summary>Engine-level MVCC exception dictionary for ECS EnabledBits.</summary>
@@ -1553,15 +1571,97 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         List<DeferredCleanupManager.DeferredChunkFreeEntry> frees = null;
         List<EcsCleanupEntry> putOff = null;
 
-        foreach (var entry in toProcess)
+        // An entity that throws midway — a back-pressure timeout on its record or a chain — drops what it collected: its record still names the chains, and
+        // it goes back in the queue with the entities after it, for the next drain to release them. A throw inside the record's own update may leave chains
+        // that no record names: FreesLost asks the close for the next open's orphan sweep (#1268). What the entities before it released is queued.
+        var processed = 0;
+        var faulted = true;
+        try
         {
-            var meta = entry.Meta;
-            var engineState = _archetypeStates[meta.ArchetypeId];
-            if (engineState?.EntityMap == null)
+            for (; processed < toProcess.Count; processed++)
             {
-                continue;
+                var freesBefore = frees?.Count ?? 0;
+                try
+                {
+                    ProcessEcsCleanupEntry(toProcess[processed], readBuf, changeSet, ref frees, ref putOff);
+                }
+                catch
+                {
+                    frees?.RemoveRange(freesBefore, frees.Count - freesBefore);
+                    DeferredCleanupManager.FreesLost = true;
+                    throw;
+                }
             }
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+
+            faulted = false;
+        }
+        finally
+        {
+            // The released chains' chunks and the content chunks they named: freed once every transaction alive now has gone — one that resolved an entity
+            // before its destroy committed can still walk its chain until it finishes.
+            if (frees is { Count: > 0 })
+            {
+                try
+                {
+                    DeferredCleanupManager.EnqueueChunkFrees(TransactionChain.NextFreeId, frees);
+                }
+                catch
+                {
+                    DeferredCleanupManager.FreesLost = true;
+                    if (!faulted)
+                    {
+                        throw;
+                    }
+                }
+            }
+
+            // Entities whose chains were not quiescent yet go back in the queue, for the next drain — and, after a throw, the one that threw and those
+            // not reached.
+            if (putOff != null || (faulted && processed < toProcess.Count))
+            {
+                lock (_ecsCleanupLock)
+                {
+                    if (putOff != null)
+                    {
+                        _ecsCleanupQueue.AddRange(putOff);
+                    }
+
+                    if (faulted && processed < toProcess.Count)
+                    {
+                        _ecsCleanupQueue.AddRange(toProcess.GetRange(processed, toProcess.Count - processed));
+                    }
+
+                    Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
+                }
+            }
+        }
+
+        // Also prune EnabledBits overrides
+        EnabledBitsOverrides.Prune(minTSN);
+
+        return toProcess.Count;
+    }
+
+    /// <summary>Invoked as each destroyed entity of <see cref="ProcessEcsCleanups"/> is processed. Test seam: a throw stages a failing cleanup.</summary>
+    internal Action<EntityId> EcsCleanupProbeForTest { get; set; }
+
+    /// <summary>
+    /// One destroyed entity of <see cref="ProcessEcsCleanups"/>: each Versioned chain released into <paramref name="frees"/> and the record removed — or,
+    /// a chain not quiescent yet, the record kept and the entity put off.
+    /// </summary>
+    private unsafe void ProcessEcsCleanupEntry(EcsCleanupEntry entry, byte* readBuf, ChangeSet changeSet,
+        ref List<DeferredCleanupManager.DeferredChunkFreeEntry> frees, ref List<EcsCleanupEntry> putOff)
+    {
+        EcsCleanupProbeForTest?.Invoke(entry.Id);
+        var meta = entry.Meta;
+        var engineState = _archetypeStates[meta.ArchetypeId];
+        if (engineState?.EntityMap == null)
+        {
+            return;
+        }
+        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+        try
+        {
             var found = engineState.EntityMap.TryGet(entry.Id.EntityKey, readBuf, ref accessor);
 
             if (found)
@@ -1630,36 +1730,44 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
                 else
                 {
+                    // A destroy of a Versioned archetype hid its slot rather than release it (VIS-09): released now, no snapshot seeing the entity alive.
+                    ReleaseHiddenDestroySlot(meta, engineState, readBuf, changeSet);
+
                     // Remove from LinearHash. The ChangeSet is threaded through even though Remove does not currently read it — the accessor above carries
                     // the dirty marks — so the call does not read as though this write is exempt from ownership.
                     engineState.EntityMap.Remove(entry.Id.EntityKey, ref accessor, changeSet);
                 }
             }
-
+        }
+        finally
+        {
             accessor.Dispose();
         }
+    }
 
-        // The released chains' chunks and the content chunks they named: freed once every transaction alive now has gone — one that resolved an entity
-        // before its destroy committed can still walk its chain until it finishes.
-        if (frees is { Count: > 0 })
+    /// <summary>The cleanup's release of a destroyed entity's hidden slot (VIS-09), named by its record; a slot not claimed-and-unoccupied is not one.</summary>
+    private unsafe void ReleaseHiddenDestroySlot(ArchetypeMetadata meta, ArchetypeEngineState engineState, byte* record, ChangeSet changeSet)
+    {
+        if (!meta.IsClusterEligible || engineState.ClusterState is not { ClusterSegment: not null } clusterState)
         {
-            DeferredCleanupManager.EnqueueChunkFrees(TransactionChain.NextFreeId, frees);
+            return;
         }
 
-        // Entities whose chains were not quiescent yet go back in the queue, for the next drain.
-        if (putOff != null)
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(record);
+        int slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(record);
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+        try
         {
-            lock (_ecsCleanupLock)
+            var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+            if (clusterState.IsHidden(clusterBase, clusterChunkId, slotIndex))
             {
-                _ecsCleanupQueue.AddRange(putOff);
-                Volatile.Write(ref _ecsCleanupCount, _ecsCleanupQueue.Count);
+                clusterState.ReleaseHiddenSlot(clusterBase, clusterChunkId, slotIndex, changeSet, clusterState.SpatialOfCluster(clusterChunkId).Grid);
             }
         }
-
-        // Also prune EnabledBits overrides
-        EnabledBitsOverrides.Prune(minTSN);
-
-        return toProcess.Count;
+        finally
+        {
+            clusterAccessor.Dispose();
+        }
     }
 
     /// <summary>
@@ -1724,7 +1832,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
         // the registry page mutation in it (avoiding a synchronous SaveChanges).
-        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet() : null;
+        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
         LogUowLifecycle("ChangeSet created");
 
         // Back-pressure: if registry is full, wait for a slot to be freed.
@@ -1782,6 +1890,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         _componentCollectionSegmentByStride = new ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>>();
         _componentCollectionVSBSByType = new ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>>();
         TransactionChain = new TransactionChain(_options.Resources.MaxActiveTransactions, this);
+        CommitCards = new CommitCardTable(TransactionChain, MemoryAllocator, this);
         DeferredCleanupManager = new DeferredCleanupManager(_options.DeferredCleanup, Logger);
         EnabledBitsOverrides = new EnabledBitsOverrides(Logger);
 
@@ -1796,6 +1905,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             LoadSystemSchemaR1();
+
+            // Before the first registration can allocate: every page the file's segments name, claimed (#1296) — the components' from their persisted
+            // pointers here, the archetypes' once their catalog is read (InitializeArchetypesCore).
+            if (CrashRecoveryAtOpen)
+            {
+                ClaimPersistedPagesAtCrashOpen();
+            }
         }
 
         InitializeWalManager();
@@ -1877,18 +1993,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// A clean close runs the cleanups still queued: revision GC entries, destroyed entities, and the chunk frees deferred past the transactions alive
-    /// when they were queued. With no transaction left, all of it is due, and none of it may outlive the close — a destroyed entity's chain root still
-    /// allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
+    /// when they were queued. All of it is due, and none of it may outlive the close — a destroyed entity's chain root still allocated reads back as a live
+    /// entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
     /// </summary>
     /// <remarks>
-    /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. Skipped while a transaction is
-    /// still alive — its snapshot may need what is queued.
+    /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. A transaction still alive does not
+    /// hold it off: none outlives the engine's disposal, and skipped, the chunks a trim had unlinked were left in no chain for good, which only a crash
+    /// recovery's sweep found again (#1268). Returns false when chunk frees or destroyed entities are left queued — an entity put off by a chain that a
+    /// transaction still writes: only an orphan sweep can find them.
     /// </remarks>
-    private void DrainCleanupsAtClose()
+    private bool DrainCleanupsAtClose()
     {
-        if (TransactionChain.ActiveCount != 0 || DeferredCleanupManager == null)
+        if (DeferredCleanupManager == null)
         {
-            return;
+            return true;
+        }
+
+        var active = TransactionChain.ActiveCount;
+        if (active != 0)
+        {
+            LogCloseWithLiveTransactions(active);
         }
 
         var changeSet = MMF.CreateChangeSet();
@@ -1916,7 +2040,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             changeSet.ReleaseDirtyMarks();
         }
+
+        return Volatile.Read(ref DeferredCleanupManager.ChunkFreeQueueSize) == 0 && EcsCleanupQueueSize == 0;
     }
+
+    [LoggerMessage(LogLevel.Warning, "Close: {active} transactions still alive; their snapshots end with the engine, and the queued cleanups run")]
+    private partial void LogCloseWithLiveTransactions(int active);
+
+    /// <summary>
+    /// The close's marker when chunks are left in no chain (#1268, CK-17): no clean flag, so the next open recovers and its orphan sweep frees them, and the
+    /// failed-open marker, so that open loads its segments strictly (CS-04) — the data file was flushed whole, and the WAL holds nothing to refill a segment
+    /// that fails to load. Written where the clean marker would have been, after PersistEngineState's fsync.
+    /// </summary>
+    private void MarkSweepOwed()
+    {
+        DurabilityWatermarks.MarkSweepOwed(MMF);
+        LogSweepOwedAtClose();
+    }
+
+    [LoggerMessage(LogLevel.Warning, "Close: chunks left in no chain; the next open runs crash recovery, with strict segment loads, to sweep them")]
+    private partial void LogSweepOwedAtClose();
 
     // Engine teardown, split out so Dispose() can guarantee owned-provider disposal in a finally (see there). A throw from
     // any step here propagates out of Dispose() after the finally has released the owned container.
@@ -1946,18 +2089,38 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             // Before the final cycle, so what the drain changes is written with everything else.
+            var freesLostAtClose = false;
             if (!_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete)
             {
-                // A drain that fails leaves what it did not free leaked, as before it existed — never the close itself undone: the final checkpoint and
-                // the clean-shutdown marker still follow.
+                // A drain that fails is never the close itself undone: the final checkpoint follows. What it did not free is in no chain, so the close marks
+                // the sweep owed instead of a clean shutdown (#1268): marked clean, it stayed allocated in the file for good.
                 try
                 {
-                    DrainCleanupsAtClose();
+                    freesLostAtClose = !DrainCleanupsAtClose();
                 }
                 catch (Exception e)
                 {
                     LogCloseDrainFailed(e);
+                    freesLostAtClose = true;
                 }
+
+                freesLostAtClose |= DeferredCleanupManager?.FreesLost == true;
+            }
+
+            // The held frees (CK-17), freed before the final cycle so it writes them freed — on this thread, as the checkpoint thread still writes what their pages
+            // need. A close the engine treats as a crash frees nothing: only the release worker stops. A release that fails leaves the frees held, allocated
+            // and named by nothing: the close then marks the sweep owed, so the next open recovers, with strict segment loads, and its sweep frees them —
+            // marked clean, they stayed allocated in the file for good (review of CK-17).
+            var freesHeldAtClose = false;
+            try
+            {
+                MMF.EndFreeQuarantine(release: !_simulateHardCrash && !SimulateUncleanShutdownForTest && _constructed && !_archetypeInitIncomplete
+                                               && CommitPipelineFailure == null);
+            }
+            catch (Exception e)
+            {
+                LogCloseDrainFailed(e);
+                freesHeldAtClose = true;
             }
 
             // Checkpoint must dispose first: runs final cycle, writes pages + advances LSN before WAL shuts down
@@ -1974,7 +2137,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // `_constructed` short-circuits a failed open (see the field docs): there is nothing to persist, and trying would bury the construction exception
             // under a teardown fault. `_archetypeInitIncomplete` does the same for an open that failed after the constructor, in InitializeArchetypes: it
             // closes as a crash, because persisting a half-built archetype table orphans data and flags it clean (#1147).
-            if (!_simulateHardCrash && _constructed && !_archetypeInitIncomplete)
+            // A stopped commit pipeline (AP-03) closes as a crash too: memory holds a partial publish, and the next open must replay its records — persisting
+            // the pages and the clean flag would make that open trust them instead.
+            if (!_simulateHardCrash && _constructed && !_archetypeInitIncomplete && CommitPipelineFailure == null)
             {
                 Logger?.LogInformation("Engine disposing: PersistArchetypeState");
                 // Persist EntityMap SPIs and NextEntityKey counters so reopen can load EntityMaps directly
@@ -1989,7 +2154,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Clean-shutdown HEAD marker: STRICTLY AFTER PersistEngineState's data fsync (own separate fsync, never
                 // bundled), so a torn close can never leave the marker durable ahead of the cluster pages it vouches for.
                 // Skipped by SimulateUncleanShutdownForTest to reproduce a crash (which also never writes the marker).
-                if (!SimulateUncleanShutdownForTest)
+                if (!SimulateUncleanShutdownForTest && (freesHeldAtClose || freesLostAtClose))
+                {
+                    MarkSweepOwed();
+                }
+                else if (!SimulateUncleanShutdownForTest)
                 {
                     // The chunk summary first, then the flag that vouches for it (CS-01): the summary describes the data file as PersistEngineState just
                     // flushed it, and the flag and the summary's nonce flip together.
@@ -2002,6 +2171,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             WalManager = null;
             Logger?.LogInformation("Engine disposing: TransactionChain + cleanup");
             TransactionChain.Dispose();
+            CommitCards.Dispose();
             UowRegistry?.Dispose();
             MMF.Dispose();
 
@@ -2106,8 +2276,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 PersistArchetypeState();
             }
         };
-        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish.
-        CheckpointManager.InFlightCommitFloor = () => TransactionChain.LowestInFlightLsn();
+        // CK-13: the cycle keeps CheckpointLSN below any commit still between its WAL append and its publish — and below one whose publish failed, for
+        // good (AP-03).
+        CheckpointManager.InFlightCommitFloor = () => Math.Min(TransactionChain.LowestInFlightLsn(), PinnedCommitFloor);
+
+        // CK-08: until the recovery's seal, every cycle is flush-only — the passes write past the cache, and a full cycle among them would advance
+        // CheckpointLSN over a half-recovered file.
+        CheckpointManager.RecoveryInProgress = CrashRecoveryAtOpen;
         CheckpointManager.Start();
 
         // Wire demand-driven flush: when page cache backpressure fires, immediately wake
@@ -2438,6 +2613,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // (LOG-08).
                 CrashRecoveryAtOpen = !_cleanShutdownAtOpen || _options.ForceCrashRecoveryAtOpen;
 
+                // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page
+                // the grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
+                MMF.RepairTornGrowsAtLoad = TolerateTornSegmentsAtOpen;
+
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
                 // Reuse the injected WAL IO when present (same backend that wrote the segments reads them back); otherwise a throwaway production IO.
@@ -2551,17 +2730,94 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 return (VariableSizedBufferSegmentBase<PersistentStore>)Activator.CreateInstance(ctType, segment);
             });
 
-    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment<T>() where T : unmanaged =>
-        _componentCollectionSegmentByStride.GetOrAdd(
-            RoundToStandardStride(Math.Max(sizeof(T) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, null, 
-                StorageSegmentKind.ComponentCollection));
+    /// <summary>Buffer locks the crash open found held in the component-collection segments' data file and freed (PS-20). Diagnostic.</summary>
+    internal int CollectionBufferLocksResetAtOpen { get; private set; }
 
-    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment(int itemSize, ChangeSet changeSet = null) =>
-        _componentCollectionSegmentByStride.GetOrAdd(
-            RoundToStandardStride(Math.Max(itemSize * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader))),
-            stride => MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, changeSet, 
-                StorageSegmentKind.ComponentCollection));
+    /// <summary>
+    /// PS-20: a crash can leave a buffer's lock held in the data file, its holder gone. Freed as the segment loads, before anything of this open reads a
+    /// collection. The index value buffers need none of it: a crash open recreates every index empty (RB-01).
+    /// </summary>
+    private unsafe void ResetCollectionBufferLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment)
+    {
+        if (CrashRecoveryAtOpen)
+        {
+            CollectionBufferLocksResetAtOpen += VariableSizedBufferRecovery.ResetRootLocksAfterCrash(segment, this);
+        }
+    }
+
+    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment<T>() where T : unmanaged =>
+        GetComponentCollectionSegment(sizeof(T));
+
+    /// <summary>
+    /// The component-collection segment for items of <paramref name="itemSize"/> bytes, created on first use. A created segment is made durable at once,
+    /// its pages first, then the bootstrap's stride → root map that the open finds it through (#1283). The map used to reach the disk only at a clean
+    /// close: a crash in the session that created the segment left the reopen without it, and every collection of that stride read back empty — data a
+    /// checkpoint had already made durable. <paramref name="changeSet"/> is not used: the creation is a structural write of its own.
+    /// </summary>
+    unsafe internal ChunkBasedSegment<PersistentStore> GetComponentCollectionSegment(int itemSize, ChangeSet changeSet = null)
+    {
+        var stride = RoundToStandardStride(Math.Max(itemSize * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
+        if (_componentCollectionSegmentByStride.TryGetValue(stride, out var segment))
+        {
+            return segment;
+        }
+
+        lock (_componentCollectionSegmentCreation)
+        {
+            if (_componentCollectionSegmentByStride.TryGetValue(stride, out segment))
+            {
+                return segment;
+            }
+
+            var creation = MMF.CreateChangeSet();
+            segment = MMF.AllocateChunkBasedSegment(PageBlockType.None, ComponentCollectionSegmentStartingSize, stride, creation,
+                StorageSegmentKind.ComponentCollection);
+            creation.SaveChanges();
+
+            // The map, the new segment in it, durable before the segment is published: no collection data reaches it before the open can find it. Under
+            // the meta lock, as every writer of the bootstrap must be: the checkpoint thread serializes the dictionary while it advances its LSN.
+            var created = segment;
+            MMF.MutateBootstrapAndPersist(() => WriteCollectionSegmentMap(stride, created));
+            segment.QuarantineFrees(MMF);
+            _componentCollectionSegmentByStride[stride] = segment;
+            return segment;
+        }
+    }
+
+    /// <summary>
+    /// Pools a component-collection segment the open loaded. Its frees are held as a Versioned table's chunks are (CK-17, #1300): a buffer is named by
+    /// content chunks the data file's chains name, and one freed at once was taken by a transaction while the disk could still name the revision that
+    /// dropped it — a crash then left that revision on disk, and the scrub that dropped it released the buffer under its new owner.
+    /// </summary>
+    private void PoolLoadedCollectionSegment(int stride, ChunkBasedSegment<PersistentStore> segment)
+    {
+        ResetCollectionBufferLocksAfterCrash(segment);
+        if (_componentCollectionSegmentByStride.TryAdd(stride, segment))
+        {
+            segment.QuarantineFrees(MMF);
+        }
+    }
+
+    /// <summary>
+    /// Writes the component-collection segments' stride → root-page map into the bootstrap — <paramref name="pendingSegment"/> too, a segment about to
+    /// be published; the caller saves it.
+    /// </summary>
+    private void WriteCollectionSegmentMap(int pendingStride = 0, ChunkBasedSegment<PersistentStore> pendingSegment = null)
+    {
+        var collections = _componentCollectionSegmentByStride;
+        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count + (pendingSegment != null ? 1 : 0));
+        var collectionIndex = 0;
+        foreach (var kv in collections)
+        {
+            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
+            collectionIndex++;
+        }
+
+        if (pendingSegment != null)
+        {
+            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(pendingStride, pendingSegment.RootPageIndex));
+        }
+    }
 
     // Create the first revision of the system schema
     private unsafe void CreateSystemSchemaR1()
@@ -3041,8 +3297,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 var stride = RoundToStandardStride(
                     Math.Max(sizeof(FieldR1) * ComponentCollectionItemCountPerChunk, sizeof(VariableSizedBufferRootHeader)));
-                var segment = MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride);
-                _componentCollectionSegmentByStride.TryAdd(stride, segment);
+                PoolLoadedCollectionSegment(stride, MMF.LoadChunkBasedSegment(fieldCollectionSPI, stride));
             }
         }
 
@@ -3059,7 +3314,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var collectionSPI = cv.GetInt(1);
             if (collectionSPI != 0 && !_componentCollectionSegmentByStride.ContainsKey(collectionStride))
             {
-                _componentCollectionSegmentByStride.TryAdd(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
+                PoolLoadedCollectionSegment(collectionStride, MMF.LoadChunkBasedSegment(collectionSPI, collectionStride));
             }
         }
 
@@ -3150,15 +3405,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Persist every component-collection segment (stride → root page). Only FieldR1 had a dedicated key before; the rest (e.g. the String64 collection
         // backing ArchetypeR1.ComponentNames) were re-allocated fresh on reopen, orphaning the originals — a page leak that also left those pages Unknown in
-        // storage introspection. Persisting the whole pool lets the reopen reload them in place.
-        var collections = _componentCollectionSegmentByStride;
-        MMF.Bootstrap.SetInt(BK_CollectionCount, collections.Count);
-        var collectionIndex = 0;
-        foreach (var kv in collections)
-        {
-            MMF.Bootstrap.Set($"collection.{collectionIndex}", BootstrapDictionary.Value.FromInt2(kv.Key, kv.Value.RootPageIndex));
-            collectionIndex++;
-        }
+        // storage introspection. Persisting the whole pool lets the reopen reload them in place. A segment's creation saves the map already (#1283); this
+        // is the same map, rewritten with the rest of the state.
+        WriteCollectionSegmentMap();
 
         MMF.SaveBootstrap(cs);
 
@@ -3986,6 +4235,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         _archetypeInitIncomplete = false;
 
+        // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
+        if (CheckpointManager != null)
+        {
+            CheckpointManager.RecoveryInProgress = false;
+        }
+
+        // From here a freed revision or content chunk waits for a checkpoint before reuse (#1251) — a crash open turned it on at its replay.
+        EnableFreeQuarantine();
+
         // The open the marker guards has completed: from here a crash is an ordinary one, whose recovery may replace a torn segment (CS-04). Set at the
         // start of the open (BeginOpenAfterCleanClose) and cleared only now, so an open that dies before this point leaves it for the next one.
         if ((_cleanShutdownAtOpen || _failedOpenAtOpen) && !_failedOpenCleared)
@@ -4032,6 +4290,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private void InitializeArchetypesCore()
     {
         ArchetypeRegistry.Freeze();
+
+        // CK-08: a crash open's passes start here — the entity-map and HEAD rebuilds before the replay. The manager's creation set it for the first call;
+        // a repeat InitializeArchetypes (#790) recovers again and sets it again.
+        if (CrashRecoveryAtOpen && CheckpointManager != null)
+        {
+            CheckpointManager.RecoveryInProgress = true;
+        }
 
         // Open-time latency instrumentation (#diagnose-open): the three reopen rebuilds below are O(entities) and run on
         // EVERY open (their state is intentionally not persisted — ADR-045). Accumulate per-phase elapsed across the
@@ -4117,6 +4382,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
+        if (CrashRecoveryAtOpen)
+        {
+            ClaimPersistedPagesAtCrashOpen();
+        }
 
         // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
         // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
@@ -4829,6 +5098,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (CrashRecoveryAtOpen)
         {
             MMF.SetPageChecksumVerification(_options.Resources.PageChecksumVerification);
+            MMF.RepairTornGrowsAtLoad = false;
         }
 
         // Zone maps last (IXS-08, #1151): the load, the schema-migration rebuild and the WAL replay above all fill clusters without widening a zone map, so
@@ -4865,12 +5135,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
+
         LastOpenRanCrashRecovery = true;
         long checkpointLsn;
         using (EpochGuard.Enter(EpochManager))
         {
             checkpointLsn = DurabilityWatermarks.ReadCheckpointLsn(MMF);
         }
+
+        // Before the replay allocates anything: every chunk the on-disk chains name is taken, so the replay never hands one out again (#1251).
+        ReserveChainChunksAfterCrash();
+
+        // Recovery's own frees — the replay's, the scrub's, the sweep's — wait for a checkpoint like any other (CK-17): freed at once, the transactions
+        // after the open reused them while the disk's pages as of before the scrub still named them, and a second crash recovered #1251 again. A seal
+        // that does not complete leaves them held. Past the budget they ask for no cycle: one in the middle of the scrub would write a half-scrubbed
+        // file (review) — the seal's cycle is the recovery's, and the end of the open wires the trigger.
+        EnableFreeQuarantine(askCheckpoints: false);
 
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
         var walIO = _injectedWalIo ?? new WalFileIO();
@@ -4917,6 +5197,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
         // consolidated into the data file by the same checkpoint.
         ScrubVersionedChains();
+
+        // Phase 4b — the component-collection segments' orphans (#1307, REAP-02): a buffer named by nothing once the chains are their heads — one whose free a
+        // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
+        SweepCollectionOrphans();
 
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
@@ -5086,7 +5370,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var capacity = cbs.ChunkCapacity;
             for (var chunkId = 0; chunkId < capacity; chunkId++)
             {
-                if (!cbs.IsChunkAllocated(chunkId))
+                if (!cbs.IsChunkLive(chunkId))
                 {
                     continue;
                 }
@@ -5195,7 +5479,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     continue;
                 }
 
-                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
+                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet, () => RecoveryBatchPoint(changeSet, RecoveryPass.Indexes)));
                 LastOpenClusterIndexRebuildCount++;
             }
         }
@@ -5214,8 +5498,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private void SealRecovery(long frontierLsn, long checkpointLsn)
     {
-        if (frontierLsn <= checkpointLsn || CheckpointManager == null)
+        if (CheckpointManager == null)
         {
+            return;
+        }
+
+        // Every pass has run: the seal's cycle is the recovery's one full cycle (CK-08).
+        CheckpointManager.RecoveryInProgress = false;
+
+        if (frontierLsn <= checkpointLsn)
+        {
+            // Nothing replayed, but the scrub and the sweep may have freed: held (CK-17) until a checkpoint writes the pages that stopped naming them.
+            if (MMF.QuarantinedBytes > 0 && CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+            {
+                MMF.DrainReleases();
+
+                // The cycle consolidated the scrub: its TSN watermark with it, as below (#673).
+                PersistNextFreeTsn();
+            }
+
+            ThrowIfRecoveryCheckpointerFailed();
             return;
         }
 
@@ -5227,7 +5529,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         WalManager.SeedDurableLsn(frontierLsn);
         // A timeout here is non-fatal: the recovered state is already correct in the page cache for this session's reads — it just
         // isn't consolidated to the data file yet, so it falls back to being re-replayed on the next open (soft recovery).
-        CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30));
+        // Recovery's frees, sealed by this cycle, freed once it covered: the open hands the transactions an allocator that reuses them (CK-17).
+        if (CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(30)))
+        {
+            MMF.DrainReleases();
+        }
+
+        // A timeout is soft, a fatal failure is not: latched before the seal or by its own cycle, the open fails.
+        ThrowIfRecoveryCheckpointerFailed();
 
         // Persist the TSN watermark AFTER the checkpoint, never before. The recovered revisions carry their ORIGINAL TSNs — RecoveryDriver advanced
         // TransactionChain.NextFreeId past them, and ScrubVersionedChains raises it again for anything a previous consolidating checkpoint left behind (RB-05)
@@ -5745,6 +6054,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // bornTsn 0: committed before this open, so the claim establishes the summary as "all genesis" and a reopened DB starts on the fast path.
                 var (clusterChunkId, slotIndex) = clusterState.ClaimSlot(ref clusterAccessor, cs, 0);
                 var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+                clusterState.PublishClaimedSlot(clusterBase, slotIndex);
 
                 // The entity-id tail is what every cluster scan resolves a slot back to an entity through; without it the rebuilt cluster is anonymous.
                 *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8) = entityPK;
@@ -5856,7 +6166,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Scan this archetype's Versioned revision chains (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads"/>) and insert one EntityRecord per
+    /// Scan this archetype's Versioned revision chains
+    /// (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads(ComponentTable, ushort?, bool, HashSet{int})"/>) and insert one EntityRecord per
     /// chain head into the EntityMap, keyed by entity key with the chain root as each Versioned slot's location. SV / non-Versioned slots get location 0 (no
     /// chain to recover from). Shared by the clean/legacy reopen path (<see cref="RebuildEntityMapsFromPersistedData"/>, <paramref name="duringRebuild"/> =
     /// false) and the crash-recovery rebuild (<see cref="RebuildEntityMapOnCrash"/>, <paramref name="duringRebuild"/> = true, where the map was just emptied
@@ -6005,9 +6316,38 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// proof-gate test can confirm the rebuild — not FPI or the loaded map — is what recovers a torn EntityMap.</summary>
     internal static bool DisableEntityMapRebuildForTest;
 
+
     /// <summary>Test-only kill switch for the crash-path occupancy re-derive (genuineness probe): when set, recovery trusts the persisted occupancy bitmap so a
     /// proof-gate test can confirm the re-derive — not FPI — is what heals a torn occupancy page (<see cref="RederiveOccupancyOnCrash"/>).</summary>
     internal static bool DisableOccupancyRederiveForTest;
+
+    /// <summary>Frees reused at once, as before #1251's quarantine: the A/B switch of its measurements, and the reproduction of what it prevents.</summary>
+    internal static bool DisableFreeQuarantineForTest;
+
+    // A crash open, before it allocates: the occupancy bitmap on disk may predate a segment's grow, and an allocation took the grow's pages for a second
+    // segment before CK-09's re-derive (#1296). The ownership the re-derive adopts, claimed now — bits set, never cleared.
+    private void ClaimPersistedPagesAtCrashOpen() => MMF.ClaimOwnedPagesAtOpen(BuildOwnedPageBitmap(out _, out _));
+
+    // A freed revision or content chunk of a Versioned table waits for a checkpoint before reuse (CK-17); past the budget, held frees ask for one when
+    // askCheckpoints. Idempotent.
+    private void EnableFreeQuarantine(bool askCheckpoints = true)
+    {
+        if (!DisableFreeQuarantineForTest)
+        {
+            if (askCheckpoints)
+            {
+                MMF.FreeQuarantineFull = CheckpointManager.ForceCheckpoint;
+            }
+
+            MMF.EnableFreeQuarantine();
+        }
+    }
+
+    /// <summary>
+    /// Frees every chunk the quarantine holds, as a covered checkpoint cycle frees those sealed at its start (CK-17): for a test that counts allocated
+    /// chunks after a free.
+    /// </summary>
+    internal void ReleaseHeldFreesForTest() => MMF.ReleaseHeldFreesNow();
 
     /// <summary>
     /// Test hook: runs in <c>Transaction.PublishComponent</c> on the committing thread, after the WAL append and before the publication acts, with the
@@ -6015,6 +6355,183 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// fixture using it stays parallel-safe. Null in production.
     /// </summary>
     internal Action<ComponentTable, int> PublishComponentProbe { get; set; }
+
+    /// <summary>
+    /// Test hook: runs in <c>Transaction.PrepareComponent</c> on the committing thread right after a conflict-handler commit takes the chain's lock it
+    /// retains to the publish — a throw from it is a throw under that lock (#1278). Per engine. Null in production.
+    /// </summary>
+    internal Action PrepareRetainedLockProbe { get; set; }
+
+    /// <summary>
+    /// The failure that stopped this engine's commits: a commit whose records were appended threw before its publish completed (AP-03), so memory holds a
+    /// partial publish. Null while the engine commits. Once set, every commit that would write is refused, the checkpoint stays below that commit's
+    /// records, and the engine closes as a crash, so the next open replays them. Only reopening clears it.
+    /// </summary>
+    public Exception CommitPipelineFailure => Volatile.Read(ref _commitPipelineFailure);
+
+    private Exception _commitPipelineFailure;
+
+    /// <summary>
+    /// The first LSN of the commit that stopped the pipeline (<see cref="CommitPipelineFailure"/>), or <see cref="long.MaxValue"/>: the checkpoint's floor
+    /// once that transaction has left the chain and taken its own (CK-13). Its records must be replayed after a restart, since memory holds only part of
+    /// them, so no checkpoint passes them until the engine is reopened.
+    /// </summary>
+    internal long PinnedCommitFloor => Volatile.Read(ref _pinnedCommitFloor);
+
+    private long _pinnedCommitFloor = long.MaxValue;
+
+    /// <summary>
+    /// Stops this engine's commits after a commit whose records were appended failed before its publish completed (AP-03): pins its records below the
+    /// checkpoint and records the failure. The first failure wins; later ones only lower the pin.
+    /// </summary>
+    /// <param name="firstLsn">The failed commit's first appended LSN; 0 when it appended nothing (nothing to pin).</param>
+    /// <param name="failure">What interrupted the publish.</param>
+    /// <remarks>Nothing here can throw: the caller latches before it marks the transaction Committed, and logs (<see cref="LogCommitPipelineStopped"/>)
+    /// after.</remarks>
+    internal void LatchCommitPipelineFailure(long firstLsn, Exception failure)
+    {
+        if (firstLsn > 0)
+        {
+            var seen = Volatile.Read(ref _pinnedCommitFloor);
+            while (firstLsn < seen)
+            {
+                var prior = Interlocked.CompareExchange(ref _pinnedCommitFloor, firstLsn, seen);
+                if (prior == seen)
+                {
+                    break;
+                }
+
+                seen = prior;
+            }
+        }
+
+        Interlocked.CompareExchange(ref _commitPipelineFailure, failure, null);
+        (DurabilityLog as DurabilityLog)?.Stop(failure);
+
+        // Nothing more reaches the data file either (#1271): writes the WAL no longer logs — a SingleVersion write under the tick fence lands in place, and
+        // no fence logs it once stopped — would otherwise be persisted by the next cycle, and the reopen would read them beside the log's pre-stop state.
+        // Nothing durable is lost: the checkpoint was held below this commit's records, and the replay starts there.
+        CheckpointManager?.PrepareCrashStop();
+    }
+
+    [LoggerMessage(LogLevel.Critical,
+        "Commit TSN {tsn} failed after appending its records (first LSN {firstLsn}), before its publish completed: the engine stops committing, keeps its "
+        + "checkpoint below those records and will close as a crash. Reopen the database to recover the transaction from the log.")]
+    internal partial void LogCommitPipelineStopped(long tsn, long firstLsn, Exception failure);
+
+    [LoggerMessage(LogLevel.Warning, "Transaction sequence numbers are running out: {next} drawn of {limit}. Transactions will be refused at {limit}, "
+        + "before the 48-bit stored TSN can wrap (#1208).")]
+    internal partial void LogTsnHeadroomLow(long next, long limit);
+
+    /// <summary>Logs the TSN headroom warning (#1208) and counts it.</summary>
+    internal void WarnTsnHeadroomLow(long next, long limit)
+    {
+        Interlocked.Increment(ref _tsnHeadroomWarnings);
+        LogTsnHeadroomLow(next, limit);
+    }
+
+    /// <summary>How many TSN headroom warnings this engine logged (#1208): one at most.</summary>
+    internal int TsnHeadroomWarnings => Volatile.Read(ref _tsnHeadroomWarnings);
+
+    private int _tsnHeadroomWarnings;
+
+    [LoggerMessage(LogLevel.Error, "Transaction TSN {tsn}: the rollback of a commit that failed before its append threw; Dispose retries it.")]
+    internal partial void LogRollbackAfterFailedCommitFailed(long tsn, Exception failure);
+
+    [LoggerMessage(LogLevel.Critical, "Tick fence {tick}: nothing logged, nor in any fence after it — the engine stopped committing after an incomplete "
+        + "publish. Reopen the database.")]
+    private partial void LogTickFenceSkippedOnStoppedEngine(long tick);
+
+    private int _tickFenceSkipLogged;
+
+    /// <summary>
+    /// AP-03: whether a fence must log nothing — the engine stopped committing over a partial publish. Logged once. Both fence paths call it before they
+    /// append: the serial <see cref="WriteTickFence"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
+    /// path must not throw, so the fence returns instead of meeting <see cref="DurabilityLog"/>'s refusal.
+    /// </summary>
+    private bool FenceMustNotAppend(long tickNumber)
+    {
+        if (CommitPipelineFailure == null)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _tickFenceSkipLogged, 1) == 0)
+        {
+            LogTickFenceSkippedOnStoppedEngine(tickNumber);
+        }
+
+        return true;
+    }
+
+    /// <summary>How long a rollback's void waits for its chain's lock between two reports of the lock's holder (#1273). A test shortens it.</summary>
+    internal TimeSpan RollbackVoidReportInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The reports a rollback's void made while it waited for its chain's lock (#1273). Diagnostic.</summary>
+    internal int RollbackVoidWaitReports => Volatile.Read(ref _rollbackVoidWaitReports);
+
+    private int _rollbackVoidWaitReports;
+
+    /// <summary>A rollback's void has waited <paramref name="waited"/> for the lock of the chain rooted at <paramref name="firstChunkId"/> (#1273).</summary>
+    internal void NoteRollbackVoidWaiting(int holderThreadId, TimeSpan waited, int firstChunkId)
+    {
+        Interlocked.Increment(ref _rollbackVoidWaitReports);
+        LogRollbackVoidWaiting(holderThreadId, waited.TotalSeconds, firstChunkId);
+    }
+
+    [LoggerMessage(LogLevel.Critical,
+        "A rollback has waited {waitedSeconds:F0} s for the lock of revision chain {firstChunkId}, held by thread {holderThreadId}. A conflict handler that "
+        + "waits on another transaction of the same entity while its commit holds that lock never releases it")]
+    private partial void LogRollbackVoidWaiting(int holderThreadId, double waitedSeconds, int firstChunkId);
+
+    /// <summary>
+    /// Test hook (#1233): runs where a transaction voids its own revision entry — a rollback, and a last-writer-wins conflict's orphan — before the void, with
+    /// the component table and the entity's revision-chain root: the window in which another thread's cleanup can compact the chain. Per engine. Null in
+    /// production.
+    /// </summary>
+    internal Action<ComponentTable, int> ChainVoidProbe { get; set; }
+
+    /// <summary>
+    /// Test hook (#1308): runs at each entry a revision compaction visits, with the chain's root, before the entry is handled — where a page fault can throw
+    /// midway through the walk. Per engine. Null in production.
+    /// </summary>
+    internal Action<int> CompactionStepProbe { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (CHAIN-01): when set, a rollback voids the entry at the index its transaction recorded, without the chain's lock and without
+    /// checking it is still its own, and drops the chain's item count whatever entry it was — what CHAIN-01 forbids — so the rule's mutant can show the
+    /// verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool RollbackVoidsRecordedIndexForTest { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (CHAIN-02): when set, a first write marks its cache entry written before its revision is appended — what CHAIN-02 forbids —
+    /// so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool FirstWriteClaimsBeforeAppendForTest { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-03): when set, a commit's publish gives up on page-cache back-pressure after the ordinary allocation timeout, as any
+    /// allocation does, instead of waiting it out — what AP-03 forbids — so the rule's mutant can show the verifier rejects it. Per engine. Never set in
+    /// production.
+    /// </summary>
+    internal bool PublishGivesUpOnBackpressureForTest { get; set; }
+
+    /// <summary>
+    /// Test-only mutant switch (AP-07): when set, a Versioned commit reconciles its indexes and views in PREPARE, as it did before #1262, instead of in its
+    /// publish — what AP-07 forbids — so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
+    /// </summary>
+    internal bool PrepareReconcilesIndexesForTest { get; set; }
+
+    /// <summary>
+    /// Test hook (view ring, step 1.5): runs in a Versioned commit's publish after its index and view deltas (Phase A), before its value reaches the
+    /// cluster slot (Phase B) — the window in which a view's full re-scan reads the old value while the delta is already in the ring, or dropped. Per
+    /// engine. Null in production.
+    /// </summary>
+    internal Action PublishAfterIndexesProbe { get; set; }
+
+    /// <summary>Test seam (AP-03): invoked inside a component's publish, under its chain lock, after the stamp and before Phase B. Null in production.</summary>
+    internal Action PublishUnderLockProbe { get; set; }
 
     /// <summary>
     /// Test-only mutant switch (AP-05): when set, the publish stamps the coordinates PREPARE recorded without checking they still name its entry — the
@@ -6068,7 +6585,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 using var vEpoch = EpochGuard.Enter(EpochManager);
                 // Deferred precisely BECAUSE the EntityMap was re-derived — RebuildEntityMapsFromPersistedData rebuilt its EnabledBits from the cluster SoA,
                 // so a clear bit here cannot be told from one that was never persisted (#398). Absence is unclassifiable on this path.
-                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips);
+                clusterState.RebuildVersionedHeadFromChain(meta, state, changeSet, false, out var headSkips,
+                    () => RecoveryBatchPoint(changeSet, RecoveryPass.VersionedHeads));
                 NoteVersionedHeadRebuildSkips(meta, in headSkips);
                 LastOpenVersionedHeadRebuildCount++;
             }
@@ -6218,7 +6736,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private Dictionary<long, ushort> SnapshotEnabledBits(RawValuePagedHashMap<long, PersistentStore> map)
     {
         var snapshot = new Dictionary<long, ushort>();
-        var accessor = map.Segment.CreateChunkAccessor();
+
+        // Read and released (EP-02): the map can be larger than the cache, and an epoch-tagged walk of it pinned all of it before the first batch point
+        // (review of #1183). Each entry's address is used before the accessor's next read.
+        var accessor = map.Segment.CreateScanAccessor();
         var action = new EnabledBitsSnapshotAction { Snapshot = snapshot };
         map.ForEachEntryQuiescent(ref accessor, ref action, MMF.IsSuspectPage);
         accessor.Dispose();
@@ -6257,6 +6778,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Versioned chain heads per slot (compRevFirstChunkId keyed by EntityPK) — the same source the flat rebuild uses for the per-slot location.
         var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
+        var namedHeads = new HashSet<int>[meta.ComponentCount];
         if (meta.VersionedSlotMask != 0 && slotToVi != null)
         {
             for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -6270,20 +6792,35 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 if (table?.CompRevTableSegment != null && table.StorageMode == StorageMode.Versioned
                     && table.CompRevTableSegment.ChunkCapacity > 0 && table.CompRevTableSegment.AllocatedChunkCount > 0)
                 {
-                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
+                    namedHeads[slot] = [];
+                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta), acceptNamedRoots: true,
+                        namedHeads[slot]);
                 }
             }
         }
 
         var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+
+        // The clusters read and released page by page (EP-02): the segment can be larger than the cache, and an epoch-tagged walk of it pinned all of it
+        // (#1183). A cluster's address holds until this accessor's next miss — the next cluster's.
+        var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
         long maxEntityKey = 0;
+        var sinceBatchPoint = 0;
         try
         {
             for (var c = 0; c < clusterState.ActiveClusterCount; c++)
             {
+                // Between clusters, every RecoveryBatchSize entities: the map's pages written so far saved, the batch's pages unpinned (#1183, CK-08). The
+                // map accessor lives for one insert, the cluster accessor is a scan one: nothing here holds an epoch-protected address across it.
+                if (sinceBatchPoint >= RecoveryBatchSize)
+                {
+                    RecoveryBatchPoint(cs, RecoveryPass.EntityMap);
+                    sinceBatchPoint = 0;
+                }
+
                 var chunkId = clusterState.ActiveClusterIds[c];
                 byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                sinceBatchPoint += BitOperations.PopCount(*(ulong*)clusterBase);
                 ulong occupancy = *(ulong*)clusterBase;
 
                 while (occupancy != 0)
@@ -6338,6 +6875,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             var head = 0;
                             chainHeads[slot]?.TryGetValue(entityPK, out head);
                             ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+
+                            // A root adopted from the named chunks: the lock reset at the table's load leaves named chunks as they are (#1251).
+                            if (head != 0 && namedHeads[slot] != null && namedHeads[slot].Contains(head))
+                            {
+                                ComponentRevisionManager.ResetChainLocks(state.SlotToComponentTable[slot].CompRevTableSegment, this, [head]);
+                            }
                         }
                     }
 
@@ -6363,6 +6906,275 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>Recovery, before the log replay: marks allocated every chunk a Versioned chain names (#1251; see the per-table method).</summary>
+    private void ReserveChainChunksAfterCrash()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        _reservedContentChunks = [];
+        ChainChunksReservedAtOpen = 0;
+
+        // The chains the live records name — a named root among them, adopted by its entity — and every chain the scan finds, named roots included. The
+        // records alone were not enough, nor with the unnamed chunks: the replay then handed out chunks a chain it grows names (market, 10 cycles each: 4 and
+        // 5 in 10 failed against 1 with every chain, one on a chain that ended early; not explained yet, review of #1251). A chunk whose header is none is
+        // skipped by the walk, which takes no lock.
+        ChainsCollapsedAtOpen = 0;
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var (table, roots) in CollectLiveChainRoots())
+            {
+                // Before the union: only the chains the records name (a flat archetype's, as its scan finds them) — a named chunk the scan accepts can be a
+                // live overflow chunk.
+                ChainsCollapsedAtOpen += ComponentRevisionManager.CollapseTornChainsBeforeReplay(table, roots, changeSet);
+                var reserved = _reservedContentChunks[table] = [];
+                roots.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values);
+                ChainChunksReservedAtOpen += ComponentRevisionManager.ReserveChainChunksAfterCrash(table, roots, reserved);
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    /// <summary>
+    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, is saved — its pages written and
+    /// their marks released — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once the owed pages pass
+    /// the dirty-page threshold a flush-only cycle writes them. A pass calls it only where it holds no page address across the call: the refresh moves the
+    /// pin of every scope on this thread. Samples the epoch-held pages first.
+    /// </summary>
+    internal void RecoveryBatchPoint(ChangeSet changeSet, RecoveryPass pass)
+    {
+        Debug.Assert(EpochManager.IsCurrentThreadInScope, "a recovery pass makes its batch points inside its epoch scope");
+        if (!EpochManager.IsCurrentThreadInScope)
+        {
+            return;
+        }
+
+        RecoveryBatchPointProbe?.Invoke(pass, RecoveryBatchPoints);
+        ThrowIfRecoveryCheckpointerFailed();
+
+        // Sampled: the census reads every slot, and a large database with a large cache makes tens of thousands of batch points (review).
+        if ((RecoveryBatchPoints & (RecoveryEpochHeldSampleEvery - 1)) == 0)
+        {
+            var held = MMF.CountEpochProtectedPages();
+            if (held > PeakRecoveryEpochHeldPages)
+            {
+                PeakRecoveryEpochHeldPages = held;
+            }
+        }
+
+        changeSet?.SaveChanges();
+        EpochManager.RefreshScope();
+        RecoveryBatchPoints++;
+        var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
+        var limit = RecoveryFlushThresholdPercentForTest >= 0 ? RecoveryFlushThresholdPercentForTest
+            : threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent;
+        if (CheckpointManager != null && MMF.WritebackDebtPercent() >= limit)
+        {
+            CheckpointManager.RunFlushOnlyCycle();
+            ThrowIfRecoveryCheckpointerFailed();
+        }
+    }
+
+    /// <summary>
+    /// A crash open fails once its checkpointer has latched a fatal failure (CK-06, CK-08): it could neither write what the recovery owes — a recovery
+    /// larger than the cache would stall on back-pressure — nor seal it, and an open that succeeded unsealed handed the application an engine that never
+    /// checkpoints again. Nothing is lost: the failed open closes as a crash, and the next open recovers again — CheckpointLSN has not moved, or, a
+    /// fatal failure after the seal's own advance (recycling the WAL), moved only over data the cycle had fsynced.
+    /// </summary>
+    private void ThrowIfRecoveryCheckpointerFailed()
+    {
+        var fatal = CheckpointManager?.FatalError;
+        if (fatal != null)
+        {
+            throw new DurabilityException(TyphonErrorCode.RecoveryCheckpointFailed,
+                $"Crash recovery failed: the checkpointer hit a fatal failure before the recovery was sealed ({fatal.Message})", fatal);
+        }
+    }
+
+    // The highest writeback debt, in percent of the cache, a crash open's pass lets build before it writes: the dirty-page trigger's, capped so that
+    // disabling the trigger cannot disable this. Owed pages cannot be evicted, nor the batch's held ones: a quarter leaves the batch room (review).
+    private const int RecoveryFlushMaxThresholdPercent = 25;
+
+    // Every how many batch points the epoch-held census is taken (a power of two).
+    private const int RecoveryEpochHeldSampleEvery = 16;
+
+    /// <summary>The most pages an epoch scope held at the last crash open's batch points, sampled every 16th (<see cref="RecoveryBatchPoint"/>). Diagnostic.</summary>
+    internal int PeakRecoveryEpochHeldPages { get; private set; }
+
+    /// <summary>Batch points the last crash open's passes made. Diagnostic.</summary>
+    internal int RecoveryBatchPoints { get; private set; }
+
+    /// <summary>Entities, records or chains a recovery pass handles between two batch points. A test lowers it, [NonParallelizable], and restores it.</summary>
+    internal static int RecoveryBatchSize { get; set; } = DefaultRecoveryBatchSize;
+
+    /// <summary>The writeback debt, in percent of the cache, past which a batch point runs a flush-only cycle; -1 for the default. A test sets 0, so
+    /// every batch point flushes, [NonParallelizable], and restores it.</summary>
+    internal static int RecoveryFlushThresholdPercentForTest { get; set; } = -1;
+
+    /// <summary>The default <see cref="RecoveryBatchSize"/>.</summary>
+    internal const int DefaultRecoveryBatchSize = 1024;
+
+    /// <summary>The crash-open passes that make batch points (<see cref="RecoveryBatchPoint"/>).</summary>
+    internal enum RecoveryPass
+    {
+        EntityMap,
+        VersionedHeads,
+        Replay,
+        Scrub,
+        Indexes,
+    }
+
+    /// <summary>
+    /// Called at each batch point with the pass and the batch points made so far, before the batch is saved: a test throws from it to stop a crash open
+    /// in the middle of a pass, as a crash would, and reopens (#1183, AP-12). Test seam.
+    /// </summary>
+    internal static Action<RecoveryPass, int> RecoveryBatchPointProbe { get; set; }
+
+    /// <summary>Live chains whose links ended before their length, collapsed by the last crash open before its replay (#1297). Diagnostic.</summary>
+    internal int ChainsCollapsedAtOpen { get; private set; }
+
+    // The content chunks the reservation took, per table: free on disk, so their bytes predate the chunk's allocation and their collection-buffer ids are
+    // stale — the scrub frees them without releasing those (#1251). Recovery only, single-threaded.
+    private Dictionary<ComponentTable, HashSet<int>> _reservedContentChunks;
+
+    /// <summary>
+    /// Chunks named by an on-disk chain and free in its segment's bitmap, reserved by the last crash open before its replay (#1251). Diagnostic.
+    /// </summary>
+    internal int ChainChunksReservedAtOpen { get; private set; }
+
+    /// <summary>
+    /// The chain roots the live entities' records name, per Versioned table — every table of every archetype, empty when no live entity holds it. Before the
+    /// replay, the chains it walks and grows; after it, those the scrub keeps. A table is shared by the archetypes that hold its component, so its roots are
+    /// the union of theirs. The records, not the chain-head scan: the scan keeps one root per entity, and an entity whose spawn the replay re-applied has two
+    /// — the scrub kept the old and swept the one its record names; a destroyed entity's chain has no record, so it is no root and the sweep frees it
+    /// (#1251).
+    /// </summary>
+    private unsafe Dictionary<ComponentTable, HashSet<int>> CollectLiveChainRoots()
+    {
+        var byTable = new Dictionary<ComponentTable, HashSet<int>>();
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            var state = _archetypeStates[meta.ArchetypeId];
+            if (state?.SlotToComponentTable == null)
+            {
+                continue;
+            }
+
+            var any = false;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = state.SlotToComponentTable[slot];
+                if (table?.StorageMode == StorageMode.Versioned && table.CompRevTableSegment != null)
+                {
+                    byTable.TryAdd(table, []);
+                    any = true;
+                }
+            }
+
+            if (!any)
+            {
+                continue;
+            }
+
+            var clusterState = state.ClusterState;
+            var slotToVi = clusterState?.Layout.SlotToVersionedIndex;
+            if (clusterState?.ClusterSegment == null || slotToVi == null)
+            {
+                // A flat archetype: its records hold no cluster to walk — its chains are found by the scan, as its map rebuild finds them.
+                for (var slot = 0; slot < meta.ComponentCount; slot++)
+                {
+                    var table = state.SlotToComponentTable[slot];
+                    if (table != null && byTable.TryGetValue(table, out var flat))
+                    {
+                        flat.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta)).Values);
+                    }
+                }
+
+                continue;
+            }
+
+            var layout = clusterState.Layout;
+            var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
+            var mapAccessor = state.EntityMap.Segment.CreateScanAccessor();
+            try
+            {
+                for (var c = 0; c < clusterState.ActiveClusterCount; c++)
+                {
+                    var clusterChunkId = clusterState.ActiveClusterIds[c];
+                    var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    var occupancy = *(ulong*)clusterBase;
+                    while (occupancy != 0)
+                    {
+                        var slotIndex = BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+                        var entityPk = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
+                        if (!state.EntityMap.TryGet(EntityId.FromRaw(entityPk).EntityKey, record, ref mapAccessor))
+                        {
+                            continue;
+                        }
+
+                        for (var slot = 0; slot < meta.ComponentCount; slot++)
+                        {
+                            var vi = slotToVi[slot];
+                            var table = state.SlotToComponentTable[slot];
+                            var chainRoot = vi >= 0 ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi) : 0;
+                            if (chainRoot != 0 && table != null && byTable.TryGetValue(table, out var roots))
+                            {
+                                roots.Add(chainRoot);
+                            }
+                        }
+
+                        // The record buffer is reused: the scan accessor may have moved since, so the cluster's base is re-read.
+                        clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    }
+                }
+            }
+            finally
+            {
+                clusterAccessor.Dispose();
+                mapAccessor.Dispose();
+            }
+        }
+
+        // The chains of archetypes the file holds and this open did not load — a tool opening with part of the schema — have no record here: taken as the
+        // scan finds them, with a root's header, not swept with the table's orphans. Those archetypes only: an unnamed chunk can be one no chain links, with
+        // any bytes as its EntityPK — taken as a root for not being loaded, its length sized the scrub's spans (review of #1251).
+        var unloaded = new HashSet<ushort>();
+        if (_persistedArchetypes != null)
+        {
+            foreach (var (_, arch) in _persistedArchetypes.Values)
+            {
+                var routing = arch.RoutingId;
+                if (routing != 0 && routing != NoRoutingId && (routing >= _stateByRouting.Length || _stateByRouting[routing]?.SlotToComponentTable == null))
+                {
+                    unloaded.Add(routing);
+                }
+            }
+        }
+
+        if (unloaded.Count > 0)
+        {
+            foreach (var (table, roots) in byTable)
+            {
+                var candidates = new List<int>();
+                foreach (var (pk, chunkId) in ComponentRevisionManager.EnumerateVersionedChainHeads(table))
+                {
+                    if (unloaded.Contains(EntityId.FromRaw(pk).ArchetypeId))
+                    {
+                        candidates.Add(chunkId);
+                    }
+                }
+
+                roots.UnionWith(ComponentRevisionManager.FilterChainRoots(table.CompRevTableSegment, candidates));
+            }
+        }
+
+        return byTable;
+    }
+
     /// <summary>
     /// Recovery Phase-4 SCRUB (03-recovery.md §6, D1): after the WAL window has been applied, collapse every Versioned revision chain to its HEAD — the
     /// highest-TSN committed element — freeing all older revisions' content chunks and the chain's overflow table chunks. The history horizon resets at
@@ -6370,6 +7182,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
     /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
     /// Invoked only on the crash path (CrashRecoveryAtOpen: WAL segments present and an unclean close); a clean reopen keeps its chains for lazy cleanup.
+    /// Per table, over the roots the live records name (<see cref="CollectLiveChainRoots"/>): a sweep per archetype freed the chains of the other
+    /// archetypes sharing the table (#1251).
     /// </summary>
     private void ScrubVersionedChains()
     {
@@ -6383,49 +7197,57 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         long maxRecoveredTsn = 0;
         try
         {
-            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            foreach (var (table, roots) in CollectLiveChainRoots())
             {
-                var state = _archetypeStates[meta.ArchetypeId];
-                if (state?.SlotToComponentTable == null)
+                var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
+                var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                Action batchPoint = () => RecoveryBatchPoint(changeSet, RecoveryPass.Scrub);
+                try
                 {
-                    continue;
-                }
-
-                for (var slot = 0; slot < meta.ComponentCount; slot++)
-                {
-                    var table = state.SlotToComponentTable[slot];
-
-                    // Shared chain-head scan (same source as the EntityMap rebuild). Empty for null / non-Versioned / empty tables.
-                    var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
-                    if (heads.Count == 0)
+                    var dropped = new List<int>();
+                    var stale = new HashSet<int>();
+                    var sinceBatchPoint = 0;
+                    foreach (var firstChunkId in roots)
                     {
-                        continue;
-                    }
-
-                    var revAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
-                    var contentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
-                    try
-                    {
-                        foreach (var firstChunkId in heads.Values)
+                        // Between chains, every RecoveryBatchSize of them: the accessors' writes committed, the scrubbed pages saved and unpinned (#1183,
+                        // CK-08). A chain's scrub keeps no address past its own call.
+                        if (++sinceBatchPoint > RecoveryBatchSize)
                         {
-                            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, out var headTsn);
-                            if (headTsn > maxRecoveredTsn)
-                            {
-                                maxRecoveredTsn = headTsn;
-                            }
+                            revAccessor.CommitChanges();
+                            contentAccessor.CommitChanges();
+                            batchPoint();
+                            sinceBatchPoint = 1;
                         }
 
-                        // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an
-                        // interrupted pre-crash op — allocated but unreachable from a chain root or a surviving head's content.
-                        ComponentRevisionManager.SweepTableOrphans(table, new HashSet<int>(heads.Values), ref revAccessor);
+                        ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref revAccessor, ref contentAccessor, dropped, stale, out var headTsn,
+                            roots);
+                        if (headTsn > maxRecoveredTsn)
+                        {
+                            maxRecoveredTsn = headTsn;
+                        }
                     }
-                    finally
+
+                    // The dropped content, freed once every head of the table is known: a torn element may name a chunk another head holds (#1251).
+                    if (_reservedContentChunks != null && _reservedContentChunks.TryGetValue(table, out var reserved))
                     {
-                        revAccessor.Dispose();
-                        contentAccessor.Dispose();
+                        stale.UnionWith(reserved);
                     }
+
+                    ComponentRevisionManager.FreeDroppedContent(table, roots, dropped, stale, ref revAccessor, ref contentAccessor, batchPoint);
+
+                    // Orphan sweep (§6): every chain is now collapsed to its root, so reclaim any chunk leaked by an interrupted pre-crash op — allocated but
+                    // unreachable from a chain root or a surviving head's content. A chain no live record names is no root: the replay's destroys, the old
+                    // roots of the spawns it re-applied.
+                    ComponentRevisionManager.SweepTableOrphans(table, roots, ref revAccessor, ref contentAccessor, batchPoint);
+                }
+                finally
+                {
+                    revAccessor.Dispose();
+                    contentAccessor.Dispose();
                 }
             }
+
+            _reservedContentChunks = null;
 
             // Advance the TSN allocator past the newest committed revision found in the persisted chains, so post-recovery readers can see a consolidated
             // revision whose WAL window recovered empty (it would otherwise be MVCC-invisible at a too-low snapshot — RB-05).
@@ -6439,6 +7261,286 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.SaveChanges();
         }
     }
+
+    /// <summary>Component-collection chunks the crash open's sweep freed: owned by no buffer that live data names (#1307). Diagnostic.</summary>
+    internal int CollectionChunksSweptAtOpen { get; private set; }
+
+    /// <summary>
+    /// The crash open's sweep of the component-collection segments (#1307, REAP-02). Every buffer that live data names is reachable — its root, the chain
+    /// from it, and its free chain — and every other allocated chunk is freed. Live data is every allocated content chunk of every table with a collection
+    /// field (a Versioned table's chain heads, the scrub having freed the rest; the system catalogs' rows; a flat archetype's components) and every slot of
+    /// every cluster of an archetype with a SingleVersion collection. Both are supersets of what is live: a handle read from a chunk that is no live row only
+    /// keeps a buffer, and its walk is bounded and checked, so a stray id frees nothing that is named.
+    /// </summary>
+    /// <remarks>
+    /// Stands down when a handle could be where this process does not look: a persisted component with a collection field and no table loaded, or a
+    /// persisted archetype with no state — its buffers would read as named by nothing and be freed under data a later open loads. Leaked, they cost space.
+    /// </remarks>
+    private unsafe void SweepCollectionOrphans()
+    {
+        if (_componentCollectionSegmentByStride.IsEmpty)
+        {
+            return;
+        }
+
+        var unloaded = FirstUnloadedCollectionHandleSource();
+        if (unloaded != null)
+        {
+            LogCollectionSweepStoodDown(unloaded);
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            var named = new Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>>();
+
+            // The segments a handle source this sweep reads points into; only those are swept. The schema catalog's table reopens without its collection
+            // info (#387), so its field lists — and the archetypes' component names — are noted from the rows the open read: through the table, the sweep
+            // had no handle into the field lists' segment and freed it whole (review).
+            var swept = new HashSet<ChunkBasedSegment<PersistentStore>>();
+            var fieldListSegment = GetComponentCollectionSegment<FieldR1>();
+            swept.Add(fieldListSegment);
+            foreach (var (_, (_, comp)) in _persistedComponents ?? [])
+            {
+                NoteNamedBuffer(named, fieldListSegment, comp.Fields._bufferId);
+            }
+
+            var componentNamesSegment = GetComponentCollectionSegment<String64>();
+            swept.Add(componentNamesSegment);
+            foreach (var (_, (_, arch)) in _persistedArchetypes ?? [])
+            {
+                NoteNamedBuffer(named, componentNamesSegment, arch.ComponentNames._bufferId);
+            }
+
+            foreach (var table in GetAllComponentTables())
+            {
+                if (!table.HasCollections || table.ComponentSegment == null)
+                {
+                    continue;
+                }
+
+                foreach (var f in table.CollectionFields)
+                {
+                    swept.Add(f.Vsbs.Segment);
+                }
+
+                var scan = table.ComponentSegment.CreateScanAccessor();
+                try
+                {
+                    foreach (var chunkId in table.ComponentSegment.AllocatedChunks())
+                    {
+                        var data = scan.GetChunkAddress(chunkId) + table.ComponentOverhead;
+                        foreach (var f in table.CollectionFields)
+                        {
+                            NoteNamedBuffer(named, f.Vsbs.Segment, *(int*)(data + f.OffsetInComponentStorage));
+                        }
+                    }
+                }
+                finally
+                {
+                    scan.Dispose();
+                }
+            }
+
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                var cs = _archetypeStates[meta.ArchetypeId]?.ClusterState;
+                if (cs?.CollectionSlots == null || cs.ClusterSegment == null)
+                {
+                    continue;
+                }
+
+                var layout = cs.Layout;
+                var scan = cs.ClusterSegment.CreateScanAccessor();
+                try
+                {
+                    foreach (var clusterChunkId in cs.ClusterSegment.AllocatedChunks())
+                    {
+                        var clusterBase = scan.GetChunkAddress(clusterChunkId);
+                        foreach (var slot in cs.CollectionSlots)
+                        {
+                            for (var i = 0; i < layout.ClusterSize; i++)
+                            {
+                                var compBase = clusterBase + layout.ComponentOffset(slot.Slot) + i * layout.ComponentSize(slot.Slot);
+                                foreach (var f in slot.Fields)
+                                {
+                                    NoteNamedBuffer(named, f.Vsbs.Segment, *(int*)(compBase + f.OffsetInComponentStorage));
+                                }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    scan.Dispose();
+                }
+            }
+
+            var sinceBatchPoint = 0;
+            foreach (var segment in _componentCollectionSegmentByStride.Values)
+            {
+                // A segment no handle source this sweep reads points into is left as it is: what names its buffers is not known here.
+                if (!swept.Contains(segment))
+                {
+                    continue;
+                }
+
+                var owned = new HashSet<int>();
+                if (named.TryGetValue(segment, out var roots))
+                {
+                    var scan = segment.CreateScanAccessor();
+                    try
+                    {
+                        foreach (var root in roots)
+                        {
+                            CollectBufferChunks(segment, ref scan, root, owned);
+                        }
+                    }
+                    finally
+                    {
+                        scan.Dispose();
+                    }
+                }
+
+                foreach (var chunkId in segment.AllocatedChunks())
+                {
+                    // A held chunk is a free already made (the scrub's, the replay's releases): freed again, it counts as a double free (REAP-02).
+                    if (owned.Contains(chunkId) || segment.IsChunkHeld(chunkId))
+                    {
+                        continue;
+                    }
+
+                    if (++sinceBatchPoint > RecoveryBatchSize)
+                    {
+                        RecoveryBatchPoint(changeSet, RecoveryPass.Scrub);
+                        sinceBatchPoint = 1;
+                    }
+
+                    segment.FreeChunk(chunkId);
+                    CollectionChunksSweptAtOpen++;
+                }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    // A handle read from content: noted when it addresses an allocated chunk of its segment. A stray id that does only keeps chunks.
+    private static void NoteNamedBuffer(Dictionary<ChunkBasedSegment<PersistentStore>, HashSet<int>> named, ChunkBasedSegment<PersistentStore> segment,
+        int bufferId)
+    {
+        if (bufferId <= 0 || bufferId >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(bufferId))
+        {
+            return;
+        }
+
+        if (!named.TryGetValue(segment, out var roots))
+        {
+            named[segment] = roots = [];
+        }
+
+        roots.Add(bufferId);
+    }
+
+    // The chunks a buffer owns: its root, the chain from it, and its free chain (as VariableSizedBufferSegmentBase frees them). Each step checked and the walk
+    // bounded; one that reaches a chunk already owned stops, as that chunk's own walk covers the rest.
+    private static unsafe void CollectBufferChunks(ChunkBasedSegment<PersistentStore> segment, ref ChunkAccessor<PersistentStore> scan, int root,
+        HashSet<int> owned)
+    {
+        if (!owned.Add(root))
+        {
+            return;
+        }
+
+        var firstFree = scan.GetChunk<VariableSizedBufferRootHeader>(root).FirstFreeChunkId;
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var next = pass == 0 ? *(int*)scan.GetChunkAddress(root) : firstFree;
+            for (var steps = 0; steps < segment.AllocatedChunkCount; steps++)
+            {
+                if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(next) || !owned.Add(next))
+                {
+                    break;
+                }
+
+                next = *(int*)scan.GetChunkAddress(next);
+            }
+        }
+    }
+
+    // A source of collection handles this process does not load, or null: a persisted component with a collection field and no table, a persisted archetype
+    // with no state.
+    private string FirstUnloadedCollectionHandleSource()
+    {
+        var loadedComponents = new HashSet<string>();
+        foreach (var table in GetAllComponentTables())
+        {
+            loadedComponents.Add(table.Definition.Name);
+
+            // A loaded table whose schema declares a collection field it has no info for: its handles would read as none. The catalog's own table is the
+            // one expected (#387), its handles noted from its rows.
+            if (!table.HasCollections && !ReferenceEquals(table, _componentsTable))
+            {
+                foreach (var field in table.Definition.FieldsByName.Values)
+                {
+                    if (field.Type == FieldType.Collection)
+                    {
+                        return $"component '{table.Definition.Name}' (its collection info not restored)";
+                    }
+                }
+            }
+        }
+
+        if (_persistedFieldsByComponent != null)
+        {
+            foreach (var (name, fields) in _persistedFieldsByComponent)
+            {
+                if (loadedComponents.Contains(name))
+                {
+                    continue;
+                }
+
+                foreach (var field in fields)
+                {
+                    if (field.Type == FieldType.Collection)
+                    {
+                        return $"component '{name}'";
+                    }
+                }
+            }
+        }
+
+        if (_persistedArchetypes != null)
+        {
+            var loadedArchetypes = new HashSet<string>();
+            foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+            {
+                if (_archetypeStates[meta.ArchetypeId] != null)
+                {
+                    loadedArchetypes.Add(meta.Name);
+                }
+            }
+
+            foreach (var name in _persistedArchetypes.Keys)
+            {
+                if (!loadedArchetypes.Contains(name))
+                {
+                    return $"archetype '{name}'";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Crash open: the component-collection sweep stood down — {source} is in the data file and not loaded, so a buffer it names would read as named by "
+        + "nothing. Orphaned buffers stay allocated")]
+    private partial void LogCollectionSweepStoodDown(string source);
 
     /// <summary>
     /// Resolve the persisted <see cref="ArchetypeR1"/> row for a runtime archetype on reopen, matching by durable <see cref="ArchetypeMetadata.Name"/> first,

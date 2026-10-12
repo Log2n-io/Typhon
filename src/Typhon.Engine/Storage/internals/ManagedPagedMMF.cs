@@ -788,9 +788,21 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
     private bool LoadChunkSegment(ChunkBasedSegment<PersistentStore> segment, int filePageIndex)
     {
+        segment.RepairTornGrowAtLoad = RepairTornGrowsAtLoad;
+        segment.DirectoryPageTrusted = RepairTornGrowsAtLoad ? IsProtectedPage : null;
         if (!segment.Load(filePageIndex, TakeChunkSummary(filePageIndex)))
         {
             return false;
+        }
+
+        if (segment.TornGrowRepaired)
+        {
+            Interlocked.Increment(ref _tornGrowsRepairedAtLoad);
+        }
+
+        if (RepairTornGrowsAtLoad)
+        {
+            ClaimSegmentPagesAtLoad(segment);
         }
 
         if (segment.LoadedFromSummary)
@@ -804,6 +816,74 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
         return true;
     }
+
+    /// <summary>
+    /// Set by a crash open until its recovery completes: a segment whose directory names pages its chain does not reach — a grow whose old tail's link did
+    /// not reach the disk — is completed at load (<see cref="LogicalSegment{TStore}.RepairTornGrow"/>), not refused (#1296). A clean open stays strict.
+    /// </summary>
+    internal bool RepairTornGrowsAtLoad { get; set; }
+
+    private int _tornGrowsRepairedAtLoad;
+    private int _pagesClaimedAtLoad;
+
+    /// <summary>Pages a crash open's loads found named by a segment and free in the occupancy bitmap, and claimed (#1296). Diagnostic.</summary>
+    internal int PagesClaimedAtLoad => Volatile.Read(ref _pagesClaimedAtLoad);
+
+    /// <summary>
+    /// A crash open's load: claims in the occupancy bitmap every page <paramref name="segment"/> names — its directory's pages, the map-extension pages
+    /// and the directory twins. The bitmap on disk is as of its last capture, and a grow after it allocated pages the directory names and the bitmap has
+    /// as free: the open's own allocations — the indexes it recreates, the maps it rebuilds — took them, two segments on one page, before the re-derive at
+    /// the end of the recovery (CK-09) could make the bitmap whole (#1296).
+    /// </summary>
+    private void ClaimSegmentPagesAtLoad(LogicalSegment<PersistentStore> segment)
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var claimed = 0;
+        foreach (var page in segment.Pages)
+        {
+            claimed += ClaimPageAtLoad(page);
+        }
+
+        var directory = new List<int>();
+        segment.CollectDirectoryMapExtensionPages(guard.Epoch, directory);
+        segment.CollectDirectoryTwins(guard.Epoch, directory);
+        foreach (var page in directory)
+        {
+            claimed += ClaimPageAtLoad(page);
+        }
+
+        Interlocked.Add(ref _pagesClaimedAtLoad, claimed);
+    }
+
+    private int ClaimPageAtLoad(int page) => page > 0 && page < _occupancyMap.Capacity && !_occupancyMap.IsSet(page) && _occupancyMap.SetL0(page) ? 1 : 0;
+
+    /// <summary>
+    /// A crash open, before it allocates: claims in the occupancy bitmap every page <paramref name="owned"/> names (the engine's
+    /// <c>BuildOwnedPageBitmap</c>, whose persisted part reads each segment the file holds from its persisted pointer) — the bitmap on disk may predate a
+    /// grow, and the open's first allocations, between one segment's load and the next, took such pages for a second segment (#1296). Sets bits, never
+    /// clears one: CK-09's re-derive at the end of the recovery replaces the bitmap whole. Returns the pages claimed.
+    /// </summary>
+    internal int ClaimOwnedPagesAtOpen(long[] owned)
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var claimed = 0;
+        for (var w = 0; w < owned.Length; w++)
+        {
+            var word = (ulong)owned[w];
+            while (word != 0)
+            {
+                var bit = System.Numerics.BitOperations.TrailingZeroCount(word);
+                word &= word - 1;
+                claimed += ClaimPageAtLoad((w << 6) | bit);
+            }
+        }
+
+        Interlocked.Add(ref _pagesClaimedAtLoad, claimed);
+        return claimed;
+    }
+
+    /// <summary>Segment grows completed at load since the engine opened (<see cref="RepairTornGrowsAtLoad"/>). Diagnostic.</summary>
+    internal int TornGrowsRepairedAtLoad => Volatile.Read(ref _tornGrowsRepairedAtLoad);
 
     /// <summary>
     /// Try to load a segment. Returns false (instead of asserting) if the root page is already registered. When
@@ -827,12 +907,13 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             return false; // Already registered — caller should fall back to fresh allocation
         }
 
-        ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
+        var directory = ResolveDirectoryPairsForLoad(filePageIndex);   // CK-05 (C2): register directory-page slot state before the load walks them
         try
         {
             if (!LoadChunkSegment(segment, filePageIndex))
             {
                 dic.TryRemove(filePageIndex, out _);
+                DropDirectoryPairs(directory, dic);
                 return false;
             }
         }
@@ -842,6 +923,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             // all of the segment's pages; CK-03's coverage gate held CheckpointLSN back, so the full WAL window is intact). Discard the partial load
             // and let the caller fresh-allocate + WAL-replay instead of trusting it (#395 / RB-01).
             dic.TryRemove(filePageIndex, out _);
+            DropDirectoryPairs(directory, dic);
             Interlocked.Increment(ref _chunkSegmentsReplacedAsTorn);
             return false;
         }
@@ -1027,32 +1109,44 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             var epoch = guard.Epoch;
 
             RequestPageEpoch(0, epoch, out var memPageIdx);
-            var latched = TryLatchPageExclusive(memPageIdx);
-            Debug.Assert(latched, "TryLatchPageExclusive failed on the meta page during PersistMetaNow");
+            // Not latched: another thread holds the meta page — unlatching it in the finally below would release that thread's latch.
+            if (!TryLatchPageExclusive(memPageIdx))
+            {
+                ThrowHelper.ThrowInvalidOp("PersistMetaNow: the meta page is latched by another thread");
+            }
 
-            byte* pageAddr = GetMemPageAddress(memPageIdx);
-            var pageSpan = new Span<byte>(pageAddr, PageSize);
+            // Unlatched whatever happens: a throw below (an oversized bootstrap, an I/O error) left the meta page latched, and every later meta writer —
+            // the checkpoint's LSN flip among them — failed to latch it (#1292).
+            int targetSlot;
+            ulong nextGen;
+            try
+            {
+                byte* pageAddr = GetMemPageAddress(memPageIdx);
+                var pageSpan = new Span<byte>(pageAddr, PageSize);
 
-            // Serialize the bootstrap into the in-memory meta page, then stamp the next generation + CRC. The meta page
-            // is CRC'd now (unlike the v1 root page, which was checksum-exempt) — the CRC is the torn-slot detector.
-            Bootstrap.WriteTo(pageAddr + BootstrapStreamOffset, PageSize - BootstrapStreamOffset);
+                // Serialize the bootstrap into the in-memory meta page, then stamp the next generation + CRC. The meta page
+                // is CRC'd now (unlike the v1 root page, which was checksum-exempt) — the CRC is the torn-slot detector.
+                Bootstrap.WriteTo(pageAddr + BootstrapStreamOffset, PageSize - BootstrapStreamOffset);
 
-            var nextGen = _metaGeneration + 1;
-            PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
+                nextGen = _metaGeneration + 1;
+                PageBaseHeader.WritePairGeneration(pageSpan, nextGen);
 
-            // The meta page is the one page that CANNOT carry a per-sector footer: its metadata region holds the root
-            // identity header, and the bootstrap stream starts immediately after and runs to the end of the page, so the
-            // footer's bytes are occupied by real content. Clear the declaration explicitly rather than relying on it
-            // never having been set — a stray value there would make a reader verify this page the wrong way.
-            PageSectorFooter.ClearGeometry(pageSpan);
-            StampPageForWrite(pageSpan, MetaSlotA);
+                // The meta page is the one page that CANNOT carry a per-sector footer: its metadata region holds the root
+                // identity header, and the bootstrap stream starts immediately after and runs to the end of the page, so the
+                // footer's bytes are occupied by real content. Clear the declaration explicitly rather than relying on it
+                // never having been set — a stray value there would make a reader verify this page the wrong way.
+                PageSectorFooter.ClearGeometry(pageSpan);
+                StampPageForWrite(pageSpan, MetaSlotA);
 
-            // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
-            var targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
-            WritePageDirect(targetSlot, pageSpan);
-            FlushToDisk();
-
-            UnlatchPageExclusive(memPageIdx);
+                // Write the full image to the alternate slot and fsync BEFORE flipping the current pointer.
+                targetSlot = MetaSlotA + MetaSlotB - _metaCurrentSlot;   // the other slot
+                WritePageDirect(targetSlot, pageSpan);
+                FlushToDisk();
+            }
+            finally
+            {
+                UnlatchPageExclusive(memPageIdx);
+            }
 
             _metaCurrentSlot = targetSlot;
             _metaGeneration = nextGen;
@@ -1266,8 +1360,63 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// flag + <c>TwinPageIndex</c>) survives a torn primary because it lives in the first 4 KiB sector and never changes
     /// across generations. Both-slots-invalid for any directory page → throws (the segment cannot be loaded).
     /// </summary>
-    internal void ResolveDirectoryPairsForLoad(int rootPageIndex)
+    internal List<int> ResolveDirectoryPairsForLoad(int rootPageIndex) => ResolveDirectoryPairs(rootPageIndex);
+
+    /// <summary>
+    /// Drops the CK-05 pair state of a segment's directory pages that a load abandoned (#1302). Left registered, the abandoned segment's twins stayed
+    /// owned for good (the owned-page census claims every registered twin), and a primary later reused as a plain page kept the paired routing: its
+    /// writes went to the alternate slot of a pair that no longer existed, and the next open read the other one. The pages themselves are given back by
+    /// the crash open's occupancy re-derive (CK-09), which no longer finds them owned. A page that is another loaded segment's directory page keeps its pair:
+    /// a stale pointer's walk can run into it, and dropped, that segment's cold reads came from a slot that may be the older one (review). A segment loaded
+    /// later resolves its own pairs again. Under <see cref="_pairLock"/>, as <see cref="PersistProtectedPage"/> re-checks the pair under it.
+    /// </summary>
+    private void DropDirectoryPairs(List<int> directory, ConcurrentDictionary<int, LogicalSegment<PersistentStore>> loaded)
     {
+        HashSet<int> others = null;
+        using (EpochGuard.Enter(EpochManager))
+        {
+            var epoch = EpochManager.GlobalEpoch;
+            var extensions = new List<int>();
+            foreach (var (root, segment) in loaded)
+            {
+                (others ??= []).Add(root);
+                extensions.Clear();
+                segment.CollectDirectoryMapExtensionPages(epoch, extensions);
+                others.UnionWith(extensions);
+            }
+        }
+
+        lock (_pairLock)
+        {
+            foreach (var page in directory)
+            {
+                if (others == null || !others.Contains(page))
+                {
+                    _pairState.TryRemove(page, out _);
+                }
+            }
+        }
+    }
+
+    /// <summary>The twin of a paired directory page, or 0 when <paramref name="primaryPageIndex"/> is not paired. Diagnostic.</summary>
+    internal int DirectoryTwinOf(int primaryPageIndex) => _pairState.TryGetValue(primaryPageIndex, out var dp) ? dp.Twin : 0;
+
+    /// <summary>
+    /// Resolves the CK-05 pairs of a segment's directory that no load has resolved yet, before a read of it through the cache. Read unresolved, a directory
+    /// page comes from its primary slot, which may be the older generation, and stays cached so: the segment's own load later found its directory as of
+    /// before its last grow (review of #1296).
+    /// </summary>
+    internal void EnsureDirectoryPairsResolved(int rootPageIndex)
+    {
+        if (!_pairState.ContainsKey(rootPageIndex))
+        {
+            ResolveDirectoryPairs(rootPageIndex);
+        }
+    }
+
+    private List<int> ResolveDirectoryPairs(int rootPageIndex)
+    {
+        var resolved = new List<int>(1);
         Span<byte> bufPrimary = new byte[PageSize];
         Span<byte> bufTwin = new byte[PageSize];
 
@@ -1315,6 +1464,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             }
 
             int next;
+            resolved.Add(primary);
             if (tValid && (!pValid || genT > genP))
             {
                 _pairState[primary] = new DirPair(twin, twin, genT);
@@ -1328,6 +1478,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
 
             primary = next;
         }
+
+        return resolved;
     }
 
     // ═══════════════════════════════════════════════════════════════

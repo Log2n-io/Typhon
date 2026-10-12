@@ -362,7 +362,9 @@ applied synchronously inside `Commit()`, not at the fence.
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
-A cluster carries two watermarks, `ClusterMaxBornTsn` and `ClusterMaxDiedTsn`, and `IsClusterFullyVisibleAt(c, txTsn)` is
+A cluster carries two watermarks, `ClusterMaxBorn` and `ClusterMaxDied` — in its in-memory entry beside its claim word and
+pending-death count, one 32-byte entry a cluster in fixed blocks (`ArchetypeClusterState.SlotWords`) — and
+`IsClusterFullyVisibleAt(c, txTsn)` is
 true only when a reader at `txTsn` may skip the per-entity `EntityMap` probe for that whole cluster. It is a conservative
 approximation: false is always safe and merely slower. Its consumers differ in what a wrong TRUE costs them — `EcsQuery`'s
 SoA and Path-A scans keep a per-entity probe, so a bad grant only loses performance, while `EcsQuery.TryCountViaOccupancy`
@@ -371,9 +373,10 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
 ### CLUSTERVIS-01: The watermark is folded before the store that publishes the slot `[fatal][silent]`
   invariant at every instant a slot's occupancy bit is observable as SET, the cluster's summary already bounds the entity
             occupying it
-  never folding the watermark after the claim returns. The claim is what publishes the bit, so a caller-side fold leaves a
-        window in which a reader sees the bit paired with a maximum that predates the entity.
-  enforce `NoteClusterBorn` runs inside the claim, ahead of the publishing CAS; `NoteClusterDied` runs ahead of
+  never publishing the bit before the fold: a reader would see the bit paired with a maximum that predates the entity. The
+        claim folds the claimer's TSN; a spawn's publish folds its stamp first (`PublishReservedSlot`); recovery, the open's
+        rebuild and a migration publish after the claim's fold (`PublishClaimedSlot`).
+  enforce `NoteClusterBorn` runs inside the claim, ahead of every publish of the bit; `NoteClusterDied` runs ahead of
           `ReleaseSlot`'s clear. The reader's half is the mirror — acquire-read the occupancy word, THEN the watermarks.
   enforce a FRESHLY allocated cluster is left at `VisibilityUnknown` by the claim and established by the caller once the
           slot has contents. The two directions need opposite treatment: for an existing cluster the hazard is an OLDER
@@ -383,12 +386,14 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
   enforce `ResetClusterVisibility` runs at every site that frees a cluster chunk, before the id can be recycled. Chunk ids
           come from a free list, so without it a "fresh" cluster inherits the previous occupant's watermarks and the clause
           above silently does nothing.
-  enforce both folds are `Interlocked` on the element AND re-read the array reference after the CAS. Concurrent claimants
-          fold into the same cluster (#708: Transient spawns commit concurrently), and a fold can otherwise land in an array
-          a grower has already copied and is about to replace.
+  enforce both folds are `Interlocked` on the word. Concurrent claimants fold into the same cluster (#708: Transient spawns
+          commit concurrently). The word lives in a fixed block that never moves, and a new block is release-stored with
+          every born watermark at `VisibilityUnknown`; until 2026-10-12 the watermarks were arrays grown by copy, and a fold
+          had to re-read the array after its CAS or land in a copy a grower was replacing.
   scope: ArchetypeClusterState.NoteClusterBorn, ArchetypeClusterState.NoteClusterDied, ArchetypeClusterState.ClaimSlot,
          ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.ResetClusterVisibility,
-         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.EnsureClusterVisibilityCapacity,
+         ArchetypeClusterState.IsClusterFullyVisibleAt, ArchetypeClusterState.WatermarksVisibleAt, ArchetypeClusterState.SlotWords,
+         ArchetypeClusterState.PublishClaimedSlot, ArchetypeClusterState.PublishReservedSlot,
          ArchetypeClusterState.FreeClusterHead, ArchetypeClusterState.ClaimSlotHeadReadProbe
   on_violation: `Count()` returns a number no scan agrees with, and the scans emit an entity that does not exist at the
                 reader's snapshot. Silent both ways — every value looks plausible.
@@ -434,19 +439,19 @@ Two bitmaps drive the tick fence: `ComponentTable.DirtyBitmap`, keyed by content
 already-published entities did this tick mutate?* — and both feed the same two consumers: WAL emission at the fence, and
 change-filtered system dispatch.
 
-A **spawn is not a mutation** for this purpose, and `FinalizeSpawns` says so where it publishes: *"We do NOT set
+A **spawn is not a mutation** for this purpose, and `PublishSpawns` says so where it publishes: *"We do NOT set
 ClusterDirtyBitmap here — that bitmap tracks write mutations for change-filtered dispatch, same as per-ComponentTable
-DirtyBitmap (which is also not set during FinalizeSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
+DirtyBitmap (which is also not set during PlaceSpawns for non-cluster SV entities)."* A spawn's bytes reach disk by a
 different route — page-level dirty marks and the checkpoint under TickFence discipline, its own CM-06 Slot record under
 Commit discipline.
 
 ### DIRTY-01: A spawn sets no dirty bit, in either bitmap `[fatal]` `[silent]`
   invariant ∀ entity e spawned in transaction T: at commit(T), e contributes no bit to `ComponentTable.DirtyBitmap` nor
             to `ClusterDirtyBitmap` — including when T also WRITES e before committing
-  never marking a spawn-staging chunk id dirty. Until `FinalizeSpawns` publishes it, a spawned entity has no cluster slot
+  never marking a spawn-staging chunk id dirty. Until `PlaceSpawns` places it in PREPARE, a spawned entity has no cluster slot
         — which is why the write lands on the pre-publish branch in the first place — so there is no correct bit to set,
         not merely an inconvenient one.
-  scope: EntityAccessor.WriteEcsComponentData, Transaction.FinalizeSpawns, DatabaseEngine.ProcessTableFence
+  scope: EntityAccessor.WriteEcsComponentData, Transaction.PlaceSpawns, DatabaseEngine.ProcessTableFence
   on_violation: a SingleVersion staging chunk reaches the fence, which reads the entity PK from its overhead and gets 0 —
                 the PK is stamped into a staging chunk only for TRANSIENT slots, while `EntityPKOverheadSize` is 8 for
                 every non-Versioned component. Routing id 0 is reserved and never assigned, so `GetMetaByRouting` returns
@@ -465,7 +470,7 @@ Commit discipline.
   rationale: nothing is lost by withholding the bit. Under TickFence discipline a spawn's SingleVersion values are
              checkpoint-durable BY DESIGN and were never WAL-logged at the fence anyway; under Commit discipline the
              spawn's own CM-06 Slot record carries them, built from the staging chunk AFTER the in-place write, because
-             own-spawns deliberately skip write staging (#713). Index entries are inserted by `FinalizeSpawns` itself
+             own-spawns deliberately skip write staging (#713). Index entries are inserted by `PublishSpawns` itself
              from the same final bytes.
   verified: SpawnThenWriteFenceTests.OwnSpawnWrite_LeavesTheTableDirtyBitmapClean [VerifiesRule] — asserts the bitmap
             directly rather than inferring it from the absence of a crash, with
@@ -476,7 +481,7 @@ Commit discipline.
 
 ## Module: STAGE — Where a spawned entity's bytes live before it is published
 
-A spawned entity has no address until `FinalizeSpawns` claims its cluster slot at commit, so its component payloads need
+A spawned entity has no address until `PlaceSpawns` claims its cluster slot at commit (PREPARE, VIS-08), so its component payloads need
 somewhere to sit in the meantime. Which "somewhere" is not a free choice: it decides whether the payload can ever be
 reclaimed.
 
@@ -492,10 +497,10 @@ reclaimed.
         header, `ClusterChunkId`, `SlotIndex`, and one `CompRevFirstChunkId` per VERSIONED slot. There is no field a
         SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
   scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
-         Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
+         Transaction.PlaceSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
          EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.WriteRef,
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
-  on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
+  on_violation: the chunk becomes unreachable the instant `PlaceSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
                 CUMULATIVE spawns rather than live entities. Measured in the SpaceBattle demo before the fix: 491,930
                 `Bullet` chunks against ~1,200 live shots, 900,096 `Pos` chunks against ~20,200 live entities, and a
@@ -526,7 +531,7 @@ reclaimed.
         must refuse, because it has no value to enable; `Enable(comp, in value)` is the way to supply one mid-life.
   scope: EntityRefMut.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
          Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
-         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
+         Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.PlaceSpawns,
          ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips, DatabaseEngine.RebuildClusterFromChains,
          DatabaseEngine.CapturePreMigrationEnabledBits
   on_violation: the slot's storage is a RECYCLED chunk, so enabling an unsupplied component serves whatever a destroyed
@@ -553,7 +558,7 @@ reclaimed.
         That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
         same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
   note: the pending-spawn case must record the allocation in the `SpawnEntry`, not through the live-entity path.
-        `FinalizeSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
+        `PlaceSpawns` writes `CompRevFirstChunkId` unconditionally from `entry.Rev[slot]`, so a root published any
         other way is clobbered by a still-zero entry and the value is lost at commit with no error.
   verified: UnsuppliedComponentPayloadTests.Versioned_EnablingANeverSuppliedComponent_IsRefused [VerifiesRule] — the
             refusal itself, decided from the record's root and the resolved location, so it does not depend on what the
@@ -588,10 +593,10 @@ second copy is not derived on demand, so every path that changes one copy has to
             bit(cluster(e).EnabledBits[s], slotIndex(e)) = bit(record(e).EnabledBits, s), where record(e) is the COMMITTED
             EntityMap record
   invariant a change reaches both copies at commit, on every path that commits one: `FlushPendingEnableDisable` for a
-            live entity, `FinalizeSpawns` for a spawn, `RecoveryApplier` when the WAL is replayed
+            live entity, `PlaceSpawns` for a spawn, `RecoveryApplier` when the WAL is replayed
   invariant every other writer of the words keeps the mirror: a slot's bits are cleared when it is released
             (`ReleaseSlot` → `ClearSlotMetadata`; `ClearSlotBits` for an orphaned migrant's destination), and every CLAIM
-            writes the occupant's full mask, clearing as well as setting — `FinalizeSpawns`, `ApplySpawnedEntityToCluster`,
+            writes the occupant's full mask, clearing as well as setting — `PlaceSpawns`, `ApplySpawnedEntityToCluster`,
             and a cluster migration's transcription to its destination slot (`ExecuteMigrations`, step 6). A freed slot is
             therefore never trusted to be clean. The migration rebuild writes the bits from the pre-migration record
             (`RebuildClusterFromChains`); the crash rebuild without a snapshot goes the other way and copies the cluster bits
@@ -609,7 +614,7 @@ second copy is not derived on demand, so every path that changes one copy has to
         transaction (EW-01; an enable/disable commit writes the EntityMap), and the Migrate slices are carved on
         destination cell, so no two workers write the same destination cluster.
   scope: EntityRefMut.Enable, EntityRefMut.Disable, Transaction.StageEnableDisable, Transaction.FlushPendingEnableDisable,
-         Transaction.PublishClusterEnabledBits, Transaction.FinalizeSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
+         Transaction.PublishClusterEnabledBits, Transaction.PlaceSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
          RecoveryApplier.ApplySpawnedEntityToCluster, DatabaseEngine.RebuildClusterFromChains,
          DatabaseEngine.RebuildClusterEntityMapEntries, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.ClearSlotBits,
          ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.ClearSlotMetadata, ClusterRef.EnabledBits,
@@ -734,33 +739,53 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
   invariant a destroy that follows a write in the same transaction turns the write's revision into the tombstone — its element's chunk set to 0
             before the chunk is freed (ComponentRevisionManager.MakeOwnRevisionTombstone) — rather than adding a second revision: no committed
             element may name a freed chunk, and the chain must reduce to a lone tombstone
-  invariant a commit that relocates a tombstone, or resolves a conflict for one, writes a tombstone: a destroy that lost a race to a concurrent write
-            stays a destroy and names no chunk (Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict)
+  invariant a commit that resolves a conflict for a tombstone writes a tombstone: a destroy that lost a race to a concurrent write stays a destroy
+            and names no chunk (Transaction.DetectAndResolveConflict; the relocation that did the same went with plan 06 step 3.3)
   invariant a rollback frees the chunk it wrote and forgets it (Transaction.RollbackComponent zeroes CurCompContentChunkId); the transaction's reset
             frees a rolled-back spawn's storage only if the rollback has not (Transaction.CleanupEcsState)
   invariant the revision GC's compaction frees every overflow chunk of the chain it rewrites — the ChainLength - 1 chunks linked from the root,
             exactly that many — once the root names the new chain, deferred with its content frees past every transaction alive: a rollback or a
             conflict resolution may still write through a handle into the old layout (ComponentRevisionManager.CleanUpUnusedEntriesCore). The chain
-            it builds ends where its length says: its new chunks are allocated cleared, so the last one links to 0 — a reissued chunk keeps its
-            previous owner's link, and a walk that followed it freed another chain's chunk. It skips an entry whose root is no longer allocated or
+            it builds is its root alone (#1298): a compaction that would keep more than the root holds is put off, the chain unchanged
+            (ComponentRevisionManager.CompactionsDeferred), for a pass the entity's next commit queues — writing the rest into fresh chunks after the
+            checkpoint's barrier, a crash that wrote the root and not them recovered an older revision. It skips an entry whose root is no longer allocated or
             names another entity, and never frees a destroyed chain's root (DeferredCleanupManager.CleanupEntityRevisionsBatched,
             ForeignChainsSkipped)
+  invariant the compaction is all or nothing up to the root's rewrite (#1308): its walk writes nothing of the live chain and frees nothing — the
+            content chunks it drops are freed after the rewrite, the deferral list's room taken before it, so nothing past the rewrite throws. A
+            walk that throws (a page fault on an overflow chunk) leaves the chain as it was
   invariant a destroyed entity's revision chain is released whole by the entity cleanup alone, once the entity's DiedTSN is below every live snapshot:
             every chunk of the chain and every content chunk a live element names, freed deferred past every transaction alive at the release
             (DeferredCleanupManager.ReleaseDestroyedEntityChain). A chain not quiescent — a revision cleanup still queued for it, its lock held, an
             element still uncommitted — puts the entity off to a later pass with its record kept; a chain already released is detached from the
             record first, so no retry releases it twice (DatabaseEngine.ProcessEcsCleanups). A root that is not allocated or names another entity
             is never freed and is counted (DestroyedChainsForeign): a bug, never a free of someone else's chunk
-  invariant a clean close with no transaction alive drains what is queued — revision GC entries, destroyed entities, deferred chunk frees —
-            before its final checkpoint, in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a
-            destroy's frees do not wait for a transaction that will never come. A chain root still allocated reads back as a live entity when its
-            archetype's map reopens empty and is rebuilt from the chain heads (#1231). What the drain cannot finish — an entry whose lock was busy,
-            an entity still put off — stays allocated, a leak; a drain that throws is logged and the close goes on
-  scope: Transaction.MarkComponentDeleted, Transaction.RelocateRevisionEntry, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
+  invariant a clean close drains what is queued — revision GC entries, destroyed entities, deferred chunk frees — before its final checkpoint,
+            in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a destroy's frees do not wait for
+            a transaction that will never come. A transaction still alive does not hold it off: none outlives the engine's disposal (#1268). A
+            chain root still allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads
+            (#1231). A drain that throws is logged and the close goes on
+  invariant chunks unlinked from every chain are never left for nothing to find (#1268): a close that leaves chunk frees or destroyed entities
+            queued (an entity put off by a chain a live writer still holds), whose drain throws, or a session whose cleanup threw holding frees
+            (DeferredCleanupManager.FreesLost) marks the sweep owed (CS-04): the next open recovers, with strict segment loads, and its orphan sweep
+            frees them. A cleanup batch that throws still queues the frees of the entities it compacted before
+            (DeferredCleanupManager.ProcessDeferredCleanups); the destroyed-entity cleanup queues what the entities before the throw released and
+            puts the one that threw back in the queue with those after it (DatabaseEngine.ProcessEcsCleanups)
+  invariant a crash open frees every component-collection chunk no buffer that live data names owns (#1307): after the scrub, a buffer is named by
+            a handle in an allocated content chunk of a table with a collection field — a Versioned head, a system catalog's row, a flat
+            archetype's component — or in any slot of a cluster of an archetype with a SingleVersion collection; it owns its root, the chain
+            from it and its free chain. Both sets are supersets of what is live, and every step of a walk is checked, so a stray handle only
+            keeps chunks (DatabaseEngine.SweepCollectionOrphans). The schema catalog's table reopens without its collection info (#387): the field
+            lists and the archetypes' component names are named from the rows the open read. Only a segment some handle source it reads points into is
+            swept; a chunk already held is not freed again. The sweep stands down when a persisted component with a collection field has no table
+            loaded, a loaded table declares one it has no info for, or a persisted archetype has no state: their handles would read as none
+            (FirstUnloadedCollectionHandleSource)
+  scope: Transaction.MarkComponentDeleted, Transaction.DetectAndResolveConflict, Transaction.RollbackComponent,
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
-         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk
+         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups,
+         DatabaseEngine.ProcessEcsCleanupEntry, DatabaseEngine.SweepCollectionOrphans, DatabaseEngine.FirstUnloadedCollectionHandleSource
   on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
                 spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
                 MarketHardeningTests' consume-and-craft storm: an item's entity read another item's data within a few thousand operations, and 100
@@ -773,11 +798,23 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
         a leak, no live entity affected); its test is quarantined against that issue
   verified: DestroyRespawnSlotReuseTests [VerifiesRule] — destroy-and-respawn in one transaction, after a read, after a write, in two transactions
             and on 8 threads keeps every live id on its own data; after a full cleanup no chunk was freed twice and the revision and content segments
-            hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a destroy
+            hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a rollback that
+            threw part-way and was retried by the dispose (no spawn's root freed twice; a real mutation, the root not cleared once freed, fails), a destroy
             committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
             overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
             a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
-            shape, found by the gate)
+            shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are drained by it (a clean
+            reopen), a cleanup batch that fails midway queues the frees it collected before, a close after lost frees marks the sweep owed and the
+            next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest;
+            VersionedVoidRaceTests.ACompactionThatThrowsMidway_LeavesTheChainAsItWas — a compaction staged to throw among the entries it drops
+            leaves the chain's entries and its content as they were, and a reader at the spawn reads the spawn; ACompactionThatWouldKeepMoreThanTheRoot_IsPutOff
+            — kept entries past the root's room: nothing written, allocated or freed, counted, and compacted once the reader is gone. Mutations
+            killed: the dropped entries cleared in place again, the put-off removed;
+            CollectionDurabilityTests.ACrashOpen_FreesTheCollectionBuffersNothingNames_AndKeepsEveryNamedOne — two durable buffers named by nothing,
+            one past its root chunk, freed by a crash open; both storage homes' collections intact, a named buffer's free chain kept, and still
+            intact after new collections take the freed chunks; ACrashOpen_ThatDoesNotLoadEveryCollectionComponent_SweepsNothing — an open that
+            does not register a collection component keeps the orphan. Mutations killed: no sweep, no stand-down, the clusters or the content
+            chunks not read, the free chain or the chain past the root not walked
 
 ## Module: VIEWLIFE — What a long-lived view may retain
 
@@ -822,6 +859,60 @@ easy to get wrong — the copy is invisible at the call site and outlives everyt
             Mutant_AQueryStillBoundToItsTransaction_IsReported is the mutant.
 
 ---
+
+## Module: VDELTA — How an incremental view folds its delta ring
+
+An incremental view (`WhereField`, a navigation view) keeps its entity set current by draining the index deltas commits append to its ring
+(`ViewDeltaRingBuffer`), and re-scans storage when the ring overflowed. Scope: `EcsView`, `NavigationView`, `ViewBase`. Source: #1264, step 1.5 of
+`claude/design/Revision/06-mvcc-commit-path-implementation-plan.md`.
+
+### VDELTA-01: A view's membership is its own, and a full refresh loses nothing it did not cover `[fatal]` `[silent]`
+  invariant whether an entity WAS in the view is the view's own state — its set (`_entityIds`), or for an OR view the branch's bit, which a
+            creation does not reset — never the delta's BeforeKey. Whether it is in now is decided by the delta's AfterKey against EVERY evaluator
+            of the field (a range on one field is two), or, for an enable, whose entry carries no key, by reading the entity
+            (`EvaluateAllFields`, `EvaluateFullPredicate`, a target's fan-out) — an entity the refresh's snapshot does not see
+            (spawned and destroyed since) is not in the view, never a throw (`TryOpen`). An entry applied twice is then harmless
+  invariant a full refresh never discards the ring: it clears the overflow flag and owes itself (`BeginRefreshFull`), re-scans, diffs, then FOLDS
+            the entries at or below its transaction's TSN through the same processing as an incremental refresh, keeps the newer ones, and owes one
+            more full refresh when the ring dropped entries before or during it, or still holds entries from before a drop (`EndRefreshFull`,
+            `_refreshFullPending`) — as a membership resync stays in resync (MEMB). An entry appended before the latest drop
+            (`ViewDeltaRingBuffer.HeadPrecedesDrop`) is consumed unapplied (`ViewBase.FoldsHead`): the ring drops the NEWEST entry, so it can hold
+            an entity's older entry and not the one after it, and the re-scan, which ran after the drop, stands for that entity. A builder leaves a
+            new view's first refresh a full one (`OweRefreshFull`). A membership resync drains its entries unapplied
+            (`DrainBufferAfterRefreshFull`)
+  invariant a navigation view's full refresh re-populates its set from the entity maps (`PopulateFromEntityMaps`)
+  invariant the ring's consumer publishes its advanced head with a release store, after clearing the slot's written flag (`Advance`)
+  never take "was in view" from the BeforeKey: it is the writer's read value, and two last-writer-wins writers of one entity both read the same
+        one — the second's delta says "was in" for an entity the first just took out, and the view keeps the wrong side for good
+  never discard, at a full refresh, an entry the re-scan may not have covered: a commit's delta reaches the ring (Phase A of its publish, AP-07)
+        before its value reaches the cluster slot the re-scan reads (Phase B). Discarded, the change is in neither. (The ring's Reset did that, and
+        re-anchored its base TSN under live producers; it is gone)
+  scope: EcsView.ProcessEntry, EcsView.ProcessEntryOr, EcsView.RefreshFull, EcsView.RefreshFullOr, EcsView.FoldEntriesAfterRefreshFull,
+         NavigationView.ProcessEntry, NavigationView.RefreshFull, ViewBase.BeginRefreshFull, ViewBase.EndRefreshFull, ViewBase.OweRefreshFull,
+         ViewBase.ApplyMembership, ViewBase.FoldsHead, ViewDeltaRingBuffer.Advance, ViewDeltaRingBuffer.HeadPrecedesDrop
+  status: **RESIDUAL:**
+          - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
+            view read the other fields' old values (#1266);
+          - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
+          - two last-writer-wins writers publishing out of revision order (AP-06) leave the view on the older value, as the index (#1263);
+          - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
+            single-field drain measures at parity);
+          - the owed re-scan covers a dropped commit, or one whose entry came before a drop, only once its value is published: one still between
+            its delta and its value at that re-scan too is lost (the chain-lock wait between them is unbounded under readers). The builders' owed
+            first refresh has the same limit for a commit straddling the view's registration;
+          - a membership resync drains, so a spawn between its delta and its publication at that re-query is not covered
+  on_violation: a view silently misses entities whose committed value passes, or keeps ones that fail; an overflowed navigation view empties
+  verified: ViewDeltaRingDefectTests — TwoConcurrentWritersOfOneEntity_LeaveTheViewOnTheNewestValue (single-field, multi-field, OR),
+            AFullRefreshBetweenACommitsDeltaAndItsValue_IsFollowedByAnother and TheOwedFullRefresh_FoldsACommitBetweenItsDeltaAndItsValue (the
+            commit held between its delta and its value by `DatabaseEngine.PublishAfterIndexesProbe` while the view re-scans),
+            ARangeOnOneField_IsDecidedByBothBounds, DisableThenEnable_BringsTheEntityBack (with and without a value),
+            AnOrViewOverTwoFields_KeepsEveryBranchOfASpawn (either branch left holding), AnOverflowedNavigationView_RebuildsItsSet,
+            ASpawnDestroyedBeforeTheRefresh_IsSkipped (single-field, multi-field, OR), AnEntryOlderThanADroppedOne_IsNotFoldedOverTheRescan
+            [VerifiesRule].
+            Real mutations, each failing its test: the BeforeKey membership restored (single-field, OR), the owed refresh dropped, the fold replaced
+            by the drain, the navigation re-population removed, one evaluator per field, the enable not re-read, the OR creation reset, an entry from
+            before a drop folded, the refresh not owed while such entries are left, the entity read with `Open`. Not
+            covered by a test: `Advance`'s release store (an arm64 reordering), the overflow telemetry no longer emitted for an owed refresh
 
 ## Module: QFENCE — What an indexed query answers between a write and its tick fence
 

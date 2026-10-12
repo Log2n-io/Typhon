@@ -79,6 +79,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     private volatile PageList _pageList;
     private StorageSegmentKind _kind;
 
+    // The segment's incarnation (SegmentGeometry.IncarnationOffset): drawn at Create, read back from the root at Load, stamped on every data page.
+    private uint _incarnation;
+
     // The directory pages, root first, in chain order: what a grow reads instead of walking the directory chain on disk, and what it appends to. Written
     // under _growLock (and by Create/Load before the segment is shared) (#1205).
     private int[] _mapPages;
@@ -147,6 +150,160 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
     /// <summary>The underlying page store.</summary>
     public ref TStore Store => ref _store;
+
+    /// <summary>
+    /// A crash open's load: data page <paramref name="at"/> does not link to the directory's next — a grow whose directory append reached the disk and
+    /// whose pages did not all (#1296; a checkpoint writes directory pages first, CK-16). Completes the grow, the directory being trusted (each of its pages
+    /// a resolved CK-05 pair, so the pages it names are this segment's). A page written as this segment's — its incarnation, its segment flag, its CRC — is
+    /// kept, with what it holds, and its link set to the directory's next: the tear may be an old lost write of the link alone, under pages whose data no
+    /// log window holds. A page the grow had not written — another incarnation, none, or a torn sector — is initialized empty, as the grow initialized it.
+    /// A grow before the last completed checkpoint's barrier was written whole, so such a page came after it: what was committed on it is in the log
+    /// window, the replay brings it back, and a chain or cluster that named a chunk there finds it free. A torn page past the one that disagrees is such a
+    /// page too — the grow's, written after the barrier — and is initialized; the disagreeing page itself, torn and this segment's, may hold a checkpoint's
+    /// data and is refused (review of #1296). Also called for a directory's last page whose link agrees, 0: one the grow had not written is initialized —
+    /// loaded as it was, it had no header and another owner's bits. False when the shape is not a torn grow's: a page written before incarnations
+    /// existed whose link is wrong and not 0; a torn disagreeing page; or the directory's last page, written, linking on to a page written as this
+    /// segment's. Linking on to a page that was not, the chain ran ahead of the directory and is ended where the directory ends (#1299). Single-threaded.
+    /// </summary>
+    internal bool RepairTornGrow(int at)
+    {
+        var list = _pageList;
+        var pages = new Span<int>(list.Items, 0, list.Count);
+        var last = at + 1 >= pages.Length;
+        PageBlockType type;
+        RepairPage atPage;
+        int link;
+        using (EpochGuard.Enter(_store.EpochManager))
+        {
+            var epoch = _store.EpochManager.GlobalEpoch;
+            _store.RequestPageEpoch(pages[0], epoch, out var rootMemPageIndex);
+            type = _store.GetPage(rootMemPageIndex).StructAt<PageBaseHeader>(PageBaseHeader.Offset).Type;
+
+            // The page that disagrees: written, it keeps its bytes and gets its link; never written, it is initialized from here. Torn and this segment's,
+            // it is refused as before the completion existed: patched, it was dirtied, and a cycle before the suspect resolution re-checksummed its torn
+            // bytes for the next open to serve (review).
+            atPage = ClassifyForRepair(pages[at], epoch, out link);
+
+            // The chain ahead of the directory (#1299): its last page, written as this segment's, links on to a page the directory does not list — a
+            // grow the cycle that wrote the old tail caught after taking its pages, whose directory it had not taken. The page is the grow's, never
+            // checkpointed (the next cycle writes directories first, CK-16): not written as this segment's, what the grow put on it is in the log
+            // window, and the chain ends where the directory does. Written as this segment's, it holds a checkpoint's data — an old lost directory
+            // append — and the segment is refused.
+            if (last && atPage == RepairPage.Ours && link != 0)
+            {
+                if (!NeverWrittenAsOurs(link, epoch))
+                {
+                    return false;
+                }
+
+                SetLink(pages[at], 0, epoch);
+                TornGrowChainsTruncated++;
+                return true;
+            }
+
+            if (atPage == RepairPage.TornOurs || (last && atPage != RepairPage.NotWritten) || (atPage == RepairPage.Legacy && link != 0))
+            {
+                return false;
+            }
+
+            if (atPage != RepairPage.NotWritten)
+            {
+                SetLink(pages[at], pages[at + 1], epoch);
+            }
+        }
+
+        // One page at a time, each under its own epoch (EP-02): an old lost link can put the whole segment behind the tear.
+        var reinitialized = 0;
+        for (var j = atPage == RepairPage.NotWritten ? at : at + 1; j < pages.Length; j++)
+        {
+            using var guard = EpochGuard.Enter(_store.EpochManager);
+            var epoch = _store.EpochManager.GlobalEpoch;
+            var expected = j + 1 < pages.Length ? pages[j + 1] : 0;
+            if (j > at && ClassifyForRepair(pages[j], epoch, out link) == RepairPage.Ours)
+            {
+                if (link != expected)
+                {
+                    SetLink(pages[j], expected, epoch);
+                }
+
+                continue;
+            }
+
+            InitDataPages(type, pages, j, null, epoch, j + 1);
+            if (_store is PersistentStore persistent)
+            {
+                // Initialized: its torn bytes are gone, and with them the suspicion the suspect resolution would fail the open on (RB-04).
+                persistent.Mmf.ClearSuspectPage(pages[j]);
+            }
+
+            reinitialized++;
+        }
+
+        TornGrowPagesReinitialized += reinitialized;
+        return true;
+    }
+
+    // A page the chain names past the directory: never written as this segment's — past the file's end, or loaded with another incarnation or none.
+    private bool NeverWrittenAsOurs(int filePageIndex, long epoch)
+    {
+        if (filePageIndex < 0)
+        {
+            return false;
+        }
+
+        if (_store is PersistentStore persistent && (long)filePageIndex * PagedMMF.PageSize >= persistent.Mmf.FileSize)
+        {
+            return true;
+        }
+
+        return ClassifyForRepair(filePageIndex, epoch, out _) == RepairPage.NotWritten;
+    }
+
+    private enum RepairPage
+    {
+        Ours,
+        TornOurs,
+        Legacy,
+        NotWritten,
+    }
+
+    /// <summary>
+    /// Whether a page of the directory was written as this segment's. A suspect page — its checksum failed — is judged by its first sector, which holds
+    /// the header and the incarnation and reaches the disk whole: this segment's, it is <see cref="RepairPage.TornOurs"/>. Taken for unwritten at the
+    /// disagreeing page, it was initialized empty and its suspicion cleared: a torn old tail lost the chunks a checkpoint had written on it, silently.
+    /// </summary>
+    private unsafe RepairPage ClassifyForRepair(int filePageIndex, long epoch, out int link)
+    {
+        _store.RequestPageEpoch(filePageIndex, epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+        link = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        if ((page.StructAt<PageBaseHeader>(PageBaseHeader.Offset).Flags & PageBlockFlags.IsLogicalSegment) == 0)
+        {
+            return RepairPage.NotWritten;
+        }
+
+        var incarnation = SegmentGeometry.ReadIncarnation(new ReadOnlySpan<byte>(page.Address, PagedMMF.PageSize));
+        var ours = incarnation == 0 ? (_incarnation == 0 ? RepairPage.Legacy : RepairPage.NotWritten)
+            : incarnation == _incarnation ? RepairPage.Ours : RepairPage.NotWritten;
+        return ours == RepairPage.Ours && _store is PersistentStore persistent && persistent.Mmf.IsSuspectPage(filePageIndex) ? RepairPage.TornOurs : ours;
+    }
+
+    private void SetLink(int filePageIndex, int next, long epoch)
+    {
+        var memPageIndex = RequestExclusiveForGrow(filePageIndex, epoch, false);
+        _store.GetPage(memPageIndex).StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID = next;
+        _store.MarkPageModified(memPageIndex);
+        _store.UnlatchPageExclusive(memPageIndex);
+    }
+
+    /// <summary>The segment's directory pages: its root and its map-extension pages, as the last load or grow read them.</summary>
+    internal ReadOnlySpan<int> DirectoryPages => _mapPages.AsSpan(0, _mapPageCount);
+
+    /// <summary>The pages a torn grow's completion initialized empty — the others were kept, written as this segment's (<see cref="RepairTornGrow"/>).</summary>
+    internal int TornGrowPagesReinitialized { get; private set; }
+
+    /// <summary>Chains that ran ahead of the directory, ended where it does (<see cref="RepairTornGrow"/>, #1299).</summary>
+    internal int TornGrowChainsTruncated { get; private set; }
 
     /// <summary>
     /// How many bytes of a page's metadata region this segment claims for its own use, and therefore how much is left
@@ -289,12 +446,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// Initializes data pages [<paramref name="from"/>, end) of <paramref name="filePageIndices"/>: a full clear (except the root), the header, and
     /// each page's forward link to the next, the last one ending the chain.
     /// </summary>
-    private unsafe void InitDataPages(PageBlockType type, Span<int> filePageIndices, int from, ChangeSet changeSet, long epoch)
+    private unsafe void InitDataPages(PageBlockType type, Span<int> filePageIndices, int from, ChangeSet changeSet, long epoch, int to = -1)
     {
         // Use unchecked access: these are new pages about to be fully overwritten (cleared + header init).
         // In WAL mode, CRC verification may fail because the growth path doesn't write WAL/FPI records, so evicted pages would have stale CRCs with
         // no FPI available for repair.
-        for (var i = from; i < filePageIndices.Length; i++)
+        for (var i = from; i < (to < 0 ? filePageIndices.Length : to); i++)
         {
             var pageIndex = filePageIndices[i];
             GrowStepProbe?.Invoke(pageIndex);
@@ -325,6 +482,8 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 // transient store returns 0 ("no twin"); the occupancy root resolves to its pre-reserved twin (page 3).
                 lsh.TwinPageIndex = _store.GetOrAllocateDirectoryTwin(filePageIndices[0], changeSet);
             }
+
+            SegmentGeometry.WriteIncarnation(new Span<byte>(page.Address, PagedMMF.PageSize), _incarnation);
 
             // Durability: record the modification before the page is unlatched, so it is owed a write from the moment it is reachable (CP-04,
             // PS-10). With a ChangeSet the first registration also takes the page's mark; without one, MarkPageModified records it alone.
@@ -523,6 +682,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         // The kind is persisted into the root page's header by CreateOrGrow (read back by Load) — set it before so the root-page write captures it.
         _kind = kind;
+        _incarnation = (uint)Random.Shared.Next(1, int.MaxValue);
         // Phase 5: Storage:Segment:Create event. First page id doubles as the segment identifier.
         if (filePageIndices.Length > 0)
         {
@@ -619,7 +779,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     _store.GetOrAllocateDirectoryTwin(mapIndices[m], changeSet);
                 }
 
-                InitDataPages(type, filePageIndices, growFrom, changeSet, epoch);
+                // Under a change set the checkpoint drains, the grow's data pages are owed a write but take no mark (PS-21): the checkpoint writes them,
+                // and they can leave the cache before the unit of work ends. Marked, a grow — a segment doubles — larger than the cache's free room held
+                // every slot until the commit that grew it ended, and could not end: an EntityMap past half an 8 MiB cache grew inside a spawn commit and
+                // stopped the engine (AP-03). A page that receives data is marked by the write that puts it there. A change set that writes its own
+                // pages (SaveChanges) keeps them: nothing else would.
+                InitDataPages(type, filePageIndices, growFrom, changeSet is { DrainedByCheckpoint: true } ? null : changeSet, epoch);
 
                 // Count a pin only once it is taken: `pinned[pinnedCount++] = PinForPublish(…)` would count it before the call, and a throw would then
                 // release a slot this grow never pinned. Only the directory pages the publish writes: those from the one holding entry growFrom on.
@@ -1166,7 +1331,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         SegmentGeometry.WriteStride(new Span<byte>(pageAddr, PagedMMF.PageSize), chunkStride);
     }
 
-    internal virtual bool Load(int filePageIndex)
+    internal virtual unsafe bool Load(int filePageIndex)
     {
         var epoch = _store.EpochManager.GlobalEpoch;
         _store.RequestPageEpoch(filePageIndex, epoch, out var memPageIndex);
@@ -1174,6 +1339,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
 
         // Restore the persisted segment kind from the root page before `page` is reassigned to traverse map pages.
         _kind = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).Kind;
+        _incarnation = SegmentGeometry.ReadIncarnation(new ReadOnlySpan<byte>(page.Address, PagedMMF.PageSize));
 
         var pages = new List<int>();
         var mapPages = new List<int> { filePageIndex };
@@ -1282,6 +1448,37 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         finally
         {
             _store.ReleasePageForRead(memPageIndex);
+        }
+    }
+
+    /// <summary>The twins of the segment's directory pages — its root's and each map-extension page's (CK-05). Appended to <paramref name="dest"/>.</summary>
+    internal void CollectDirectoryTwins(long epoch, List<int> dest)
+    {
+        var length = Length;
+        if (length == 0)
+        {
+            return;
+        }
+
+        _store.RequestPageEpoch(RootPageIndex, epoch, out var memPageIndex);
+        var page = _store.GetPage(memPageIndex);
+        var maxWalk = length / NextHeadersIndexSectionCount + 4; // cycle guard
+        for (var step = 0; step < maxWalk; step++)
+        {
+            ref var header = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
+            if (header.TwinPageIndex > 0)
+            {
+                dest.Add(header.TwinPageIndex);
+            }
+
+            var next = header.LogicalSegmentNextMapPBID;
+            if (next == 0)
+            {
+                return;
+            }
+
+            _store.RequestPageEpoch(next, epoch, out memPageIndex);
+            page = _store.GetPage(memPageIndex);
         }
     }
 

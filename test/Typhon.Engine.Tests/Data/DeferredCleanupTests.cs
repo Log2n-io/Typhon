@@ -50,6 +50,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — never accessed E, but deferred cleanup should process it
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // After T1 commits, deferred cleanup should have removed old revisions
         {
@@ -107,7 +108,9 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
             var cs = dbe.MMF.CreateChangeSet();
             var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
             var content = table.ComponentSegment.CreateChunkAccessor(cs);
-            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref rev, ref content, out _);
+            var dropped = new List<int>();
+            ComponentRevisionManager.ScrubChainToHead(table, firstChunkId, ref rev, ref content, dropped, [], out _);
+            ComponentRevisionManager.FreeDroppedContent(table, [firstChunkId], dropped, null, ref rev, ref content);
             rev.Dispose();
             content.Dispose();
             cs.SaveChanges();
@@ -174,11 +177,14 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
             var cs = dbe.MMF.CreateChangeSet();
             var rev = table.CompRevTableSegment.CreateChunkAccessor(cs);
-            ComponentRevisionManager.SweepTableOrphans(table, reachableRoots, ref rev);
+            var content = table.ComponentSegment.CreateChunkAccessor(cs);
+            ComponentRevisionManager.SweepTableOrphans(table, reachableRoots, ref rev, ref content);
+            content.Dispose();
             rev.Dispose();
             cs.SaveChanges();
         }
 
+        dbe.ReleaseHeldFreesForTest();
         Assert.That(table.CompRevTableSegment.IsChunkAllocated(orphanRev), Is.False, "orphan rev chunk must be freed");
         Assert.That(table.ComponentSegment.IsChunkAllocated(orphanContent), Is.False, "orphan content chunk must be freed");
         Assert.That(table.CompRevTableSegment.IsChunkAllocated(rootChunkId), Is.True, "reachable chain root must be kept");
@@ -224,6 +230,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — triggers deferred cleanup
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // Queue should be empty after processing
         Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.EqualTo(0), "Queue should be empty after tail commits");
@@ -294,7 +301,11 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
         }
 
         // T1 commits — should not crash even though entity was deleted
-        Assert.DoesNotThrow(() => t1.Commit(), "Processing deferred cleanup for a deleted entity should not throw");
+        Assert.DoesNotThrow(() =>
+        {
+            t1.Commit();
+            t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose (TXC-01)
+        }, "Processing deferred cleanup for a deleted entity should not throw");
 
         // Queue should be empty
         Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.EqualTo(0), "Queue should be empty after processing");
@@ -345,6 +356,7 @@ class DeferredCleanupTests : TestBase<DeferredCleanupTests>
 
         // T1 commits — triggers cleanup of all entities
         t1.Commit();
+        t1.Dispose();   // an empty commit leaves the cleanup to the tail's dispose: it stays usable, and its cutoff leaves its own snapshot out (TXC-01)
 
         // All entities should now have 1 revision
         {

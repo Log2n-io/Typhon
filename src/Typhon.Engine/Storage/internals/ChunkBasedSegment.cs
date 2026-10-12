@@ -35,7 +35,7 @@ internal struct ChunkBasedSegmentHeader
 /// page with a summary bit per 64 pages, searched next-fit from the last page an allocation succeeded on (see <see cref="RoomBlock"/>). The minimum chunk
 /// size is 8 bytes.
 /// </remarks>
-public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : struct, IPageStore
+public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFrees where TStore : struct, IPageStore
 {
     private readonly Lock _growLock = new();
     private readonly EpochManager _epochManager;
@@ -284,11 +284,53 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         }
 
         ScanForAllocatorState(filePageIndex);
+
+        // Chunk 0 is the null id, reserved at creation. A completion that initialized the page holding it cleared its bit with the page's: the replay
+        // could hand it out, and a revision or a component stored at "none" was lost (review of #1296).
+        if (TornGrowRepaired)
+        {
+            using var guard = EpochGuard.Enter(_store.EpochManager);
+            if (!IsChunkAllocated(0))
+            {
+                ReserveChunk(0);
+            }
+        }
+
         return true;
     }
 
     /// <summary>Whether the last <see cref="Load(int, ChunkSegmentSummary)"/> rebuilt the allocator from a summary rather than by reading the pages.</summary>
     internal bool LoadedFromSummary { get; private set; }
+
+    /// <summary>Set before a crash open's load: a grow whose old tail's link did not reach the disk is completed, not refused (#1296).</summary>
+    internal bool RepairTornGrowAtLoad { get; set; }
+
+    /// <summary>
+    /// Set with <see cref="RepairTornGrowAtLoad"/>: whether a directory page is a resolved CK-05 pair. A map-extension page a grow allocated and the crash
+    /// did not let reach the disk is none, and the page ids read off it are another page's bytes — repairing by them would initialize other segments' pages.
+    /// </summary>
+    internal Func<int, bool> DirectoryPageTrusted { get; set; }
+
+    private bool DirectoryTrusted()
+    {
+        if (DirectoryPageTrusted == null)
+        {
+            return false;
+        }
+
+        foreach (var page in DirectoryPages)
+        {
+            if (!DirectoryPageTrusted(page))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether the last load completed a torn grow (<see cref="RepairTornGrowAtLoad"/>).</summary>
+    internal bool TornGrowRepaired { get; private set; }
 
     /// <summary>
     /// Rebuilds the allocator from the chunk bitmaps, the source of truth: reads every page. Checks each page's forward link against the directory as the
@@ -326,6 +368,24 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             }
 
             var expected = (i + 1) < length ? pages[i + 1] : 0;
+            // The last page agreeing — linking to nothing — is checked too: a grow whose last page never reached the disk left it without a header,
+            // its bits another owner's (review of #1296).
+            if ((next != expected || i == length - 1) && i > 0 && RepairTornGrowAtLoad && DirectoryTrusted() && RepairTornGrow(i))
+            {
+                // The directory ran ahead of the chain: a grow torn by the crash (#1296). Completed, and this page read again — it may be initialized empty.
+                TornGrowRepaired = true;
+                next = expected;
+                var repaired = AcquirePageForRead(i, out var repairedMemPageIndex);
+                try
+                {
+                    popcount = CountAllocatedBits(repaired.MetadataReadOnly<long>(), bitmapLongs, maxChunks);
+                }
+                finally
+                {
+                    ReleasePageForRead(repairedMemPageIndex);
+                }
+            }
+
             if (next != expected)
             {
                 throw new InvalidOperationException(
@@ -404,7 +464,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             // Prefer the caller's ChangeSet, whose unit of work will release the marks taken below. Without one we make a
             // local set and release it ourselves before returning — it used to be created and simply abandoned, so every
             // grow without a caller ChangeSet stranded one mark per new page for the lifetime of the process.
-            var localChangeSet = changeSet == null ? _store.CreateChangeSet() : null;
+            var localChangeSet = changeSet == null ? _store.CreateChangeSet(drainedByCheckpoint: true) : null;
             var effectiveChangeSet = changeSet ?? localChangeSet;
             try
             {
@@ -414,7 +474,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 MarkRoomRange(currentLength, newLength);
 
                 // Grow the underlying logical segment (thread-safe, will allocate new pages). It clears every new page in full — the chunk bitmap with it —
-                // and registers each with the change set (InitDataPages, PS-14), so nothing here writes a page after it is published.
+                // and records each as owed a write (InitDataPages, PS-14), so nothing here writes a page after it is published. Under a change set the
+                // checkpoint drains, the data pages take no mark: a grow larger than the cache's free room would otherwise hold every slot until the
+                // change set ends (PS-21).
                 base.Grow(newLength, effectiveChangeSet);
                 GrowPagesPublishedForTest?.Invoke(this);
 
@@ -801,6 +863,13 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 {
                     return chunkId;
                 }
+
+                // Its free chunks are mid-release (CK-17): the page keeps its room bit and the search moves on — looking again here would spin until the
+                // release worker's next instruction, a scheduler quantum when it is descheduled.
+                if (chunkId == ChunksMidRelease)
+                {
+                    return -1;
+                }
             }
 
             // Full: clear the bit, then look again — a free that set it before the clear would otherwise be lost with it.
@@ -825,9 +894,16 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         }
     }
 
-    /// <summary>Sets a free bit at or above <paramref name="pageFloor"/> in page <paramref name="pageIndex"/>'s chunk bitmap; -1 when there is none.</summary>
+    // ClaimOnPage found free bits, every one a chunk the quarantine's release has freed and not yet stopped holding.
+    private const int ChunksMidRelease = -2;
+
+    /// <summary>
+    /// Sets a free bit at or above <paramref name="pageFloor"/> in page <paramref name="pageIndex"/>'s chunk bitmap; -1 when there is none,
+    /// <see cref="ChunksMidRelease"/> when the only ones are mid-release.
+    /// </summary>
     private int ClaimOnPage(int pageIndex, int pageFloor, bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
     {
+        var midRelease = false;
         var maxChunks = ChunksOnPage(pageIndex);
         var bitmapLongs = BitmapLongsOnPage(pageIndex);
         var epoch = _store.EpochManager.GlobalEpoch;
@@ -846,7 +922,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 var chunkInPage = w * 64 + bit;
                 if (chunkInPage >= maxChunks)
                 {
-                    return -1;
+                    return midRelease ? ChunksMidRelease : -1;
                 }
 
                 var mask = 1L << bit;
@@ -855,6 +931,17 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 {
                     // Lost race — update word with current state and retry next bit
                     word = prevBits | mask | floorMask;
+                    continue;
+                }
+
+                // A chunk the quarantine's release has freed in the bitmap and not yet stopped holding (CK-17): taken now, its next owner's free found
+                // it held, was refused as a second free, and the chunk leaked. Given back; the next bit is tried.
+                if (_freeQuarantine != null && _freeQuarantine.IsHeld(PageOffsetToChunkIndex(pageIndex, chunkInPage)))
+                {
+                    Interlocked.And(ref metadata[w], ~mask);
+                    _store.MarkPageModified(memPageIdx);
+                    word = prevBits | mask | floorMask;
+                    midRelease = true;
                     continue;
                 }
 
@@ -887,7 +974,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             }
         }
 
-        return -1;
+        return midRelease ? ChunksMidRelease : -1;
     }
 
     /// <summary>
@@ -935,7 +1022,133 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// </summary>
     internal long DoubleFreeCount;
 
+    // The frees no checkpoint has made safe to reuse yet, and the store that says when the quarantine is on (#1251). Null: frees are immediate.
+    private FreeQuarantine _freeQuarantine;
+    private PagedMMF _quarantineOwner;
+    private Action<int> _freeHeld;
+
+    /// <summary>
+    /// Holds this segment's frees back from reuse until a checkpoint makes it safe (<see cref="FreeQuarantine"/>) — for a segment whose chunks the data
+    /// file's chains name: a Versioned table's revisions and content.
+    /// </summary>
+    internal void QuarantineFrees(PagedMMF mmf)
+    {
+        _freeQuarantine = new FreeQuarantine();
+        _quarantineOwner = mmf;
+        _freeHeld = FreeHeldChunk;
+        mmf.RegisterFreeQuarantine(this);
+    }
+
+    /// <summary>The frees held back from reuse. Diagnostic.</summary>
+    internal int QuarantinedFreeCount => _freeQuarantine?.Count ?? 0;
+
+    /// <summary>
+    /// Frees <paramref name="chunkId"/> at once, never held (CK-17): for a chunk no committed revision ever named — a rolled-back transaction's content.
+    /// </summary>
+    internal void FreeChunkUnheld(int chunkId)
+    {
+        if (chunkId != 0 && _freeQuarantine != null && _freeQuarantine.IsHeld(chunkId))
+        {
+            // Held already: a second free.
+            Interlocked.Increment(ref DoubleFreeCount);
+            return;
+        }
+
+        FreeChunkNow(chunkId);
+    }
+
+    /// <summary>Whether <paramref name="chunkId"/> was freed and is held back from reuse (CK-17): still allocated in the bitmap, owned by no one.</summary>
+    internal bool IsChunkHeld(int chunkId) => _freeQuarantine != null && _freeQuarantine.IsHeld(chunkId);
+
+    /// <summary>
+    /// Whether <paramref name="chunkId"/> belongs to someone: allocated, and not a free held back from reuse (CK-17). What a check that tells a live chain
+    /// from a released one asks — the allocation bit alone takes a held chunk for live.
+    /// </summary>
+    /// <remarks>
+    /// The hold is read first: the release frees the bitmap bit and then the hold, so a bitmap read first, then a hold read after the release, took a free
+    /// chunk for live (review of CK-17). Read in this order, a hold seen gone was preceded by the bitmap's free, which the acquire orders before the
+    /// second read — on arm64 as well.
+    /// </remarks>
+    internal bool IsChunkLive(int chunkId) => !IsChunkHeld(chunkId) && IsChunkAllocated(chunkId);
+
+    void IQuarantinedFrees.SealFrees() => _freeQuarantine?.Seal();
+
+    bool IQuarantinedFrees.MarkReleasable() => _freeQuarantine != null && _freeQuarantine.MarkReleasable();
+
+    void IQuarantinedFrees.ReleaseSealed()
+    {
+        if (_freeQuarantine != null && !Pages.IsEmpty)
+        {
+            _releasedNow = 0;
+            try
+            {
+                _freeQuarantine.ReleaseSealed(_freeHeld, _epochManager);
+            }
+            finally
+            {
+                NoteReleasedNow();
+            }
+        }
+    }
+
+    void IQuarantinedFrees.ReleaseAll()
+    {
+        if (_freeQuarantine != null && !Pages.IsEmpty)
+        {
+            _releasedNow = 0;
+            try
+            {
+                _freeQuarantine.ReleaseAll(_freeHeld, _epochManager);
+            }
+            finally
+            {
+                NoteReleasedNow();
+            }
+        }
+    }
+
+    // What the release in progress freed, counted as it frees: a release that throws midway still gives back the bytes of the chunks it freed, or the
+    // budget's count drifts up for good and every release is followed by a forced cycle (review of CK-17). One release at a time per segment.
+    private int _releasedNow;
+
+    private void FreeHeldChunk(int chunkId)
+    {
+        FreeChunkNow(chunkId);
+        _releasedNow++;
+    }
+
+    private void NoteReleasedNow()
+    {
+        if (_releasedNow > 0)
+        {
+            _quarantineOwner.NoteReleased((long)_releasedNow * Stride);
+            _releasedNow = 0;
+        }
+    }
+
+    /// <summary>
+    /// Frees <paramref name="chunkId"/> — at once, or, quarantined (<see cref="QuarantineFrees"/>) and once the engine is open, when a checkpoint has made its
+    /// reuse safe; it stays allocated until then.
+    /// </summary>
     public void FreeChunk(int chunkId)
+    {
+        if (_freeQuarantine != null && chunkId != 0 && _quarantineOwner.FreeQuarantineEnabled)
+        {
+            // A chunk already free, or already held, is a second free: counted, as the bitmap counts it below.
+            if (!IsChunkAllocated(chunkId) || !_freeQuarantine.Add(chunkId))
+            {
+                Interlocked.Increment(ref DoubleFreeCount);
+                return;
+            }
+
+            _quarantineOwner.NoteQuarantined(Stride);
+            return;
+        }
+
+        FreeChunkNow(chunkId);
+    }
+
+    private void FreeChunkNow(int chunkId)
     {
         // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would give its page room again and AllocateChunk would hand
         // it out, causing every caller to clobber the meta chunk.
@@ -1595,6 +1808,124 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         return (data[wordIndex] & mask) != 0L;
     }
 
+    /// <summary>
+    /// Whether chunk <paramref name="index"/> is allocated, its bitmap page read and released (EP-02): <see cref="IsChunkAllocated"/> epoch-tags the
+    /// page, and a walk that asks it of chunks across a segment larger than the cache pinned all of it (#1183). The read pin takes the slot's lock:
+    /// for recovery's and the offline walks, not the hot paths.
+    /// </summary>
+    internal bool IsChunkAllocatedUnpinned(int index)
+    {
+        var (pageIndex, chunkInPage) = GetChunkLocation(index);
+        var page = AcquirePageForRead(pageIndex, out var memPageIndex);
+        try
+        {
+            return (page.MetadataReadOnly<long>()[chunkInPage >> 6] & (1L << (chunkInPage & 0x3F))) != 0L;
+        }
+        finally
+        {
+            ReleasePageForRead(memPageIndex);
+        }
+    }
+
+    /// <summary><see cref="IsChunkLive"/> through <see cref="IsChunkAllocatedUnpinned"/>: allocated and not held, the page read and released (EP-02).</summary>
+    internal bool IsChunkLiveUnpinned(int index) => !IsChunkHeld(index) && IsChunkAllocatedUnpinned(index);
+
+    /// <summary>
+    /// The allocated chunks, in chunk order — each page's bitmap copied under a read pin and released before its chunks are returned (EP-02): a walk
+    /// over every chunk of a segment larger than the cache pins one page at a time, never the segment (#1183). A chunk allocated or freed while it
+    /// runs may or may not be returned; held chunks (CK-17) are allocated and are returned.
+    /// </summary>
+    internal AllocatedChunkCursor AllocatedChunks() => new(this);
+
+    /// <summary>The cursor of <see cref="AllocatedChunks"/>: <c>foreach (var chunkId in segment.AllocatedChunks())</c>. Holds no page between moves.</summary>
+    internal ref struct AllocatedChunkCursor
+    {
+        private readonly ChunkBasedSegment<TStore> _segment;
+        private BitmapCopy _words;
+        private int _pageIndex;
+        private int _wordCount;
+        private int _word;
+        private int _chunksOnPage;
+        private long _bits;
+
+        internal AllocatedChunkCursor(ChunkBasedSegment<TStore> segment)
+        {
+            _segment = segment;
+            _words = default;
+            _pageIndex = -1;
+            _wordCount = 0;
+            _word = 0;
+            _chunksOnPage = 0;
+            _bits = 0;
+            Current = -1;
+        }
+
+        public int Current { get; private set; }
+
+        public AllocatedChunkCursor GetEnumerator() => this;
+
+        public bool MoveNext()
+        {
+            while (true)
+            {
+                while (_bits == 0)
+                {
+                    if (++_word < _wordCount)
+                    {
+                        _bits = _words[_word];
+                        continue;
+                    }
+
+                    if (++_pageIndex >= _segment.Length)
+                    {
+                        return false;
+                    }
+
+                    CopyPage();
+                }
+
+                var bit = BitOperations.TrailingZeroCount(_bits);
+                _bits &= _bits - 1;
+                var chunkInPage = (_word << 6) + bit;
+                if (chunkInPage >= _chunksOnPage)
+                {
+                    _bits = 0;
+                    continue;
+                }
+
+                Current = _segment.PageOffsetToChunkIndex(_pageIndex, chunkInPage);
+                return true;
+            }
+        }
+
+        private void CopyPage()
+        {
+            _word = -1;
+            _chunksOnPage = _segment.ChunksOnPage(_pageIndex);
+            _wordCount = _chunksOnPage == 0 ? 0 : _segment.BitmapLongsOnPage(_pageIndex);
+            if (_wordCount == 0)
+            {
+                return;
+            }
+
+            var page = _segment.AcquirePageForRead(_pageIndex, out var memPageIndex);
+            try
+            {
+                page.MetadataReadOnly<long>()[.._wordCount].CopyTo(_words);
+            }
+            finally
+            {
+                _segment.ReleasePageForRead(memPageIndex);
+            }
+        }
+    }
+
+    // A page's chunk bitmap: its metadata region (PagedMMF.PageMetadataSize, 128 bytes) holds at most 16 words.
+    [System.Runtime.CompilerServices.InlineArray(PagedMMF.PageMetadataSize / sizeof(long))]
+    internal struct BitmapCopy
+    {
+        private long _element;
+    }
 }
 
 /// <summary>

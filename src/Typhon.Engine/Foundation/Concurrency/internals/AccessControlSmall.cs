@@ -209,6 +209,34 @@ internal struct AccessControlSmall
         }
     }
 
+    /// <summary>
+    /// Enters shared (reader) access without waiting: succeeds unless an exclusive holder is present, retrying only a CAS lost to another reader. Sets
+    /// no contention flag, emits no contention event and reads no clock — for a caller that composes a wait budget only when it has to wait (CX-06).
+    /// </summary>
+    /// <returns>True if access was acquired; false if an exclusive holder is present.</returns>
+    public bool TryEnterSharedAccess()
+    {
+        while (true)
+        {
+            int initial = _data;
+            if ((initial >> ThreadIdShift) != 0)
+            {
+                return false;
+            }
+
+            if ((initial & SharedUsedCounterMask) >= SharedUsedCounterMask)
+            {
+                ThrowInvalidOperationException("Too many concurrent shared accesses");
+            }
+
+            if (Interlocked.CompareExchange(ref _data, initial + 1, initial) == initial)
+            {
+                TyphonEvent.EmitConcurrencyAccessControlSmallSharedAcquire((ushort)Environment.CurrentManagedThreadId);
+                return true;
+            }
+        }
+    }
+
     /// <summary>Exits shared (reader) access.</summary>
     public void ExitSharedAccess()
     {
@@ -243,7 +271,8 @@ internal struct AccessControlSmall
         var ct = Environment.CurrentManagedThreadId << ThreadIdShift;
         var ac = new AtomicChange(ref _data, ref ctx);
 
-        if ((ac.Initial & ~SharedUsedCounterMask) == ct)
+        // The contention flag masked too: sticky, it made the guard miss on a lock ever contended, and the thread waited on its own hold (#1256).
+        if ((ac.Initial & ~(SharedUsedCounterMask | ContentionFlagMask)) == ct)
         {
             ThrowInvalidOperationException("Cannot enter exclusive access while already holding it");
         }
@@ -395,13 +424,15 @@ internal struct AccessControlSmall
         while (true)
         {
             int initial = _data;
-            if ((initial & ~SharedUsedCounterMask) != expectedThread)
+
+            // The contention flag masked, as in EnterExclusiveAccess's guard: kept, it made the owner's demote throw on a lock ever contended (#1256 review).
+            if ((initial & ~(SharedUsedCounterMask | ContentionFlagMask)) != expectedThread)
             {
                 ThrowInvalidOperationException("DemoteFromExclusiveAccess called by a thread that doesn't own the lock");
             }
 
-            // Clear thread ID and set shared counter to 1
-            if (Interlocked.CompareExchange(ref _data, 1, initial) == initial)
+            // Clear thread ID and set shared counter to 1, the contention flag preserved
+            if (Interlocked.CompareExchange(ref _data, 1 | (initial & ContentionFlagMask), initial) == initial)
             {
                 break;
             }

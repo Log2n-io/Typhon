@@ -101,6 +101,50 @@ public class AccessControlSmallTests
         Assert.That(control.SharedUsedCounter, Is.EqualTo(0));
     }
 
+    /// <summary>
+    /// #1256: re-entering exclusive access on the thread that holds it throws on a lock that was ever contended too. The guard kept the sticky contention
+    /// flag in its comparison and missed on such a lock: the thread waited on its own hold — for good without a deadline, a lock timeout with one.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    public void EnterExclusiveAccess_ReenteredOnAContendedLock_Throws()
+    {
+        var control = new AccessControlSmall();
+        control.EnterExclusiveAccess(ref WaitContext.Null);
+        var other = Task.Run(() =>
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(10));
+            return control.EnterExclusiveAccess(ref ctx);
+        }).Result;
+        Assert.That((other, control.WasContended), Is.EqualTo((false, true)), "premise: another thread's attempt marked the lock contended");
+
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(200));
+            control.EnterExclusiveAccess(ref ctx);
+        });
+        control.ExitExclusiveAccess();
+    }
+
+    /// <summary>The owner's demote on a lock ever contended: it demotes, and keeps the contention flag (#1256 review).</summary>
+    [Test]
+    [CancelAfter(5000)]
+    public void DemoteFromExclusiveAccess_OnAContendedLock_Demotes_AndKeepsTheFlag()
+    {
+        var control = new AccessControlSmall();
+        control.EnterExclusiveAccess(ref WaitContext.Null);
+        var other = Task.Run(() =>
+        {
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(10));
+            return control.EnterExclusiveAccess(ref ctx);
+        }).Result;
+        Assert.That((other, control.WasContended), Is.EqualTo((false, true)), "premise: another thread's attempt marked the lock contended");
+
+        Assert.DoesNotThrow(() => control.DemoteFromExclusiveAccess(), "the owner's demote");
+        Assert.That((control.SharedUsedCounter, control.LockedByThreadId, control.WasContended), Is.EqualTo((1, 0, true)));
+        control.ExitSharedAccess();
+    }
+
     [Test]
     [CancelAfter(1000)]
     public void ExitExclusiveAccess_WithoutEnter_ThrowsException()

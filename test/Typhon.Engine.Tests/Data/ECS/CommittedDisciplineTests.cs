@@ -1,6 +1,9 @@
 ﻿using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -494,5 +497,162 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         var rp = read.Open(id).Read(CmEntity.Position);
         Assert.That(rp.X, Is.EqualTo(42f));
         Assert.That(rp.Y, Is.EqualTo(2f));
+    }
+
+    /// <summary>
+    /// #1269: a commit checks the engine's stop before it claims its WAL slot, and may wait in back-pressure between the two. One that claimed after
+    /// another commit had stopped the engine appended over the partial publish AP-03 stops for. The stop is checked again once the slot is claimed.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    public void ACommitThatClaimsItsSlotAfterTheEngineStopped_IsRefused()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnAnt(dbe, 1, 2, 0);
+        var log = (Typhon.Engine.Internals.DurabilityLog)dbe.DurabilityLog;
+        var committer = Environment.CurrentManagedThreadId;
+        log.BeforeClaimProbe = () =>
+        {
+            if (Environment.CurrentManagedThreadId == committer)
+            {
+                dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: another commit's publish failed past its append"));
+            }
+        };
+        Exception thrown = null;
+        try
+        {
+            using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
+            tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(99, 88));
+            try
+            {
+                tx.Commit();
+            }
+            catch (Exception e)
+            {
+                thrown = e;
+            }
+        }
+        finally
+        {
+            log.BeforeClaimProbe = null;
+        }
+
+        Assert.That((thrown as DurabilityException)?.ErrorCode, Is.EqualTo(TyphonErrorCode.CommitPipelineStopped), $"the commit refused, not {thrown}");
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Open(id).Read(CmEntity.Position).X, Is.EqualTo(1f), "the refused commit's write, never published");
+    }
+
+    /// <summary>
+    /// #1269, review: a tick fence whose claim meets a stop latched while it waited appends nothing and does not throw. The re-check once claimed refuses
+    /// it; thrown on the tick path, the runtime recorded a fence failure that is never cleared.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-03")]
+    public void AFenceWhoseClaimMeetsAStop_AppendsNothing_AndDoesNotThrow()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnAnt(dbe, 1, 2, 0);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(CmEntity.Position, new CmPosition(5, 6));
+            tx.Commit();
+        }
+
+        var log = (Typhon.Engine.Internals.DurabilityLog)dbe.DurabilityLog;
+        log.BeforeClaimProbe = () => dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: a commit's publish failed past its append"));
+        try
+        {
+            Assert.DoesNotThrow(() => dbe.WriteTickFence(1), "the fence on the tick path");
+        }
+        finally
+        {
+            log.BeforeClaimProbe = null;
+        }
+
+        Assert.That(dbe.CommitPipelineFailure, Is.Not.Null, "premise: the stop latched inside the fence's append");
+    }
+
+    private static unsafe (int Chunk, byte Slot) ClusterLocationOf(DatabaseEngine dbe, EntityId id)
+    {
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var es = dbe._archetypeStates[dbe.GetMetaByRouting(id.ArchetypeId).ArchetypeId];
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        var m = es.EntityMap.Segment.CreateChunkAccessor();
+        try
+        {
+            Assert.That(es.EntityMap.TryGet(id.EntityKey, record, ref m), Is.True, $"{id}'s record");
+            return (ClusterEntityRecordAccessor.GetClusterChunkId(record), ClusterEntityRecordAccessor.GetSlotIndex(record));
+        }
+        finally
+        {
+            m.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #1261: a Commit-discipline transaction that writes an entity and destroys it releases the entity's cluster slot (FlushPendingDestroys) before it
+    /// publishes its staged writes. The staged write was copied into the slot all the same, over whatever a concurrent spawn had put there meanwhile.
+    /// Held between the two, the commit lets another transaction's spawn take the slot — the only free one of a full cluster — and that spawn's value
+    /// must survive the publish.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CM-01")]
+    [CancelAfter(30_000)]
+    public void AStagedWriteToAnEntityItsCommitDestroys_LeavesTheSpawnInItsReleasedSlotAlone()
+    {
+        using var dbe = SetupEngine();
+        var clusterSize = dbe._archetypeStates[Archetype<CmEntity>.Metadata.ArchetypeId].ClusterState.Layout.ClusterSize;
+        var ids = new EntityId[clusterSize];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < clusterSize; i++)
+            {
+                ids[i] = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(i, i)), CmEntity.Wallet.Set(new CmWallet(i)));
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the spawns");
+        }
+
+        var victim = ids[clusterSize / 2];
+        var victimSlot = ClusterLocationOf(dbe, victim);
+        Assert.That(ClusterLocationOf(dbe, ids[0]).Chunk, Is.EqualTo(victimSlot.Chunk), "premise: one full cluster");
+
+        EntityId spawned = default;
+        var committer = 0;
+        dbe.CommitBeforeStagedPublishProbe = () =>
+        {
+            if (Environment.CurrentManagedThreadId != Volatile.Read(ref committer))
+            {
+                return;
+            }
+
+            var spawn = Task.Run(() =>
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                var id = tx.Spawn<CmEntity>(CmEntity.Position.Set(new CmPosition(7, 7)), CmEntity.Wallet.Set(new CmWallet(7)));
+                Assert.That(tx.Commit(), Is.True, "the concurrent spawn");
+                return id;
+            });
+            Assert.That(spawn.Wait(TimeSpan.FromSeconds(10)), Is.True, "the concurrent spawn, completed while the commit is held");
+            spawned = spawn.Result;
+        };
+        try
+        {
+            Volatile.Write(ref committer, Environment.CurrentManagedThreadId);
+            using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate, CommitDiscipline.Commit);
+            tx.OpenMut(victim).Set(CmEntity.Position, new CmPosition(99, 88));
+            tx.Destroy(victim);
+            Assert.That(tx.Commit(), Is.True, "the write-and-destroy");
+        }
+        finally
+        {
+            dbe.CommitBeforeStagedPublishProbe = null;
+        }
+
+        Assert.That(ClusterLocationOf(dbe, spawned), Is.EqualTo(victimSlot), "premise: the spawn took the destroyed entity's slot");
+        using var read = dbe.CreateQuickTransaction();
+        var p = read.Open(spawned).Read(CmEntity.Position);
+        Assert.That((p.X, p.Y), Is.EqualTo((7f, 7f)), "the spawn's value, not the destroyed entity's staged write");
+        Assert.That(read.IsAlive(victim), Is.False, "the destroyed entity");
     }
 }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -43,6 +44,8 @@ public struct EntityRecordHeader
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set
         {
+            // 48 bits: TransactionChain refuses transactions well before a TSN outgrows them (#1208).
+            Debug.Assert((ulong)value < 1UL << 48, "a BornTSN outgrew its 48-bit storage");
             BornTsnHigh = (uint)(value >> 16);
             BornTsnLow = (ushort)(value & 0xFFFF);
         }
@@ -56,16 +59,106 @@ public struct EntityRecordHeader
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set
         {
+            Debug.Assert((ulong)value < 1UL << 48, "a DiedTSN outgrew its 48-bit storage");
             DiedTsnHigh = (uint)(value >> 16);
             DiedTsnLow = (ushort)(value & 0xFFFF);
         }
     }
 
-    /// <summary>True if the entity has not been destroyed (DiedTSN == 0).</summary>
+    /// <summary>
+    /// True if the entity is published and its destroy is not (a HEAD reader's view). A spawn placed in PREPARE and not yet published (its born pending,
+    /// VIS-08) is not alive: its commit may still abort. An entity whose destroy is pending (VIS-09) still is, for the same reason.
+    /// </summary>
     public readonly bool IsAlive
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => DiedTsnHigh == 0 && DiedTsnLow == 0;
+        get => (BornTsnHigh & PendingHighBit) == 0 && ((DiedTsnHigh == 0 && DiedTsnLow == 0) || (DiedTsnHigh & PendingHighBit) != 0);
+    }
+
+    /// <summary>Bit 47 of a 48-bit stamp field: the value is an owner's TSN, not a commit stamp (VIS-08). TSNs stay below it (#1208).</summary>
+    internal const long PendingBit = 1L << 47;
+
+    private const uint PendingHighBit = 1u << 31;   // bit 47 of the 48-bit value, in its upper 32 bits
+
+    /// <summary>The born value of a spawn placed in PREPARE by <paramref name="ownerTsn"/>: above every snapshot, so a test that ignores it reads "not born".</summary>
+    internal static long PendingBorn(long ownerTsn) => PendingBit | ownerTsn;
+
+    /// <summary>True while the spawn's commit has not published: <see cref="BornTSN"/> holds its owner's TSN.</summary>
+    internal readonly bool IsBornPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => (BornTsnHigh & PendingHighBit) != 0;
+    }
+
+    /// <summary>True while a destroy's commit has not published: <see cref="DiedTSN"/> holds its owner's TSN (VIS-09).</summary>
+    internal readonly bool IsDiedPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => (DiedTsnHigh & PendingHighBit) != 0;
+    }
+
+    /// <summary>Either stamp field holds an owner: the record needs the owner's card to be read at a snapshot.</summary>
+    internal readonly bool HasPending
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => ((BornTsnHigh | DiedTsnHigh) & PendingHighBit) != 0;
+    }
+
+    /// <summary>
+    /// <see cref="IsVisibleAt(long)"/> with a pending born resolved through its owner's commit card (VIS-01, VIS-08): visible when the owner is registered
+    /// with a stamp at or below <paramref name="txTsn"/>, or is <paramref name="txTsn"/> itself; a pending died the same way (VIS-09), the entity dead from its
+    /// owner's stamp on. With no card holding the owner the answer is in the live record, not this copy — it was published since, or its commit aborted:
+    /// <paramref name="reread"/> is set, and the caller reads the record again and asks once more; a value still pending then is not committed.
+    /// </summary>
+    internal readonly bool IsVisibleAt(long txTsn, CommitCardTable cards, out bool reread)
+    {
+        reread = false;
+        if (IsBornPending)
+        {
+            var owner = BornTSN & ~PendingBit;
+            if (owner != txTsn)
+            {
+                if (cards == null || !cards.TryGetStamp(owner, out var stamp))
+                {
+                    reread = true;
+                    return false;
+                }
+
+                if (stamp > txTsn)
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            var born = BornTSN;
+            if (born != 0 && born > txTsn)
+            {
+                return false;
+            }
+        }
+
+        if (IsDiedPending)
+        {
+            // Dead at txTsn once its owner's stamp is at or below it; an owner with no card is not committed — unless the live record says otherwise.
+            var owner = DiedTSN & ~PendingBit;
+            if (owner == txTsn)
+            {
+                return false;
+            }
+
+            if (cards == null || !cards.TryGetStamp(owner, out var diedStamp))
+            {
+                reread = true;
+                return true;
+            }
+
+            return diedStamp > txTsn;
+        }
+
+        var died = DiedTSN;
+        return died == 0 || died > txTsn;
     }
 
     /// <summary>

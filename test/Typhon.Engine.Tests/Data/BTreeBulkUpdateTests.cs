@@ -338,7 +338,7 @@ public class BTreeBulkUpdateTests
 
             var seen = new List<int>();
             var neighbour = new List<int>();
-            var e = tree.EnumerateRangeMultiple(Key, Key + 1);
+            using var e = tree.EnumerateRangeMultiple(Key, Key + 1);
             while (e.MoveNext())
             {
                 var target = e.CurrentKey == Key ? seen : neighbour;
@@ -591,7 +591,7 @@ public class BTreeBulkUpdateTests
 
             // And the refusal must leave the buffer intact, which is the half that would have failed before the guard existed.
             var seen = new List<int>();
-            var e = tree.EnumerateRangeMultiple(42, 42);
+            using var e = tree.EnumerateRangeMultiple(42, 42);
             while (e.MoveNext())
             {
                 foreach (var v in e.CurrentValues)
@@ -711,7 +711,7 @@ public class BTreeBulkUpdateTests
             Assert.That(stats.LeavesTouched, Is.LessThan(span.Length), "batching must reach fewer leaves than there are entries");
 
             // Every key in the tree, not just the batch: a partitioning mistake on the multi path shows up as an untouched key having been written.
-            var e = tree.EnumerateRangeMultiple(10, Keys * 10);
+            using var e = tree.EnumerateRangeMultiple(10, Keys * 10);
             var seenKeys = 0;
             while (e.MoveNext())
             {

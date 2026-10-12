@@ -16,6 +16,7 @@ internal ref struct RevisionEnumerator : IDisposable
     private ref int _nextChunkId;
     private readonly bool _exclusiveAccess;
     private readonly bool _ownsLock;
+    private readonly PagedMMF.CaptureTicket _ticket;
     private bool _hasLopped;
     private short _revisionIndex;
 
@@ -64,8 +65,13 @@ internal ref struct RevisionEnumerator : IDisposable
         return true;
     }
 
+    /// <remarks>
+    /// <c>budgetOwner</c> is the transactional read path (CX-06): when set, <c>lockWc</c> is ignored. The lock is first tried without waiting
+    /// (<see cref="AccessControlSmall.TryEnterSharedAccess"/> / <see cref="AccessControlSmall.TryEnterExclusiveAccess"/>), which reads no clock and
+    /// reports no contention; only an acquisition that has to wait composes its budget, from the transaction, at that moment.
+    /// </remarks>
     public unsafe RevisionEnumerator(ref ChunkAccessor<PersistentStore> compRevTableAccessor, int compRevFirstChunkId, bool exclusiveAccess, bool goToFirstItem,
-        WaitContext lockWc)
+        WaitContext lockWc, Transaction budgetOwner = null)
     {
         _compRevTableAccessor = ref compRevTableAccessor;
         _exclusiveAccess = exclusiveAccess;
@@ -74,9 +80,23 @@ internal ref struct RevisionEnumerator : IDisposable
         _ownsLock = !_header.Control.IsLockedByCurrentThread;
         if (_ownsLock)
         {
-            // The chain-lock WaitContext is supplied by the caller — composed ONCE per transaction for reads, or the
-            // infinite PTA context — so Stopwatch.GetTimestamp() is not re-armed per walk. Only consulted under contention.
-            if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+            _ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref _header);
+
+            // The budget is the caller's — the infinite PTA context, a fresh per-call one — or, on the transactional path, composed only if the
+            // uncontended attempt fails (CX-06). Either way it is only consulted under contention.
+            if (budgetOwner != null)
+            {
+                var acquired = _exclusiveAccess ? _header.Control.TryEnterExclusiveAccess() : _header.Control.TryEnterSharedAccess();
+                if (!acquired)
+                {
+                    lockWc = budgetOwner.ChainLockWaitContext();
+                    if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+                    {
+                        ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                    }
+                }
+            }
+            else if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
             {
                 ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
@@ -139,6 +159,7 @@ internal ref struct RevisionEnumerator : IDisposable
         if (_ownsLock)
         {
             _header.Control.Exit(_exclusiveAccess);
+            ComponentRevisionManager.EndChainLockHold(ref _compRevTableAccessor, in _ticket);
         }
     }
 }

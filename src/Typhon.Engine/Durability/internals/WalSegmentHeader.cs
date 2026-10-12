@@ -21,8 +21,8 @@ internal unsafe struct WalSegmentHeader
     /// <summary>Magic number identifying a Typhon WAL file: "TYFW" (TYphon File Wal).</summary>
     public const uint MagicValue = 0x54594657;
 
-    /// <summary>Current WAL format version.</summary>
-    public const uint CurrentVersion = 1;
+    /// <summary>Current WAL format version. 2: a TxCommit record carries its commit stamp after its body (plan 06 step 3.2, VIS-03).</summary>
+    public const uint CurrentVersion = 2;
 
     /// <summary>Total size of this header struct in bytes (one page).</summary>
     public const int SizeInBytes = 4096;

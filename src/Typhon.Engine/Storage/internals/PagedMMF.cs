@@ -578,9 +578,51 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool IsSuspectPage(int filePageIndex) => _suspectPages.ContainsKey(filePageIndex);
 
+    /// <summary>Whether any page failed its checksum and awaits the suspect resolution (RB-04).</summary>
+    internal bool HasSuspectPages => !_suspectPages.IsEmpty;
+
+    private bool _suspectsResolved;
+
+    /// <summary>
+    /// <paramref name="memPageIndices"/> without the pages that failed their checksum and await the suspect resolution (RB-04) — until it ran
+    /// (<see cref="DrainSuspectPages"/>); after it, every page as given.
+    /// </summary>
+    internal int[] WithoutSuspectPages(int[] memPageIndices)
+    {
+        if (Volatile.Read(ref _suspectsResolved) || _suspectPages.IsEmpty)
+        {
+            return memPageIndices;
+        }
+
+        var kept = 0;
+        var copy = memPageIndices;
+        for (var i = 0; i < memPageIndices.Length; i++)
+        {
+            if (IsSuspectPage(GetFilePageIndex(memPageIndices[i])))
+            {
+                if (ReferenceEquals(copy, memPageIndices))
+                {
+                    copy = (int[])memPageIndices.Clone();
+                }
+
+                continue;
+            }
+
+            copy[kept++] = memPageIndices[i];
+        }
+
+        return kept == memPageIndices.Length ? memPageIndices : copy[..kept];
+    }
+
+    /// <summary>A suspect page rewritten whole — a crash open's completion of a torn grow initialized it: nothing of its torn bytes is left to resolve.</summary>
+    internal void ClearSuspectPage(int filePageIndex) => _suspectPages.TryRemove(filePageIndex, out _);
+
     /// <summary>Returns the recorded suspect file pages and clears the set. Called once by recovery after apply+scrub+rebuild to resolve them (heal or loud-fail).</summary>
     internal int[] DrainSuspectPages()
     {
+        // From here no page is held back from a write as suspect: one recorded after the resolution is judged by no one, and held back for the
+        // session it was skipped by the close's flush too — a clean marker over a page that never reached the disk (review of #1304).
+        Volatile.Write(ref _suspectsResolved, true);
         if (_suspectPages.IsEmpty)
         {
             return Array.Empty<int>();
@@ -640,6 +682,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             MemPages = AllocateCacheBlock(memoryAllocator, this, cacheSize);
             _slots = new PageSlotTable(memoryAllocator, this, pageCount);
             _directory = new PageDirectory(memoryAllocator, this, _slots);
+            AllocateCaptureFence(memoryAllocator, pageCount);
         }
         catch (OutOfMemoryException e)
         {
@@ -1093,6 +1136,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // Null-conditional Logger throughout: an early ctor throw (e.g. options.Validate at construction, before Logger
             // is assigned) still registers this node in the resource tree, so Dispose can run on a half-constructed instance.
             Logger?.LogInformation("Disposing Virtual Disk Manager");
+            // The quarantine's release worker frees chunks in this cache: stopped before it goes (a close ends it earlier, EndFreeQuarantine).
+            StopReleaseWorker();
+            _releaseSignal.Dispose();
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);
@@ -1105,6 +1151,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // The table itself is freed with the other child blocks below (base.Dispose); callers arriving later find null (PageSlotTable remarks).
             _slots = null;
             _directory = null;
+            _captureFence = null;
+            _locksHeldThroughCapture = null;
             _memPagesAddr = null;
             _windows = null;
             // Null-safe: an early ctor throw (e.g. the InvalidDatabaseBundle rejection above, raised before the strategy is
@@ -1863,6 +1911,28 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         set => _clockSweepCurrentIndex.Value = value % MemPagesCount;
     }
 
+    /// <summary>
+    /// Non-zero on a thread while a commit publishes, past its WAL append (AP-03): the end of the append, a <see cref="Stopwatch"/> timestamp. Its page
+    /// allocations wait back-pressure out instead of throwing after <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/>, until
+    /// <see cref="TimeoutOptions.CommitPublishBackpressureTimeout"/> after it — one bound for the whole publish, however many allocations it makes.
+    /// A throw there could not roll the commit back, only stop the engine.
+    /// </summary>
+    internal static long PublishSince
+    {
+        get => t_publishSince;
+        set => t_publishSince = value;
+    }
+
+    [ThreadStatic] private static long t_publishSince;
+
+    /// <summary>How many times a publish's allocation outlasted <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> and went on waiting.</summary>
+    internal long PublishBackpressureExtensions => Interlocked.Read(ref _publishBackpressureExtensions);
+
+    private long _publishBackpressureExtensions;
+
+    /// <summary>Test seam: while it returns true, every allocation round finds no slot, a whole lap's worth — back-pressure, on demand.</summary>
+    internal Func<bool> ForceBackpressureForTest;
+
     private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
         CancellationToken cancellationToken = default)
     {
@@ -1909,10 +1979,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             memPageIndex = -1;
             int evictedFilePageIndex = -1;
 
+            var forced = ForceBackpressureForTest != null && ForceBackpressureForTest();
+            if (forced)
+            {
+                cursor = Math.Max(cursor, 0);
+                lapVisits = pageCount;
+            }
+
             // If we already have a MemPage fetch for the FilePage just before the one we allocate, then we try to take the MemPage that follows
             // We request FilePage 123, there's a FilePage 122 allocated to MemPage 34, then we try to allocate 35 for 123, which will allow, if needed,
             //  one file write operation for both pages
-            if (filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
+            if (!forced && filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
             {
                 memPageIndex = prevMemPageIndex + 1;
                 pi = Slot(memPageIndex);
@@ -1930,7 +2007,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (found == false)
             {
                 long attempts = 0;
-                while (attempts < firstPassMax)
+                while (!forced && attempts < firstPassMax)
                 {
                     memPageIndex = AdvanceClockHand();
                     pi = Slot(memPageIndex);
@@ -1953,7 +2030,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                 // Should almost never happen, right. ...right?
                 // But if it is, loop one more time, same thing, but ignoring the ClockSweepCounter, take the first page available
-                if (found == false)
+                if (found == false && !forced)
                 {
                     var visits = attempts;
                     if (cursor < 0)
@@ -2053,9 +2130,25 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         // then a strategy that gives up just does not wait.
                         if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount) && lapComplete)
                         {
-                            ThrowHelper.ThrowPageCacheBackpressureTimeout(
-                                dirtyCount, epochCount,
-                                TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                            // AP-03: past a commit's WAL append, a give-up cannot roll the commit back, only stop the engine. The publish waits on, a
+                            // fresh PageCacheBackpressureTimeout at a time, up to CommitPublishBackpressureTimeout from the end of its append.
+                            var publishSince = t_publishSince;
+                            var limit = TimeoutOptions.Current.CommitPublishBackpressureTimeout;
+                            if (publishSince != 0 && Stopwatch.GetElapsedTime(publishSince) < limit)
+                            {
+                                Interlocked.Increment(ref _publishBackpressureExtensions);
+                                LogPublishBackpressureWaitExtended(Logger, dirtyCount, epochCount, Stopwatch.GetElapsedTime(publishSince).TotalMilliseconds,
+                                    limit.TotalMilliseconds);
+                                bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
+                            }
+                            else
+                            {
+                                ThrowHelper.ThrowPageCacheBackpressureTimeout(
+                                    dirtyCount, epochCount,
+                                    publishSince != 0
+                                        ? Stopwatch.GetElapsedTime(backpressureSince)
+                                        : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                            }
                         }
                     }
                     finally
@@ -2245,7 +2338,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
     
-    public ChangeSet CreateChangeSet() => new(this);
+    /// <param name="drainedByCheckpoint">The set ends by ReleaseDirtyMarks, never SaveChanges: the checkpoint writes its pages (PS-21).</param>
+    public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => new(this) { DrainedByCheckpoint = drainedByCheckpoint };
 
     // ─── ChangeSet pool ────────────────────────────────────────────────────────────────
     // Fence-tick parallel phases create one ChangeSet per chunk (FencePrep + FenceMigrate × chunkCount × tickRate ≈ thousands per second). Pool them via a
@@ -2256,9 +2350,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>
     /// Rent a reusable <see cref="ChangeSet"/> from the per-engine pool, falling back to a fresh allocation when the pool is empty. Caller must call
     /// <see cref="ReturnChangeSet"/> exactly once when done; pages tracked by the rented ChangeSet must have their dirty marks resolved
-    /// (via SaveChangesAsync / ReleaseDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state.
+    /// (via ReleaseDirtyMarks / Reset) BEFORE returning, otherwise the next renter will receive stale state. A rented set is drained by the checkpoint
+    /// (<see cref="ChangeSet.DrainedByCheckpoint"/>): it is never saved.
     /// </summary>
-    public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this);
+    public ChangeSet RentChangeSet() => _changeSetPool.TryTake(out var cs) ? cs : new ChangeSet(this) { DrainedByCheckpoint = true };
 
     /// <summary>
     /// Return a previously-rented <see cref="ChangeSet"/> to the pool. Clears the local tracking buffers via <see cref="ChangeSet.ClearForReuse"/>;
@@ -2595,6 +2690,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Live <see cref="PageInfo.ActiveChunkWriters"/> for a page. Non-zero at quiesce proves a leaked registration.</summary>
     internal int ActiveChunkWritersOf(int memPageIndex) => Volatile.Read(ref Slot(memPageIndex).ActiveChunkWriters);
+
+    /// <summary>Slots an epoch scope holds now — tagged at or after the lowest pinned epoch. Diagnostic, O(cache).</summary>
+    internal int CountEpochProtectedPages()
+    {
+        var minActive = EpochManager.MinActiveEpoch;
+        var n = 0;
+        for (var i = 0; i < MemPagesCount; i++)
+        {
+            if (Volatile.Read(ref Slot(i).AccessEpoch) >= minActive)
+            {
+                n++;
+            }
+        }
+
+        return n;
+    }
 
     /// <summary>Pages holding a writer registration. Must be zero at quiesce (CP-13).</summary>
     internal int CountPagesWithActiveChunkWriters()
@@ -3608,7 +3719,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var genAtCapture = Volatile.Read(ref pi.WritebackGen);
 
             using var staging = stagingPool.Rent();
-            if (!CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex))
+
+            // The copy is the page's image: a lock held while it reads the page goes to disk in it, and its holder learns of it at release (PS-20).
+            BeginCapture(memPageIndex);
+            bool copied;
+            try
+            {
+                copied = CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex);
+            }
+            finally
+            {
+                EndCapture(memPageIndex);
+            }
+
+            if (!copied)
             {
                 // Page has an active writer (via TryLatchPageExclusive) — skip it. The page stays dirty and will be picked up in the next checkpoint cycle.
                 // This prevents deadlock when the writer is blocked on backpressure waiting for THIS checkpoint to free pages.
@@ -3707,6 +3831,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     unsafe internal Task SavePages(int[] memPageIndices)
     {
+        // A suspect page (its checksum failed at a crash open's load) is left owed until the suspect resolution judges it (RB-04): written, its torn
+        // bytes were checksummed again, and the next open served them (#1304).
+        if (HasSuspectPages && !Volatile.Read(ref _suspectsResolved))
+        {
+            memPageIndices = WithoutSuspectPages(memPageIndices);
+            if (memPageIndices.Length == 0)
+            {
+                return Task.CompletedTask;
+            }
+        }
+
         // Synchronous span brackets the setup+kickoff work. The async fsync+decrement completion in the ContinueWith is NOT captured under
         // this span because SpanScope is a ref struct — instead, we emit a separate PageCacheFlushCompleted record from inside the continuation,
         // correlated to this span by SpanId. PageCache.Flush is gated by Storage:PageCache:Enabled in JSON (post-2026-04-30 re-tier — only
@@ -3810,6 +3945,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             return Task.CompletedTask;
         }
 
+        // These pages are written from live memory, read by the OS at any point until the writes complete: each is a capture of its page from here to the
+        // continuation (PS-20). Ended there, or below if the writes cannot be issued.
+        for (int i = 0; i < normalPages.Length; i++)
+        {
+            BeginCapture(normalPages[i]);
+        }
+
         // Stamp every page (file page 0 is the file header, a different format, so it is left alone): bump its ChangeRevision, then stamp identity
         // and checksum so the on-disk copy is self-consistent (CP-07 equivalent for SavePages).
         var filePages = new int[normalPages.Length];
@@ -3848,13 +3990,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         var tasks = new Task[operations.Count];
-        for (int i = 0; i < operations.Count; i++)
+        var issued = 0;
+        try
         {
-            tasks[i] = SavePageInternal(operations[i].memPageIndex, operations[i].length).AsTask();
+            for (; issued < operations.Count; issued++)
+            {
+                tasks[issued] = SavePageInternal(operations[issued].memPageIndex, operations[issued].length).AsTask();
+            }
+        }
+        catch
+        {
+            // The writes already issued still read their pages: their captures end when they complete.
+            Task.WhenAll(tasks.AsSpan(0, issued)).ContinueWith(t =>
+            {
+                _ = t.Exception;   // the throw below reports the failure; an issued write's own is read here, not left unobserved
+                EndCaptures(normalPages);
+            });
+            throw;
         }
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(_ =>
         {
+            EndCaptures(normalPages);
+
             // CP-03: fsync data file before decrementing DirtyCounter.
             // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,
             // risking stale reload after eviction if the OS hasn't flushed to stable media.
@@ -3910,6 +4068,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         runs.Add((start, length));
+    }
+
+    private void EndCaptures(int[] memPageIndices)
+    {
+        for (var i = 0; i < memPageIndices.Length; i++)
+        {
+            EndCapture(memPageIndices[i]);
+        }
     }
 
     internal ValueTask SavePageInternal(int firstMemPageIndex, int length)

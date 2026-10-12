@@ -80,6 +80,13 @@ internal static class DurabilityWatermarks
             mmf.Bootstrap.SetInt(FailedOpenKey, 1);
         });
 
+    /// <summary>
+    /// A close that leaves chunks in no chain (#1268, CK-17): clears the clean flag and the chunk summary's nonce, and sets the failed-open marker, in ONE
+    /// meta flip. The next open recovers — its orphan sweep frees the chunks — and loads its segments strictly, as after an open that never completed
+    /// (CS-04): the close flushed the data file whole, and the WAL holds nothing to refill a segment that fails to load.
+    /// </summary>
+    internal static void MarkSweepOwed(ManagedPagedMMF mmf) => BeginOpenAfterCleanClose(mmf);
+
     /// <summary>Clears the failed-open marker once the open that set it has completed (CS-04): from then on a crash is an ordinary one.</summary>
     internal static void ClearFailedOpen(ManagedPagedMMF mmf) => mmf.MutateBootstrapAndPersist(() => mmf.Bootstrap.SetInt(FailedOpenKey, 0));
 

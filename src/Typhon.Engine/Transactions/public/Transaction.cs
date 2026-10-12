@@ -57,11 +57,6 @@ public unsafe partial class Transaction : EntityAccessor
     // to flush in a single batch (one lock acquire instead of N). Never re-allocated after warmup.
     private List<DeferredCleanupManager.CleanupEntry> _deferredEnqueueBatch;
 
-    // Composed once per transaction (lazily), reused for every revision-chain lock acquisition on the read/resolve path
-    // so Stopwatch.GetTimestamp() is not re-armed per Versioned slot per entity. Reset in Init(). See ChainLockWaitContext().
-    private WaitContext _chainLockWc;
-    private bool _chainLockWcResolved;
-
     // Hoisted accessors for batch index maintenance (set per component type during Commit)
     private ChunkAccessor<PersistentStore>[] _batchIndexAccessors;
     private bool _batchIndexActive;
@@ -88,7 +83,7 @@ public unsafe partial class Transaction : EntityAccessor
 
     // AP-01 (Append-before-publish): the commit pipeline splits each component entry into a PREPARE half (all fallible work — conflict
     // detect/resolve, index/spatial B+Tree mutation, cluster Phase-A index updates, view notify) and a non-throwing PUBLISH half
-    // (IsolationFlag clear + TSN stamp, LCRI/CommitSequence bump, cluster Phase-B HEAD→slot memcpy, handler-lock release). PrepareComponent
+    // (commit stamp + IsolationFlag clear, CommitSequence bump, cluster Phase-B HEAD→slot memcpy, handler-lock release). PrepareComponent
     // records one PublishEntry here; the entries are drained by PublishComponent AFTER the WAL Append, so no change is made visible before
     // its records are appended. ElementRevisionHandle is a ref struct (cannot be stored), so the handle is re-derived in publish from the
     // blittable (FirstChunkId, CurRevisionIndex). Pooled, reused across pooled Transaction lifetimes; cleared after each commit.
@@ -102,9 +97,17 @@ public unsafe partial class Transaction : EntityAccessor
     // publish; 0 otherwise. The checkpoint keeps CheckpointLSN below the lowest one: those records' page effects are not in memory yet.
     private long _inFlightLsnFloor;
 
+    // VIS-03: the commit card this commit holds (-1 none), from its reservation before PREPARE to the end of its publish; and its commit stamp, drawn at
+    // the commit point (0 until then). Reset at the start of each commit (pooled Transaction reuse).
+    private int _commitCardSlot = -1;
+    private long _commitStamp;
+
     /// <summary>The first LSN this transaction's commit appended, while that commit is between its append and the end of its publish; 0 otherwise
     /// (CK-13).</summary>
     internal long InFlightLsnFloor => Volatile.Read(ref _inFlightLsnFloor);
+
+    /// <summary>The commit stamp of this transaction's last commit (VIS-03), drawn at its commit point; 0 before one.</summary>
+    internal long CommitStamp => _commitStamp;
 
     // Drain cursor into _publishEntries: entries [0, _publishDrainIndex) have been fully published (and their retained handler locks released). On a
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
@@ -122,9 +125,11 @@ public unsafe partial class Transaction : EntityAccessor
         public int FirstChunkId;
         public int CurCompContentChunkId;
         public short CurRevisionIndex;
-        public short LastCommitRevisionIndex;
         public bool Created;
         public bool LockHeld;
+
+        // The capture ticket of the hold LockHeld says PREPARE retained (PS-20): ended by whichever path releases it.
+        public PagedMMF.CaptureTicket LockTicket;
 
         // Resolved physical location of the committing revision element, captured in PREPARE so PUBLISH reconstructs the handle without a locking walk.
         public int ElementChunkId;
@@ -134,6 +139,12 @@ public unsafe partial class Transaction : EntityAccessor
         // Cluster Phase-B coordinates resolved by PrepareClusterVersionedSlot (so publish needs no second EntityMap lookup).
         // ClusterCopyPending == true ⇒ a committed HEAD value must be copied into (ArchId, ClusterChunkId, SlotIndex)'s CompSlot.
         public bool ClusterCopyPending;
+
+        // Phase A (#1262): IndexPending == true ⇒ the publish reconciles the archetype's indexes and views for CompSlot, moving the entity (Pk) from the
+        // value of the revision it read (ReadCompChunkId, 0 for none) to the committing one's.
+        public bool IndexPending;
+        public long Pk;
+        public int ReadCompChunkId;
         public ushort ArchId;
         public int ClusterChunkId;
         public byte SlotIndex;
@@ -153,7 +164,24 @@ public unsafe partial class Transaction : EntityAccessor
     internal ushort UowId => OwningUnitOfWork?.UowId ?? 0;
 
     /// <summary>Intrusive link to the next transaction in the engine's transaction chain. Managed by the engine; not intended for external use.</summary>
-    public Transaction Next { get; internal set; }
+    public Transaction Next { get => _link.Next; internal set => _link.Next = value; }
+
+    /// <summary>
+    /// This transaction's node in the chain: the link to the next (older) node and the TSN as the chain's walkers read it (TXC-01), side by side. A cutoff
+    /// walk reads both for every node, and a Transaction is several KiB: <see cref="EntityAccessor.TSN"/> sits 4.5 KiB from where the link would be on
+    /// its own, a second cache line per node.
+    /// </summary>
+    private ChainLink _link;
+
+#pragma warning disable TYPHON005 // A link to another chain node, never owned: the chain removes and disposes nothing through it.
+    private struct ChainLink
+    {
+        public Transaction Next;
+
+        /// <summary>0 while the transaction is in the chain but its TSN is not drawn yet (TXC-01).</summary>
+        public long Tsn;
+    }
+#pragma warning restore TYPHON005
 
     /// <summary>
     /// Number of component operations this transaction carries: the sum of cached entries across every touched component type plus components deleted during
@@ -177,11 +205,11 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, fixes the MVCC
-    /// snapshot at <paramref name="tsn"/>, and selects the commit discipline. Called by the engine when a transaction is created; not for direct use.
+    /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, selects the commit
+    /// discipline, then registers in the transaction chain, which draws the TSN that fixes the MVCC snapshot (TXC-01: in the chain first, then the TSN).
+    /// Called by the engine when a transaction is created; not for direct use.
     /// </summary>
     /// <param name="dbe">Owning database engine.</param>
-    /// <param name="tsn">Transaction sequence number that fixes this transaction's MVCC read snapshot.</param>
     /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
     /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
     /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
@@ -189,23 +217,24 @@ public unsafe partial class Transaction : EntityAccessor
     /// When <see langword="true"/>, the transaction makes and releases its own <see cref="ChangeSet"/> even inside a unit of work that has a shared one: for a
     /// transaction that runs concurrently with others of the same unit of work, whose shared ChangeSet is single-thread-affine (#1116).
     /// </param>
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
+    public void Init(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
         bool ownChangeSet = false)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
-        var initScope = TyphonEvent.BeginDataTransactionInit(tsn, uow?.UowId ?? 0);
-        // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. EnterScope/CreateChangeSet/PushHead are engine-internal.
+        // The TSN is drawn at the end, by the chain (TXC-01); the span carries it, set before the span is emitted.
+        var initScope = TyphonEvent.BeginDataTransactionInit(0, uow?.UowId ?? 0);
+        // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. EnterScope/CreateChangeSet/Register are engine-internal.
         // If a future change adds a throw path, re-tag to variant B.
         _dbe = dbe;
         _epochManager = _dbe.EpochManager;
-        _dbe.LogTxInitPhase(tsn, "entering epoch");
+        _dbe.LogTxInitPhase(0, "entering epoch");
         _ = _epochManager.EnterScope(); // Depth unused: Transaction uses ExitScopeUnordered (not LIFO)
-        _dbe.LogTxInitPhase(tsn, "epoch entered");
+        _dbe.LogTxInitPhase(0, "epoch entered");
         _isDisposed = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
-        _chainLockWcResolved = false;   // recompute the composed chain-lock deadline for this logical transaction
+        ChainLockWaitContextProbe = null;
         _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
         _committedOperationCount = null;
         _deletedComponentCount = 0;
@@ -226,12 +255,22 @@ public unsafe partial class Transaction : EntityAccessor
         // Rented from the engine's pool and returned at dispose, so a per-chunk transaction allocates nothing in steady state.
         _changeSet = readOnly ? null : _ownsChangeSet ? _dbe.MMF.RentChangeSet() : uow.ChangeSet;
         State = TransactionState.Created;
-        TSN = tsn;
 
-        _dbe.TransactionChain.PushHead(this);
+        // TXC-01: in the chain first, its TSN pending (0), then the TSN. A cutoff computed meanwhile waits for it instead of passing this snapshot.
+        _link.Tsn = 0;
+        var tsn = _dbe.TransactionChain.Register(this);
+        TSN = tsn;
+        _dbe.LogTxInitPhase(tsn, "registered");
+        initScope.Tsn = tsn;
         // PROFILING-SPAN-NO-THROW-END
         initScope.Dispose();
     }
+
+    /// <summary>Publishes this transaction's TSN, drawn after it entered the chain (TXC-01). Pairs with <see cref="ReadPublishedTsn"/>.</summary>
+    internal void PublishTsn(long tsn) => Volatile.Write(ref _link.Tsn, tsn);
+
+    /// <summary>This transaction's TSN as another thread may read it: 0 while the creator is between its push and its draw (TXC-01).</summary>
+    internal long ReadPublishedTsn() => Volatile.Read(ref _link.Tsn);
 
     /// <summary>Reset all state for pooling reuse. Called by TransactionChain after unlinking.</summary>
     internal void Reset() => ResetCore();
@@ -255,7 +294,18 @@ public unsafe partial class Transaction : EntityAccessor
         _deletedComponentCount = 0;
         _deferredEnqueueBatch?.Clear();
         _inFlightLsnFloor = 0;
+        _prepareConsumed = false;
+        _pendingUniqueMoves = 0;
     }
+
+    /// <summary>
+    /// Set once a commit's PREPARE has begun on its entries (#1262): from then on the transaction cannot commit again, whether its failed commit's rollback
+    /// succeeded or not — PREPARE consumed each entry's read revision.
+    /// </summary>
+    private bool _prepareConsumed;
+
+    /// <summary>How many of this commit's prepared Versioned writes move a key a unique index covers: <c>ValidatePublishBeforeAppend</c> checks them.</summary>
+    private int _pendingUniqueMoves;
 
     /// <summary>
     /// <see cref="PrepareOpenMut"/> inside a profiling span — the first writable open of an <see cref="ArchetypeAccessor{TArch}"/>. Its later opens run
@@ -476,7 +526,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        var drainSet = _dbe.MMF.CreateChangeSet();
+        var drainSet = _dbe.MMF.CreateChangeSet(drainedByCheckpoint: true);
         try
         {
             _dbe.ProcessEcsCleanups(nextMinTSN, drainSet);
@@ -1038,7 +1088,7 @@ public unsafe partial class Transaction : EntityAccessor
                     }
 
 
-                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN);
+                    var walked = RevisionChainReader.WalkChain(ref _compRevAccessor, chainRoot, _transactionTSN, _tx);
                     if (walked.IsFailure || walked.Value.CurCompContentChunkId == 0)
                     {
                         continue;   // not visible at this snapshot, or tombstoned
@@ -1248,8 +1298,18 @@ public unsafe partial class Transaction : EntityAccessor
         ref var compRevInfo = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var exists);
         if (!exists)
         {
-            // Couldn't find in the cache, get it from the index
-            var result = GetCompRevInfoFromIndex(pk, info, TSN);
+            // Couldn't find in the cache, get it from the index. A throw (the walk's lock timeout) takes the entry with it, as a failure does below.
+            Result<ComponentInfo.CompRevInfo, RevisionReadStatus> result;
+            try
+            {
+                result = GetCompRevInfoFromIndex(pk, info, TSN);
+            }
+            catch
+            {
+                info.SingleCache.Remove(pk);
+                throw;
+            }
+
             if (result.IsFailure)
             {
                 // NotFound, SnapshotInvisible, or Deleted — all mean no readable component. Remove the default entry that GetValueRefOrAddDefault added to
@@ -1419,8 +1479,7 @@ public unsafe partial class Transaction : EntityAccessor
             return false;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(fullBuf);
-        return header.IsVisibleAt(TSN);
+        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref _entityMapCacheAccessor, _epochManager);
     }
 
     private Result<int, BTreeLookupStatus> GetCompRevTableFirstChunkId(long pk, ComponentInfo info)
@@ -1434,7 +1493,7 @@ public unsafe partial class Transaction : EntityAccessor
         int chunkId = ResolveEntityMapSlotChunkId(pk, info);
         if (chunkId != 0)
         {
-            return RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chunkId, TSN);
+            return RevisionChainReader.WalkChain(ref info.CompRevTableAccessor, chunkId, TSN, this);
         }
         return new Result<ComponentInfo.CompRevInfo, RevisionReadStatus>(RevisionReadStatus.NotFound);
     }
@@ -1448,23 +1507,35 @@ public unsafe partial class Transaction : EntityAccessor
         => WaitContext.FromDeadline(Deadline.Min(ctx.WaitContext.Deadline, Deadline.FromTimeout(subsystemTimeout)));
 
     /// <summary>
-    /// The <see cref="WaitContext"/> used to acquire a revision-chain lock while READING (resolve/walk), composed ONCE
-    /// per transaction as the tighter of the owning UoW deadline and <c>RevisionChainLockTimeout</c>. Caching it collapses
-    /// the per-walk <c>Stopwatch.GetTimestamp()</c> — previously paid for every Versioned slot of every entity opened — to
-    /// a single QPC per transaction. The deadline is only consulted under lock contention, so a transaction-scoped budget
-    /// is an adequate (and stricter) liveness backstop than a fresh per-acquisition one.
+    /// The <see cref="WaitContext"/> for ONE revision-chain lock acquisition while reading (resolve/walk): the tighter of the owning UoW's deadline and
+    /// <c>RevisionChainLockTimeout</c> from now. Composed per acquisition, and only when that acquisition has to wait: the single-entry fast path takes
+    /// no lock, and the locked walk first tries the lock without waiting (<c>AccessControlSmall.TryEnterSharedAccess</c>), which reads no clock
+    /// (<see cref="RevisionChainReader.WalkChain(ref ChunkAccessor{PersistentStore}, int, long, Transaction)"/>, <see cref="RevisionEnumerator"/>).
     /// </summary>
+    /// <remarks>
+    /// Never cached for the transaction (CX-06). It was, to save a <c>Stopwatch.GetTimestamp()</c> per walk: the budget then ran from the transaction's
+    /// first locked walk, so once the transaction was older than the timeout every contended walk threw at once — a reader holding its snapshot past
+    /// 5 s failed on its first wait (MarketHardeningTests' long readers, on the desks' chains).
+    /// </remarks>
     internal WaitContext ChainLockWaitContext()
     {
-        if (!_chainLockWcResolved)
+        if (ChainLockWaitContextProbe is { } probe)
         {
-            _chainLockWc = OwningUnitOfWork != null
-                ? OwningUnitOfWork.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
-                : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
-            _chainLockWcResolved = true;
+            return probe();
         }
-        return _chainLockWc;
+
+        // A unit of work already disposed has no deadline left to compose with (and its token source is gone): the lock's own budget applies.
+        return OwningUnitOfWork is { IsDisposed: false } uow
+            ? uow.CreateContext(TimeoutOptions.Current.RevisionChainLockTimeout).WaitContext
+            : WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
     }
+
+    /// <summary>
+    /// Test seam (CX-06): when set, supplies the chain-lock budget in place of <see cref="ChainLockWaitContext"/>'s own, so the rule's mutant can bring
+    /// back a budget cached for the transaction and show the verifier rejects it. Cleared by <c>Init</c>. Null in production: one null check per locked
+    /// walk, none on the single-entry fast path.
+    /// </summary>
+    internal Func<WaitContext> ChainLockWaitContextProbe { get; set; }
 
     /// <summary>
     /// Rolls back a single component revision: frees content chunks, voids revision entries, and enqueues for deferred cleanup.
@@ -1482,44 +1553,42 @@ public unsafe partial class Transaction : EntityAccessor
 
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
-        // Get the chunk storing the revision we want to roll back as well as the index of the element
-        var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        _dbe.ChainVoidProbe?.Invoke(info.ComponentTable, firstChunkId);
 
-        // Validate CurRevisionIndex — chain compaction by another transaction's cleanup may have
-        // shifted entry positions since our read. Best-effort (no lock).
-        if (elementHandle.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
-        {
-            var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
-            if (fixedIndex >= 0)
-            {
-                compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
-            }
-        }
-
-        // Free the chunk storing the content (if any) — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a copy-on-write or
-        // a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone. It was left
-        // set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one payload.
-        if (compRevInfo.CurCompContentChunkId != 0)
-        {
-            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId);
-            compRevInfo.CurCompContentChunkId = 0;
-        }
-
-        // If we roll back a created component, we must delete the revision table chunk
+        // If we roll back a created component, we must delete the revision table chunk. No other transaction can reach a chain this one created.
         if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) == ComponentInfo.OperationType.Created)
         {
-            revTableSegment.FreeChunk(firstChunkId);
+            // A root of 0: an earlier pass of this rollback freed the chain, then threw on a later entry, and this is the retry (Dispose). The entry
+            // leaves the cache only once the whole pass is done, so the retry meets it again; freeing the root twice took the chain of whoever had been
+            // given the chunk in between (REAP-02).
+            if (firstChunkId != 0)
+            {
+                FreeOwnContentChunk(info, ref compRevInfo);
+                revTableSegment.FreeChunk(firstChunkId);
+                compRevInfo.CompRevTableFirstChunkId = 0;
+            }
 
             // Early exit: the RevTable chunk is gone — continuing would access freed memory.
             return true;
         }
 
-        // In case of update or delete, mark void the revision entry we added
+        // In case of update or delete, void the revision entry we added (CHAIN-01): under the chain's exclusive lock, found by its identity — a compaction
+        // may have moved it, and another transaction's revision may now sit where it was, or after it. Its content chunk is freed only when the entry was
+        // this transaction's: when the first write failed before adding one, CurCompContentChunkId still names the committed revision's chunk (#1252).
         if ((compRevInfo.Operations & (ComponentInfo.OperationType.Updated | ComponentInfo.OperationType.Deleted)) != 0)
         {
-            compRev.VoidElement(elementHandle);
+            if (_dbe.RollbackVoidsRecordedIndexForTest)
+            {
+                new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId)
+                    .VoidElement(ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, firstChunkId, compRevInfo.CurRevisionIndex));
+                FreeOwnContentChunk(info, ref compRevInfo);
+            }
+            else if (ComponentRevisionManager.VoidOwnPendingEntry(info, firstChunkId, compRevInfo.CurCompContentChunkId, TSN, compRevInfo.CurRevisionIndex))
+            {
+                FreeOwnContentChunk(info, ref compRevInfo);
+            }
+
+            compRevInfo.CurCompContentChunkId = 0;
         }
 
         // Enqueue for deferred cleanup
@@ -1540,27 +1609,53 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Detects write-write conflicts and resolves them via handler invocation or "last wins" semantics.
-    /// Must be called inside the per-entity revision chain lock (when handler is provided) or outside (last-wins path).
+    /// Frees the content chunk this transaction's revision named — this rollback is its one owner (REAP-02). CC-aware, for the collection buffers a
+    /// copy-on-write or a spawn took a reference on; and the id cleared, which is what tells CleanupEcsState, at the reset that follows, that it is gone.
+    /// It was left set, and that cleanup freed it a second time: harmless only until another thread took the chunk in between, then two owners of one
+    /// payload.
+    /// </summary>
+    private static void FreeOwnContentChunk(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo)
+    {
+        if (compRevInfo.CurCompContentChunkId != 0)
+        {
+            DeferredCleanupManager.FreeContentChunk(info.ComponentTable, compRevInfo.CurCompContentChunkId, neverCommitted: true);
+            compRevInfo.CurCompContentChunkId = 0;
+        }
+    }
+
+    /// <summary>
+    /// Detects write-write conflicts and resolves them through the handler, under the chain lock PREPARE holds since it took it; without a handler the
+    /// last writer wins and there is nothing to resolve.
     /// </summary>
     /// <remarks>
-    /// Two complementary checks for the handler path:
-    /// <list type="number">
-    /// <item>CommitSequence: detects any commit since our read (monotonic counter, immune to revision index ordering and cleanup compaction).</item>
-    /// <item>Invisible-commit TSN check: detects committed entries by higher-TSN transactions invisible to our snapshot.</item>
-    /// </list>
-    /// Without handler: uses the original index-based check as best-effort for "last wins".
+    /// With a handler, a conflict is a revision another transaction committed past this writer's snapshot (plan 06 §3.10): published with a stamp above
+    /// <paramref name="tsn"/>, or flagged by a committer registered on its commit card with one — past its commit point, not yet published, which a
+    /// CommitSequence test misses (it is bumped at publish). Chain position is no version order (VIS-05), so the old test of the last commit's index is
+    /// gone.
+    /// <para>
+    /// Without a handler the conflict is only counted: a CommitSequence changed since the read. This transaction's entry needs no relocation — its stamp is
+    /// drawn at its commit point, after the commit it lost to published, so it is the newest revision by stamp wherever it sits in the chain (VIS-05), a
+    /// tombstone as well as a value. Before option C the entry had to be re-added at the chain's end, under the chain lock, with a copy of its content.
+    /// </para>
     /// </remarks>
-    private static void DetectAndResolveConflict(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, 
-        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short lastCommitRevisionIndex, int readCompChunkId, 
-        bool lockHeld, long tsn, ushort uowId, DatabaseEngine dbe)
+    private static void DetectAndResolveConflict(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, int readCompChunkId, long tsn, ushort uowId,
+        DatabaseEngine dbe)
     {
         var conflictSolver = context.Solver;
 
-        var hasConflict = (conflictSolver != null) ? 
-            compRev.CommitSequence != compRevInfo.ReadCommitSequence || 
-            (lastCommitRevisionIndex >= 0 && compRev.GetRevisionElement(lastCommitRevisionIndex).Element.TSN > tsn) : 
-            lastCommitRevisionIndex >= compRevInfo.CurRevisionIndex;
+        short newestIndex = -1;
+        bool hasConflict;
+        if (conflictSolver != null)
+        {
+            newestIndex = ComponentRevisionManager.FindNewestByStamp(ref info.CompRevTableAccessor, compRevInfo.CompRevTableFirstChunkId, dbe?.CommitCards,
+                tsn, out var newestStamp);
+            hasConflict = newestStamp > tsn;
+        }
+        else
+        {
+            hasConflict = compRev.CommitSequence != compRevInfo.ReadCommitSequence;
+        }
 
         if (!hasConflict)
         {
@@ -1572,94 +1667,86 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Phase 6: Data:Transaction:Conflict instant. componentTypeId left as 0 — the enclosing
         // TransactionCommitComponent span (kind 22) carries the typeId, so the viewer correlates by parent.
-        // conflictType encodes which detection path fired: 0 = handler-based (sequence/lcri), 1 = index-based fallback.
+        // conflictType encodes which detection path fired: 0 = handler-based (by stamp), 1 = handler-less (CommitSequence changed).
         var conflictType = (byte)(conflictSolver != null ? 0 : 1);
         TyphonEvent.EmitDataTransactionConflict(tsn, pk, 0, conflictType);
 
-        // Save the orphan index before AddCompRev changes CurRevisionIndex
-        var conflictOrphanIndex = compRevInfo.CurRevisionIndex;
+        if (conflictSolver != null)
+        {
+            ResolveConflictUnderLock(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, newestIndex, readCompChunkId, tsn, uowId);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DetectAndResolveConflict"/>'s resolution, under the chain's exclusive lock PREPARE holds: a new revision carrying this transaction's value
+    /// resolved by the handler against <paramref name="newestIndex"/>, the newest revision by stamp, and this transaction's first entry, the orphan, voided
+    /// where it now is.
+    /// </summary>
+    private static void ResolveConflictUnderLock(ref CommitContext context, long pk, ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo,
+        ComponentRevision compRev, ref ComponentRevisionManager.ElementRevisionHandle elementHandle, short newestIndex, int readCompChunkId,
+        long tsn, ushort uowId)
+    {
+        var conflictSolver = context.Solver;
+        ref var accessor = ref info.CompRevTableAccessor;
+        var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
+
+        // The orphan, found by identity: a compaction may have moved it since CurRevisionIndex was recorded.
+        var orphanChunkId = compRevInfo.CurCompContentChunkId;
+        var conflictOrphanIndex = ComponentRevisionManager.FindOwnPendingEntry(ref accessor, firstChunkId, orphanChunkId, tsn, compRevInfo.CurRevisionIndex);
+        if (conflictOrphanIndex < 0)
+        {
+            ThrowHelper.ThrowInvalidOp("DetectAndResolveConflict: the transaction's revision entry is not in its chain");
+        }
+
+        compRevInfo.CurRevisionIndex = conflictOrphanIndex;
 
         // A destroy wins the conflict as a destroy: a fresh tombstone after the commit it lost to, ours voided. There is no payload to carry over and nothing
         // for a handler to resolve — the generic path below would publish a LIVE revision copied from chunk 0 (REAP-02).
-        if (compRevInfo.CurCompContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
+        if (orphanChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
         {
-            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, lockHeld);
+            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
+            ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);   // before anything that can throw (CHAIN-01)
             elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-            compRev.GetRevisionElement(conflictOrphanIndex).Element.Void();
             return;
         }
 
-        // Create a new revision for the resolved data (under existing lock when handler is provided)
-        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, lockHeld);
+        // Create a new revision for the resolved data, under the lock
+        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
 
-        // Copy the dirty-write data to the new revision as starting point
-        var dstChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
-        var srcChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.PrevCompContentChunkId);
-        var sizeToCopy = info.ComponentTable.ComponentTotalSize;
-        new Span<byte>(srcChunk, sizeToCopy).CopyTo(new Span<byte>(dstChunk, sizeToCopy));
-
-        // Update elementHandle to point to the new revision
-        elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-
-        // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
-        if (conflictSolver != null)
+        // The orphan is voided as soon as the new entry exists, before anything that can throw — the copy's page access, the handler: a throw aborts the
+        // commit, whose rollback finds only the new entry, and left isolated the orphan would stay so for good (no compaction passes an isolated entry).
+        // Its content chunk is the copy's source and the handler's committing value, so it is freed last, whatever happens; the new revision's copy took
+        // the collection buffers it named.
+        ComponentRevisionManager.VoidEntry(ref accessor, firstChunkId, conflictOrphanIndex);
+        try
         {
-            var lastCommitHandle = compRev.GetRevisionElement(lastCommitRevisionIndex);
+            // Copy the dirty-write data to the new revision as starting point
+            var dstChunk = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
+            var srcChunk = info.CompContentAccessor.GetChunkAddress(orphanChunkId);
+            var sizeToCopy = info.ComponentTable.ComponentTotalSize;
+            new Span<byte>(srcChunk, sizeToCopy).CopyTo(new Span<byte>(dstChunk, sizeToCopy));
+
+            // Update elementHandle to point to the new revision
+            elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+
+            // Invoke the handler to resolve the conflict (under lock, so committedData is guaranteed fresh)
+            var lastCommitHandle = compRev.GetRevisionElement(newestIndex);
             var overhead = info.ComponentTable.ComponentOverhead;
             var readChunkAddr = info.CompContentAccessor.GetChunkAddress(readCompChunkId) + overhead;
-            var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.PrevCompContentChunkId) + overhead;
+            var committingChunkAddr = info.CompContentAccessor.GetChunkAddress(orphanChunkId) + overhead;
             var toCommitChunkAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead;
             var committedChunkAddr = info.CompContentAccessor.GetChunkAddress(lastCommitHandle.Element.ComponentChunkId) + overhead;
 
             conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr);
             context.Handler(ref conflictSolver);
         }
-
-        // Void the orphaned entry at the old position and free its content chunk
-        var conflictOrphan = compRev.GetRevisionElement(conflictOrphanIndex);
-        if (conflictOrphan.Element.ComponentChunkId > 0)
+        finally
         {
-            info.CompContentSegment.FreeChunk(conflictOrphan.Element.ComponentChunkId);
+            if (orphanChunkId > 0)
+            {
+                info.CompContentSegment.FreeChunk(orphanChunkId);
+            }
         }
-        conflictOrphan.Element.Void();
-    }
-
-    /// <summary>
-    /// Relocates a revision entry to the end of the chain when our entry is at or behind LCRI.
-    /// This happens when a later-created transaction committed at a higher index — without relocation,
-    /// the chain walk would shadow our value with the older commit at the higher index.
-    /// </summary>
-    /// <remarks>Must be called under the per-entity revision chain exclusive lock.</remarks>
-    private static ComponentRevisionManager.ElementRevisionHandle RelocateRevisionEntry(
-        ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, ComponentRevision compRev, long tsn, ushort uowId)
-    {
-        // Save the chunk that holds our modified data
-        var oldContentChunkId = compRevInfo.CurCompContentChunkId;
-
-        // A tombstone moves as a tombstone: nothing to copy, nothing to free (REAP-02). Relocated as data, it would publish a live revision copied from — and
-        // then free — chunk 0.
-        if (oldContentChunkId == 0 && (compRevInfo.Operations & ComponentInfo.OperationType.Deleted) != 0)
-        {
-            ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, true, true);
-            compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
-            return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-        }
-
-        // Create new entry at end of chain (under existing lock)
-        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, tsn, uowId, false, true);
-
-        // Copy our data to the new content chunk
-        var srcAddr = info.CompContentAccessor.GetChunkAddress(oldContentChunkId);
-        var dstAddr = info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true);
-        new Span<byte>(srcAddr, info.ComponentTable.ComponentTotalSize)
-            .CopyTo(new Span<byte>(dstAddr, info.ComponentTable.ComponentTotalSize));
-
-        // Free the old content chunk and void the orphaned entry. The old entry at PrevRevisionIndex retains
-        // IsolationFlag=true which blocks deferred cleanup compaction. Voiding it makes it a harmless placeholder.
-        info.CompContentSegment.FreeChunk(oldContentChunkId);
-        compRev.GetRevisionElement(compRevInfo.PrevRevisionIndex).Element.Void();
-
-        return compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
     }
 
     /// <summary>Action struct for commit PREPARE iteration: delegates to <see cref="PrepareComponent"/>.</summary>
@@ -1680,7 +1767,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// PREPARE half of the AP-01 commit split: all fallible work for one component revision — acquires the revision chain lock (when a handler is
     /// provided; the lock is RETAINED for <see cref="PublishComponent"/> so detect→publish stays atomic for concurrent conflict resolution), detects
     /// and resolves write-write conflicts, mutates secondary/spatial/cluster (Phase-A) indexes, and notifies views — then records a
-    /// <see cref="PublishEntry"/>. It does NOT clear IsolationFlag, does NOT bump LCRI/CommitSequence, and does NOT copy to the cluster slot: those are
+    /// <see cref="PublishEntry"/>. It does NOT clear IsolationFlag, does NOT bump CommitSequence, and does NOT copy to the cluster slot: those are
     /// the visibility acts, deferred to PublishComponent AFTER the WAL Append (AP-01: append before publish).
     /// </summary>
     private void PrepareComponent(ref CommitContext context)
@@ -1693,7 +1780,6 @@ public unsafe partial class Transaction : EntityAccessor
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
         var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var lastCommitRevisionIndex = compRev.LastCommitRevisionIndex;
         var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
 
         // Validate CurRevisionIndex — chain compaction may have shifted entry positions since our read
@@ -1714,45 +1800,43 @@ public unsafe partial class Transaction : EntityAccessor
         // AP-01: the lock is RETAINED past Append and released by PublishComponent, so [detect, resolve-against-committed, IsolationFlag clear] is
         // one atomic region — required for concurrent conflict resolution to compose (ConcurrencyConflictTests #8).
         var lockHeld = false;
-        if (conflictSolver != null)
-        {
-            ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
-            var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
-            if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
-            {
-                ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
-            }
-            lockHeld = true;
-            lastCommitRevisionIndex = lockHeader.LastCommitRevisionIndex;
-
-            // Re-validate CurRevisionIndex under lock (race-free)
-            var curElement = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
-            if (curElement.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
-            {
-                var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(
-                    ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
-                if (fixedIndex < 0)
-                {
-                    ThrowHelper.ThrowInvalidOp("PrepareComponent: revision entry lost after chain compaction");
-                }
-                compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
-            }
-
-            // Relocate if our entry is at or behind LCRI
-            if (lastCommitRevisionIndex >= 0 && compRevInfo.CurRevisionIndex <= lastCommitRevisionIndex)
-            {
-                elementHandle = RelocateRevisionEntry(info, ref compRevInfo, compRev, TSN, UowId);
-            }
-        }
-
+        var lockTicket = default(PagedMMF.CaptureTicket);
         var publishRecorded = false;
         try
         {
-            DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev,
-                ref elementHandle, lastCommitRevisionIndex, readCompChunkId, lockHeld, TSN, UowId, _dbe);
+            // Inside the try (#1278): from the lock on, a throw — the re-validation's, the conflict resolution's — reaches the finally, which releases
+            // the lock while no publish entry owns it.
+            if (conflictSolver != null)
+            {
+                ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+                lockTicket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref lockHeader);
+                var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+                if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
+                {
+                    ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
+                }
+                lockHeld = true;
+                _dbe.PrepareRetainedLockProbe?.Invoke();
 
-            // Maintain indices/spatial (fallible PREPARE work). The visibility acts — IsolationFlag clear, LCRI/CommitSequence bump, cluster HEAD copy —
+                // Re-validate CurRevisionIndex under lock (race-free)
+                var curElement = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+                if (curElement.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
+                {
+                    var fixedIndex = ComponentRevisionManager.FindRevisionIndexByChunkId(
+                        ref compRevTableAccessor, firstChunkId, compRevInfo.CurCompContentChunkId, TSN);
+                    if (fixedIndex < 0)
+                    {
+                        ThrowHelper.ThrowInvalidOp("PrepareComponent: revision entry lost after chain compaction");
+                    }
+                    compRevInfo.CurRevisionIndex = fixedIndex;
+                    elementHandle = compRev.GetRevisionElement(fixedIndex);
+                }
+            }
+
+            // No relocation to the chain's end (plan 06 §3.3): the newest revision is the highest stamp wherever it sits (VIS-05).
+            DetectAndResolveConflict(ref context, pk, info, ref compRevInfo, compRev, ref elementHandle, readCompChunkId, TSN, UowId, _dbe);
+
+            // Maintain indices/spatial (fallible PREPARE work). The visibility acts — the stamp and IsolationFlag clear, CommitSequence bump, cluster HEAD copy —
             // are deferred to PublishComponent (AP-01). Cluster entities use per-archetype B+Trees/R-Trees, NOT per-ComponentTable shared indexes.
             var archId = EntityId.FromRaw(pk).ArchetypeId;
             var commitMeta = _dbe.GetMetaByRouting(archId);
@@ -1775,13 +1859,28 @@ public unsafe partial class Transaction : EntityAccessor
             // Cluster path — Phase A only here (per-archetype B+Tree index updates + view notify). Phase B (HEAD→cluster slot copy) is the
             // visibility act, deferred to PublishComponent.
             //
-            // The exemption is PENDING SPAWNS, not the Created flag. FinalizeSpawns does the cluster copy for entities spawned in this transaction, so
+            // The exemption is PENDING SPAWNS, not the Created flag. PlaceSpawns does the cluster copy for entities spawned in this transaction, so
             // repeating it here would be redundant — but since #845 a component can also be CREATED mid-life on an already-published entity, via
             // EntityRefMut.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
             // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
             bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
-                out clusterCopyPending, out clusterChunkId, out slotIndex, out compSlot);
+                out clusterCopyPending, out var indexPending, out clusterChunkId, out slotIndex, out compSlot);
+            if (indexPending && (_dbe._stateByRouting[archId].ClusterState.UniqueIndexedSlots & (1 << compSlot)) != 0)
+            {
+                _pendingUniqueMoves++;
+            }
+
+            if (indexPending && _dbe.PrepareReconcilesIndexesForTest)
+            {
+                // AP-07's mutant: the pre-#1262 order, Phase A in PREPARE.
+                PublishClusterIndexes(new PublishEntry
+                {
+                    Info = info, CurCompContentChunkId = compRevInfo.CurCompContentChunkId, ArchId = archId, ClusterChunkId = clusterChunkId,
+                    SlotIndex = slotIndex, CompSlot = compSlot, Pk = pk, ReadCompChunkId = readCompChunkId,
+                });
+                indexPending = false;
+            }
 
             // Periodic flush: bound dirty counter inflation for large transactions
             if (_batchIndexActive && (++_batchEntityCount & 0x3FF) == 0)
@@ -1808,13 +1907,16 @@ public unsafe partial class Transaction : EntityAccessor
                 FirstChunkId = firstChunkId,
                 CurCompContentChunkId = compRevInfo.CurCompContentChunkId,
                 CurRevisionIndex = compRevInfo.CurRevisionIndex,
-                LastCommitRevisionIndex = lastCommitRevisionIndex,
                 Created = (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0,
                 LockHeld = lockHeld,
+                LockTicket = lockTicket,
                 ElementChunkId = elementHandle.ChunkId,
                 ElementIsFirst = elementHandle.IsFirst,
                 ElementIndexInChunk = elementHandle.ElementIndex,
                 ClusterCopyPending = clusterCopyPending,
+                IndexPending = indexPending,
+                Pk = pk,
+                ReadCompChunkId = readCompChunkId,
                 ArchId = archId,
                 ClusterChunkId = clusterChunkId,
                 SlotIndex = slotIndex,
@@ -1830,6 +1932,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
                 lockHeader.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in lockTicket);
             }
         }
 
@@ -1849,7 +1952,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>
     /// PUBLISH half of the AP-01 commit split: makes one prepared component revision visible. Non-throwing by construction (AP-03) — re-derives the
     /// revision handle (an <see cref="ComponentRevisionManager.ElementRevisionHandle"/> is a ref struct and cannot be carried across the Append), stamps
-    /// TSN + clears IsolationFlag (the publication act), bumps LCRI/CommitSequence, copies the committed HEAD value into the cluster slot (Phase B), and
+    /// the commit stamp + clears IsolationFlag (the publication act), bumps CommitSequence, copies the committed HEAD value into the cluster slot (Phase B), and
     /// releases the per-entity revision-chain lock retained by <see cref="PrepareComponent"/>. MUST run only after the transaction's WAL Append.
     /// </summary>
     private void PublishComponent(in PublishEntry e)
@@ -1859,6 +1962,14 @@ public unsafe partial class Transaction : EntityAccessor
         _dbe.PublishComponentProbe?.Invoke(info.ComponentTable, e.FirstChunkId);
 
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
+
+        // Phase A (#1262): the indexes and views, before the stamp — and before taking the chain lock, which readers of this entity then do not wait out
+        // through an index update (a page-cache back-pressure wait included). PREPARE did it unlocked too; a conflict-handler commit still holds the lock.
+        if (e.IndexPending)
+        {
+            PublishClusterIndexes(in e);
+            _dbe.PublishAfterIndexesProbe?.Invoke();
+        }
 
         // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here
         // a cleanup on another thread can compact this chain: CleanUpUnusedEntries rewrites every kept entry from index 0, the still-isolated one included.
@@ -1871,13 +1982,16 @@ public unsafe partial class Transaction : EntityAccessor
         // a chain that has a pending entry, and AccessControlSmall gives a waiting writer no preference: an entity read without pause can delay this publish
         // for as long as the reads overlap. It does not deadlock — a reader holds no lock this transaction waits for — but the delay is not bounded.
         var lockTaken = false;
+        var ticket = e.LockTicket;
         if (!e.LockHeld)
         {
+            ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
             var unbounded = new WaitContext(Deadline.Infinite, default);
             header.Control.EnterExclusiveAccess(ref unbounded);
             lockTaken = true;
         }
 
+        var completed = false;
         try
         {
             // Reconstruct the revision handle from the coordinates resolved in PREPARE. Held since PREPARE (handler path), the lock kept every compaction
@@ -1894,10 +2008,12 @@ public unsafe partial class Transaction : EntityAccessor
                 if (found < 0)
                 {
                     // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
-                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing is published: no stamp, no LCRI, no
-                    // cluster copy. The commit is lost either way; this keeps it from taking a neighbour down with it, and says so.
+                    // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing more is published: no stamp, no CommitSequence,
+                    // no cluster copy. (Phase A, run above, has moved the index for it, as it did from PREPARE before #1262.) The commit is lost either way;
+                    // this keeps it from taking a neighbour down with it, and says so.
                     Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
                     _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
+                    completed = true;
                     return;
                 }
 
@@ -1905,31 +2021,35 @@ public unsafe partial class Transaction : EntityAccessor
                 elementHandle = ComponentRevisionManager.GetRevisionElement(ref compRevTableAccessor, e.FirstChunkId, found);
             }
 
-            elementHandle.Commit(TSN);   // THE publication act: TSN stamp + IsolationFlag clear
+            Debug.Assert(_commitStamp != 0, "VIS-04: a revision published before its commit stamp was drawn");
+            elementHandle.Publish(_commitStamp);   // THE publication act: the commit stamp replaces the owner's TSN, IsolationFlag cleared (VIS-04)
+            _dbe.PublishUnderLockProbe?.Invoke();
 
-            // LCRI / CommitSequence bookkeeping, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it. Read from
-            // the live header: a compaction since PREPARE renumbered the entries, and under a lock held since PREPARE it is the recorded value anyway.
-            var previousLastCommit = header.LastCommitRevisionIndex;
-            header.LastCommitRevisionIndex = Math.Max(previousLastCommit, revisionIndex);
+            // The revision number, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it.
             if (!e.Created)
             {
                 header.CommitSequence++;
             }
 
             // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
-            // is the newest committed one. Two transactions updating one entity can publish in the opposite order to their revisions; copying outside the
-            // lock let the older one land last, leaving the slot behind the chain's HEAD, and let two copies interleave into one slot.
-            if (e.ClusterCopyPending && revisionIndex >= previousLastCommit)
+            // is the newest published one by stamp (VIS-05). Two transactions updating one entity publish in either order of their stamps: the later
+            // publish of the older stamp must not land in the slot. A writer still unpublished copies at its own publish if its stamp is the higher.
+            if (e.ClusterCopyPending && _commitStamp > ComponentRevisionManager.HighestPublishedStamp(ref compRevTableAccessor, e.FirstChunkId, revisionIndex))
             {
                 PublishClusterVersionedSlot(e);
             }
+
+            completed = true;
         }
         finally
         {
-            // Both forms released here: the one taken above, and the one PrepareComponent retained (handler path), which nothing else releases.
-            if (lockTaken || e.LockHeld)
+            // The lock taken above, always. The one PrepareComponent retained (handler path) only on a normal exit: on a throw the drain's cursor has not
+            // passed this entry, and ReleaseRetainedPublishLocks — the abort path — releases it. Released here too, it was released twice, and the second
+            // release's InvalidOperationException replaced the CommitPublishIncompleteException (AP-03).
+            if (lockTaken || (e.LockHeld && completed))
             {
                 header.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
         }
     }
@@ -1957,10 +2077,27 @@ public unsafe partial class Transaction : EntityAccessor
 
         // Advance the cursor only after each entry is FULLY published (PublishComponent releases its retained lock last), so a mid-drain throw leaves
         // [_publishDrainIndex, Count) for the abort path to release — never double-releasing an already-published entry's lock.
-        while (_publishDrainIndex < _publishEntries.Count)
+        //
+        // Batch mode, as PREPARE's pass: the index moves made here since #1262 (Phase A) return their B+Tree warm accessors without a CommitChanges each,
+        // and one flush per 1 024 entries, and at the end, registers their dirty pages. The end is before CK-13's floor is withdrawn, so a checkpoint
+        // that passes these records collects those pages. Unlike PREPARE's flush, this one does not release the ChangeSet's dirty marks mid-publish.
+        ChunkBasedSegment<PersistentStore>.EnterBatchMode();
+        try
         {
-            PublishComponent(_publishEntries[_publishDrainIndex]);
-            _publishDrainIndex++;
+            while (_publishDrainIndex < _publishEntries.Count)
+            {
+                PublishComponent(_publishEntries[_publishDrainIndex]);
+                _publishDrainIndex++;
+                if ((_publishDrainIndex & 0x3FF) == 0)
+                {
+                    ChunkBasedSegment<PersistentStore>.ExitBatchMode();
+                    ChunkBasedSegment<PersistentStore>.EnterBatchMode();
+                }
+            }
+        }
+        finally
+        {
+            ChunkBasedSegment<PersistentStore>.ExitBatchMode();
         }
 
         // Cluster Phase-B may have created lazy-cached accessors during this drain — release them.
@@ -1989,6 +2126,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 ref var lockHeader = ref e.Info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId);
                 lockHeader.Control.ExitExclusiveAccess();
+                ComponentRevisionManager.EndChainLockHold(ref e.Info.CompRevTableAccessor, in e.LockTicket);
             }
         }
 
@@ -1997,16 +2135,18 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// PREPARE half of the cluster commit (AP-01): updates per-archetype B+Tree indexes (Phase A) and notifies views, and resolves the cluster-slot
-    /// coordinates for the deferred Phase-B copy. Phase B (the HEAD→cluster-slot memcpy — the visibility act) is performed by
-    /// <see cref="PublishClusterVersionedSlot"/> after the WAL Append. Single EntityMap lookup; the resolved coordinates are returned so publish does
-    /// not repeat it. <paramref name="copyToCluster"/> is false for spawns (FinalizeSpawns handles cluster copy for those).
+    /// PREPARE half of the cluster commit (AP-01): resolves the cluster-slot coordinates for the publish, and says what it owes. Both the index and view
+    /// reconcile (Phase A, <see cref="PublishClusterIndexes"/>) and the HEAD→cluster-slot copy (Phase B, <see cref="PublishClusterVersionedSlot"/>) run
+    /// after the WAL Append: Phase A here would survive an abort before the append, which reverts revisions only (#1262). Single EntityMap lookup; the
+    /// resolved coordinates are returned so publish does not repeat it. <paramref name="copyToCluster"/> is false for spawns (PlaceSpawns handles
+    /// cluster copy for those).
     /// </summary>
-    private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId,
-        ComponentTable table, int componentTypeId, bool copyToCluster,
-        out bool clusterCopyPending, out int outClusterChunkId, out byte outSlotIndex, out byte outCompSlot)
+    private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId, ComponentTable table,
+        int componentTypeId, bool copyToCluster, out bool clusterCopyPending, out bool indexPending, out int outClusterChunkId, out byte outSlotIndex,
+        out byte outCompSlot)
     {
         clusterCopyPending = false;
+        indexPending = false;
         outClusterChunkId = 0;
         outSlotIndex = 0;
         outCompSlot = 0;
@@ -2045,29 +2185,84 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
-        byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
-        int clusterLocation = clusterChunkId * 64 + slotIndex;
-        outClusterChunkId = clusterChunkId;
-        outSlotIndex = slotIndex;
+        outClusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
+        outSlotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
 
         // Phase B (HEAD→cluster slot copy) is required iff a committed value exists and this is not a spawn — deferred to PublishClusterVersionedSlot.
         clusterCopyPending = copyToCluster && compRevInfo.CurCompContentChunkId != 0;
 
-        // Phase A: Update per-archetype B+Tree indexes for this component's indexed fields
-        if (hasIndexes)
+        // Phase A — the archetype's B+Tree indexes and the views over them — is owed when an index covers this component and the write moves one of its
+        // keys: an insert, a delete, or a changed field. The publish does it. The unchanged-field guard (#665) runs here, where it always ran, so a write
+        // that leaves every indexed field alone costs the publish nothing.
+        if (hasIndexes && (clusterState.IndexedSlots & (1 << compSlot)) != 0)
         {
-            // Read new and old field values from CONTENT CHUNKS (not cluster slot — cluster hasn't been updated yet).
-            byte* newComp = compRevInfo.CurCompContentChunkId != 0 ?
-                _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + table.ComponentOverhead : null;
-            byte* oldComp = readCompChunkId != 0 ?
-                _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + table.ComponentOverhead : null;
-
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, oldComp, newComp);
+            if (compRevInfo.CurCompContentChunkId == 0 || readCompChunkId == 0)
+            {
+                indexPending = true;
+            }
+            else
+            {
+                var overhead = table.ComponentOverhead;
+                indexPending = AnyIndexedFieldChanged(clusterState, compSlot,
+                    _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + overhead,
+                    _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead);
+            }
         }
 
         // Phase B (HEAD→cluster slot copy) is deferred to PublishClusterVersionedSlot (AP-01). The cluster dirty bit it sets is what later drives
         // DetectClusterMigrations at tick fence (spatial per-cell index — same deferred-update pattern as SV cluster spatial, Issue #230 Phase 3).
+    }
+
+    /// <summary>Whether a write from <paramref name="oldComp"/> to <paramref name="newComp"/> changes a field an index of the slot covers — the guard
+    /// <see cref="ReconcileClusterIndexAndViews"/> applies field by field, so a write it would skip entirely owes the publish nothing.</summary>
+    private static bool AnyIndexedFieldChanged(ArchetypeClusterState clusterState, int compSlot, byte* oldComp, byte* newComp)
+    {
+        var ixSlots = clusterState.IndexSlots;
+        for (var ixs = 0; ixs < ixSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref ixSlots[ixs];
+            if (ixSlot.Slot != compSlot)
+            {
+                continue;
+            }
+
+            var fields = ixSlot.Fields;
+            for (var fi = 0; fi < fields.Length; fi++)
+            {
+                ref var field = ref fields[fi];
+                if (!FieldBytesEqual(oldComp + field.FieldOffset, newComp + field.FieldOffset, field.FieldSize))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Phase A of the cluster commit, in its publish (#1262): moves the entity's entries in the archetype's B+Tree indexes from the value of the revision
+    /// the transaction read to the committing one's, and appends the matching view deltas. Values come from the content chunks — the cluster slot is
+    /// Phase B's, and not copied yet. Runs before the revision is stamped, as it did in PREPARE, so the index never lags a visible revision.
+    /// </summary>
+    /// <remarks>
+    /// In PREPARE this survived an abort before the append — the rollback reverts revisions only — leaving the index on a key no commit made and the
+    /// views with a delta no commit made. A unique key it would collide on is rejected before the append (<c>ValidatePublishBeforeAppend</c>);
+    /// <see cref="RejectUniqueIndexCollision"/> here is the backstop for a concurrent commit that took the key in between (#1258).
+    /// </remarks>
+    private void PublishClusterIndexes(in PublishEntry e)
+    {
+        var es = _dbe._stateByRouting[e.ArchId];
+        var clusterState = es.ClusterState;
+        var table = e.Info.ComponentTable;
+        EnsureClusterCommitAccessors(e.ArchId, es, table.ComponentSegment, clusterState);
+
+        byte* newComp = e.CurCompContentChunkId != 0
+            ? _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId) + table.ComponentOverhead
+            : null;
+        byte* oldComp = e.ReadCompChunkId != 0 ? _clusterCommitContentAccessor.GetChunkAddress(e.ReadCompChunkId) + table.ComponentOverhead : null;
+        ReconcileClusterIndexAndViews(es, clusterState, e.CompSlot, e.ClusterChunkId, e.ClusterChunkId * 64 + e.SlotIndex, EntityId.FromRaw(e.Pk), oldComp,
+            newComp);
     }
 
     /// <summary>
@@ -2313,7 +2508,7 @@ public unsafe partial class Transaction : EntityAccessor
                 else if (newComp != null)
                 {
                     // Insert (first commit after spawn): Add returns the per-entity element id for an AllowMultiple index, which must be recorded in the
-                    // cluster tail slot so destroy/update can target this entity's entry (mirrors FinalizeSpawns).
+                    // cluster tail slot so destroy/update can target this entity's entry (mirrors PlaceSpawns).
                     if (!field.AllowMultiple)
                     {
                         RejectUniqueIndexCollision(ref field, newComp + field.FieldOffset, clusterLocation, ref idxAccessor);
@@ -2377,21 +2572,21 @@ public unsafe partial class Transaction : EntityAccessor
                         var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                         var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)(fi & 0x3F);
-                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, newKey, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                     else if (newComp != null)
                     {
                         // Add: isCreation flag
                         var newKey = KeyBytes8.FromPointer(newComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)((fi & 0x3F) | 0x40); // isCreation
-                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, default, newKey, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                     else if (oldComp != null)
                     {
                         // Remove: isDeletion flag
                         var oldKey = KeyBytes8.FromPointer(oldComp + field.FieldOffset, field.FieldSize);
                         byte flags = (byte)((fi & 0x3F) | 0x80); // isDeletion
-                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, TSN, flags, reg.ComponentTag);
+                        reg.DeltaBuffer.TryAppend(entityId, oldKey, default, ViewDeltaTag, flags, reg.ComponentTag);
                     }
                 }
             }
@@ -2430,6 +2625,13 @@ public unsafe partial class Transaction : EntityAccessor
 
             foreach (var staged in info.CommitStaged)
             {
+                // An entity this commit destroys is skipped, as the validation before the append skips it (CheckStagedUniqueKeys): FlushPendingDestroys
+                // released its slot, and a concurrent spawn may hold it now (#1261).
+                if (_pendingDestroys != null && _pendingDestroys.Contains(EntityId.FromRaw(staged.Key)))
+                {
+                    continue;
+                }
+
                 PublishStagedEntry(info, staged.Key, staged.Value);
             }
         }
@@ -2702,7 +2904,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Recovery aggregates the Spawn + these Slots by EntityId and applies them together (ApplySpawnedEntity → cluster slot claim + SoA value
             // write), so the entity recovers with its values. TickFence spawns stay checkpoint-durable by design (no per-commit SV WAL). Versioned
             // spawn values are already logged via their revision chains (SingleCache loop below); Transient is never logged. Read from the
-            // spawn-staging content chunk (entry.Loc[slot]) — FinalizeSpawns runs later (PUBLISH), so the cluster SoA is not populated yet, but the
+            // spawn-staging content chunk (entry.Loc[slot]) — PlaceSpawns runs later (the end of PREPARE), so the cluster SoA is not populated yet, but the
             // value already sits at ComponentOverhead in the staging chunk.
             if (_discipline == CommitDiscipline.Commit)
             {
@@ -2725,7 +2927,7 @@ public unsafe partial class Transaction : EntityAccessor
 
                         // #839: a SingleVersion spawn payload is staged in the transaction's arena, not in a content chunk. This read is unaffected by the
                         // move — it wants the [ComponentOverhead][value] bytes, and the arena slot has exactly that layout — so CM-06's emission keeps its
-                        // existing position BEFORE FinalizeSpawns rather than needing to be re-ordered after it.
+                        // existing position BEFORE PlaceSpawns rather than needing to be re-ordered after it.
                         int stage = s.Stage[slot];
                         if (stage <= 0)
                         {
@@ -2830,6 +3032,7 @@ public unsafe partial class Transaction : EntityAccessor
     private long AppendToWal(ref UnitOfWorkContext ctx)
     {
         long walHighLsn = 0;
+        var cards = _dbe.CommitCards;
         if (State != TransactionState.Created && OwningUnitOfWork?.SuppressWalSerialization != true)
         {
             var persistScope = TyphonEvent.BeginTransactionPersist(TSN);
@@ -2842,7 +3045,8 @@ public unsafe partial class Transaction : EntityAccessor
                 if (!batch.IsEmpty)
                 {
                     var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
-                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc, ref _inFlightLsnFloor);
+                    walHighLsn = _dbe.DurabilityLog.Append(ref batch, ref wc, ref _inFlightLsnFloor, cards, _commitCardSlot);
+                    _commitStamp = batch.CommitStamp;
                 }
 
                 persistScope.WalLsn = walHighLsn;
@@ -2853,8 +3057,131 @@ public unsafe partial class Transaction : EntityAccessor
             }
         }
 
+        // VIS-03: a commit with no WAL record (bulk-loaded, or an empty batch) has its commit point here, at the end of PREPARE.
+        if (_commitStamp == 0)
+        {
+            _commitStamp = cards.Register(_commitCardSlot, TSN);
+        }
+
         _appendPhaseEnteredThisCommit = true; // AP-01 guard: the append phase has run; publish is now permitted.
         return walHighLsn;
+    }
+
+    /// <summary>
+    /// VIS-03 step 0: a commit card of this transaction's window, before PREPARE takes any chain lock. A full window waits here, holding no chain lock and
+    /// no WAL claim, its epoch refreshed so the cards' owners can load pages; it gives up at the unit of work's deadline with
+    /// <see cref="LockTimeoutException"/>, before anything is staged: the transaction can commit again.
+    /// </summary>
+    private void ReserveCommitCard(ref UnitOfWorkContext ctx)
+    {
+        var cards = _dbe.CommitCards;
+        if (cards.TryReserve(TSN, out _commitCardSlot))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref cards.FullWindowWaits);
+        var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.DefaultCommitTimeout);
+        var waiter = new AdaptiveWaiter();
+        var refreshedAt = Stopwatch.GetTimestamp();
+        while (!cards.TryReserve(TSN, out _commitCardSlot))
+        {
+            if (!waiter.Wait(ref wc))
+            {
+                ThrowHelper.ThrowLockTimeout("CommitCard/Reserve", TimeoutOptions.Current.DefaultCommitTimeout);
+            }
+
+            // The waiter is often an old writer, the oldest epoch pin: held while the cards' owners need page loads, it would make a cycle only the
+            // back-pressure timeout breaks (design 05 §3.2). It holds no page reference across the wait (EP-03).
+            if (LiveIndexCursors == 0 && Stopwatch.GetElapsedTime(refreshedAt) >= CommitCardEpochRefreshInterval)
+            {
+                FlushAndRefreshEpoch();
+                refreshedAt = Stopwatch.GetTimestamp();
+            }
+        }
+    }
+
+    /// <summary>How often a commit waiting for a commit card refreshes its epoch.</summary>
+    private static readonly TimeSpan CommitCardEpochRefreshInterval = TimeSpan.FromMilliseconds(1);
+
+    /// <summary>VIS-03 step 6, and every exit before the commit point: the card given back. Idempotent.</summary>
+    private void ReleaseCommitCard()
+    {
+        if (_commitCardSlot >= 0)
+        {
+            _dbe.CommitCards.Release(_commitCardSlot);
+            _commitCardSlot = -1;
+        }
+    }
+
+    /// <summary>
+    /// Rolls back a commit that failed before its append, once PREPARE had begun on its entries (#1262), without the unit of work's deadline: the failure
+    /// may be that deadline (the transaction chain's lock keeps its own timeout). Reported as
+    /// <see cref="Typhon.Profiler.TransactionRollbackReason.AutoOnDispose"/>, the rollback such a commit used to get from <see cref="Dispose"/>. A rollback
+    /// that throws is logged, and the commit's own failure is the one that propagates; the transaction still cannot commit again
+    /// (<see cref="_prepareConsumed"/>).
+    /// </summary>
+    private void RollbackAfterFailedCommit()
+    {
+        try
+        {
+            // The spawns PREPARE placed go first: their records name the chain roots the rollback frees (AP-07, VIS-08). The destroys' pending died with them.
+            UnplaceSpawns();
+            UnmarkDestroysPending();
+            UnmarkEnableDisablePending();
+            _prepareStaged = false;
+            var unbounded = UnitOfWorkContext.None;
+            RollbackCore(ref unbounded, Typhon.Profiler.TransactionRollbackReason.AutoOnDispose);
+        }
+        catch (Exception rollbackFailure)
+        {
+            _dbe.LogRollbackAfterFailedCommitFailed(TSN, rollbackFailure);
+        }
+    }
+
+    /// <summary>
+    /// The commit failed after its append (AP-02/AP-03): it reports Committed and is never rolled back. When its publish had completed, only the durability
+    /// wait or the finalization failed: <see cref="CommitDurabilityUncertainException"/>. Otherwise memory holds part of it: the engine stops committing and
+    /// pins its records below the checkpoint (<see cref="DatabaseEngine.LatchCommitPipelineFailure"/>), its records are made durable when they can be, and
+    /// <see cref="CommitPublishIncompleteException"/> tells the caller to reopen. Always throws.
+    /// </summary>
+    private void CompleteAfterFailedPublish(long walHighLsn, bool published, Exception failure)
+    {
+        if (published)
+        {
+            TransitionTo(TransactionState.Committed);
+            throw new CommitDurabilityUncertainException(walHighLsn, failure);
+        }
+
+        // Latch, then Committed, then anything that can throw: from here on, a throw must not leave the transaction for Dispose to roll back.
+        var firstLsn = Volatile.Read(ref _inFlightLsnFloor);
+        _dbe.LatchCommitPipelineFailure(firstLsn, failure);
+        TransitionTo(TransactionState.Committed);
+
+        // The chain locks of entries the drain did not reach are released before the durability wait, which must not span them (as WaitAndFinalize's
+        // never does). The drain cursor makes the commit's own finally a no-op after this.
+        ReleaseRetainedPublishLocks();
+        _dbe.LogCommitPipelineStopped(TSN, firstLsn, failure);
+
+        // The records' durability decides whether the restart recovers this commit: confirmed when it can be, on a budget of its own (the unit of work's
+        // may be what ran out).
+        var durable = false;
+        if (walHighLsn > 0 && _dbe.WalManager != null)
+        {
+            try
+            {
+                _dbe.WalManager.RequestFlush();
+                var wc = WaitContext.FromTimeout(TimeoutOptions.Current.DefaultCommitTimeout);
+                _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
+                durable = true;
+            }
+            catch (Exception)
+            {
+                // Unconfirmed: the exception says so. Never a rollback.
+            }
+        }
+
+        throw new CommitPublishIncompleteException(walHighLsn, durable, failure);
     }
 
     /// <summary>
@@ -2865,7 +3192,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// </summary>
     private void WaitAndFinalize(ref UnitOfWorkContext ctx, long walHighLsn, long startTicks)
     {
-        TyphonException durabilityUncertain = null;
+        Exception durabilityUncertain = null;
 
         // Durability wait for Immediate mode. Publish already ran (AP-01), so the transaction is logically committed: a wait failure here (back-pressure
         // timeout or fatal writer error) MUST NOT roll back (AP-02). Capture it, finish the Committed transition, then surface it as
@@ -2879,8 +3206,9 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 _dbe.WalManager.WaitForDurable(walHighLsn, ref wc);
             }
-            catch (TyphonException ex)
+            catch (Exception ex)
             {
+                // Any failure, not only a TyphonException: the transaction is published, so the wait's failure is uncertainty, never a rollback.
                 durabilityUncertain = ex;
             }
         }
@@ -2923,33 +3251,27 @@ public unsafe partial class Transaction : EntityAccessor
             return true;
         }
 
-        // Nothing to commit if the transaction is empty, but still process deferred cleanups
-        // in case this transaction (as the tail) is blocking cleanup of entities modified by others.
+        // Nothing to commit if the transaction is empty. Its deferred cleanups wait for its Dispose: an empty commit leaves the transaction usable (still
+        // Created), and the cutoff a tail computes leaves its own snapshot out — trimming to it here took revisions this transaction can still read (TXC-01).
         if (State is TransactionState.Created)
         {
-            if (_dbe.DeferredCleanupManager.QueueSize > 0)
-            {
-                var wcDeferred = ComposeWaitContext(ref ctx, TimeoutOptions.Current.TransactionChainLockTimeout);
-                if (_dbe.TransactionChain.Control.EnterSharedAccess(ref wcDeferred))
-                {
-                    var isTailForDeferred = _dbe.TransactionChain.Tail == this;
-                    var nextMinTSNDeferred = isTailForDeferred ? _dbe.TransactionChain.ComputeNextMinTSN() : 0;
-                    _dbe.TransactionChain.Control.ExitSharedAccess();
-
-                    if (isTailForDeferred)
-                    {
-                        _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSNDeferred, _dbe, _changeSet);
-                    }
-                }
-            }
-
             return true;
         }
 
-        // Can't commit a transaction already processed
-        if (State is TransactionState.Rollbacked or TransactionState.Committed)
+        // Can't commit a transaction already processed — nor one a failed commit's PREPARE consumed (#1262), should its rollback have failed
+        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
         {
             return false;
+        }
+
+        // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory. Nothing more is appended over it: the restart that recovers
+        // that commit replays the log, and a later commit would build on what the partial publish left. Refused before PREPARE, so this one rolls back
+        // clean.
+        if (_dbe.CommitPipelineFailure is { } stopped)
+        {
+            throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                "The engine stopped committing after a commit failed between its append and the end of its publish; reopen the database to recover it.",
+                stopped);
         }
 
         // ── Yield point: safe to cancel before any modifications ──
@@ -2957,10 +3279,12 @@ public unsafe partial class Transaction : EntityAccessor
 
         var scope = TyphonEvent.BeginTransactionCommit(TSN);
         // Cumulative commit counter — monotonic. Incrementing BEFORE the commit body means a commit that throws mid-way still gets
-        // counted; the rollback counter will NOT fire for that case (Commit and Rollback are mutually exclusive paths). For gauge
-        // purposes "attempted commit" vs "successful commit" is close enough; a more precise variant would move this to a success
-        // path but currently Transaction.Commit has no single success-return point.
+        // counted. A commit that fails before its append, once PREPARE has begun on its entries, also counts a rollback (#1262: it rolls back
+        // itself); one that fails earlier counts its rollback when Dispose rolls it back. For gauge purposes "attempted commit" vs "successful
+        // commit" is close enough; a more precise variant would move this to a success path but currently Transaction.Commit has no single
+        // success-return point.
         _dbe.TransactionChain.IncrementCommitTotal();
+        var preparedEntries = false;
         try
         {
             // Must sit inside the try so the finally still runs if this property access ever gains side effects that can throw.
@@ -2972,6 +3296,11 @@ public unsafe partial class Transaction : EntityAccessor
 
             // ── Holdoff: entire commit loop runs to completion ──
             using var holdoff = ctx.EnterHoldoff();
+
+            // VIS-03 step 0, before any chain lock: the commit card. The finally gives it back on every exit before the commit point.
+            _commitStamp = 0;
+            ReserveCommitCard(ref ctx);
+            _dbe.CommitAfterReserveProbe?.Invoke();
 
             var conflictSolver = handler != null ? ConcurrencyConflictSolver.GetConflictSolver() : null;
             var context = new CommitContext { Solver = conflictSolver, Handler = handler };
@@ -2993,10 +3322,16 @@ public unsafe partial class Transaction : EntityAccessor
 
             _appendPhaseEnteredThisCommit = false; // AP-01 guard reset (pooled Transaction reuse).
             _publishDrainIndex = 0;
+            _pendingUniqueMoves = 0;
 
             // Prepare ECS destroy operations: create component-level tombstone revisions in the PREPARE pass so it can handle index removal, WAL, and
             // cleanup. The entity-level destroy visibility (DiedTSN) is applied later, in the PUBLISH pass (FlushEcsPendingOperations).
             PrepareEcsDestroys();
+
+            // From here PREPARE changes per-entry state a second attempt could not reuse (each entry's read revision is consumed, a conflict's orphan
+            // freed), so a failure before the append ends the transaction: see the catch below (#1262). A failure above stays retryable.
+            preparedEntries = true;
+            _prepareConsumed = true;
 
             _dbe.LogCommitPhase(TSN, "CommitComponentCore");
 
@@ -3064,6 +3399,17 @@ public unsafe partial class Transaction : EntityAccessor
                 }
             }
 
+            // AP-03: what the publish would fail on — a unique key taken when it publishes, a spawn without the component a unique index or its spatial
+            // cell needs — is checked here, after PREPARE and before the point of no return: past it a failure could only stop the engine.
+            ValidatePublishBeforeAppend();
+
+            // VIS-08: every spawn exists before the commit point — its slot reserved, its record in the EntityMap with a pending born. VIS-09: every destroy
+            // too — its record's died pending. An exit before the append un-places and un-marks them (RollbackAfterFailedCommit).
+            _prepareStaged = true;
+            PlaceSpawns();
+            MarkDestroysPending();
+            MarkEnableDisablePending();
+
             // ── PREPARE complete. Deferred-cleanup enqueue is prepare-side bookkeeping (no visibility) — it runs before Append. ──
             _dbe.LogCommitPhase(TSN, "DeferredCleanup");
 
@@ -3082,46 +3428,103 @@ public unsafe partial class Transaction : EntityAccessor
                 hasConflict = true;
             }
 
+            // AP-03: an engine that stopped while this commit prepared takes no more records: checked again at the last moment the commit can roll back.
+            if (_dbe.CommitPipelineFailure is { } stoppedMeanwhile)
+            {
+                throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                    "The engine stopped committing after a commit failed between its append and the end of its publish; reopen the database to recover it.",
+                    stoppedMeanwhile);
+            }
+
             // ── AP-01: APPEND before PUBLISH. Build + append the WAL batch from the prepared (conflict-resolved) state. This is the point of no
             //    return (AP-02): nothing above made any change visible. ──
             _dbe.LogCommitPhase(TSN, "Append");
             // CK-13: the append records the batch's first LSN in _inFlightLsnFloor before publishing its frame. It stays there, keeping the checkpoint
             // below these records, until the publish below has put their page effects in memory.
+            _dbe.CommitBeforeAppendProbe?.Invoke();
             var walHighLsn = AppendToWal(ref ctx);
-            _dbe.CommitAfterAppendProbe?.Invoke();
+            var published = false;
 
-            // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
-            //    LCRI/CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
-            //    inserts via FinalizeSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
-            _dbe.LogCommitPhase(TSN, "Publish");
-            PublishPreparedComponents();
-            FlushEcsPendingOperations();
-            // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after FinalizeSpawns so a staged
-            // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
-            _dbe.CommitBeforeStagedPublishProbe?.Invoke();
-            PublishStagedCommitWrites();
+            // AP-03: past the append, page-cache back-pressure is waited out rather than thrown (up to CommitPublishBackpressureTimeout from here): a throw
+            // could not roll this commit back, only stop the engine.
+            var outerPublishSince = PagedMMF.PublishSince;
+            PagedMMF.PublishSince = _dbe.PublishGivesUpOnBackpressureForTest ? 0 : Stopwatch.GetTimestamp();
+            try
+            {
+                _dbe.CommitAfterAppendProbe?.Invoke();
 
-            // CK-13: every page effect is in memory and marked dirty, so a checkpoint that passes these records now also collects their pages.
-            Volatile.Write(ref _inFlightLsnFloor, 0);
+                // ── PUBLISH (AP-01): now make the transaction's changes visible. Drain the component publish descriptors (clear IsolationFlag, bump
+                //    CommitSequence, copy HEAD→cluster slot, release retained handler locks), then flush ECS pending operations (EntityMap spawn
+                //    publication via PublishSpawns, DiedTSN destroys, EnabledBits). Every visibility act happens strictly after the Append. ──
+                _dbe.LogCommitPhase(TSN, "Publish");
+                PublishPreparedComponents();
+                FlushEcsPendingOperations();
+                _prepareStaged = false;   // every staged effect published
+                // Commit-discipline (SingleVersion) staged writes: publish to cluster HEAD + reconcile exact indexes (after PublishSpawns so a staged
+                // write to a same-tx-spawned entity resolves in the EntityMap). Variant A / issue #392.
+                _dbe.CommitBeforeStagedPublishProbe?.Invoke();
+                PublishStagedCommitWrites();
 
-            // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
-            //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
-            _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
-            WaitAndFinalize(ref ctx, walHighLsn, startTicks);
+                // CK-13: every page effect is in memory and marked dirty, so a checkpoint that passes these records now also collects their pages.
+                published = true;
+                Volatile.Write(ref _inFlightLsnFloor, 0);
+
+                // VIS-04, step 6: every effect is stamped, the card goes back: before the durability wait, and before Commit() returns (causality).
+                ReleaseCommitCard();
+
+                // ── WAIT (Immediate) + transition to Committed. Publish already ran and released handler locks, so the durability wait never spans a held
+                //    lock; a wait timeout here means durability-uncertain, not rollback (AP-02). ──
+                _dbe.LogCommitPhase(TSN, "WaitAndFinalize");
+                WaitAndFinalize(ref ctx, walHighLsn, startTicks);
+            }
+            catch (Exception failure) when (State != TransactionState.Committed)
+            {
+                // AP-02/AP-03: past the append the records are in the log, and the commit is never rolled back. A publish that did not complete keeps its
+                // card registered: what it left flagged is that commit's, which a reader resolves by the card's stamp, and the engine commits no more.
+                if (!published)
+                {
+                    _commitCardSlot = -1;
+                }
+
+                CompleteAfterFailedPublish(walHighLsn, published, failure);
+                throw;   // unreachable: CompleteAfterFailedPublish always throws
+            }
+            finally
+            {
+                PagedMMF.PublishSince = outerPublishSince;
+            }
+
             _dbe.LogCommitPhase(TSN, "Complete");
             scope.ConflictDetected = hasConflict;
             return true;
 
         }
+        catch (Exception) when (preparedEntries && State == TransactionState.InProgress)
+        {
+            // #1262: a commit that fails after PREPARE began on its entries, and before its append, rolls the transaction back here — the rollback Dispose
+            // would give it — so it is over: Commit again returns false. Retried, PREPARE would run on entries the first attempt consumed. Past the append
+            // the transaction is Committed (AP-03) and this does not apply.
+            //
+            // Its retained chain locks go first, as they did when the finally released them before Dispose's rollback: the rollback frees a spawn's chain
+            // (its lock word with it) and voids, with no deadline, on chains another aborting commit may hold — rolled back holding them, two conflict-
+            // handler commits that took their chains in crossed order wait for each other for good.
+            ReleaseRetainedPublishLocks();
+            RollbackAfterFailedCommit();
+            throw;
+        }
         finally
         {
-            // First, so nothing below can leave it set: a commit that threw part-way stops holding the checkpoint back (CK-13; its partial publish is
-            // AP-03's residual, #396).
+            // First, so nothing below can leave it set: a commit that threw part-way stops holding the checkpoint back (CK-13). One whose publish failed
+            // past its append has pinned its floor on the engine (AP-03).
             Volatile.Write(ref _inFlightLsnFloor, 0);
 
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
             ReleaseRetainedPublishLocks();
+
+            // VIS-03: a commit that failed before its commit point gives its card back. A leaked reservation would block its window for good, and a
+            // retried commit of this transaction would wait on itself. A no-op on success (released after the publish).
+            ReleaseCommitCard();
             scope.Dispose();
         }
     }

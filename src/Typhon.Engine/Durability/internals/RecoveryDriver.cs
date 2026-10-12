@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -19,6 +20,16 @@ internal sealed class RecoveryDriver
         public int RecordsApplied;
         public int TxCommitted;
         public long MaxTsn;
+
+        /// <summary>The highest commit stamp on any TxCommit record scanned (VIS-03), at or below the checkpoint too: the TSN counter resumes above it (RB-05).</summary>
+        public long MaxCommitStamp;
+
+        /// <summary>
+        /// Identity TSN → commit stamp, for every transaction the window commits (VIS-03; design 05 §3.7). A batch that drew no stamp maps to its TSN.
+        /// Commit fate stays keyed on the identity (LOG-04/08).
+        /// </summary>
+        public Dictionary<long, long> CommitStamps;
+
         public long MaxLsn; // highest LSN seen in the recovery window — the frontier the post-recovery seal consolidates to
 
         /// <summary>
@@ -60,6 +71,7 @@ internal sealed class RecoveryDriver
         public ushort EnabledBits;
         public int Index;        // CollectionDelta: element index (RemoveAt/UpdateAt) or new count (SetCount)
         public bool IsFence;
+        public bool IsCommitDiscipline;
         public byte[] Payload;
     }
 
@@ -80,6 +92,12 @@ internal sealed class RecoveryDriver
 
         /// <summary>True once a <see cref="CollectionOp.Clear"/> has been folded — under Option B that is always, before any element op.</summary>
         public bool BaseDiscarded;
+
+        /// <summary>
+        /// The commit stamp of the deltas folded, for a Versioned component's collection: only the highest stamp's are kept (VIS-05), as for the slot's
+        /// value — every Versioned commit logs the full content behind a Clear, so a higher stamp starts the fold over and a lower one is ignored.
+        /// </summary>
+        public long Stamp;
 
         /// <summary>
         /// Folds one delta. <paramref name="where"/> is a caller-supplied location string used only in failure messages.
@@ -189,7 +207,7 @@ internal sealed class RecoveryDriver
     {
         var result = default(Result);
         var records = new List<Rec>();
-        var committed = new HashSet<long>();
+        var committed = new Dictionary<long, long>();
 
         // #688: through the backend, so an injected WAL IO is discoverable. Same reason as WalRecovery.DiscoverSegments.
         var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
@@ -220,6 +238,12 @@ internal sealed class RecoveryDriver
                         offset += consumed;
                         result.RecordsScanned++;
 
+                        // RB-05 over every stamp seen, consolidated or not: a stamp is drawn from the TSN counter, which must resume above it.
+                        if (view.IsTxCommit && view.CommitStamp > result.MaxCommitStamp)
+                        {
+                            result.MaxCommitStamp = view.CommitStamp;
+                        }
+
                         if (view.IsUnknownKind || view.Lsn <= checkpointLsn)
                         {
                             continue;
@@ -232,7 +256,7 @@ internal sealed class RecoveryDriver
 
                         if (view.IsTxCommit)
                         {
-                            committed.Add(view.Tsn);
+                            committed[view.Tsn] = view.CommitStamp != 0 ? view.CommitStamp : view.Tsn;
                         }
 
                         // A columnar fence block (#559) carries one cluster's entity-key column plus each durable component's
@@ -281,7 +305,7 @@ internal sealed class RecoveryDriver
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
                             SlotIndex = view.SlotIndex, FieldId = view.FieldId, EnabledBits = view.EnabledBits,
-                            Index = view.Index, IsFence = view.IsFence,
+                            Index = view.Index, IsFence = view.IsFence, IsCommitDiscipline = view.IsCommittedDiscipline,
                             // CollectionDelta element bytes are copied too (#389). They used to be discarded here, one line before the switch that was
                             // documented as deferring the apply — so a CollectionDelta was gutted at SCAN, and adding an apply case alone could never have
                             // worked.
@@ -319,9 +343,16 @@ internal sealed class RecoveryDriver
         var entities = new Dictionary<long, EntityAgg>();
         foreach (var r in records)
         {
-            if (!r.IsFence && !committed.Contains(r.Tsn))
+            if (!r.IsFence)
             {
-                continue;
+                if (!committed.TryGetValue(r.Tsn, out var stamp))
+                {
+                    continue;
+                }
+
+                // A transaction's effects replay with its commit stamp (VIS-03, design 05 §3.7): the stamp is what the live engine published — revisions,
+                // born, died — and the version order (VIS-05). Fate stayed keyed on the identity above. Fence records keep their fence-cycle TSN.
+                r.Tsn = stamp;
             }
 
             applier.Track(r.Tsn); // RB-05 watermark over every applicable record
@@ -337,7 +368,18 @@ internal sealed class RecoveryDriver
                     break;
 
                 case RecordKind.Slot when r.Op == (byte)SlotOp.Upsert:
-                    GetAgg(entities, r.EntityId).Slots[r.SlotIndex] = new RecoveryApplier.SlotData
+                    var slotAgg = GetAgg(entities, r.EntityId);
+
+                    // A Versioned value's newest is the highest stamp (VIS-05), not the highest LSN: the stamp is drawn after the claim, so two commits can
+                    // log in one order and stamp in the other. Other components (fence records, SingleVersion under the Commit discipline) keep CM-03's LSN
+                    // order. Versioned by the slot's table, not by the record's discipline flag: a Commit-discipline batch flags its Versioned records too.
+                    // The base HEAD's stamp is weighed by the scrub (the chain) and by the applier (the cluster HEAD copy).
+                    if (!r.IsFence && IsVersionedSlot(dbe, r.EntityId, r.SlotIndex) && slotAgg.Slots.TryGetValue(r.SlotIndex, out var held) && held.Tsn > r.Tsn)
+                    {
+                        break;
+                    }
+
+                    slotAgg.Slots[r.SlotIndex] = new RecoveryApplier.SlotData
                     {
                         SlotIndex = r.SlotIndex,
                         Payload = r.Payload ?? [],
@@ -359,17 +401,42 @@ internal sealed class RecoveryDriver
                     break;
 
                 case RecordKind.CollectionDelta:
-                    // Folded per (EntityId, slot, FieldId) in LSN order, flushed after the entity's Slot apply (03-recovery.md §5, #389).
-                    GetAgg(entities, r.EntityId).FoldFor(r.SlotIndex, r.FieldId).Apply(
-                        (CollectionOp)r.Op, r.Index, r.Payload, $"LSN {r.Lsn} (entity 0x{r.EntityId:X}, slot {r.SlotIndex}, field {r.FieldId})");
+                    // Folded per (EntityId, slot, FieldId) in LSN order, flushed after the entity's Slot apply (03-recovery.md §5, #389). A Versioned
+                    // component's keeps only the highest stamp's deltas, as its value does: the collection must be the one of the revision that wins.
+                    var fold = GetAgg(entities, r.EntityId).FoldFor(r.SlotIndex, r.FieldId);
+                    if (!r.IsFence && IsVersionedSlot(dbe, r.EntityId, r.SlotIndex))
+                    {
+                        if (r.Tsn < fold.Stamp)
+                        {
+                            break;
+                        }
+
+                        if (r.Tsn > fold.Stamp)
+                        {
+                            fold.Elements.Clear();
+                            fold.BaseDiscarded = false;
+                            fold.Stamp = r.Tsn;
+                        }
+                    }
+
+                    fold.Apply((CollectionOp)r.Op, r.Index, r.Payload, $"LSN {r.Lsn} (entity 0x{r.EntityId:X}, slot {r.SlotIndex}, field {r.FieldId})");
                     break;
 
                 // BulkManifest is orphan-detection only and is applied in a later increment (TSN still tracked above).
             }
         }
 
+        var sinceBatchPoint = 0;
         foreach (var (entityIdRaw, agg) in entities)
         {
+            // Between entities, every RecoveryBatchSize of them: the replay's pages written so far saved and unpinned, so a window larger than the cache
+            // replays (#1183, CK-08).
+            if (++sinceBatchPoint > DatabaseEngine.RecoveryBatchSize)
+            {
+                applier.BatchPoint();
+                sinceBatchPoint = 1;
+            }
+
             // No Spawn in the window → the record targets a pre-existing (checkpointed) entity already loaded into the EntityMap.
             if (!agg.HasSpawn)
             {
@@ -404,10 +471,15 @@ internal sealed class RecoveryDriver
             }
 
             // Spawned AND destroyed within the window → net not-alive: don't insert (and don't create its revision chains), exactly
-            // as the live FinalizeSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
+            // as the live PlaceSpawns skips a spawn+destroy entity. Post-recovery reads happen at a TSN past the window, so the
             // historical alive-then-dead transition is not observable — absence == dead for IsAlive.
+            //
+            // Not "nothing to do": the data file may hold the entity — a checkpoint that copied its cluster page between the spawn and the destroy — and
+            // the crash path's map, rebuilt from the clusters, then has it alive. The destroy goes through as for a base entity; it is a no-op when the
+            // entity is absent (#1251).
             if (agg.HasDestroy)
             {
+                applier.ApplyDestroyToExisting(entityIdRaw, agg.DestroyTsn);
                 continue;
             }
 
@@ -416,13 +488,17 @@ internal sealed class RecoveryDriver
             result.CollectionFoldsFlushed += FlushCollections(applier, entityIdRaw, agg);
         }
 
+        applier.Complete();
         result.TxCommitted = committed.Count;
+        result.CommitStamps = dbe.RetainRecoveryCommitStampsForTest ? committed : null;
         result.MaxTsn = applier.MaxTsn;
 
-        // RB-05: NextFreeTSN must exceed every applied TSN, or post-recovery reads would not see the recovered entities.
-        if (applier.MaxTsn >= dbe.TransactionChain.NextFreeId)
+        // RB-05: NextFreeTSN must exceed every applied TSN, or post-recovery reads would not see the recovered entities — and every commit stamp, drawn
+        // from the same counter (VIS-03): a TSN at or below one would share a number with a commit point.
+        var floor = Math.Max(applier.MaxTsn, result.MaxCommitStamp);
+        if (floor >= dbe.TransactionChain.NextFreeId)
         {
-            dbe.TransactionChain.SetNextFreeId(applier.MaxTsn + 1);
+            dbe.TransactionChain.SetNextFreeId(floor + 1);
         }
 
         // #697, the entity-key half of the same watermark discipline: NextEntityKey must be at least the highest key this window applied, or the first
@@ -467,6 +543,19 @@ internal sealed class RecoveryDriver
 
         applier.ApplyCollectionFolds(entityIdRaw, folded);
         return folded.Count;
+    }
+
+    /// <summary>Whether <paramref name="slotIndex"/> of <paramref name="entityIdRaw"/>'s archetype is a Versioned component, by its table.</summary>
+    private static bool IsVersionedSlot(DatabaseEngine dbe, long entityIdRaw, ushort slotIndex)
+    {
+        var routing = EntityId.FromRaw(entityIdRaw).ArchetypeId;
+        var states = dbe._stateByRouting;
+        if (routing >= states.Length || states[routing] is not { } state || slotIndex >= state.SlotToComponentTable.Length)
+        {
+            return false;
+        }
+
+        return state.SlotToComponentTable[slotIndex]?.StorageMode == StorageMode.Versioned;
     }
 
     private static EntityAgg GetAgg(Dictionary<long, EntityAgg> entities, long entityId)

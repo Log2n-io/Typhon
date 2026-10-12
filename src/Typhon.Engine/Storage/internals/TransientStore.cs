@@ -149,6 +149,14 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void MarkPageModified(int memPageIndex) { }
 
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public PagedMMF.CaptureTicket TakeCaptureTicket(ref byte lockWord) => default;
+
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void EndLockHold(in PagedMMF.CaptureTicket ticket) { }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Slot Ref Counting — no-ops (pages are always resident, never evicted)
     // ═══════════════════════════════════════════════════════════════════════
@@ -279,7 +287,7 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ChangeSet CreateChangeSet() => null;
+    public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => null;
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

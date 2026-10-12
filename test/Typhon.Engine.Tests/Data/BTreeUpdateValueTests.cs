@@ -436,7 +436,7 @@ public class BTreeUpdateValueTests
 
             var seen = new System.Collections.Generic.List<int>();
             var neighbour = new System.Collections.Generic.List<int>();
-            var e = tree.EnumerateRangeMultiple(Key, Key + 1);
+            using var e = tree.EnumerateRangeMultiple(Key, Key + 1);
             while (e.MoveNext())
             {
                 var target = e.CurrentKey == Key ? seen : neighbour;
@@ -552,7 +552,7 @@ public class BTreeUpdateValueTests
 
             var seen = new System.Collections.Generic.List<int>();
             var neighbour = new System.Collections.Generic.List<int>();
-            var e = tree.EnumerateRangeMultiple(Key, Key + 1);
+            using var e = tree.EnumerateRangeMultiple(Key, Key + 1);
             while (e.MoveNext())
             {
                 var target = e.CurrentKey == Key ? seen : neighbour;
@@ -605,7 +605,7 @@ public class BTreeUpdateValueTests
             Assert.Throws<InvalidOperationException>(() => tree.TryUpdateValue(Key, 7777, ref localAccessor));
 
             var seen = new System.Collections.Generic.List<int>();
-            var e = tree.EnumerateRangeMultiple(Key, Key);
+            using var e = tree.EnumerateRangeMultiple(Key, Key);
             while (e.MoveNext())
             {
                 foreach (var v in e.CurrentValues)

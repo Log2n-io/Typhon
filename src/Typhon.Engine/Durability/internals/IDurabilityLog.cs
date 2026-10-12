@@ -26,9 +26,11 @@ internal interface IDurabilityLog
 
     /// <summary>
     /// <see cref="Append(ref CommitBatchBuilder, ref WaitContext)"/>, also storing the batch's first LSN into <paramref name="inFlightFloor"/> after
-    /// claiming it and before publishing the frame (CK-13). A barrier that covers the batch has drained that frame, so it also sees the floor.
+    /// claiming it and before publishing the frame (CK-13). A barrier that covers the batch has drained that frame, so it also sees the floor. With
+    /// <paramref name="cards"/>, the transaction's commit point (VIS-03): its card <paramref name="cardSlot"/> registered and its stamp drawn once the claim
+    /// holds, the stamp written on TxCommit and left in <see cref="CommitBatchBuilder.CommitStamp"/>.
     /// </summary>
-    long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor);
+    long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot);
 
     /// <summary>
     /// Appends a run of columnar tick-fence blocks (#559), copying each cluster's SoA columns straight into the WAL claim with

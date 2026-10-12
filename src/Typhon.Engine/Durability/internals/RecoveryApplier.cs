@@ -7,10 +7,10 @@ namespace Typhon.Engine.Internals;
 
 // Applies committed WAL v2 records back into engine state during crash recovery, reusing the engine's own write primitives (the design's "one write path").
 // P1.2: rebuilds a committed spawned entity — the EntityRecord plus, per spawn-init Slot, a committed revision-chain root holding the component value — by
-// BUILDING the full record then InsertNew once, mirroring the live FinalizeSpawns (approach B; the live engine has no in-place location update — a Versioned
+// BUILDING the full record then InsertNew once, mirroring the live PlaceSpawns (approach B; the live engine has no in-place location update — a Versioned
 // location is written once at spawn and stays fixed, revisions append within the chain). Both the flat (non-cluster) path and the cluster path are wired:
 // a cluster-eligible archetype reconstructs the entity into a CLUSTER slot (ClaimSlot + SoA value write + ClusterEntityRecord), mirroring the live
-// FinalizeSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy, SetEnabledBits and
+// PlaceSpawns cluster branch — this is what makes Commit-discipline SingleVersion values WAL-recoverable (#392 AC-2/AC-7). Destroy, SetEnabledBits and
 // collections (#389: ApplyCollectionFolds, which MUST run after an entity's Slot apply) are all wired. Runs single-threaded under one epoch scope with a
 // dedicated ChangeSet (so applied page mutations are captured by the sealing checkpoint). See 03-recovery.md §3.
 
@@ -78,6 +78,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         _changeSet = new ChangeSet(dbe.MMF);
     }
 
+
     /// <summary>Highest TSN applied — recovery restores NextFreeTSN above this (RB-05).</summary>
     public long MaxTsn => _maxTsn;
 
@@ -115,7 +116,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>
     /// Rebuilds a committed spawned entity: the EntityRecord (BornTSN, EnabledBits) plus, for each spawn-init Slot, a committed
     /// revision-chain root holding the component value, then inserts it into the archetype's EntityMap. Mirrors the live
-    /// FinalizeSpawns build-then-insert so recovery produces the same persisted shape through the same insert primitive. Flat
+    /// PlaceSpawns build-then-insert so recovery produces the same persisted shape through the same insert primitive. Flat
     /// (non-cluster) Versioned/SingleVersion path; the entity becomes alive AND its spawn-init component values resolve.
     /// </summary>
     public void ApplySpawnedEntity(long entityIdRaw, ushort archetypeId, ushort enabledBits, long bornTsn, IReadOnlyCollection<SlotData> slots)
@@ -189,7 +190,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// <summary>
     /// Cluster counterpart of <see cref="ApplySpawnedEntity"/>: reconstructs a committed spawned entity into a CLUSTER slot — claims a slot, writes each
     /// committed component value into the cluster SoA (the HEAD; for Versioned it also builds the revision-chain root and records its chunkId), writes the
-    /// EntityId + per-slot EnabledBits into the cluster, and inserts the ClusterEntityRecord. Mirrors the live FinalizeSpawns cluster branch. Spatial
+    /// EntityId + per-slot EnabledBits into the cluster, and inserts the ClusterEntityRecord. Mirrors the live PlaceSpawns cluster branch. Spatial
     /// cell-routing and AABBs are rebuilt wholesale on reopen, so a plain (non-spatial) ClaimSlot is used. RB-01: secondary indexes are NOT populated here
     /// — they are rebuilt from final HEAD data at open. Idempotent (AP-12): a re-applied entity already in the loaded map is skipped.
     /// </summary>
@@ -198,18 +199,25 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         var key = EntityId.FromRaw(entityIdRaw).EntityKey;
         byte* recordPtr = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
-        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
-        {
-            return; // idempotent re-apply
-        }
-
         var clusterState = _engineState.ClusterState;
         var layout = clusterState.Layout;
 
-        // H1: the claim folds bornTsn into the cluster's visibility summary before publishing the occupancy bit — replay must bound the cluster too, or a
+        // Present (AP-12): the data file holds the entity in its slot — the crash path rebuilds the map from the clusters. Not proof the spawn's data is
+        // there: a checkpoint copies a transaction's pages at different moments, and the cluster page can be from after the spawn while its revision chain
+        // and content are from before. Taken as applied, the entity recovered with every component zeroed (#1251). Its logged values are re-applied in
+        // the slot it holds instead, each Versioned one on a fresh chain root: the old root may name chunks that never reached the disk, and the orphan
+        // sweep after the scrub reclaims it.
+        if (_engineState.EntityMap.TryGet(key, recordPtr, ref _mapAccessor))
+        {
+            ReapplySpawnedEntityToCluster(entityIdRaw, enabledBits, bornTsn, recordPtr, slots);
+            return;
+        }
+
+        // H1: the claim folds bornTsn into the cluster's visibility summary before the occupancy bit is published — replay must bound the cluster too, or a
         // recovered entity is invisible to the summary.
         var (clusterChunkId, slotIdx) = clusterState.ClaimSlot(ref _clusterAccessor, _changeSet, bornTsn);
         byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+        clusterState.PublishClaimedSlot(clusterBase, slotIdx);
 
         // Build the ClusterEntityRecord (19 bytes base + 4 bytes per Versioned slot).
         ClusterEntityRecordAccessor.InitializeRecord(recordPtr, _metadata.VersionedSlotCount);
@@ -256,7 +264,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot). The bits come from the absolute mask,
+        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit published by PublishClaimedSlot above). The bits come from the absolute mask,
         // clearing as well as setting: a claimed slot is not guaranteed clean of its previous occupant's bits (ENABLE-01).
         *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
         for (int slot = 0; slot < _componentCount; slot++)
@@ -283,6 +291,72 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     }
 
     /// <summary>
+    /// A spawn replayed over an entity the data file already holds in a cluster slot: its logged values written there again, each Versioned slot on a fresh
+    /// chain root, the record's birth and enabled bits restored and written back. A SingleVersion collection handle the slot held is not released — on a
+    /// torn page it may be another entity's buffer; a buffer the spawn made and the replay makes again is leaked instead.
+    /// </summary>
+    private void ReapplySpawnedEntityToCluster(long entityIdRaw, ushort enabledBits, long bornTsn, byte* recordPtr, IReadOnlyCollection<SlotData> slots)
+    {
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+        var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId, true);
+
+        ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordPtr);
+        header.BornTSN = bornTsn;
+        header.EnabledBits = enabledBits;
+        clusterState.NoteClusterBorn(clusterChunkId, bornTsn);
+
+        if (slots != null)
+        {
+            foreach (var slot in slots)
+            {
+                var slotIndex = slot.SlotIndex;
+                if (slotIndex >= _metadata.ComponentCount)
+                {
+                    continue;
+                }
+
+                var table = _engineState.SlotToComponentTable[slotIndex];
+                if (table.StorageMode == StorageMode.Transient)
+                {
+                    continue;
+                }
+
+                var compSize = layout.ComponentSize(slotIndex);
+                slot.Payload.AsSpan().CopyTo(new Span<byte>(clusterBase + layout.ComponentOffset(slotIndex) + slotIdx * compSize, compSize));
+                if (table.StorageMode == StorageMode.Versioned)
+                {
+                    var vi = layout.SlotToVersionedIndex[slotIndex];
+                    if (vi >= 0)
+                    {
+                        var chainRoot = CreateVersionedChainRoot(table, entityIdRaw, slot.Tsn, slot.Payload, out var contentChunkId);
+                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordPtr, vi, chainRoot);
+                        _appliedContentChunkBySlot[slotIndex] = contentChunkId;
+                    }
+                }
+            }
+        }
+
+        *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
+        for (int slot = 0; slot < _componentCount; slot++)
+        {
+            ref var word = ref *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot));
+            if ((enabledBits & (1 << slot)) != 0)
+            {
+                word |= 1UL << slotIdx;
+            }
+            else
+            {
+                word &= ~(1UL << slotIdx);
+            }
+        }
+
+        _engineState.EntityMap.Upsert(EntityId.FromRaw(entityIdRaw).EntityKey, recordPtr, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
     /// Applies a committed Destroy to an entity that already exists in the loaded EntityMap (its Spawn is below the checkpoint
     /// frontier, so it is not in the recovery window — only the Destroy is). Sets DiedTSN on the existing record and writes it
     /// back dirty-marked, mirroring the live FlushPendingDestroys archetype-level tombstone. Idempotent: a missing entity is a
@@ -302,6 +376,16 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         EntityRecordAccessor.GetHeader(readBuf).DiedTSN = tsn;
+
+        // A cluster entity goes as a live destroy goes once no snapshot reads it — and after a crash none does: its slot released, its record removed,
+        // its chains left to the scrub's orphan sweep. Tombstoned only, it kept its slot for good: the index rebuild indexed it, an index lookup returned a
+        // destroyed entity, and its slot and chains were never reclaimed (#1251).
+        if (_hasClusterAccessor)
+        {
+            ReleaseDestroyedClusterEntity(entityIdRaw, readBuf);
+            return;
+        }
+
         // H1, and NOT with `tsn`. Unlike the commit-path tombstone this replay does NOT call ReleaseSlot — cleanup is deferred to the orphan sweep — so the
         // cluster keeps a SET occupancy bit for a dead entity. The whole died-watermark argument rests on the bit being cleared at destroy: a reader past the
         // last death is exact only because occupancy already reflects it. Fold `tsn` here and every post-recovery reader satisfies `died <= txTsn`, the gate
@@ -309,6 +393,26 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         // replays a below-frontier destroy. VisibilityUnknown denies this cluster until the sweep clears the bit, which is what the pre-#722 sticky flag did.
         _engineState.ClusterState?.NoteClusterDied(ClusterEntityRecordAccessor.GetClusterChunkId(readBuf), ArchetypeClusterState.VisibilityUnknown);
         _engineState.EntityMap.Upsert(key, readBuf, ref _mapAccessor, _changeSet);
+    }
+
+    /// <summary>
+    /// The cluster half of <see cref="ApplyDestroyToExisting"/>: releases the entity's slot — when it still holds the entity: a torn page can show it
+    /// holding another — and removes its record. Its chains, named by no live record, are no root of the scrub: its sweep frees them.
+    /// </summary>
+    private void ReleaseDestroyedClusterEntity(long entityIdRaw, byte* recordPtr)
+    {
+        var clusterState = _engineState.ClusterState;
+        var layout = clusterState.Layout;
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordPtr);
+        var slotIdx = ClusterEntityRecordAccessor.GetSlotIndex(recordPtr);
+        byte* clusterBase = _clusterAccessor.GetChunkAddress(clusterChunkId);
+        if ((*(ulong*)clusterBase & (1UL << slotIdx)) != 0 && *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) == entityIdRaw)
+        {
+            // Its SingleVersion collection handles are not released: on a torn page they may name buffers that are not its own — leaked instead.
+            clusterState.ReleaseSlot(ref _clusterAccessor, clusterChunkId, slotIdx, _changeSet, releaseCollections: false);
+        }
+
+        _engineState.EntityMap.Remove(EntityId.FromRaw(entityIdRaw).EntityKey, ref _mapAccessor, _changeSet);
     }
 
     /// <summary>
@@ -458,7 +562,25 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                 CapturePreApplyHandles(table, slotIndex, new ReadOnlySpan<byte>(dst, compSize));
             }
 
-            slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+            // A Versioned slot's HEAD copy takes the replayed value only above every revision its chain already holds (VIS-05), as the live publish: the
+            // base can hold a later stamp than this record's — a commit that drew its stamp after this one's, published and checkpointed while this one
+            // was still in flight — and the scrub keeps that one in the chain.
+            var copyHead = true;
+            if (table.StorageMode == StorageMode.Versioned)
+            {
+                var vih = layout.SlotToVersionedIndex[slotIndex];
+                var existingRoot = vih >= 0 ? ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordPtr, vih) : 0;
+                if (existingRoot != 0)
+                {
+                    var info = GetRecoveryInfo(table);
+                    copyHead = slot.Tsn > ComponentRevisionManager.HighestPublishedStamp(ref info.CompRevTableAccessor, existingRoot, -1);
+                }
+            }
+
+            if (copyHead)
+            {
+                slot.Payload.AsSpan().CopyTo(new Span<byte>(dst, compSize));
+            }
 
             // Versioned in a cluster: the SoA slot is the HEAD cache over the chain, so the chain has to carry the value too or the scrub would collapse the
             // HEAD back to a stale revision.
@@ -525,7 +647,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         payload.AsSpan().CopyTo(new Span<byte>(contentBase + info.ComponentOverhead, payload.Length));
 
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, chainRootChunkId, compRevInfo.CurRevisionIndex);
-        handle.Commit(tsn);
+        handle.Publish(tsn);
     }
 
     /// <summary>Resets the per-entity scratch that <see cref="ApplyCollectionFolds"/> consumes. Called at the top of every entity apply.</summary>
@@ -739,7 +861,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
     // Allocates a content chunk holding the payload and a committed single-element revision chain pointing at it — exactly the
     // spawn→commit end-state the live ComponentRevisionManager produces (AllocCompRevStorage creates the isolated element, then
-    // the live ElementRevisionHandle.Commit clears the isolation flag). Returns the chain-root chunk id (the slot's location).
+    // the live ElementRevisionHandle.Publish stamps it and clears the isolation flag). Returns the chain-root chunk id (the slot's location).
     private int CreateVersionedChainRoot(ComponentTable table, long pk, long tsn, byte[] payload) =>
         CreateVersionedChainRoot(table, pk, tsn, payload, out _);
 
@@ -755,7 +877,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
 
         var compRevChunkId = ComponentRevisionManager.AllocCompRevStorage(info, tsn, 0, contentChunkId, pk);
         var handle = ComponentRevisionManager.GetRevisionElement(ref info.CompRevTableAccessor, compRevChunkId, 0);
-        handle.Commit(tsn); // element TSN already == tsn; this clears IsolationFlag → the revision is committed/visible
+        handle.Publish(tsn); // tsn is the commit's stamp (the driver replays stamps); clears IsolationFlag → the revision is committed/visible
 
         // RB-01: recovery never trusts persisted secondary indexes. Apply writes ONLY primary data (content + chain); the secondary indexes are cleared at open
         // on the crash path and rebuilt wholesale from final HEAD data in Phase-5 (DatabaseEngine.RebuildSecondaryIndexes), so populating them here would
@@ -834,6 +956,44 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
     }
 
+    /// <summary>The replay applied every entity: <see cref="Dispose"/> writes its last batch.</summary>
+    internal void Complete() => _completed = true;
+
+    private bool _completed;
+
+    /// <summary>
+    /// Between two entities' applies, every <see cref="DatabaseEngine.RecoveryBatchSize"/> of them: every accessor's writes committed — its dirty slots
+    /// released to the checkpoint, the pins of the slots it evicted returned — then the engine's batch point saves this ChangeSet and unpins the batch
+    /// (#1183, CK-08). No accessor address outlives an entity's apply.
+    /// </summary>
+    internal void BatchPoint()
+    {
+        CommitAccessors();
+        _dbe.RecoveryBatchPoint(_changeSet, DatabaseEngine.RecoveryPass.Replay);
+    }
+
+    private void CommitAccessors()
+    {
+        if (_hasAccessor)
+        {
+            _mapAccessor.CommitChanges();
+        }
+
+        if (_hasClusterAccessor)
+        {
+            _clusterAccessor.CommitChanges();
+        }
+
+        foreach (var info in _infoByTable.Values)
+        {
+            info.CompContentAccessor.CommitChanges();
+            if (info.ComponentTable.StorageMode == StorageMode.Versioned)
+            {
+                info.CompRevTableAccessor.CommitChanges();
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (_hasAccessor)
@@ -861,5 +1021,20 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         }
 
         _infoByTable.Clear();
+
+        // The replay's last batch written, its marks released. Held, they were never released, and every page the replay touched stayed unevictable
+        // (#1183). Released unwritten, a segment the replay grew had its directory owed while the scrub's batch wrote the old tail it shares a page with:
+        // a crash before the next cycle left the chain ahead of the directory, and the open after it refused the segment (CrashDuringRecoveryTests).
+        // Written, the directory goes first (CK-05's alternate slot, then the plain pages). Only once the replay completed: on a throw, an entity's apply
+        // may be half done — a flush-only cycle may still write some of it, and the next open's replay of the entity, idempotent, converges over it
+        // (CK-08, AP-12); what this save would add is the rest of the half-applied batch (review).
+        if (_completed)
+        {
+            _changeSet.SaveChanges();
+        }
+        else
+        {
+            _changeSet.ReleaseDirtyMarks();
+        }
     }
 }

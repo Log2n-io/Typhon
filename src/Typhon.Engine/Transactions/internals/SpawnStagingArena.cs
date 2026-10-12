@@ -10,7 +10,7 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A spawned entity has no address until <c>FinalizeSpawns</c> claims its cluster slot at commit, so its payload has to live somewhere in the meantime.
+/// A spawned entity has no address until <c>PlaceSpawns</c> claims its cluster slot at commit, so its payload has to live somewhere in the meantime.
 /// That used to be a real <c>ComponentSegment</c> chunk, which for a cluster-backed SingleVersion or Transient component then became structurally unreachable —
 /// the persisted <c>ClusterEntityRecord</c> has no field that could hold the id, so nothing could ever free it and the file grew with cumulative spawns (#839).
 /// This arena is that address space instead: no page cache, no occupancy bitmap, nothing to leak, and it costs the transaction one native block for as long as

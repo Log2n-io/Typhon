@@ -299,7 +299,6 @@ internal static class SchemaEvolutionEngine
                 newHeader.ChainLength = 1;
                 newHeader.ItemCount = 1;
                 newHeader.FirstItemIndex = 0;
-                newHeader.LastCommitRevisionIndex = 0;
                 newHeader.CommitSequence = header.CommitSequence;
                 newHeader.EntityPK = header.EntityPK;
 
@@ -315,20 +314,39 @@ internal static class SchemaEvolutionEngine
     }
 
     /// <summary>
-    /// Finds the HEAD (most recent) revision element in a revision chain.
+    /// Finds the HEAD revision element of a revision chain: the committed element with the highest stamp (VIS-05), not the last in chain order — two
+    /// concurrent writers of one entity publish in either order. A chain with no committed element yields its last, as before.
     /// </summary>
     private static unsafe CompRevStorageElement FindHeadElement(ref CompRevStorageHeader header, byte* rootChunk, ref ChunkAccessor<PersistentStore> accessor)
     {
-        var headIndex = header.FirstItemIndex + header.ItemCount - 1;
-        var (chunkIndex, indexInChunk) = CompRevStorageHeader.GetRevisionLocation(headIndex);
+        var span = ComponentRevisionManager.CompRevCountInRoot + ((header.ChainLength - 1) * ComponentRevisionManager.CompRevCountInNext);
+        CompRevStorageElement head = default;
+        CompRevStorageElement last = default;
+        var found = false;
+        for (var i = 0; i < header.ItemCount; i++)
+        {
+            var element = ElementAt((header.FirstItemIndex + i) % span, rootChunk, ref accessor);
+            last = element;
+            if (!element.IsVoid && !element.IsolationFlag && (!found || element.TSN >= head.TSN))
+            {
+                head = element;
+                found = true;
+            }
+        }
 
+        return found ? head : last;
+    }
+
+    private static unsafe CompRevStorageElement ElementAt(int revisionIndex, byte* rootChunk, ref ChunkAccessor<PersistentStore> accessor)
+    {
+        var (chunkIndex, indexInChunk) = CompRevStorageHeader.GetRevisionLocation(revisionIndex);
         if (chunkIndex == 0)
         {
             var elements = (CompRevStorageElement*)(rootChunk + Unsafe.SizeOf<CompRevStorageHeader>());
             return elements[indexInChunk];
         }
 
-        // Walk the chain to find the target chunk
+        // Walk the chain to the target chunk
         var currentChunkId = Unsafe.AsRef<int>(rootChunk); // NextChunkId is the first field
         for (int i = 1; i < chunkIndex; i++)
         {

@@ -80,6 +80,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                 RoutingId = _sourceTable.DBE.RoutingIdOf(meta),
                 View = this,
                 Tx = tx,
+                Map = engineState.EntityMap,
             };
             engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
             accessor.Dispose();
@@ -88,14 +89,14 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
     private struct SourceCollector : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
     {
+        public RawValuePagedHashMap<long, PersistentStore> Map;
         public ushort RoutingId;
         public NavigationView<TSource, TTarget> View;
         public Transaction Tx;
 
         public bool Process(long key, byte* value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
-            if (!header.IsVisibleAt(Tx.TSN))
+            if (!EntityVisibility.IsVisibleInScan(value, Tx.TSN, Tx.DBE.CommitCards, Map, key))
             {
                 return true;
             }
@@ -142,7 +143,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             throw new ObjectDisposedException(nameof(NavigationView<,>));
         }
 
-        if (DeltaBuffer.HasOverflow)
+        if (NeedsRefreshFull)
         {
             SetOverflowDetected(true);
             RefreshFull(tx);
@@ -161,6 +162,22 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ProcessEntry(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, byte componentTag, Transaction tx)
     {
+        // An enable carries no key (NotifyViewsForEnableDisable): the source is re-evaluated from what it reads, a target's sources are fanned out to.
+        if (isCreation && entry.AfterKey.IsZero)
+        {
+            var pk = (long)entry.EntityPK.RawValue;
+            if (componentTag == 0)
+            {
+                ApplyMembership(pk, EvaluateFullPredicate(pk, tx));
+            }
+            else
+            {
+                ReverseLookupAndUpdate(pk, tx);
+            }
+
+            return;
+        }
+
         if (componentTag == 0)
         {
             // Source component change
@@ -221,34 +238,19 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             return;
         }
 
-        var wasInView = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
-        var shouldPass = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
+        // Membership from the view's own set, not the entry's BeforeKey — the writer's read value, stale under concurrent writers (step 1.5).
+        var wasInView = _entityIds.Contains(sourcePK);
+        var shouldPass = !isDeletion && SourceFieldPasses(fieldIndex, ref entry.AfterKey);
 
-        if (wasInView == shouldPass)
+        if (wasInView)
         {
-            // No boundary crossing — if entity is in view, mark Modified
-            if (shouldPass && _entityIds.Contains(sourcePK))
-            {
-                CompactDelta(sourcePK, DeltaKind.Modified);
-            }
-            return;
+            // IN: stays while this predicate passes, leaves when it fails
+            ApplyDelta(sourcePK, true, shouldPass);
         }
-
-        if (!wasInView)
+        else if (shouldPass && CheckOtherSourceFieldsAndTarget(sourcePK, fieldIndex, tx))
         {
             // OUT→IN: verify all other predicates (source + target via FK)
-            if (CheckOtherSourceFieldsAndTarget(sourcePK, fieldIndex, tx))
-            {
-                ApplyDelta(sourcePK, _entityIds.Contains(sourcePK), true);
-            }
-        }
-        else
-        {
-            // IN→OUT: remove if entity was in view
-            if (_entityIds.Contains(sourcePK))
-            {
-                ApplyDelta(sourcePK, true, false);
-            }
+            ApplyDelta(sourcePK, false, true);
         }
     }
 
@@ -503,15 +505,44 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     {
         var oldEntities = _entityIds.Clone();
 
-        DeltaBuffer.Reset(tx.TSN);
+        var droppedBefore = BeginRefreshFull();
 
+        // Rebuilt from storage, as the builder seeds it. It cleared the set and computed the deltas from nothing, so an overflow emptied the view.
         _entityIds.Clear();
-
-        DrainBufferAfterRefreshFull(tx.TSN);
+        PopulateFromEntityMaps(tx);
         ComputeRefreshFullDeltas(oldEntities);
+
+        // The entries the re-scan may have missed (a commit between its delta and its value) are folded, not discarded: see EndRefreshFull.
+        while (DeltaBuffer.TryPeek(tx.TSN, out var entry, out var flags, out var tsn, out var componentTag))
+        {
+            var fold = FoldsHead;   // an entry appended before a drop that may have superseded it: the re-scan stands for its entity
+            DeltaBuffer.Advance();
+            if (fold)
+            {
+                ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
+            }
+
+            SetLastRefreshTSN(tsn);
+        }
+
+        EndRefreshFull(droppedBefore);
 
         SetOverflowDetected(false);
         SetLastRefreshTSN(tx.TSN);
+    }
+
+    /// <summary>Whether <paramref name="key"/> passes every source evaluator of <paramref name="fieldIndex"/> — two for a range on one field.</summary>
+    private bool SourceFieldPasses(int fieldIndex, ref KeyBytes8 key)
+    {
+        for (var i = 0; i < _sourceEvaluators.Length; i++)
+        {
+            if (_sourceEvaluators[i].FieldIndex == fieldIndex && !EvaluateKey(ref _sourceEvaluators[i], ref key))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

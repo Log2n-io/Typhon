@@ -53,7 +53,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             var d = new CompD(1.0f, 10, 2.0);
             entityId = t.Spawn<CompDArch>(CompDArch.D.Set(in d));
             t.Commit();
-            createTsn = t.TSN;
+            createTsn = t.CommitStamp;   // a delta carries its commit stamp (VIS-11)
         }
 
         var entityPk = (long)entityId.RawValue;
@@ -71,7 +71,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             w = d;
             target.Set(CompDArch.D, w);
             t.Commit();
-            updateTsn = t.TSN;
+            updateTsn = t.CommitStamp;   // a delta carries its commit stamp (VIS-11)
         }
 
         Assert.That(view.DeltaBuffer.TryPeek(long.MaxValue, out var entry, out var flags, out var tsn, out _), Is.True);
@@ -101,7 +101,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             var d = new CompD(1.0f, 42, 2.0);
             entityId = t.Spawn<CompDArch>(CompDArch.D.Set(in d));
             t.Commit();
-            createTsn = t.TSN;
+            createTsn = t.CommitStamp;   // a delta carries its commit stamp (VIS-11)
         }
 
         var entityPk = (long)entityId.RawValue;
@@ -145,7 +145,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             using var t = dbe.CreateQuickTransaction();
             t.Destroy(entityId);
             t.Commit();
-            deleteTsn = t.TSN;
+            deleteTsn = t.CommitStamp;   // a delta carries its commit stamp (VIS-11)
         }
 
         Assert.That(view.DeltaBuffer.TryPeek(long.MaxValue, out var entry, out var flags, out var tsn, out _), Is.True);
@@ -406,11 +406,11 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             var d = new CompD(1.0f, 10, 2.0);
             t.Spawn<CompDArch>(CompDArch.D.Set(in d));
             t.Commit();
-            tsn1 = t.TSN;
+            tsn1 = t.CommitStamp;   // a delta carries its commit stamp (VIS-11)
         }
 
         view.DeltaBuffer.TryPeek(long.MaxValue, out _, out _, out var storedTsn1, out _);
-        Assert.That(storedTsn1, Is.EqualTo(tsn1), "TSN from creation should match transaction TSN");
+        Assert.That(storedTsn1, Is.EqualTo(tsn1), "the creation delta carries its commit stamp");
         view.DeltaBuffer.Advance();
 
         {
@@ -418,7 +418,7 @@ class ViewChangeCaptureTests : TestBase<ViewChangeCaptureTests>
             var d = new CompD(2.0f, 20, 3.0);
             t.Spawn<CompDArch>(CompDArch.D.Set(in d));
             t.Commit();
-            tsn2 = t.TSN;
+            tsn2 = t.CommitStamp;
         }
 
         view.DeltaBuffer.TryPeek(long.MaxValue, out _, out _, out var storedTsn2, out _);

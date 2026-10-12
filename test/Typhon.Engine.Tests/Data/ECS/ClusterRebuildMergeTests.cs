@@ -193,6 +193,48 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
     // AC-2.1 — bit-identical to the two-pass oracle
     // ══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// #1305: the startup rebuild of a cluster segment larger than the cache completes, under one epoch scope as the open's is, serial and parallel. Its map
+    /// read every cluster through an epoch-tagged accessor, which pinned every page it read for the scope: a spatial database larger than its cache timed
+    /// out in the crash open's spatial pass, with every slot epoch-held.
+    /// </summary>
+    [TestCase(1)]
+    [TestCase(4)]
+    [VerifiesRule("EP-02")]
+    [Property("CacheSize", 8L * 1024 * 1024)]
+    [CancelAfter(60_000)]
+    public void TheRebuild_OfAClusterSegmentLargerThanTheCache_Completes(int maxWorkers)
+    {
+        using var dbe = SetupEngineWithGrid();
+        var cs = ClusterState(dbe);
+        var spawned = 0;
+        while (cs.ClusterSegment.Length <= 8 * 1024 * 1024 / PagedMMF.PageSize)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < 2_000; i++, spawned++)
+            {
+                tx.Spawn<RbmUnit>(RbmUnit.Pos.Set(PointAt(spawned % 997 % WorldMax, spawned % 991 % WorldMax)));
+            }
+
+            Assert.That(tx.Commit(), Is.True, "the spawns");
+        }
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            dbe.Realm0Grid.ResetCellState();
+            cs.ResetRealmCellPools();
+            cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, maxWorkers);
+        }
+
+        var mapped = 0;
+        for (var i = 0; i < cs.ActiveClusterCount; i++)
+        {
+            mapped += cs.ClusterCellMap[cs.ActiveClusterIds[i]] >= 0 ? 1 : 0;
+        }
+
+        Assert.That(mapped, Is.EqualTo(cs.ActiveClusterCount), "every cluster filed in its cell");
+    }
+
     [Test]
     public void MergedRebuild_MatchesTwoPassOracle_AcrossCellsAndClusters()
     {

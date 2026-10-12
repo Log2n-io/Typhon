@@ -1,7 +1,10 @@
 ﻿using JetBrains.Annotations;
 using System;
+using System.Threading;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
@@ -43,14 +46,23 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        public void Commit(long tsn)
-        {
-            ref var el = ref Element;
-            el.TSN = tsn;
-            el.IsolationFlag = false;
-        }
+        /// <summary>The publication act (VIS-04): the element stamped with the commit <paramref name="stamp"/>, its isolation flag cleared, in that order.</summary>
+        public void Publish(long stamp) => Element.Publish(stamp);
 
     }
+
+    /// <summary>
+    /// The capture ticket for a hold of <paramref name="root"/>'s chain lock (PS-20, <see cref="PagedMMF.CaptureTicket"/>): taken before the lock is, and
+    /// given to <see cref="EndChainLockHold"/> once it is released. <paramref name="root"/> is a chunk of the page cache.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static PagedMMF.CaptureTicket ChainLockTicket(ref ChunkAccessor<PersistentStore> accessor, ref CompRevStorageHeader root) =>
+        accessor.Store.Mmf.TakeCaptureTicket(ref Unsafe.As<CompRevStorageHeader, byte>(ref root));
+
+    /// <summary>Ends the chain-lock hold <paramref name="ticket"/> was taken for, after the lock is released (PS-20).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EndChainLockHold(ref ChunkAccessor<PersistentStore> accessor, in PagedMMF.CaptureTicket ticket) =>
+        accessor.Store.Mmf.EndLockHold(in ticket);
 
     internal static ElementRevisionHandle GetRevisionElement(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short revisionIndex)
     {
@@ -67,23 +79,33 @@ internal ref struct ComponentRevisionManager
 
         var curChunkId = nextChunkId;
         var useLock = !firstHeader.Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (useLock)
         {
+            ticket = ChainLockTicket(ref accessor, ref firstHeader);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!firstHeader.Control.EnterSharedAccess(ref wc))
             {
                 ThrowHelper.ThrowLockTimeout("RevisionChain/GetElement", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
-        while (--chunkIndexInChain >= 0)
+        // The walk fetches the overflow chunks, and a fetch can throw — a page-cache back-pressure timeout: the hold is released whatever happens, or the
+        // next writer of the entity waits out its lock timeout (#1278).
+        try
         {
-            curChunkId = nextChunkId;
-            nextChunkId = accessor.GetChunk<int>(nextChunkId);
+            while (--chunkIndexInChain >= 0)
+            {
+                curChunkId = nextChunkId;
+                nextChunkId = accessor.GetChunk<int>(nextChunkId);
+            }
         }
-
-        if (useLock)
+        finally
         {
-            firstHeader.Control.ExitSharedAccess();
+            if (useLock)
+            {
+                firstHeader.Control.ExitSharedAccess();
+                EndChainLockHold(ref accessor, in ticket);
+            }
         }
 
         return new ElementRevisionHandle(ref accessor, curChunkId, false, (short)indexInChunk);
@@ -102,8 +124,10 @@ internal ref struct ComponentRevisionManager
         ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(compRevInfo.CompRevTableFirstChunkId, true);
 
         // Enter exclusive access for the Revision Table (skip if caller already holds the lock)
+        var ticket = default(PagedMMF.CaptureTicket);
         if (!lockAlreadyHeld)
         {
+            ticket = ChainLockTicket(ref compRevTableAccessor, ref firstHeader);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!firstHeader.Control.EnterExclusiveAccess(ref wc))
             {
@@ -161,6 +185,7 @@ internal ref struct ComponentRevisionManager
             if (!lockAlreadyHeld)
             {
                 firstHeader.Control.ExitExclusiveAccess();
+                EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
         }
     }
@@ -180,6 +205,7 @@ internal ref struct ComponentRevisionManager
         ref var accessor = ref info.CompRevTableAccessor;
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
         ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+        var ticket = ChainLockTicket(ref accessor, ref header);
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
         if (!header.Control.EnterExclusiveAccess(ref wc))
         {
@@ -221,6 +247,219 @@ internal ref struct ComponentRevisionManager
         {
             header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
             header.Control.ExitExclusiveAccess();
+            EndChainLockHold(ref accessor, in ticket);
+        }
+    }
+
+    /// <summary>
+    /// Voids this transaction's own pending entry (CHAIN-01): found by its identity under the chain's exclusive lock, wherever a compaction has moved it.
+    /// For a rollback, which has nothing to fail into: the lock is waited for without a deadline, and the wait ends — a cleanup only tries the lock, a
+    /// publish or a conflict-handler commit holding it releases it (AP-05's argument).
+    /// </summary>
+    /// <param name="info">The component's table info.</param>
+    /// <param name="firstChunkId">The chain's root chunk.</param>
+    /// <param name="ownChunkId">The content chunk this transaction's entry names; 0 for a delete entry.</param>
+    /// <param name="tsn">This transaction's TSN, which identifies a delete entry.</param>
+    /// <param name="hintIndex">Where the transaction last saw its entry; checked first.</param>
+    /// <returns>
+    /// <c>false</c> when the chain holds no pending entry of this transaction: nothing is voided, and the caller must not free <paramref name="ownChunkId"/> —
+    /// an entry naming it, if any, is committed and not this transaction's to void (#1252).
+    /// </returns>
+    internal static bool VoidOwnPendingEntry(ComponentInfo info, int firstChunkId, int ownChunkId, long tsn, short hintIndex)
+    {
+        ref var accessor = ref info.CompRevTableAccessor;
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+
+        // A rollback run while this thread holds the chain already — a conflict handler, under the lock its commit holds, disposing another transaction
+        // that wrote the entity — voids under that lock: waiting for the lock it holds would never end.
+        var held = header.Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
+        if (!held)
+        {
+            ticket = ChainLockTicket(ref accessor, ref header);
+            EnterChainLockForRollback(info, ref header, firstChunkId);
+        }
+
+        try
+        {
+            var index = FindOwnPendingEntry(ref accessor, firstChunkId, ownChunkId, tsn, hintIndex);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            VoidEntry(ref accessor, firstChunkId, index);
+            return true;
+        }
+        finally
+        {
+            if (!held)
+            {
+                header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+                header.Control.ExitExclusiveAccess();
+                EndChainLockHold(ref accessor, in ticket);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The chain's exclusive lock for a rollback's void, waited for without a deadline — a rollback has nothing to fail into — in slices, each one that runs
+    /// out reported with the lock's holder (#1273). The wait ends unless the holder waits on this rollback: a conflict handler that, while its commit holds
+    /// the chain's lock, waits on another transaction of the same entity. Handler code must not; the report names the thread that does.
+    /// </summary>
+    private static void EnterChainLockForRollback(ComponentInfo info, ref CompRevStorageHeader header, int firstChunkId)
+    {
+        var dbe = info.ComponentTable.DBE;
+        var interval = dbe?.RollbackVoidReportInterval ?? TimeSpan.FromSeconds(30);
+        var start = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var slice = WaitContext.FromTimeout(interval);
+            if (header.Control.EnterExclusiveAccess(ref slice))
+            {
+                return;
+            }
+
+            dbe?.NoteRollbackVoidWaiting(header.Control.LockedByThreadId, Stopwatch.GetElapsedTime(start), firstChunkId);
+        }
+    }
+
+    /// <summary>
+    /// The index of this transaction's pending entry: isolated, and naming <paramref name="ownChunkId"/> — or, for a delete (<paramref name="ownChunkId"/>
+    /// 0), naming no chunk and carrying <paramref name="tsn"/>. -1 when the chain holds none. The caller holds the chain's exclusive lock.
+    /// </summary>
+    /// <param name="accessor">Accessor for revision table chunks.</param>
+    /// <param name="firstChunkId">The chain's root chunk.</param>
+    /// <param name="ownChunkId">The content chunk this transaction's entry names; 0 for a delete entry.</param>
+    /// <param name="tsn">This transaction's TSN, which identifies a delete entry.</param>
+    /// <param name="hintIndex">Where the transaction last saw its entry; checked first, and trusted only inside the chain.</param>
+    internal static short FindOwnPendingEntry(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, int ownChunkId, long tsn, short hintIndex)
+    {
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+        if (hintIndex >= header.FirstItemIndex && hintIndex < header.FirstItemIndex + header.ItemCount
+            && IsOwnPendingEntry(GetRevisionElement(ref accessor, firstChunkId, hintIndex).Element, ownChunkId, tsn))
+        {
+            return hintIndex;
+        }
+
+        // One walk: the enumerator takes no lock of its own under the one the caller holds, so its budget is never consulted.
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            if (IsOwnPendingEntry(enumerator.Current, ownChunkId, tsn))
+            {
+                return (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool IsOwnPendingEntry(in CompRevStorageElement element, int ownChunkId, long tsn) =>
+        element.IsolationFlag && element.ComponentChunkId == ownChunkId && (ownChunkId != 0 || element.TSN == tsn);
+
+    /// <summary>
+    /// An element's commit stamp by VIS-01: a published element's own; a flagged element's owner's, when that owner is registered on a commit card — past
+    /// its commit point, not yet published. False for a void, for an element of <paramref name="self"/>, and for a flagged element whose owner is not
+    /// committing (an uncommitted write, or a rollback's remains).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool TryResolveStamp(in CompRevStorageElement element, CommitCardTable cards, long self, out long stamp)
+    {
+        stamp = 0;
+        if (element.IsVoid)
+        {
+            return false;
+        }
+
+        var tsn = element.TSN;
+        if (!element.IsolationFlag)
+        {
+            stamp = tsn;
+            return tsn > 0;
+        }
+
+        return tsn != self && cards != null && cards.TryGetStamp(tsn, out stamp);
+    }
+
+    /// <summary>
+    /// The chain's newest revision by commit stamp (VIS-05), flagged ones resolved through their owner's card (<see cref="TryResolveStamp"/>), the
+    /// entries of <paramref name="self"/> left out: its index, or -1 when there is none. Conflict detection's test (plan 06 §3.10): a newest stamp above
+    /// a writer's snapshot is a commit it did not see. Takes the chain's shared lock unless the caller holds it.
+    /// </summary>
+    internal static short FindNewestByStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, CommitCardTable cards, long self,
+        out long newestStamp)
+    {
+        newestStamp = 0;
+        short newest = -1;
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            if (TryResolveStamp(enumerator.Current, cards, self, out var stamp) && stamp > newestStamp)
+            {
+                newestStamp = stamp;
+                newest = (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex);
+            }
+        }
+
+        return newest;
+    }
+
+    /// <summary>
+    /// The highest stamp among the chain's published revisions, the one at <paramref name="exceptIndex"/> left out; 0 when none. The publish's test for
+    /// the cluster HEAD copy (VIS-05): a revision is copied only above every other published one. The caller holds the chain's exclusive lock.
+    /// </summary>
+    internal static unsafe long HighestPublishedStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short exceptIndex)
+    {
+        long highest = 0;
+
+        // The chain in its root alone — the steady state, cleanup keeping a chain to its root (#1298): its elements read in place, no enumerator.
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+        if (header.ChainLength == 1)
+        {
+            var elements = accessor.GetChunkAsSpan(firstChunkId).Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
+            for (var i = 0; i < header.ItemCount; i++)
+            {
+                // The revision index as the enumerator numbers it (FirstItemIndex + position, unwrapped), the element where the circular root holds it.
+                var revisionIndex = header.FirstItemIndex + i;
+                ref var element = ref elements[revisionIndex % CompRevCountInRoot];
+                if (revisionIndex != exceptIndex && !element.IsVoid && !element.IsolationFlag && element.TSN > highest)
+                {
+                    highest = element.TSN;
+                }
+            }
+
+            return highest;
+        }
+
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        while (enumerator.MoveNext())
+        {
+            ref var element = ref enumerator.Current;
+            if (!element.IsVoid && !element.IsolationFlag && element.TSN > highest
+                && (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex) != exceptIndex)
+            {
+                highest = element.TSN;
+            }
+        }
+
+        return highest;
+    }
+
+    /// <summary>
+    /// Voids the entry at <paramref name="index"/>, and drops the chain's item count only when it is the chain's last entry: a void elsewhere is a hole —
+    /// readers skip it, the next compaction drops it — and dropping the count would drop the chain's last entry instead: another transaction's revision,
+    /// appended after this one (#1233). The caller holds the chain's exclusive lock.
+    /// </summary>
+    internal static void VoidEntry(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short index)
+    {
+        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+        var last = index == header.FirstItemIndex + header.ItemCount - 1;
+        GetRevisionElement(ref accessor, firstChunkId, index).Element.Void();
+        if (last)
+        {
+            header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
+            --header.ItemCount;
         }
     }
 
@@ -237,7 +476,7 @@ internal ref struct ComponentRevisionManager
         header.FirstItemIndex = 0;
         header.ItemCount = 1;
         header.ChainLength = 1;
-        header.LastCommitRevisionIndex = -1;
+        header.Reserved = 0;
         header.CommitSequence = 1;
         header.EntityPK = pk;
 
@@ -266,6 +505,9 @@ internal ref struct ComponentRevisionManager
     /// <para>This method is transaction-agnostic and can be called from both the transaction commit path and the lazy cleanup path.</para>
     /// <para>A <b>sentinel</b> revision is preserved when the first kept entry has TSN &gt; nextMinTSN: this is the last committed
     /// revision before the cutoff, needed because active transactions at MinTSN may have cached its content chunk ID.</para>
+    /// <para>All or nothing up to the root's rewrite (REAP-02, #1308): the walk writes nothing of the live chain and frees nothing, so a throw in it — a
+    /// back-pressure timeout on an overflow chunk's page — leaves the chain as it was. The frees follow the rewrite, and cannot throw when deferred: the
+    /// list's room is taken before. The compacted chain is the root alone (#1298): a compaction that would keep more is put off, the chain unchanged.</para>
     /// </remarks>
     internal static unsafe bool CleanUpUnusedEntriesCore(ComponentTable ct, int firstChunkId, long nextMinTSN,
         ref ChunkAccessor<PersistentStore> compRevTableAccessor, ref ChunkAccessor<PersistentStore> compContentAccessor,
@@ -302,119 +544,185 @@ internal ref struct ComponentRevisionManager
             next = compRevTableAccessor.GetChunk<int>(next);   // an overflow chunk's first field is its own next-chunk id
         }
 
+        // The content chunks the compaction frees, freed once the root names the new chain — at most one per element — and the new chain's overflow chunks,
+        // given back if the walk throws: the new chain is never longer than the old one, which starts at an offset when the new one starts at 0.
+        int itemCount = firstChunkHeader.ItemCount;
+        Span<int> contentFrees = (itemCount <= 512) ? stackalloc int[itemCount] : new int[itemCount];
+        var contentFreeCount = 0;
+        var stepProbe = ct.DBE?.CompactionStepProbe;
+        Span<byte> destSpan;
+
+        try
         {
             using var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc);
             var maxSkipCount = firstChunkHeader.ItemCount;
 
-            // Sentinel: delayed-free pattern — each newer committed skip candidate frees the previous one's chunk.
-            // The final sentinel is either emitted to the compacted output or freed, depending on the first kept entry's TSN.
+            // Sentinel: the highest-stamp committed revision below the cutoff (VIS-06) — the one the oldest snapshot reads. A skip candidate with a higher
+            // stamp supersedes it and frees its chunk; one with a lower stamp is freed itself: chain order is no version order (VIS-05), and keeping the
+            // last candidate in chain order freed the newest revision of a chain whose writers published out of order ([A(12), B(10)], cutoff 13).
+            // The final sentinel is either emitted to the compacted output or freed, depending on the first kept entry.
             CompRevStorageElement sentinelEntry = default;
             int sentinelCompChunkId = 0;
             bool hasSentinel = false;
+            bool sentinelKept = false;
             bool inSkipPhase = true;
 
             while (enumerator.MoveNext())
             {
+                stepProbe?.Invoke(firstChunkId);
+
+                // A void — a rolled-back entry, or a conflict's orphan — is not an entry (CHAIN-01): dropped wherever it is, and it counts for nothing. Kept,
+                // it ended the skip phase as the chain's last entry and the sentinel, the newest committed revision below the cutoff, was freed as no longer
+                // needed.
+                if (enumerator.Current.IsVoid)
+                {
+                    skipCount++;
+                    continue;
+                }
+
+                // A committed entry below the cutoff and older than the sentinel is superseded for every snapshot wherever it sits, chain order being no
+                // version order (VIS-05): a last-writer-wins commit publishes its entry in place, ahead of the commit it won against. The count guard does
+                // not keep it — the sentinel stays instead — and past the skip phase it is not copied.
+                var superseded = hasSentinel && !enumerator.Current.IsolationFlag && enumerator.Current.TSN > 0 && enumerator.Current.TSN < nextMinTSN
+                                 && enumerator.Current.TSN < sentinelEntry.TSN;
+
                 // Skip phase: remove entries older than the cutoff, track the last committed one as sentinel. Active uncommitted entries (IsolationFlag=true)
                 // must NOT enter the skip phase — they belong to transactions that will commit later. Freeing them would corrupt their data.
                 // IsolationFlag check is before maxSkipCount decrement to avoid wasting the guard count.
-                if (inSkipPhase && !enumerator.Current.IsolationFlag && (--maxSkipCount > 0) && (enumerator.Current.TSN < nextMinTSN))
+                if (inSkipPhase && !enumerator.Current.IsolationFlag && (--maxSkipCount > 0 || superseded) && (enumerator.Current.TSN < nextMinTSN))
                 {
                     var revChunkId = enumerator.Current.ComponentChunkId;
                     bool isCommitted = (enumerator.Current.TSN > 0);
 
                     if (isCommitted)
                     {
-                        // Supersede previous sentinel: free/defer its chunk, promote current entry
-                        if (hasSentinel)
+                        if (hasSentinel && enumerator.Current.TSN < sentinelEntry.TSN)
                         {
-                            DeferOrFreeContentChunk(ct, ref compContentAccessor, sentinelCompChunkId, hasCollections, deferredChunkFrees);
+                            // Superseded by the sentinel, which is newer.
+                            PendContentFree(contentFrees, ref contentFreeCount, revChunkId);
                         }
-                        sentinelEntry = enumerator.Current;
-                        sentinelCompChunkId = revChunkId;
-                        hasSentinel = true;
+                        else
+                        {
+                            // Supersede the previous sentinel: free/defer its chunk, promote the current entry.
+                            if (hasSentinel)
+                            {
+                                PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
+                            }
+
+                            sentinelEntry = enumerator.Current;
+                            sentinelCompChunkId = revChunkId;
+                            hasSentinel = true;
+                        }
                     }
                     else
                     {
-                        // Voided entry (all fields zeroed from rollback): ComponentChunkId is 0, effectively a no-op.
-                        DeferOrFreeContentChunk(ct, ref compContentAccessor, revChunkId, hasCollections, deferredChunkFrees);
+                        // No TSN, yet not void: no such entry is written. Freed like a void's chunk would be (0, a no-op).
+                        PendContentFree(contentFrees, ref contentFreeCount, revChunkId);
                     }
 
-                    enumerator.CurrentAsSpan.Clear();
                     skipCount++;
                     continue;
                 }
 
                 // Transition out of skip phase: resolve sentinel
-                int newChunkId;
                 if (inSkipPhase)
                 {
                     inSkipPhase = false;
                     if (hasSentinel)
                     {
-                        if (enumerator.Current.TSN >= nextMinTSN || enumerator.Current.IsolationFlag)
+                        if (enumerator.Current.TSN >= nextMinTSN || enumerator.Current.IsolationFlag || enumerator.Current.TSN < sentinelEntry.TSN)
                         {
                             // Keep sentinel: the first kept entry is at or beyond the cutoff, OR is an active uncommitted entry (IsolationFlag=true) invisible
-                            // to readers — the sentinel provides the read baseline for transactions at MinTSN.
-                            curDestElements[curDestIndexInChunk++] = sentinelEntry;
-                            tempFirstHeader[0].ItemCount++;
-                            tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
-                            curDestIndex++;
-                            skipCount--; // Sentinel was counted as skipped but is being kept
-
+                            // to readers, OR is older than the sentinel (a lower stamp, VIS-06) — the sentinel provides the read baseline for transactions at
+                            // MinTSN.
                             if (curDestIndexInChunk == curDestElements.Length)
                             {
-                                curDestIndexInChunk = 0;
-                                tempFirstHeader[0].ChainLength++;
-
-                                newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0
-                                curNextChunkId[0] = newChunkId;
-                                var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
-                                newChunkSpan.Split(out curNextChunkId, out curDestElements);
+                                goto Deferred;
                             }
+
+                            curDestElements[curDestIndexInChunk++] = sentinelEntry;
+                            tempFirstHeader[0].ItemCount++;
+                            curDestIndex++;
+                            skipCount--; // Sentinel was counted as skipped but is being kept
+                            sentinelKept = true;
                         }
                         else
                         {
                             // Sentinel not needed: the first kept entry is visible to all remaining transactions
-                            DeferOrFreeContentChunk(ct, ref compContentAccessor, sentinelCompChunkId, hasCollections, deferredChunkFrees);
+                            PendContentFree(contentFrees, ref contentFreeCount, sentinelCompChunkId);
                         }
                     }
                 }
 
-                // Copy entry to compacted output
-                curDestElements[curDestIndexInChunk++] = enumerator.Current;
-                tempFirstHeader[0].ItemCount++;
-                if (!enumerator.Current.IsolationFlag)
+                if (sentinelKept && superseded)
                 {
-                    tempFirstHeader[0].LastCommitRevisionIndex = (short)curDestIndex;
+                    PendContentFree(contentFrees, ref contentFreeCount, enumerator.Current.ComponentChunkId);
+                    skipCount++;
+                    continue;
                 }
-                curDestIndex++;
 
+                // Copy entry to compacted output — into the root alone (#1298): what the compaction keeps past it, it would put in fresh chunks after the
+                // checkpoint's barrier, and a crash that wrote the root and not them recovered an older revision, the newest being in the lost chunk.
+                // Put off instead, to a pass that finds fewer entries to keep: nothing has been written or freed yet.
                 if (curDestIndexInChunk == curDestElements.Length)
                 {
-                    curDestIndexInChunk = 0;
-                    tempFirstHeader[0].ChainLength++;
-
-                    newChunkId = ct.CompRevTableSegment.AllocateChunk(true, compRevTableAccessor.ChangeSet);   // cleared: its link is 0, the chain's end
-                    curNextChunkId[0] = newChunkId;
-                    var newChunkSpan = compRevTableAccessor.GetChunkAsSpan(newChunkId, true);
-                    newChunkSpan.Split(out curNextChunkId, out curDestElements);
+                    goto Deferred;
                 }
+
+                curDestElements[curDestIndexInChunk++] = enumerator.Current;
+                tempFirstHeader[0].ItemCount++;
+                curDestIndex++;
             }
+
+            // Every entry was skipped — what followed the last committed one was voids: the sentinel is the chain's newest revision, and stays. The count
+            // guard above keeps the last entry, but only when it is no void.
+            if (inSkipPhase && hasSentinel)
+            {
+                if (curDestIndexInChunk == curDestElements.Length)
+                {
+                    goto Deferred;
+                }
+
+                curDestElements[curDestIndexInChunk] = sentinelEntry;
+                tempFirstHeader[0].ItemCount++;
+                skipCount--;
+            }
+
+            // Nothing but voids: the chain keeps one, the shape the recovery scrub gives a chain with no committed revision — readers find nothing in it,
+            // and a chain is never empty.
+            if (tempFirstHeader[0].ItemCount == 0)
+            {
+                tempElements[0] = default;
+                tempFirstHeader[0].ItemCount = 1;
+                skipCount--;
+            }
+
+            // The room for every deferred free, and the root's page, taken before the rewrite: past it, nothing may throw.
+            deferredChunkFrees?.EnsureCapacity(deferredChunkFrees.Count + contentFreeCount + chunksToFreeCount);
+            destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
+        }
+        catch
+        {
+            // The live chain is as it was: the walk wrote nothing of it and allocated nothing.
+            versionCleanupScope.Dispose();
+            throw;
         }
 
         // Cleanup does NOT increment CommitSequence. CS represents the total number of commits to this entity, and cleanup removing old entries
-        // doesn't constitute a new commit. The commit path's CurRevisionIndex re-validation (FindRevisionIndexByChunkId) handles stale indices
-        // caused by chain compaction. Keeping CS stable across cleanup ensures the snapshot-isolated revision number formula
-        // (CS - totalCommitted + visibleOrdinal) remains correct.
+        // doesn't constitute a new commit — a changed CS is a handler-less commit's conflict signal. The commit path's CurRevisionIndex re-validation
+        // (FindRevisionIndexByChunkId) handles stale indices caused by chain compaction.
 
         // Copy the compacted data to the first chunk, but SKIP the Control field (offset 4, size 4)
         // to avoid zeroing it. The caller holds the exclusive lock and the Control must remain intact.
-        var destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
         var controlFieldEnd = sizeof(int) + sizeof(int); // NextChunkId (4) + Control (4) = 8
         tempChunk.Slice(0, sizeof(int)).CopyTo(destSpan.Slice(0, sizeof(int)));
         tempChunk.Slice(controlFieldEnd).CopyTo(destSpan.Slice(controlFieldEnd));
-        firstChunkHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
+
+        // The content chunks of the entries the new chain dropped, now that nothing names them.
+        for (var i = 0; i < contentFreeCount; i++)
+        {
+            DeferOrFreeContentChunk(ct, ref compContentAccessor, contentFrees[i], hasCollections, deferredChunkFrees);
+        }
 
         // The old overflow chunks, now that nothing names them: deferred with the content frees, past every transaction alive now — a rollback or a
         // conflict resolution can still write through a handle it took into the old layout before this pass took the lock. Immediately only without a
@@ -438,7 +746,16 @@ internal ref struct ComponentRevisionManager
 
         // Is the component totally deleted? Return true, otherwise false
         return (tempFirstHeader[0].ItemCount == 1 && tempElements[0].ComponentChunkId == 0);
+
+        // What the compaction would keep does not fit the root (#1298): the chain stays as it is, for a later pass — the next commit to the entity queues one.
+        Deferred:
+        Interlocked.Increment(ref CompactionsDeferred);
+        versionCleanupScope.Dispose();
+        return false;
     }
+
+    /// <summary>Compactions put off because what they would keep does not fit the chain's root (#1298). Diagnostic.</summary>
+    internal static long CompactionsDeferred;
 
     /// <summary>
     /// Recovery scrub (03-recovery.md §6, D1): collapses one entity's revision chain to exactly its <b>HEAD</b> — the highest-TSN committed
@@ -456,7 +773,8 @@ internal ref struct ComponentRevisionManager
     /// the caller need not touch the EntityMap.
     /// </returns>
     internal static unsafe bool ScrubChainToHead(ComponentTable ct, int firstChunkId, ref ChunkAccessor<PersistentStore> compRevTableAccessor,
-        ref ChunkAccessor<PersistentStore> compContentAccessor, out long headTsn)
+        ref ChunkAccessor<PersistentStore> compContentAccessor, List<int> droppedContent, HashSet<int> staleContent, out long headTsn,
+        HashSet<int> liveRoots = null)
     {
         headTsn = 0;   // max committed TSN surviving in this chain (0 if no committed head) — fed to NextFreeTSN recovery (RB-05)
         ref var firstHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId);
@@ -465,14 +783,23 @@ internal ref struct ComponentRevisionManager
         var commitSequence = firstHeader.CommitSequence;
         var entityPk = firstHeader.EntityPK;
 
+        // A root whose header is none — a torn page — is left as it is: sized from it, the spans below overran the stack (review of #1251).
+        if (!HasRootHeader(ref firstHeader))
+        {
+            return false;
+        }
+
         // (1) Collect every overflow table chunk (the whole chain except the first chunk) by following the NextChunkId
         // linkage. After scrub the head lives alone in the first chunk, so all overflow chunks are freed unconditionally.
         Span<int> overflowChunks = (chainLength < 128) ? stackalloc int[chainLength] : new int[chainLength];
         var overflowCount = 0;
         {
+            // ChainLength counts the root: ChainLength - 1 overflow chunks, no more. A torn chain's link past them — its last overflow chunk's page as of
+            // before, naming the chunk it was next to in a previous life — reached another chain's live root, which this freed (#1251). Nor into a live
+            // root within them: a root page as of before a compaction names, as its overflow, the chunk since reused as that root.
             var next = firstHeader.NextChunkId;
-            var guard = chainLength + 4;                                  // cycle guard — a corrupted chain must not loop forever
-            while (next != 0 && guard-- > 0)
+            var capacity = ct.CompRevTableSegment.ChunkCapacity;
+            while (next > 0 && next < capacity && overflowCount < chainLength - 1 && (liveRoots == null || !liveRoots.Contains(next)))
             {
                 overflowChunks[overflowCount++] = next;
                 next = compRevTableAccessor.GetChunk<CompRevStorageHeader>(next).NextChunkId;
@@ -501,10 +828,19 @@ internal ref struct ComponentRevisionManager
                     continue;
                 }
 
-                if (!hasHead || el.TSN > head.TSN)
+                // A later element of the same TSN wins: it is the replay's, appended over a chain the data file holds as of after the transaction while
+                // its content is as of before. The two are the same revision; only the replay's content is the transaction's (#1251).
+                if (!hasHead || el.TSN >= head.TSN)
                 {
                     if (hasHead)
                     {
+                        // The loser of a tie is the torn on-disk element: its content chunk's bytes may be another revision's, and its collection
+                        // buffer ids with them — freed without releasing those; the replay's twin rebuilt the collection.
+                        if (el.TSN == head.TSN && head.ComponentChunkId != 0)
+                        {
+                            staleContent.Add(head.ComponentChunkId);
+                        }
+
                         contentToFree[contentCount++] = head.ComponentChunkId;
                     }
                     head = el;
@@ -517,11 +853,15 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // (3) Free non-head content chunks + all overflow table chunks AFTER the enumerator is disposed (the circular buffer
-        // must not be mutated mid-walk — the use-after-free discipline of CleanUpUnusedEntriesCore).
+        // (3) Free all overflow table chunks AFTER the enumerator is disposed (the circular buffer must not be mutated mid-walk — the use-after-free
+        // discipline of CleanUpUnusedEntriesCore). The non-head content chunks are handed to the caller, which frees each once every chain of the table is
+        // scrubbed, and only if no surviving head names it: a torn element can name a chunk another chain's head holds (#1251).
         for (var i = 0; i < contentCount; i++)
         {
-            FreeCompContentChunk(ct, ref compContentAccessor, contentToFree[i], hasCollections);
+            if (contentToFree[i] != 0)
+            {
+                droppedContent.Add(contentToFree[i]);
+            }
         }
         for (var i = 0; i < overflowCount; i++)
         {
@@ -547,7 +887,7 @@ internal ref struct ComponentRevisionManager
             destElements[0] = default;                       // all-zero ⇒ IsVoid ⇒ invisible to readers
             destHeader[0].ItemCount = 1;
             destHeader[0].FirstItemIndex = 0;
-            destHeader[0].LastCommitRevisionIndex = -1;
+            destHeader[0].Reserved = 0;
             return true;
         }
 
@@ -556,7 +896,7 @@ internal ref struct ComponentRevisionManager
         head.IsolationFlag = false;
         destElements[0] = head;
         destHeader[0].ItemCount = 1;
-        destHeader[0].LastCommitRevisionIndex = 0;
+        destHeader[0].Reserved = 0;
 
         // A committed head — live or tombstone — is kept as the single surviving element. The entity stays in the EntityMap;
         // a tombstone is filtered by the read path. Only the no-committed-head case above drops the entity.
@@ -577,59 +917,405 @@ internal ref struct ComponentRevisionManager
     /// the schema-migration backfill (<c>ComponentTable.PopulateNewIndexes</c>) must not, because a ComponentTable's index is shared by every archetype
     /// holding the component and a filtered backfill would leave the others unindexed (#670).
     /// </remarks>
-    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort? archetypeId = null)
+    internal static Dictionary<long, int> EnumerateVersionedChainHeads(ComponentTable table, ushort? archetypeId = null, bool acceptNamedRoots = false,
+        HashSet<int> acceptedNamed = null)
     {
-        var heads = new Dictionary<long, int>();
         if (table?.CompRevTableSegment == null || table.StorageMode != StorageMode.Versioned)
         {
-            return heads;
+            return [];
         }
 
-        var segment = table.CompRevTableSegment;
+        return EnumerateVersionedChainHeads(table.CompRevTableSegment, archetypeId, acceptNamedRoots, acceptedNamed);
+    }
+
+    /// <summary>
+    /// The chain roots of a revision segment, keyed by EntityPK: the allocated chunks no other chunk names as its next — and, with
+    /// <paramref name="acceptNamedRoots"/>, a named chunk with a root's header whose EntityPK no unnamed chunk has.
+    /// </summary>
+    /// <remarks>
+    /// The data file holds each page as of its last capture, so a chunk freed by a compaction can still be on disk, allocated and naming as its next a
+    /// chunk the engine has since reused as a live chain's root: excluded, that root lost its entity its chain (#1251). Only the crash rebuild of a
+    /// cluster EntityMap accepts named roots, and it adopts one only for the EntityPK of an entity its clusters hold: an overflow chunk's bytes can read
+    /// as a root's header (its first element's TSN modulo 2^16 as the chain length, its second element as the EntityPK), and walked, scrubbed or reset
+    /// as a root, it corrupted the chain it belongs to (review of #1251). Read through a scan accessor: the segment may be larger than the cache.
+    /// </remarks>
+    /// <param name="segment">The revision segment.</param>
+    /// <param name="archetypeId">The archetype whose roots are returned, or <c>null</c> for every root.</param>
+    /// <param name="acceptNamedRoots">Whether a named chunk with a root's header is its entity's root when no unnamed chunk is.</param>
+    /// <param name="acceptedNamed">When given, receives the named chunks returned.</param>
+    internal static unsafe Dictionary<long, int> EnumerateVersionedChainHeads(ChunkBasedSegment<PersistentStore> segment, ushort? archetypeId,
+        bool acceptNamedRoots, HashSet<int> acceptedNamed = null)
+    {
+        var heads = new Dictionary<long, int>();
         var capacity = segment.ChunkCapacity;
         if (capacity == 0 || segment.AllocatedChunkCount == 0)
         {
             return heads;
         }
 
-        var accessor = segment.CreateChunkAccessor();
-
-        // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
-        var overflowSet = new HashSet<int>();
-        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        var accessor = segment.CreateScanAccessor();
+        try
         {
-            if (!segment.IsChunkAllocated(chunkId))
+            // Pass 1: every chunk referenced as another chunk's NextChunkId is an overflow chunk, not a head.
+            var overflowSet = new HashSet<int>();
+            foreach (var chunkId in segment.AllocatedChunks())
             {
-                continue;
+                if (segment.IsChunkHeld(chunkId))
+                {
+                    continue;
+                }
+
+                var next = accessor.GetChunk<CompRevStorageHeader>(chunkId).NextChunkId;
+                if (next != 0)
+                {
+                    overflowSet.Add(next);
+                }
             }
 
-            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId, true);
-            if (hdr.NextChunkId != 0)
+            // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered); then the named chunks
+            // with a root's header, for the entities left without one.
+            List<(long Pk, int Chunk)> namedRoots = null;
+            foreach (var chunkId in segment.AllocatedChunks())
             {
-                overflowSet.Add(hdr.NextChunkId);
+                if (segment.IsChunkHeld(chunkId))
+                {
+                    continue;
+                }
+
+                var pk = accessor.GetChunk<CompRevStorageHeader>(chunkId).EntityPK;
+                if (archetypeId.HasValue && EntityId.FromRaw(pk).ArchetypeId != archetypeId.Value)
+                {
+                    continue;
+                }
+
+                if (!overflowSet.Contains(chunkId))
+                {
+                    heads[pk] = chunkId;
+                }
+                else if (acceptNamedRoots && IsChainRoot(ref accessor, segment, chunkId))
+                {
+                    (namedRoots ??= []).Add((pk, chunkId));
+                }
+            }
+
+            if (namedRoots != null)
+            {
+                foreach (var (pk, chunkId) in namedRoots)
+                {
+                    if (heads.TryAdd(pk, chunkId))
+                    {
+                        acceptedNamed?.Add(chunkId);
+                    }
+                }
             }
         }
-
-        // Pass 2: heads = allocated chunks not in the overflow set, owned by this archetype (or all of them when unfiltered).
-        for (var chunkId = 0; chunkId < capacity; chunkId++)
+        finally
         {
-            if (!segment.IsChunkAllocated(chunkId) || overflowSet.Contains(chunkId))
-            {
-                continue;
-            }
-
-            ref var hdr = ref accessor.GetChunk<CompRevStorageHeader>(chunkId);
-            var pk = hdr.EntityPK;
-            if (archetypeId.HasValue && EntityId.FromRaw(pk).ArchetypeId != archetypeId.Value)
-            {
-                continue;
-            }
-
-            heads[pk] = chunkId;
+            accessor.Dispose();
         }
 
-        accessor.Dispose();
         return heads;
+    }
+
+    /// <summary>
+    /// Frees every chain lock a crash left held in the data file (PS-20). A capture can copy a held lock word, and only the checkpoint after the release
+    /// rewrites it: a crash before that one leaves the hold on disk, its holder gone. Run on a crash open as the table loads — before the HEAD rebuild's
+    /// walks, the log replay's revisions and the scrub, each of which takes chain locks and would wait for the dead holder. Every unnamed chunk is
+    /// reset: a root — a destroyed entity's chain still awaiting release included — or a chunk no chain will link, whose bytes no one reads (an overflow
+    /// chunk whose predecessor's page is as of before its growth). Filtered by a root's header check, a root whose overflow chunk the disk has as free
+    /// kept its hold, and the open failed (review of #1251). A named chunk is left as it is — an overflow chunk's bytes at the lock's offset are an
+    /// element's — and one the EntityMap rebuild adopts as its entity's root is reset as it is adopted (<see cref="ResetChainLocks"/>). A chunk is
+    /// dirtied only when its word was set. Single-threaded.
+    /// </summary>
+    /// <returns>The number of chunks whose lock word was set.</returns>
+    internal static unsafe int ResetChainLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe) =>
+        LockWordRecovery.ResetRootLocks(segment, dbe, ChainLockOffset, sizeof(AccessControlSmall),
+            static (ref ChunkAccessor<PersistentStore> _, ChunkBasedSegment<PersistentStore> _, int _) => true);
+
+    /// <summary>Clears the chain lock words of <paramref name="roots"/>: named chunks a crash open adopted as roots (see above). Single-threaded.</summary>
+    /// <returns>The number of roots whose lock word was set.</returns>
+    internal static unsafe int ResetChainLocks(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe, IEnumerable<int> roots) =>
+        LockWordRecovery.ResetLocks(segment, dbe, ChainLockOffset, sizeof(AccessControlSmall), roots);
+
+    private static readonly int ChainLockOffset = ComputeChainLockOffset();
+
+    private static int ComputeChainLockOffset()
+    {
+        var header = default(CompRevStorageHeader);
+        return (int)Unsafe.ByteOffset(ref Unsafe.As<CompRevStorageHeader, byte>(ref header), ref Unsafe.As<AccessControlSmall, byte>(ref header.Control));
+    }
+
+    /// <summary>The chunks of <paramref name="candidates"/> with a root's header and links (<see cref="IsChainRoot"/>). Inside an epoch scope.</summary>
+    internal static List<int> FilterChainRoots(ChunkBasedSegment<PersistentStore> segment, IEnumerable<int> candidates)
+    {
+        var roots = new List<int>();
+        var scan = segment.CreateScanAccessor();
+        try
+        {
+            foreach (var chunkId in candidates)
+            {
+                if (IsChainRoot(ref scan, segment, chunkId))
+                {
+                    roots.Add(chunkId);
+                }
+            }
+        }
+        finally
+        {
+            scan.Dispose();
+        }
+
+        return roots;
+    }
+
+    // A root's header, as far as its own bytes tell — what a walk or a scrub of its chain is sized from (IsChainRoot also checks its links).
+    private static bool HasRootHeader(ref CompRevStorageHeader header) => header.ChainLength >= 1 && header.ItemCount >= 0
+        && header.ItemCount <= ComputeRevElementCount(header.ChainLength) && header.FirstItemIndex >= 0;
+
+    /// <summary>
+    /// Whether an unnamed chunk is a chain root and not an overflow chunk whose predecessor's link a crash lost: a plausible header, and its
+    /// <c>ChainLength - 1</c> links all through allocated chunks.
+    /// </summary>
+    private static unsafe bool IsChainRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        ref var header = ref scan.GetChunk<CompRevStorageHeader>(chunkId);
+        int length = header.ChainLength, items = header.ItemCount, first = header.FirstItemIndex, next = header.NextChunkId;
+        if (length < 1 || length > segment.AllocatedChunkCount || items < 0 || items > ComputeRevElementCount(length) || first < 0 || header.EntityPK == 0)
+        {
+            return false;
+        }
+
+        for (var left = length - 1; left > 0; left--)
+        {
+            if (next <= 0 || next >= segment.ChunkCapacity || !segment.IsChunkLiveUnpinned(next))
+            {
+                return false;
+            }
+
+            next = *(int*)scan.GetChunkAddress(next);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Frees the content chunks the scrub dropped from <paramref name="table"/>'s chains — releasing their collection buffers — except those a surviving
+    /// head names. A chain the data file holds as of after a transaction, its content as of before, names chunks the disk had as free, and the live engine
+    /// may have reused one that another chain holds: freed through the first chain, that other chain's head read whatever took the chunk next (#1251).
+    /// </summary>
+    /// <remarks>A chunk in <paramref name="withoutRelease"/> — taken by the reservation (free on disk), or the content of a torn element a twin replaced —
+    /// is freed without releasing its collection buffers: its bytes may predate it, so the buffer ids it holds are not its own.</remarks>
+    internal static void FreeDroppedContent(ComponentTable table, HashSet<int> roots, List<int> droppedContent, HashSet<int> withoutRelease,
+        ref ChunkAccessor<PersistentStore> revAccessor, ref ChunkAccessor<PersistentStore> contentAccessor, Action batchPoint = null)
+    {
+        if (droppedContent.Count == 0)
+        {
+            return;
+        }
+
+        var heads = new HashSet<int>(roots.Count);
+        var sinceBatchPoint = 0;
+        foreach (var rootChunkId in roots)
+        {
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
+            revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
+            if (els[0].ComponentChunkId != 0)
+            {
+                heads.Add(els[0].ComponentChunkId);
+            }
+        }
+
+        var freed = new HashSet<int>();
+        var contentSeg = table.ComponentSegment;
+        foreach (var chunkId in droppedContent)
+        {
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
+            if (!heads.Contains(chunkId) && freed.Add(chunkId) && (uint)chunkId < (uint)contentSeg.ChunkCapacity && contentSeg.IsChunkLiveUnpinned(chunkId))
+            {
+                if (withoutRelease != null && withoutRelease.Contains(chunkId))
+                {
+                    contentSeg.FreeChunk(chunkId);
+                }
+                else
+                {
+                    FreeCompContentChunk(table, ref contentAccessor, chunkId, table.HasCollections);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// On a crash open, before the log replay: marks allocated every chunk the chains of <paramref name="roots"/> — the live records' — name: their overflow
+    /// chunks and their elements' content. A chunk's allocation bit is on its own page, so a chain the data file holds as of after a transaction can name
+    /// chunks the disk has as free; the replay then handed them out again, and two chains shared a chunk — an entity read another's value, or zeros (#1251).
+    /// The scrub and its orphan sweep free what no surviving chain names. An overflow chunk handed out was also cleared: its chain ended early, and the
+    /// replay's next growth of it threw — the crash open failed. Returns the chunks reserved.
+    /// </summary>
+    internal static int ReserveChainChunksAfterCrash(ComponentTable table, IEnumerable<int> roots, HashSet<int> reservedContent)
+    {
+        var revSeg = table.CompRevTableSegment;
+        var contentSeg = table.ComponentSegment;
+        var reserved = 0;
+        var accessor = revSeg.CreateScanAccessor();
+        try
+        {
+            foreach (var rootChunkId in roots)
+            {
+                ref var header = ref accessor.GetChunk<CompRevStorageHeader>(rootChunkId);
+                if (!HasRootHeader(ref header))
+                {
+                    continue;
+                }
+
+                // Every element slot of every chunk of the chain, read without its lock: a root found by the scan can be an overflow chunk whose bytes at
+                // the lock's offset are an element's, read as a hold (review of #1251). A slot past the chain's items reserves a chunk the orphan sweep
+                // frees again.
+                int length = header.ChainLength, next = header.NextChunkId;
+                accessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> rootElements);
+                reserved += ReserveContent(contentSeg, rootElements, reservedContent);
+                for (var left = length - 1; left > 0 && next > 0 && next < revSeg.ChunkCapacity; left--)
+                {
+                    if (!revSeg.IsChunkAllocatedUnpinned(next))
+                    {
+                        revSeg.ReserveChunk(next);
+                        reserved++;
+                    }
+
+                    var chunk = accessor.GetChunkAsSpan(next);
+                    reserved += ReserveContent(contentSeg, chunk.Slice(sizeof(int)).Cast<byte, CompRevStorageElement>().Slice(0, CompRevCountInNext),
+                        reservedContent);
+                    next = chunk.Cast<byte, int>()[0];
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return reserved;
+    }
+
+    /// <summary>
+    /// On a crash open, before the log replay: collapses to its newest reachable committed revision each chain of <paramref name="roots"/> — the live
+    /// records' — whose links end before its length. Its root's page reached the disk after a growth, the page of the chunk that links to the new one
+    /// before it: the replay then appended past the last reachable chunk — into a chunk no walk reaches, or the reserved chunk 0 — the scrub kept a stale
+    /// revision, and the next growth threw (#1297). A link to a chunk the disk has as free, or to another live record's root, is torn the same way: the free
+    /// chunk was allocated after the bitmap page's capture, the root's header read as elements made a committed tombstone with a TSN past every replayed
+    /// one. The revisions in the chunks past a torn link were written after the last completed checkpoint's barrier — an allocation before it reached the
+    /// disk with that cycle — so the replay brings them back; a compaction that moved older revisions into fresh chunks after the barrier is the residual
+    /// this cannot repair (#1298). Read through a scan accessor, a collapsed root written through an epoch one. Recovery only, single-threaded; returns the
+    /// chains collapsed.
+    /// </summary>
+    internal static int CollapseTornChainsBeforeReplay(ComponentTable table, HashSet<int> roots, ChangeSet changeSet)
+    {
+        var revSeg = table.CompRevTableSegment;
+        var capacity = revSeg.ChunkCapacity;
+        var reachable = new List<int>();
+        var collapsed = 0;
+        var accessor = revSeg.CreateScanAccessor();
+        var writer = revSeg.CreateChunkAccessor(changeSet);
+        try
+        {
+            foreach (var root in roots)
+            {
+                ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+                if (!HasRootHeader(ref header))
+                {
+                    continue;
+                }
+
+                int length = header.ChainLength, items = header.ItemCount, first = header.FirstItemIndex, next = header.NextChunkId;
+                reachable.Clear();
+                reachable.Add(root);
+                for (var left = length - 1; left > 0; left--)
+                {
+                    if (next <= 0 || next >= capacity || !revSeg.IsChunkAllocatedUnpinned(next) || roots.Contains(next))
+                    {
+                        break;
+                    }
+
+                    reachable.Add(next);
+                    next = accessor.GetChunk<int>(next);
+                }
+
+                if (reachable.Count == length)
+                {
+                    continue;
+                }
+
+                // The newest committed live revision in a reachable chunk.
+                var span = ComputeRevElementCount(length);
+                CompRevStorageElement head = default;
+                var found = false;
+                for (var i = 0; i < items; i++)
+                {
+                    var (chunkInChain, indexInChunk) = CompRevStorageHeader.GetRevisionLocation((first + i) % span);
+                    if (chunkInChain >= reachable.Count)
+                    {
+                        continue;
+                    }
+
+                    var element = ElementOf(ref accessor, reachable[chunkInChain], chunkInChain == 0, indexInChunk);
+                    if (!element.IsVoid && !element.IsolationFlag && (!found || element.TSN >= head.TSN))
+                    {
+                        head = element;
+                        found = true;
+                    }
+                }
+
+                // The root alone holds it — fields one by one, never the whole header, so the lock word is kept (as ScrubChainToHead).
+                writer.GetChunkAsSpan(root, true).Split(out Span<CompRevStorageHeader> h, out Span<CompRevStorageElement> elements);
+                h[0].NextChunkId = 0;
+                h[0].FirstItemIndex = 0;
+                h[0].ChainLength = 1;
+                h[0].ItemCount = 1;
+                h[0].Reserved = 0;
+                if (found)
+                {
+                    head.UowId = 0;
+                }
+
+                elements[0] = found ? head : default;
+                collapsed++;
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+            writer.Dispose();
+        }
+
+        return collapsed;
+    }
+
+    private static CompRevStorageElement ElementOf(ref ChunkAccessor<PersistentStore> accessor, int chunkId, bool isRoot, int index)
+    {
+        var chunk = accessor.GetChunkAsSpan(chunkId);
+        if (isRoot)
+        {
+            chunk.Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> rootElements);
+            return rootElements[index];
+        }
+
+        return chunk.Slice(sizeof(int)).Cast<byte, CompRevStorageElement>()[index];
+    }
+
+    private static int ReserveContent(ChunkBasedSegment<PersistentStore> contentSeg, Span<CompRevStorageElement> elements, HashSet<int> reservedContent)
+    {
+        var reserved = 0;
+        foreach (ref var element in elements)
+        {
+            var cc = element.ComponentChunkId;
+            if (cc > 0 && cc < contentSeg.ChunkCapacity && !contentSeg.IsChunkAllocatedUnpinned(cc))
+            {
+                contentSeg.ReserveChunk(cc);
+                reservedContent.Add(cc);
+                reserved++;
+            }
+        }
+
+        return reserved;
     }
 
     /// <summary>
@@ -639,10 +1325,11 @@ internal ref struct ComponentRevisionManager
     /// chain is exactly its root (NextChunkId==0), so <paramref name="reachableRoots"/> (the chains' root chunk ids) is the full
     /// set of reachable revision-table chunks, and the roots' single head elements yield the only reachable content chunks.
     /// Orphan content is freed with a plain <c>FreeChunk</c> (NOT <see cref="FreeCompContentChunk"/>): a never-linked chunk's
-    /// collection-buffer ids are unreliable, so its buffers are not released — a rare, bounded residual (standalone collection
-    /// buffer orphans are out of scope here). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
+    /// collection-buffer ids are unreliable, so its buffers are not released here — the crash open's collection sweep, which runs after, frees
+    /// what nothing names (DatabaseEngine.SweepCollectionOrphans, #1307). Reserved chunk 0 (the null sentinel) reports unallocated, so it is never swept.
     /// </summary>
-    internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor)
+    internal static void SweepTableOrphans(ComponentTable table, HashSet<int> reachableRoots, ref ChunkAccessor<PersistentStore> revAccessor,
+        ref ChunkAccessor<PersistentStore> contentAccessor, Action batchPoint = null)
     {
         var revSeg = table.CompRevTableSegment;
         var contentSeg = table.ComponentSegment;
@@ -653,8 +1340,10 @@ internal ref struct ComponentRevisionManager
 
         // Reachable content = the single head element's ComponentChunkId of each surviving chain root.
         var reachableContent = new HashSet<int>(reachableRoots.Count);
+        var sinceBatchPoint = 0;
         foreach (var rootChunkId in reachableRoots)
         {
+            BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
             revAccessor.GetChunkAsSpan(rootChunkId).Split(out Span<CompRevStorageHeader> _, out Span<CompRevStorageElement> els);
             var cc = els[0].ComponentChunkId;
             if (cc != 0)
@@ -663,22 +1352,49 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // Free orphan revision-table chunks (allocated, not a chain root).
-        for (var chunkId = 0; chunkId < revSeg.ChunkCapacity; chunkId++)
+        // Free orphan revision-table chunks (allocated, not a chain root) — the allocated chunks walked page by page (EP-02, #1183).
+        foreach (var chunkId in revSeg.AllocatedChunks())
         {
-            if (revSeg.IsChunkAllocated(chunkId) && !reachableRoots.Contains(chunkId))
+            if (!revSeg.IsChunkHeld(chunkId) && !reachableRoots.Contains(chunkId))
             {
+                BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
                 revSeg.FreeChunk(chunkId);
             }
         }
 
         // Free orphan content chunks (allocated, referenced by no surviving head).
-        for (var chunkId = 0; chunkId < contentSeg.ChunkCapacity; chunkId++)
+        foreach (var chunkId in contentSeg.AllocatedChunks())
         {
-            if (contentSeg.IsChunkAllocated(chunkId) && !reachableContent.Contains(chunkId))
+            if (!contentSeg.IsChunkHeld(chunkId) && !reachableContent.Contains(chunkId))
             {
+                BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
                 contentSeg.FreeChunk(chunkId);
             }
+        }
+    }
+
+    // A crash open's batch point every DatabaseEngine.RecoveryBatchSize steps of a scrub walk (#1183, CK-08): the accessors' writes committed first — their
+    // dirty slots released to the checkpoint, the pins of the slots they evicted returned. No address the walk took outlives its step.
+    private static void BatchPointEvery(ref int since, Action batchPoint, ref ChunkAccessor<PersistentStore> revAccessor,
+        ref ChunkAccessor<PersistentStore> contentAccessor)
+    {
+        if (batchPoint == null || ++since <= DatabaseEngine.RecoveryBatchSize)
+        {
+            return;
+        }
+
+        revAccessor.CommitChanges();
+        contentAccessor.CommitChanges();
+        batchPoint();
+        since = 1;
+    }
+
+    /// <summary>A content chunk the compaction frees once the root names the new chain (#1308); 0 names none.</summary>
+    private static void PendContentFree(Span<int> frees, ref int count, int chunkId)
+    {
+        if (chunkId != 0)
+        {
+            frees[count++] = chunkId;
         }
     }
 
@@ -753,6 +1469,14 @@ internal ref struct ComponentRevisionManager
                 // (Versioned = 0, SingleVersion = 8 for the entity PK). Cluster slots have no overhead.
                 var bufferId = compContentAccessor.GetChunkAsReadOnlySpan(chunkId)
                     .Slice(ct.ComponentOverhead + f.OffsetInComponentStorage).Cast<byte, int>()[0];
+
+                // 0: the field never got a buffer. Released, it decremented the reserved chunk 0 as a reference count, under chunk 0's exclusive lock —
+                // the crash-open scrub's path, which then waited on whatever hold the data file had kept on chunk 0 (#1291).
+                if (bufferId == 0)
+                {
+                    continue;
+                }
+
                 var collAccessor = f.Vsbs.Segment.CreateChunkAccessor();
                 f.Vsbs.BufferRelease(bufferId, ref collAccessor);
                 collAccessor.Dispose();
@@ -821,8 +1545,10 @@ internal ref struct ComponentRevisionManager
 
         var first = header;
         var useLock = !first->Control.IsLockedByCurrentThread;
+        var ticket = default(PagedMMF.CaptureTicket);
         if (useLock)
         {
+            ticket = ChainLockTicket(ref accessor, ref *first);
             var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
             if (!first->Control.EnterSharedAccess(ref wc))
             {
@@ -836,6 +1562,7 @@ internal ref struct ComponentRevisionManager
         if (useLock)
         {
             first->Control.ExitSharedAccess();
+            EndChainLockHold(ref accessor, in ticket);
         }
 
         return (short)indexInChunk;

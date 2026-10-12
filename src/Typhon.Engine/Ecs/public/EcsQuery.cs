@@ -1009,6 +1009,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // Process any deltas that arrived during population
         view.RefreshFromScheduler(_tx);
         view.ClearDelta();
+        view.OweRefreshFull();
 
         return view;
     }
@@ -1030,6 +1031,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         view.PopulateInitialOr(_tx);
         view.RefreshFromScheduler(_tx);
         view.ClearDelta();
+        view.OweRefreshFull();
 
         return view;
     }
@@ -1748,25 +1750,41 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// result, the failure mode this whole migration exists to remove (#663).
     /// </remarks>
     private static bool IsVisibleAtSnapshot(long rawId, bool visGated, ArchetypeEngineState visState, byte* visBuf, int visRecordSize, long txTsn,
-        ref ChunkAccessor<PersistentStore> visAccessor)
+        CommitCardTable cards, ref ChunkAccessor<PersistentStore> visAccessor)
     {
         if (!visGated || visState == null)
         {
             return true;
         }
 
-        if (!visState.EntityMap.TryGet(EntityId.FromRaw(rawId).EntityKey, visBuf, ref visAccessor))
+        var key = EntityId.FromRaw(rawId).EntityKey;
+        if (!visState.EntityMap.TryGet(key, visBuf, ref visAccessor))
         {
             return true;
         }
 
-        ref var header = ref EntityRecordAccessor.GetHeader(visBuf);
-        if (header.BornTSN != 0 && header.BornTSN > txTsn)
+        // Born after this snapshot — the phantom the fixed snapshot must hide — or died at or before it; a pending born through its owner's card (VIS-08).
+        return EntityVisibility.IsVisibleInScan(visBuf, txTsn, cards, visState.EntityMap, key);
+    }
+
+    /// <summary>
+    /// A RESERVED slot of the cluster SoA scan — a spawn placed in PREPARE and not yet published (VIS-08): visible only through a record that exists and a
+    /// born its owner's card resolves at or below the snapshot. Unlike an occupied slot, a reserved one with no record yet is a spawn still being placed.
+    /// </summary>
+    private static bool IsReservedSpawnVisible(long rawId, int clusterChunkId, int slotIndex, ArchetypeEngineState visState, byte* visBuf, long txTsn,
+        CommitCardTable cards, ref ChunkAccessor<PersistentStore> visAccessor)
+    {
+        if (rawId == 0 || visState == null)
         {
-            return false; // committed after this snapshot — the phantom the fixed snapshot must hide
+            return false;
         }
 
-        return header.DiedTSN == 0 || header.DiedTSN > txTsn;
+        // The record must name THIS slot: a migration's destination is claimed and unoccupied while its source still holds the entity, and the record still
+        // points at the source, so the entity is found there and not twice.
+        var key = EntityId.FromRaw(rawId).EntityKey;
+        return visState.EntityMap.TryGet(key, visBuf, ref visAccessor)
+               && ClusterEntityRecordAccessor.GetClusterChunkId(visBuf) == clusterChunkId && ClusterEntityRecordAccessor.GetSlotIndex(visBuf) == slotIndex
+               && EntityVisibility.IsVisibleInScan(visBuf, txTsn, cards, visState.EntityMap, key);
     }
 
     private void ScanClusterSoa<TSink, TPrimary, TData>(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeMetadata meta,
@@ -1882,10 +1900,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
 
                 var clusterBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-                // Acquire, not a plain load: IsClusterFullyVisibleAt below opens with an acquire of its own, and an acquire does not stop an EARLIER plain
+
+                // The pending destroys BEFORE the occupancy word (VIS-09): a destroy's publish hides its slot, then lifts the count, so a zero read here means
+                // the occupancy read below reflects the hide — read after, a stale bit passed the gate. The claim word, read after the occupancy word, sits
+                // beside it: one lookup for both.
+                ref var slotWords = ref visGated ? ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId) : ref Unsafe.NullRef<long>();
+                var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref slotWords);
+
+                // Acquire, not a plain load: AreClusterWatermarksVisibleAt below opens with an acquire of its own, and an acquire does not stop an EARLIER plain
                 // load from sinking past it. Plain here would let arm64 pair a fresh occupancy word with a stale watermark — the phantom BIND-04 forbids.
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
-                if (occupancy == 0)
+
+                // No block at the first lookup — a cluster listed before its words exist (SlotWordTable): resolve them again, after the occupancy word, or a
+                // destroy that created the block and hid its slot meanwhile would read here as neither occupied nor claimed, and an older snapshot lose it.
+                if (visGated && Unsafe.IsNullRef(ref slotWords))
+                {
+                    slotWords = ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId);
+                }
+
+                // VIS-08/09: a slot claimed and not occupied — a spawn placed in PREPARE, or a destroyed entity hidden until the cleanup. A snapshot scan visits
+                // it, the claims read after the occupancy word (a spawn's claim outlives its publish), and decides it through its record and its owner's card.
+                // HEAD readers never see one.
+                var reserved = ArchetypeClusterState.ClaimOf(ref slotWords) & ~occupancy;
+                if ((occupancy | reserved) == 0)
                 {
                     continue;
                 }
@@ -1896,7 +1933,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // cluster, so the probe count collapses to ~0. A cluster that fails the summary keeps the exact per-entity check, so correctness is unchanged.
                 // Read AFTER the occupancy word on purpose: the summary is published by the same commit that sets the occupancy bit, so a reader that cannot
                 // see the bit cannot be misled by a summary that predates it.
-                var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+                var clusterVisGated = visGated && (pendingDeaths != 0 || !ArchetypeClusterState.WatermarksVisibleAt(ref slotWords, txTsn));
 
                 // The component column can live in a DIFFERENT segment from the occupancy word — a Transient slot on a mixed archetype. Chunk ids are held in
                 // lockstep between the two segments, so the same clusterChunkId addresses both.
@@ -1905,7 +1942,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 if (anySimd)
                 {
                     // SIMD path: batch-evaluate SIMD-eligible evaluators, then scalar-verify the rest
-                    var matchBits = occupancy;
+                    var matchBits = occupancy | reserved;
 
                     // Phase 1: SIMD evaluators narrow the match set
                     for (var e = 0; e < evalCount; e++)
@@ -1946,7 +1983,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         if (pass)
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                            if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            var visible = (reserved & (1UL << slotIndex)) != 0
+                                ? IsReservedSpawnVisible(rawId, clusterChunkId, slotIndex, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
+                                : IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor);
+                            if (visible)
                             {
                                 result.Add(EntityId.FromRaw(rawId));
                             }
@@ -1955,11 +1995,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
                 else
                 {
-                    // Scalar path (unchanged): evaluate each occupied entity against all field predicates
-                    while (occupancy != 0)
+                    // Scalar path: evaluate each occupied or reserved entity against all field predicates
+                    var visit = occupancy | reserved;
+                    while (visit != 0)
                     {
-                        var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                        occupancy &= occupancy - 1;
+                        var slotIndex = System.Numerics.BitOperations.TrailingZeroCount(visit);
+                        visit &= visit - 1;
 
                         var entityComp = compBase + slotIndex * compSize;
                         var allMatch = true;
@@ -1976,7 +2017,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         if (allMatch)
                         {
                             var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                            if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                            var visible = (reserved & (1UL << slotIndex)) != 0
+                                ? IsReservedSpawnVisible(rawId, clusterChunkId, slotIndex, visState, visBuf, txTsn, _tx.DBE.CommitCards, ref visAccessor)
+                                : IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor);
+                            if (visible)
                             {
                                 result.Add(EntityId.FromRaw(rawId));
                             }
@@ -2334,6 +2378,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
 
                     var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
+                    var pendingDeaths = visGated ? clusterState.PendingDeaths(clusterChunkId) : 0;   // before the occupancy word — see ScanClusterSoa
                     var occupancy = Volatile.Read(ref *(ulong*)clusterBase);   // acquire — see ScanClusterSoa for why plain is wrong here
                     var remaining = candidateBits & occupancy; // intersection with live entities
 
@@ -2344,7 +2389,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                     // H1 — same cluster-granularity visibility as the SoA scan (see ScanClusterSoa). Path A raised the stake rather than lowering it: the
                     // tree has already narrowed the candidate set, so the per-match probe is a LARGER share of what remains than it is on a full scan.
-                    var clusterVisGated = visGated && !clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn);
+                    var clusterVisGated = visGated && (pendingDeaths != 0 || !clusterState.AreClusterWatermarksVisibleAt(clusterChunkId, txTsn));
 
                     // The cluster's entities written since the last fence: one word, as the shadow bitmap indexes entities by chunkId * 64 + slot.
                     var fenceDirty = shadowBitmap?.ReadWord(clusterChunkId) ?? 0;
@@ -2394,7 +2439,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             if (pass)
                             {
                                 var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor))
                                 {
                                     result.Add(EntityId.FromRaw(rawId));
                                 }
@@ -2429,7 +2474,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             if (allMatch)
                             {
                                 var rawId = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                                if (IsVisibleAtSnapshot(rawId, clusterVisGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor))
                                 {
                                     result.Add(EntityId.FromRaw(rawId));
                                 }
@@ -2666,7 +2711,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             }
 
                             var hitGated = visGated && !memoFullyVisible;
-                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn,
+                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn, _tx.DBE.CommitCards,
                                     ref visAccessor))
                             {
                                 result.Add(entityId);
@@ -2703,7 +2748,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                             }
 
                             var hitGated = visGated && !memoFullyVisible;
-                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn,
+                            if (IsVisibleAtSnapshot(unchecked((long)hit.Entity.RawValue), hitGated, visState, visBuf, meta._entityRecordSize, txTsn, _tx.DBE.CommitCards,
                                     ref visAccessor))
                             {
                                 result.Add(entityId);
@@ -2816,7 +2861,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     var entityId = EntityId.FromRaw(span[i].entityId);
                     if (MaskTestByRouting(entityId.ArchetypeId)
-                        && IsVisibleAtSnapshot(span[i].entityId, visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                        && IsVisibleAtSnapshot(span[i].entityId, visGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor))
                     {
                         result.Add(entityId);
                     }
@@ -2888,7 +2933,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     var entityId = EntityId.FromRaw(span[i]);
                     if (MaskTestByRouting(entityId.ArchetypeId)
-                        && IsVisibleAtSnapshot(span[i], visGated, visState, visBuf, visRecordSize, txTsn, ref visAccessor))
+                        && IsVisibleAtSnapshot(span[i], visGated, visState, visBuf, visRecordSize, txTsn, _tx.DBE.CommitCards, ref visAccessor))
                     {
                         result.Add(entityId);
                     }
@@ -3372,6 +3417,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
+                Cards = dbe.CommitCards,
+                Map = engineState.EntityMap,
                 RequiredEnabled = reqEnabled,
                 RequiredDisabled = reqDisabled,
                 OnMatch = onMatch,
@@ -3447,6 +3494,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
+                Cards = dbe.CommitCards,
+                Map = engineState.EntityMap,
                 RequiredEnabled = reqEnabled,
                 RequiredDisabled = reqDisabled,
                 PendingEnableDisable = _tx.PendingEnableDisable,
@@ -3482,12 +3531,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <item><b>Born after the snapshot / died before it.</b> The occupancy word is CURRENT — it knows nothing about the reader's snapshot.
     /// <see cref="ArchetypeClusterState.IsClusterFullyVisibleAt(int, long)"/> is the same per-cluster summary the SoA scan uses (H1): it is true only when
     /// every entity in the cluster was born at or before <paramref name="txTsn"/> and every death recorded there is already visible to this reader. It is
-    /// conservative by construction — an unsized
-    /// array or an unestablished maximum answers false — so a bail is always safe and only ever costs performance.</item>
+    /// conservative by construction — a cluster without words or an unestablished maximum answers false — so a bail is always safe and only ever costs
+    /// performance.</item>
     /// <item><b>Enabled/disabled (T2) predicates.</b> Occupancy is liveness, not enabled bits, so any T2 requirement disqualifies the archetype outright.</item>
     /// <item><b>Entities pending destroy in this transaction.</b> Their occupancy bit is still set, so a non-empty set disqualifies the archetype.</item>
-    /// <item><b>Pending spawns.</b> Not a hazard, and deliberately not a bail: <c>ClaimSlot</c> runs from <c>FinalizeSpawns</c> at commit, so a spawn still
-    /// pending in this transaction owns no slot and cannot be double-counted against the caller's separate pending pass.</item>
+    /// <item><b>Pending spawns.</b> A spawn still pending in this transaction owns no slot; one placed by a committing transaction holds a reserved slot,
+    /// which bails to the map probe (VIS-08).</item>
     /// </list>
     /// <para>
     /// All-or-nothing per archetype, on purpose. A cluster that fails the summary would have to be counted through the EntityMap by entity id, and a point
@@ -3528,6 +3577,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 return false;
             }
 
+            // Read once: a cluster whose block is missing from it reads as unestablished and bails, which is conservative (SlotWordTable).
+            var slotWords = clusterState.SlotWordTable;
             var total = 0;
             for (var c = 0; c < activeCount; c++)
             {
@@ -3535,10 +3586,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
                 // Occupancy BEFORE the summary, and with acquire ordering: NoteClusterBorn stores the maximum plainly, on the premise that the reader reaches
                 // it only after an acquire-ordered read of this word. Reading them the other way round could pair a fresh maximum with a stale occupancy word.
+                // The pending-death count before the occupancy word, the claim word after it — see ScanClusterSoa; both in one lookup.
                 var clusterBase = accessor.GetChunkAddress(clusterChunkId);
+                ref var words = ref ArchetypeClusterState.SlotWords(slotWords, clusterChunkId);
+                var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref words);
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
 
-                if (!clusterState.IsClusterFullyVisibleAt(clusterChunkId, txTsn))
+                // A slot claimed and not occupied — a spawn placed in PREPARE (VIS-08), a destroy hidden until the cleanup (VIS-09) — is decided by its
+                // owner's stamp or its died, which a popcount cannot tell: the map probe decides it.
+                if (pendingDeaths != 0 || !ArchetypeClusterState.WatermarksVisibleAt(ref words, txTsn)
+                    || (ArchetypeClusterState.ClaimOf(ref words) & ~occupancy) != 0)
                 {
                     return false;
                 }
@@ -3598,6 +3655,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
+                Cards = dbe.CommitCards,
+                Map = engineState.EntityMap,
                 RequiredEnabled = reqEnabled,
                 RequiredDisabled = reqDisabled,
                 PendingEnableDisable = _tx.PendingEnableDisable,
@@ -3661,6 +3720,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 TxTsn = txTsn,
                 EnabledBitsOverrides = dbe.EnabledBitsOverrides,
                 HasT2 = hasT2,
+                Cards = dbe.CommitCards,
+                Map = engineState.EntityMap,
                 RequiredEnabled = reqEnabled,
                 RequiredDisabled = reqDisabled,
                 Results = results,
@@ -3689,6 +3750,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
+        public CommitCardTable Cards;
+        public RawValuePagedHashMap<long, PersistentStore> Map;
         public ushort RequiredEnabled;
         public ushort RequiredDisabled;
         public Action<EntityId, ushort> OnMatch;
@@ -3702,13 +3765,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             ref var header = ref EntityRecordAccessor.GetHeader(value);
 
             // Visibility check
-            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
+            if (!EntityVisibility.IsVisibleInScan(value, TxTsn, Cards, Map, key))
             {
-                return true; // Not yet born — skip, continue
-            }
-            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
-            {
-                return true; // Dead — skip, continue
+                return true; // Not yet born, or dead — skip, continue (a pending born through its owner's card, VIS-08)
             }
 
             var entityId = new EntityId(key, RoutingId);
@@ -3720,7 +3779,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
@@ -3763,6 +3822,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
+        public CommitCardTable Cards;
+        public RawValuePagedHashMap<long, PersistentStore> Map;
         public ushort RequiredEnabled;
         public ushort RequiredDisabled;
         public Dictionary<EntityId, ushort> PendingEnableDisable;
@@ -3773,13 +3834,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             ref var header = ref EntityRecordAccessor.GetHeader(value);
 
             // Visibility check (MVCC)
-            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
+            if (!EntityVisibility.IsVisibleInScan(value, TxTsn, Cards, Map, key))
             {
-                return false; // Not yet born
-            }
-            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
-            {
-                return false; // Dead
+                return false; // Not yet born, or dead (a pending born through its owner's card, VIS-08)
             }
 
             var entityId = new EntityId(key, RoutingId);
@@ -3791,7 +3848,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;
@@ -3821,6 +3878,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         public long TxTsn;
         public EnabledBitsOverrides EnabledBitsOverrides;
         public bool HasT2;
+        public CommitCardTable Cards;
+        public RawValuePagedHashMap<long, PersistentStore> Map;
         public ushort RequiredEnabled;
         public ushort RequiredDisabled;
         public List<(EntityId, ArchetypeMetadata, ushort, EntityLocations)> Results;
@@ -3831,11 +3890,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             ref var header = ref EntityRecordAccessor.GetHeader(value);
 
-            if (header.BornTSN != 0 && header.BornTSN > TxTsn)
-            {
-                return true;
-            }
-            if (header.DiedTSN != 0 && header.DiedTSN <= TxTsn)
+            if (!EntityVisibility.IsVisibleInScan(value, TxTsn, Cards, Map, key))
             {
                 return true;
             }
@@ -3849,7 +3904,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             // Resolve EnabledBits: MVCC overrides first, then pending enable/disable overlay
-            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn);
+            var bits = EnabledBitsOverrides.ResolveEnabledBits(key, header.EnabledBits, TxTsn, Cards);
             if (PendingEnableDisable != null && PendingEnableDisable.TryGetValue(entityId, out var pendingBits))
             {
                 bits = pendingBits;

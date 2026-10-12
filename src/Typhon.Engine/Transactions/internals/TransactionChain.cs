@@ -2,6 +2,7 @@ using JetBrains.Annotations;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Schema.Definition;
 
@@ -76,6 +77,7 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
     public TransactionChain(int maxActiveTransactions, IResource parent) : base("TransactionChain", ResourceType.TransactionPool, parent)
     {
+        _dbe = parent as DatabaseEngine;
         _maxActiveTransactions = maxActiveTransactions;
         _nextFreeId = 1;
         _pool = new ConcurrentQueue<Transaction>();
@@ -89,14 +91,55 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     /// Sets the next free TSN to the given value. Used during engine reload to restore the TSN counter from the persisted header so that MVCC visibility
     /// works for entities created by previous sessions.
     /// </summary>
-    internal void SetNextFreeId(long value) => _nextFreeId = value;
+    internal void SetNextFreeId(long value)
+    {
+        _nextFreeId = value;
+
+        // A reopened database whose counter is past the limit is refused at open, not at its first transaction (#1208); one past the warning says so now.
+        if (value >= TsnRefusalThreshold)
+        {
+            throw new TransactionSequenceExhaustedException(value, TsnRefusalThreshold);
+        }
+
+        if (value >= TsnWarningThreshold)
+        {
+            WarnTsnHeadroomOnce(value);
+        }
+    }
+
+    /// <summary>Test seam: sets the TSN counter without the open-time check of <see cref="SetNextFreeId"/>.</summary>
+    internal void SetNextFreeIdForTest(long value) => _nextFreeId = value;
+
+    /// <summary>The engine this chain belongs to (its resource parent), for the TSN headroom warning; null in a fixture without one.</summary>
+    private readonly DatabaseEngine _dbe;
 
     public ref AccessControl Control => ref _control;
 
     /// <summary>
-    /// Lock-free CAS-based stack push. Concurrent with Remove (which holds exclusive lock) and other PushHead callers (CAS contention only).
+    /// Registers <paramref name="transaction"/> and returns its TSN (TXC-01): pushed with its TSN pending (0), then the TSN drawn and published. A cutoff
+    /// walker that sees the node waits for its TSN (<see cref="AwaitTsn"/>); one that read the head before the push read the counter before that, and this
+    /// TSN, drawn after the push, is above what it read.
     /// </summary>
-    public void PushHead([TransfersOwnership] Transaction transaction)
+    internal long Register([TransfersOwnership] Transaction transaction)
+    {
+        PushHead(transaction);
+        CreationWindowProbe?.Invoke();
+        var tsn = Interlocked.Increment(ref _nextFreeId);
+        transaction.PublishTsn(tsn);
+        if (Volatile.Read(ref _tail) == transaction)
+        {
+            // Pushed into an empty chain: its TSN is the tail's. A Remove that made it the tail meanwhile awaited and wrote the same value.
+            Volatile.Write(ref _minTSN, tsn);
+        }
+
+        return tsn;
+    }
+
+    /// <summary>
+    /// Lock-free CAS-based stack push of a transaction whose TSN is still pending. Concurrent with Remove (which holds exclusive lock) and other PushHead
+    /// callers (CAS contention only).
+    /// </summary>
+    private void PushHead([TransfersOwnership] Transaction transaction)
     {
         Interlocked.Increment(ref _activeCount);
         Transaction oldHead;
@@ -111,8 +154,27 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 #pragma warning disable TYPHON004 // CAS on _tail — returned old value is intentionally discarded (conditional write, not a leak)
             Interlocked.CompareExchange(ref _tail, transaction, null);
 #pragma warning restore TYPHON004
-            Volatile.Write(ref _minTSN, transaction.TSN);
         }
+    }
+
+    /// <summary>
+    /// The TSN of a transaction in the chain. A node pushed but not yet drawn (TXC-01) is waited for: its creator is two instructions from publishing it,
+    /// and needs no lock to do so.
+    /// </summary>
+    private long AwaitTsn(Transaction transaction)
+    {
+        var tsn = transaction.ReadPublishedTsn();
+        if (tsn == 0)
+        {
+            Interlocked.Increment(ref _pendingNodeWaits);
+            var spin = new SpinWait();
+            while ((tsn = transaction.ReadPublishedTsn()) == 0)
+            {
+                spin.SpinOnce(sleep1Threshold: -1);   // never Sleep(1): the creator is runnable and only needs the CPU
+            }
+        }
+
+        return tsn;
     }
 
     public void WalkHeadToTail(Func<Transaction, bool> predicate)
@@ -167,23 +229,54 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     }
 
     /// <summary>
-    /// Computes the next MinTSN by walking the singly-linked chain to find the second-to-last transaction.
-    /// Caller must hold shared lock on Control.
+    /// The cutoff the leaving tail hands the revision cleanup: the lowest snapshot that may still read, over every other transaction in the chain and every
+    /// one being created (TXC-01). Caller must hold shared lock on Control, and be the tail.
     /// </summary>
+    /// <remarks>
+    /// The minimum, not the second-to-last node's TSN: concurrent creations push in any order, so the chain is not in TSN order. The counter is read before
+    /// the head: a transaction pushed after this walk read the head draws its TSN after that, above <c>issued</c>; a pending node the walk does see is
+    /// awaited. The walk is the one the second-to-last search already made.
+    /// </remarks>
     internal long ComputeNextMinTSN()
     {
-        var cur = Volatile.Read(ref _head);
-        Transaction secondToLast = null;
-        while (cur != null && cur.Next != null)
+        var issued = Volatile.Read(ref _nextFreeId);
+#pragma warning disable TYPHON004 // a reference compared against, not owned: the tail is its caller's to dispose
+        var tail = Volatile.Read(ref _tail);
+#pragma warning restore TYPHON004
+        var next = issued + 1;
+        for (var cur = Volatile.Read(ref _head); cur != null; cur = cur.Next)
         {
-            secondToLast = cur;
-            cur = cur.Next;
+            if (cur != tail)
+            {
+                next = Math.Min(next, AwaitTsn(cur));
+            }
         }
 
-        var next = secondToLast?.TSN ?? (_nextFreeId + 1);
+        if (CutoffProbe is { } probe)
+        {
+            next = probe(next);
+        }
+
         PublishRetainedMinTSN(next);
         return next;
     }
+
+    /// <summary>How many times a cutoff walk, or a Remove, met a node whose TSN was still pending and waited for it (TXC-01). Diagnostic.</summary>
+    internal long PendingNodeWaits => Volatile.Read(ref _pendingNodeWaits);
+
+    private long _pendingNodeWaits;
+
+    /// <summary>
+    /// Test seam (TXC-02): invoked by a Remove of the tail alone in the chain, just before its CAS of the head (<c>false</c>) and, when that CAS emptied
+    /// the chain, just after it (<c>true</c>).
+    /// </summary>
+    internal Action<bool> RemoveTailProbe { get; set; }
+
+    /// <summary>TXC-02's mutant: a Remove that empties the chain clears the tail after its CAS of the head instead of before.</summary>
+    internal bool TailClearedAfterCasMutantForTest;
+
+    /// <summary>Test seam (TXC-01's mutant): replaces the cutoff <see cref="ComputeNextMinTSN"/> computed.</summary>
+    internal Func<long, long> CutoffProbe { get; set; }
 
     /// <summary>
     /// The oldest TSN whose revisions are still guaranteed to be retained. A snapshot below this may have been trimmed — #672.
@@ -225,6 +318,10 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         _control.EnterExclusiveAccess(ref WaitContext.Null);
         Interlocked.Decrement(ref _activeCount);
 
+        // The tail is the chain's last node, and only a Remove moves it off a node. A push that found the chain empty may still set it after this read, but
+        // `transaction` is then not the last node, and isTail is false either way.
+        var isTail = Volatile.Read(ref _tail) == transaction;
+
         // Scan for predecessor (singly-linked)
         var cur = Volatile.Read(ref _head);
         Transaction prev = null;
@@ -238,10 +335,41 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         if (prev != null)
         {
             prev.Next = transaction.Next;
+            if (isTail)
+            {
+                // The last node's predecessor is the new last node.
+                SetTail(prev);
+            }
         }
         else
         {
-            if (Interlocked.CompareExchange(ref _head, transaction.Next, transaction) != transaction)
+            if (isTail && !TailClearedAfterCasMutantForTest)
+            {
+                // Alone in the chain (TXC-02): the tail is cleared BEFORE the CAS that empties the head, which orders it. A push that then finds the chain
+                // empty finds the tail cleared too, and its own CAS makes it the tail. Cleared after, a push in between would fail that CAS against this
+                // transaction, and the chain would hold a node and no tail.
+                Volatile.Write(ref _minTSN, 0);
+                Volatile.Write(ref _tail, null);
+            }
+
+            if (isTail)
+            {
+                RemoveTailProbe?.Invoke(false);
+            }
+
+            if (Interlocked.CompareExchange(ref _head, transaction.Next, transaction) == transaction)
+            {
+                if (isTail)
+                {
+                    RemoveTailProbe?.Invoke(true);
+                    if (TailClearedAfterCasMutantForTest)
+                    {
+                        Volatile.Write(ref _tail, null);
+                        Volatile.Write(ref _minTSN, 0);
+                    }
+                }
+            }
+            else
             {
                 // PushHead prepended nodes between our Volatile.Read and CAS — re-scan for new predecessor
                 var p = Volatile.Read(ref _head);
@@ -250,22 +378,11 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
                     p = p.Next;
                 }
                 p.Next = transaction.Next;
-            }
-        }
-
-        // Tail maintenance
-        if (Volatile.Read(ref _tail) == transaction)
-        {
-            var newTail = Volatile.Read(ref _head);
-            if (newTail != null)
-            {
-                while (newTail.Next != null)
+                if (isTail)
                 {
-                    newTail = newTail.Next;
+                    SetTail(p);
                 }
             }
-            Volatile.Write(ref _tail, newTail);
-            Volatile.Write(ref _minTSN, newTail?.TSN ?? 0);
         }
 
         // Capture pool decision under lock; transaction is fully unlinked, so Reset+Enqueue can safely happen outside the critical section to reduce hold time.
@@ -286,14 +403,92 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         }
     }
 
+    /// <summary>Test seam (TXC-01): invoked inside a creation's window, between the push and the TSN draw. A test holds a creator there.</summary>
+    internal Action CreationWindowProbe { get; set; }
+
+    /// <summary>
+    /// Makes <paramref name="node"/>, the chain's last node, the tail; its TSN may still be pending (TXC-01). Caller holds the exclusive lock.
+    /// </summary>
+    private void SetTail(Transaction node)
+    {
+        Volatile.Write(ref _tail, node);
+        Volatile.Write(ref _minTSN, AwaitTsn(node));
+    }
+
+    /// <summary>
+    /// A commit stamp (VIS-03 step 2), from the one counter TSNs come from (design 05 §4). No headroom check: the commit point cannot be refused, and the
+    /// refusal threshold's margin covers the stamps drawn past it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal long DrawCommitStamp() => Interlocked.Increment(ref _nextFreeId);
+
     /// <summary>
     /// Allocates a monotonically-increasing TSN without creating a Transaction.
     /// Used by <see cref="PointInTimeAccessor"/> to get an MVCC visibility snapshot point.
     /// </summary>
-    internal long AllocateTSN() => Interlocked.Increment(ref _nextFreeId);
+    internal long AllocateTSN()
+    {
+        CheckTsnHeadroom();
+        return Interlocked.Increment(ref _nextFreeId);
+    }
 
     /// <summary>
-    /// Lock-free transaction creation. No lock acquired — uses ConcurrentQueue for pooling, atomic TSN increment, and CAS-based PushHead.
+    /// The counter above which a TSN draw takes the slow path (#1208): a warning, once, then the refusal at <see cref="TsnRefusalThreshold"/>. A TSN is
+    /// stored in 48 bits (<c>CompRevStorageElement.TSN</c>, <c>EntityRecordHeader.BornTSN</c>/<c>DiedTSN</c>); bit 47 stays free for the commit-stamp
+    /// design's pending mark.
+    /// </summary>
+    internal const long TsnWarningThreshold = 1L << 46;
+
+    /// <summary>
+    /// No TSN is drawn once the counter reaches this (#1208): 2^47 minus a fixed margin of 2^24. Fixed, not per live transaction: draws pass the check
+    /// and then draw, so concurrent ones can overshoot it by up to one per thread, and the commit-stamp design (option C) draws a stamp at a commit point
+    /// that can never be refused. 2^24 covers both with room to spare, at a cost of one part in 10^7 of the range.
+    /// </summary>
+    internal const long TsnRefusalThreshold = (1L << 47) - (1L << 24);
+
+    private int _tsnWarned;
+
+    /// <summary>
+    /// The begin path's one predictable branch (#1208): below <see cref="TsnWarningThreshold"/> nothing happens. Above it, a warning once; at
+    /// <see cref="TsnRefusalThreshold"/>, <see cref="ResourceExhaustedException"/> — a refusal before the 48-bit stored TSN can wrap and read as "born at
+    /// genesis, alive".
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CheckTsnHeadroom()
+    {
+        // A plain read: the value is advisory (the margin absorbs a stale one) and takes part in no ordering.
+        var next = _nextFreeId;
+        if (next >= TsnWarningThreshold)
+        {
+            TsnHeadroomSlowPath(next);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void TsnHeadroomSlowPath(long next)
+    {
+        if (next >= TsnRefusalThreshold)
+        {
+            throw new TransactionSequenceExhaustedException(next, TsnRefusalThreshold);
+        }
+
+        WarnTsnHeadroomOnce(next);
+    }
+
+    private void WarnTsnHeadroomOnce(long next)
+    {
+        // Read first: past 2^46 every draw comes here, for years — an unconditional exchange would be a locked write on the chain's line per draw.
+        if (Volatile.Read(ref _tsnWarned) == 0 && Interlocked.Exchange(ref _tsnWarned, 1) == 0)
+        {
+            _dbe?.WarnTsnHeadroomLow(next, TsnRefusalThreshold);
+        }
+    }
+
+    /// <summary>Whether the TSN headroom warning has been logged (#1208).</summary>
+    internal bool TsnHeadroomWarned => Volatile.Read(ref _tsnWarned) != 0;
+
+    /// <summary>
+    /// Lock-free transaction creation. No lock acquired — uses ConcurrentQueue for pooling, then <see cref="Register"/>: CAS-based push, atomic TSN increment.
     /// </summary>
     [return: TransfersOwnership]
     public Transaction CreateTransaction(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
@@ -304,23 +499,19 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
             ThrowHelper.ThrowResourceExhausted("Data/TransactionChain/CreateTransaction", ResourceType.Service, _activeCount, _maxActiveTransactions);
         }
 
+        CheckTsnHeadroom();
+
         if (!_pool.TryDequeue(out var t))
         {
             t = new Transaction();
         }
 
-        t.Init(dbe, Interlocked.Increment(ref _nextFreeId), uow, readOnly, discipline, ownChangeSet);
+        t.Init(dbe, uow, readOnly, discipline, ownChangeSet);
 
         // Gauge: cumulative "transactions created" counter. Single convergence point — every call path (UnitOfWork.CreateTransaction,
         // DatabaseEngine.CreateQuickTransaction, DatabaseEngine.CreateReadOnlyTransaction) funnels through this method, so one
         // increment here counts every transaction exactly once. Pooled (dequeued) and newly-allocated paths both pass through.
         Interlocked.Increment(ref _createdTotal);
-
-        // Are we getting short on Ids? The max is 1 << 47
-        if (_nextFreeId > (1L << 46))
-        {
-            // TODO Log some warning
-        }
 
         return t;
     }

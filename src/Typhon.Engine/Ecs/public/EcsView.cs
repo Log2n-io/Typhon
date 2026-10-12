@@ -368,13 +368,18 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                 return;
             }
 
-            // Incremental mode: drain ring buffer
-            bool overflow = DeltaBuffer.HasOverflow;
+            // Incremental mode: drain ring buffer — unless the ring dropped entries, or the last full refresh owes another (_refreshFullPending)
+            bool overflow = NeedsRefreshFull;
             if (overflow)
             {
-                // Phase 7: ECS:View:DeltaBuffer:Overflow instant — operationally critical, fires at the moment overflow is detected.
+                // Phase 7: ECS:View:DeltaBuffer:Overflow instant — operationally critical, fires at the moment overflow is detected. Not for a full refresh
+                // a previous one owed (_refreshFullPending): that overflow was reported when it happened.
                 // currentTsn = transaction snapshot, tailTsn = last refresh, marginPagesLost = 0 (no per-page accounting at this layer).
-                TyphonEvent.EmitEcsViewDeltaBufferOverflow(tx.TSN, LastRefreshTSN, 0);
+                if (DeltaBuffer.HasOverflow)
+                {
+                    TyphonEvent.EmitEcsViewDeltaBufferOverflow(tx.TSN, LastRefreshTSN, 0);
+                }
+
                 SetOverflowDetected(true);
                 if (IsOrMode)
                 {
@@ -729,17 +734,40 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         // The view's entity set is keyed on the raw EntityId value (see PopulateFromEntityMaps / _entityIds).
         var pk = (long)entityId.RawValue;
 
-        var wasInView = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
-        var shouldBeInView = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
+        // An enable carries no key (NotifyViewsForEnableDisable): the value is read. So is a creation whose key is 0 — right either way, only slower.
+        if (isCreation && entry.AfterKey.IsZero)
+        {
+            ApplyMembership(pk, _fieldReader != null && _fieldReader.EvaluateAllFields(pk, Evaluators, tx));
+            return;
+        }
+
+        // Whether the entity WAS in the view is the view's own set, not the entry's BeforeKey: that is the writer's read value, and two concurrent writers
+        // of one entity both read the same one — the second's entry then says "was in" for an entity the first just took out (VDELTA-01). The set also
+        // makes an entry applied twice harmless: the AfterKey decides, whatever came before. Every evaluator of the field decides (a range is two).
+        var fieldPasses = !isDeletion && FieldPasses(Evaluators, fieldIndex, ref entry.AfterKey);
 
         if (Evaluators.Length == 1)
         {
-            ApplyDelta(pk, wasInView, shouldBeInView);
+            ApplyMembership(pk, fieldPasses);
         }
         else
         {
-            ProcessMultiField(pk, fieldIndex, wasInView, shouldBeInView, tx);
+            ProcessMultiField(pk, fieldIndex, _entityIds.Contains(pk), fieldPasses, tx);
         }
+    }
+
+    /// <summary>Whether <paramref name="key"/> passes every evaluator of <paramref name="fieldIndex"/> — two for a range on one field.</summary>
+    private static bool FieldPasses(FieldEvaluator[] evaluators, int fieldIndex, ref KeyBytes8 key)
+    {
+        for (var i = 0; i < evaluators.Length; i++)
+        {
+            if (evaluators[i].FieldIndex == fieldIndex && !EvaluateKey(ref evaluators[i], ref key))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -750,38 +778,50 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         return FieldEvaluator.Evaluate(ref eval, (byte*)&local);
     }
 
-    private void ProcessMultiField(long pk, int fieldIndex, bool wasInView, bool shouldBeInView, Transaction tx)
+    // wasInView: the entity is in the view's set (every field passed). fieldPasses: this entry's field passes with its new value.
+    private void ProcessMultiField(long pk, int fieldIndex, bool wasInView, bool fieldPasses, Transaction tx)
     {
-        if (wasInView == shouldBeInView)
+        if (wasInView)
         {
-            if (shouldBeInView && _entityIds.Contains(pk))
-            {
-                CompactDelta(pk, DeltaKind.Modified);
-            }
-            return;
+            // IN: stays while this field passes (the others did and have their own entries), leaves when it fails
+            ApplyDelta(pk, true, fieldPasses);
         }
-
-        if (!wasInView)
+        else if (fieldPasses && _fieldReader != null && _fieldReader.CheckOtherFields(pk, Evaluators, fieldIndex, tx))
         {
-            // OUT→IN: verify all other fields pass
-            if (_fieldReader != null && _fieldReader.CheckOtherFields(pk, Evaluators, fieldIndex, tx))
-            {
-                ApplyDelta(pk, false, true);
-            }
-        }
-        else
-        {
-            // IN→OUT: remove if entity was in view
-            if (_entityIds.Contains(pk))
-            {
-                ApplyDelta(pk, true, false);
-            }
+            // OUT→IN: this field passes, and so do all the others
+            ApplyDelta(pk, false, true);
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Full refresh (overflow recovery — uses EcsQuery broad scan)
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Folds, after a full refresh's re-scan and diff, the ring's entries at or below its transaction's TSN — see <see cref="ViewBase"/>'s
+    /// <c>EndRefreshFull</c>. The newer ones stay for the next refresh.
+    /// </summary>
+    private void FoldEntriesAfterRefreshFull(Transaction tx)
+    {
+        while (DeltaBuffer.TryPeek(tx.TSN, out var entry, out var flags, out var tsn, out _))
+        {
+            var fold = FoldsHead;   // an entry appended before a drop that may have superseded it: the re-scan stands for its entity
+            DeltaBuffer.Advance();
+            if (fold)
+            {
+                if (IsOrMode)
+                {
+                    ProcessEntryOr(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
+                }
+                else
+                {
+                    ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, tx);
+                }
+            }
+
+            SetLastRefreshTSN(tsn);
+        }
+    }
 
     private void RefreshFull(Transaction tx)
     {
@@ -792,7 +832,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         {
             var oldEntities = _entityIds.Clone();
 
-            DeltaBuffer.Reset(tx.TSN);
+            var droppedBefore = BeginRefreshFull();
             _entityIds.Clear();
 
             // #668: this used to have three branches and only this one was reachable. The other two required a view with a field reader but no cached plan
@@ -812,8 +852,9 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             _query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds);
             fullScope.RequeryNs = (uint)Math.Min((Stopwatch.GetTimestamp() - requeryStart) * 1_000_000_000L / Stopwatch.Frequency, uint.MaxValue);
 
-            DrainBufferAfterRefreshFull(tx.TSN);
             ComputeRefreshFullDeltas(oldEntities);
+            FoldEntriesAfterRefreshFull(tx);
+            EndRefreshFull(droppedBefore);
 
             SetOverflowDetected(false);
             SetLastRefreshTSN(tx.TSN);
@@ -877,14 +918,28 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
 
         var pk = (long)entityId.RawValue;
-        _branchBitmaps.TryGetValue(pk, out var oldBitmap);
-        if (isCreation)
-        {
-            oldBitmap = 0;
-        }
 
+        // The branch bits are the view's own (VDELTA-01): a creation does not zero them — one entry arrives per field, and the second would erase the
+        // first's branches — and neither does an entry applied twice. A new entity has none.
+        _branchBitmaps.TryGetValue(pk, out var oldBitmap);
         var wasInView = oldBitmap != 0;
         var newBitmap = oldBitmap;
+
+        if (isCreation && entry.AfterKey.IsZero)
+        {
+            // An enable carries no key: every branch is evaluated from the value read.
+            newBitmap = 0;
+            for (var b = 0; b < _branchEvaluators.Length; b++)
+            {
+                if (_fieldReader.EvaluateAllFields(pk, _branchEvaluators[b], tx))
+                {
+                    newBitmap |= (ushort)(1 << b);
+                }
+            }
+
+            ApplyBranchBitmap(pk, oldBitmap, newBitmap);
+            return;
+        }
 
         for (var b = 0; b < _branchEvaluators.Length; b++)
         {
@@ -898,22 +953,18 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             ref var eval = ref branchEvals[evalIndex];
             var bit = (ushort)(1 << b);
 
-            var fieldWasIn = !isCreation && EvaluateKey(ref eval, ref entry.BeforeKey);
-            var fieldIsIn = !isDeletion && EvaluateKey(ref eval, ref entry.AfterKey);
+            // The branch's own state, not the entry's BeforeKey (the writer's read value, stale under concurrent writers — VDELTA-01).
+            var branchWasIn = (oldBitmap & bit) != 0;
+            var fieldIsIn = !isDeletion && FieldPasses(branchEvals, fieldIndex, ref entry.AfterKey);
 
-            if (fieldWasIn == fieldIsIn)
-            {
-                continue;
-            }
-
-            if (!fieldWasIn)
+            if (fieldIsIn && !branchWasIn)
             {
                 if (_fieldReader.CheckOtherFieldsInBranch(pk, branchEvals, fieldIndex, tx))
                 {
                     newBitmap |= bit;
                 }
             }
-            else
+            else if (!fieldIsIn && branchWasIn)
             {
                 newBitmap &= (ushort)~bit;
             }
@@ -924,6 +975,13 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             newBitmap = 0;
         }
 
+        ApplyBranchBitmap(pk, oldBitmap, newBitmap);
+    }
+
+    /// <summary>Records an OR view entity's branch bits and its membership change from <paramref name="oldBitmap"/> to <paramref name="newBitmap"/>.</summary>
+    private void ApplyBranchBitmap(long pk, ushort oldBitmap, ushort newBitmap)
+    {
+        var wasInView = oldBitmap != 0;
         var shouldBeInView = newBitmap != 0;
 
         if (newBitmap != 0)
@@ -961,7 +1019,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         try
         {
             var oldEntities = _entityIds.Clone();
-            DeltaBuffer.Reset(tx.TSN);
+            var droppedBefore = BeginRefreshFull();
             _entityIds.Clear();
             _branchBitmaps.Clear();
 
@@ -989,8 +1047,9 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                 }
             }
 
-            DrainBufferAfterRefreshFull(tx.TSN);
             ComputeRefreshFullDeltas(oldEntities);
+            FoldEntriesAfterRefreshFull(tx);
+            EndRefreshFull(droppedBefore);
             SetOverflowDetected(false);
             SetLastRefreshTSN(tx.TSN);
 
@@ -1155,8 +1214,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
     public override bool CheckOtherFields(long pk, FieldEvaluator[] evaluators, int skipFieldIndex, Transaction tx)
     {
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }
@@ -1186,8 +1246,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
         }
 
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }
@@ -1212,8 +1273,9 @@ internal sealed unsafe class EcsViewFieldReader<T> : EcsViewFieldReader where T 
     public override bool EvaluateAllFields(long pk, FieldEvaluator[] evaluators, Transaction tx)
     {
         var entityId = EntityId.FromRaw(pk);
-        var entity = tx.Open(entityId);
-        if (!entity.TryRead<T>(out var comp))
+        // TryOpen: an entry can name an entity the refresh's snapshot does not see — spawned and destroyed since — which Open throws for. Not visible
+        // is not in the view.
+        if (!tx.TryOpen(entityId, out var entity) || !entity.TryRead<T>(out var comp))
         {
             return false;
         }

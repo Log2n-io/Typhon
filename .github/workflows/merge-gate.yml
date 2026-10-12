@@ -504,6 +504,10 @@ jobs:
             suffix="${spec#"$base"}"
             suffix="${suffix#-}"
             case "$suffix" in
+              full|*-full)
+                # An exhaustive bound too long for the gate (CommitStamp-full.cfg: ~10 min on 32 threads); run locally.
+                echo "skipped: $spec (run locally: bash run-tlc.sh $base $suffix)"
+                ;;
               mutant|mutant-*)
                 echo "::group::genuineness — $base $suffix must violate"
                 bash run-tlc.sh "$base" "$suffix" --expect-violation

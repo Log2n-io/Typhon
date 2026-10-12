@@ -26,6 +26,13 @@ internal sealed class VsbsSetElementsTests : TestBase<VsbsSetElementsTests>
     private DatabaseEngine _dbe;
     private VariableSizedBufferSegment<int, PersistentStore> _vsbs;
 
+    // No periodic checkpoint: a release of held frees (CK-17) in flight frees the bitmap bit before the hold, and the live count below would read it short.
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Resources.CheckpointIntervalMs = int.MaxValue;
+    }
+
     [SetUp]
     public void SetUpSegment()
     {
@@ -104,7 +111,8 @@ internal sealed class VsbsSetElementsTests : TestBase<VsbsSetElementsTests>
         return a.RefCounter;
     }
 
-    private int AllocatedChunkCount => _vsbs.Segment.AllocatedChunkCount;
+    // Live chunks: a free held until a checkpoint (CK-17, #1300) is reclaimed, not orphaned.
+    private int AllocatedChunkCount => _vsbs.Segment.AllocatedChunkCount - _vsbs.Segment.QuarantinedFreeCount;
 
     // ── AC 2.1: the five shapes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 

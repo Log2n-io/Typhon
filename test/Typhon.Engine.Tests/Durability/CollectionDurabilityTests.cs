@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -314,6 +315,247 @@ internal sealed class CollectionDurabilityTests
                 "no FenceBlock-expanded record was inspected — the columnar emitter's handle zeroing went unverified. That path bulk-copies component columns "
                 + "straight out of the cluster page, so it is the one that most easily carries a handle through.");
         }
+    }
+
+    /// <summary>
+    /// #1307: a crash open frees the collection buffers nothing names — a buffer whose free a checkpoint had not written, one a swept orphan named — and
+    /// keeps every named one, in both storage homes. Staged: two buffers made durable and named by no component, one of them past its root chunk. The new
+    /// collections spawned after the open take the chunks the sweep freed, so a named buffer freed with them would be overwritten. One named buffer has a
+    /// free chain, which it owns as it owns its root.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [CancelAfter(20_000)]
+    public void ACrashOpen_FreesTheCollectionBuffersNothingNames_AndKeepsEveryNamedOne()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+        List<int> orphanChunks;
+        int freeChainChunk;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            TouchSingleVersionEntities(dbe, single);
+            dbe.WriteTickFence(1);
+            freeChainChunk = StageANamedBufferWithAFreeChain(dbe);
+            orphanChunks = StageOrphanBuffers(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            var segment = dbe.GetComponentTable<CcVersioned>().CollectionFields[0].Vsbs.Segment;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                foreach (var chunkId in orphanChunks)
+                {
+                    Assert.That(segment.IsChunkAllocated(chunkId), Is.False, $"orphan chunk {chunkId}, freed");
+                }
+
+                Assert.That(segment.IsChunkAllocated(freeChainChunk), Is.True, "a named buffer's free chain, kept");
+
+                // The schema catalog's own collections: a component's field list (ComponentR1.Fields), an archetype's component names. The catalog's
+                // table reopens without its collection info (#387), so the sweep had no handle into the field list's segment and freed it whole.
+                foreach (var (name, (_, comp)) in dbe.PersistedComponents)
+                {
+                    if (comp.Fields._bufferId != 0)
+                    {
+                        var fieldSegment = dbe.GetComponentCollectionSegment<FieldR1>();
+                        Assert.That((fieldSegment.IsChunkAllocated(comp.Fields._bufferId), fieldSegment.IsChunkHeld(comp.Fields._bufferId)),
+                            Is.EqualTo((true, false)), $"component '{name}': its persisted field list, kept");
+                    }
+                }
+
+                foreach (var (name, (_, arch)) in dbe._persistedArchetypes)
+                {
+                    if (arch.ComponentNames._bufferId != 0)
+                    {
+                        var nameSegment = dbe.GetComponentCollectionSegment<String64>();
+                        Assert.That((nameSegment.IsChunkAllocated(arch.ComponentNames._bufferId), nameSegment.IsChunkHeld(arch.ComponentNames._bufferId)),
+                            Is.EqualTo((true, false)), $"archetype '{name}': its persisted component names, kept");
+                    }
+                }
+
+                Assert.That(segment.DoubleFreeCount, Is.Zero, "the sweep freed nothing twice");
+            }
+
+            Assert.That(dbe.CollectionChunksSweptAtOpen, Is.GreaterThanOrEqualTo(orphanChunks.Count), "the sweep's count");
+            AssertRecoveredContent(dbe, versioned, single);
+
+            // New collections take the freed chunks: a named buffer freed with them would now hold another's elements.
+            SeedBoth(dbe);
+            AssertRecoveredContent(dbe, versioned, single);
+        }
+    }
+
+    /// <summary>
+    /// #1307: the sweep stands down when a handle may be where the open does not look — here a persisted component with a collection field that the
+    /// reopening process does not register. Its buffers would read as named by nothing and be freed under data a later open loads.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    [CancelAfter(20_000)]
+    public void ACrashOpen_ThatDoesNotLoadEveryCollectionComponent_SweepsNothing()
+    {
+        List<int> orphanChunks;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            SeedBoth(dbe);
+
+            // Checkpointed: the crash open replays nothing of the component it will not register.
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the checkpoint");
+            orphanChunks = StageOrphanBuffers(dbe);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CcVersioned>();
+            dbe.InitializeArchetypes();
+            Assert.That(dbe.LastOpenRanCrashRecovery, Is.True, "premise: a crash open");
+            var segment = dbe.GetComponentTable<CcVersioned>().CollectionFields[0].Vsbs.Segment;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                Assert.That(segment.IsChunkAllocated(orphanChunks[0]), Is.True, "the orphan, kept: the sweep stood down");
+            }
+
+            Assert.That(dbe.CollectionChunksSweptAtOpen, Is.Zero);
+        }
+    }
+
+    // A Versioned entity's collection with a chunk on its free chain, durable and checkpointed: the window replays nothing of it. Returns that chunk.
+    private static unsafe int StageANamedBufferWithAFreeChain(DatabaseEngine dbe)
+    {
+        var vsbs = (VariableSizedBufferSegment<int, PersistentStore>)dbe.GetComponentTable<CcVersioned>().CollectionFields[0].Vsbs;
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var v = new CcVersioned { Seq = -1 };
+            using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+            {
+                cca.Add(-1);
+            }
+
+            id = tx.Spawn<CcVersionedArch>(CcVersionedArch.C.Set(in v));
+            Assert.That(tx.Commit(), Is.True, "the keeper's spawn");
+        }
+
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the checkpoint");
+        int bufferId;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            bufferId = tx.Open(id).Read(CcVersionedArch.C).Items._bufferId;
+        }
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var cs = dbe.MMF.CreateChangeSet();
+            var accessor = vsbs.Segment.CreateChunkAccessor(cs);
+            int middle;
+            try
+            {
+                // Fill the root and a chunk, spill into a third (the append cursor), then empty the second: a walk over the buffer unlinks it onto the
+                // free chain — never the cursor.
+                var byChunk = new Dictionary<int, List<int>>();
+                int first = 0, cursor = 0;
+                for (var el = 0; el < vsbs.ElementCountRootChunk + 3 * vsbs.ElementCountPerChunk; el++)
+                {
+                    cursor = vsbs.AddElement(bufferId, 1000 + el, ref accessor);
+                    first = first == 0 ? cursor : first;
+                    if (!byChunk.TryGetValue(cursor, out var values))
+                    {
+                        byChunk[cursor] = values = [];
+                    }
+
+                    values.Add(1000 + el);
+                }
+
+                // A chunk holding only this staging's values, neither the root, the chunk the spawn's element shares, nor the cursor.
+                middle = 0;
+                foreach (var (chunkId, values) in byChunk)
+                {
+                    if (chunkId != bufferId && chunkId != first && chunkId != cursor && values.Count == vsbs.ElementCountPerChunk)
+                    {
+                        middle = chunkId;
+                    }
+                }
+
+                Assert.That(middle, Is.Not.Zero, "premise: a full overflow chunk");
+                foreach (var value in byChunk[middle])
+                {
+                    vsbs.DeleteElement(bufferId, middle, value, ref accessor);
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+
+            cs.SaveChanges();
+            foreach (var _ in vsbs.EnumerateBuffer(bufferId))
+            {
+            }
+
+            var check = vsbs.Segment.CreateChunkAccessor();
+            try
+            {
+                Assert.That(check.GetChunk<VariableSizedBufferRootHeader>(bufferId).FirstFreeChunkId, Is.EqualTo(middle),
+                    "premise: the emptied chunk is on the buffer's free chain");
+            }
+            finally
+            {
+                check.Dispose();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the unlink, durable");
+            return middle;
+        }
+    }
+
+    // Two buffers in the int collections' segment, durable and named by nothing — the second spilling past its root chunk. Returns every chunk they own.
+    private static unsafe List<int> StageOrphanBuffers(DatabaseEngine dbe)
+    {
+        var vsbs = (VariableSizedBufferSegment<int, PersistentStore>)dbe.GetComponentTable<CcVersioned>().CollectionFields[0].Vsbs;
+        var chunks = new List<int>();
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            var cs = dbe.MMF.CreateChangeSet();
+            var accessor = vsbs.Segment.CreateChunkAccessor(cs);
+            try
+            {
+                var allocatedBefore = vsbs.Segment.AllocatedChunkCount;
+                var first = vsbs.AllocateBuffer(ref accessor);
+                var second = vsbs.AllocateBuffer(ref accessor);
+                for (var el = 0; el < vsbs.ElementCountRootChunk + vsbs.ElementCountPerChunk + 1; el++)
+                {
+                    vsbs.AddElement(second, el, ref accessor);
+                }
+
+                Assert.That(vsbs.Segment.AllocatedChunkCount - allocatedBefore, Is.GreaterThanOrEqualTo(3), "premise: the second buffer spills");
+                chunks.Add(first);
+                chunks.Add(second);
+                for (var next = *(int*)accessor.GetChunkAddress(second); next != 0; next = *(int*)accessor.GetChunkAddress(next))
+                {
+                    chunks.Add(next);
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+
+            cs.SaveChanges();
+        }
+
+        return chunks;
     }
 
     // ── shared engine scaffolding ───────────────────────────────────────────────────────────────────────────────────────────────────────────

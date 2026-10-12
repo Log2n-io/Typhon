@@ -171,14 +171,16 @@ internal sealed class WalRecovery : IDisposable
                 segScope.Dispose();
             }
 
+            // The frontier is the highest LSN any segment holds, not the last segment's: the reader starts each segment from 0, and an open that failed
+            // before its recovery completed leaves a new segment with no record in it. Taken from that one, the frontier fell back to CheckpointLSN, the
+            // next writer began a segment inside the window's LSNs, and the open after it read the window short — durable transfers lost (LOG-08, #1183).
+            result.LastValidLSN = Math.Max(result.LastValidLSN, reader.LastValidLSN);
             if (reader.WasTruncated)
             {
                 break; // Stop at truncation point
             }
             segIndex++;
         }
-
-        result.LastValidLSN = reader.LastValidLSN;
 
         // ═══════════════════════════════════════════════════════════
         // Phase 3: Cross-reference with registry

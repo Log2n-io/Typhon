@@ -194,7 +194,7 @@ internal static unsafe class IndexDataOracle
             }
 
             var seen = new Dictionary<long, List<int>>();
-            var e = intTree.EnumerateRangeMultiple(int.MinValue, int.MaxValue);
+            using var e = intTree.EnumerateRangeMultiple(int.MinValue, int.MaxValue);
             while (e.MoveNextKey())
             {
                 // The enumerator is TWO-LEVEL and this loop must be too. `CurrentValues` is one CHUNK of the key's VSBS buffer, not the whole of it —

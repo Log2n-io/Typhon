@@ -186,6 +186,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <summary>Whether a fatal I/O error has occurred during checkpointing.</summary>
     public bool HasFatalError => _fatalError != null;
 
+    /// <summary>The failure that latched <see cref="HasFatalError"/>, or null.</summary>
+    internal Exception FatalError => _fatalError;
+
     /// <summary>Current durability health (CK-06). <see cref="DurabilityHealth.Degraded"/> means the last cycle hit a
     /// transient stall and will retry next tick; <see cref="DurabilityHealth.Fatal"/> means periodic checkpointing
     /// has halted (the shutdown path still attempts one last-chance flush).</summary>
@@ -636,6 +639,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     {
         lock (_cycleLock)
         {
+            // CK-08: during a crash open's recovery the only cycle is flush-only — the timer's, the pressure's and a back-pressured allocation's alike.
+            if (RecoveryInProgress)
+            {
+                // Classified as a cycle's failure is (CK-06): escaping, it ended the loop for the session.
+                try
+                {
+                    RunFlushOnlyCycleCore();
+                }
+                catch (Exception ex)
+                {
+                    ClassifyCycleFailure(ex);
+                }
+
+                return;
+            }
+
             RunCheckpointCycleCore(targetLsn, reason);
         }
     }
@@ -669,6 +688,71 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         var written = WriteDirtyPages(ref pending, ref ctx, out _);
         Interlocked.Add(ref _totalPagesWritten, written);
         Interlocked.Increment(ref _totalWritesAheadOfTheHook);
+    }
+
+    /// <summary>
+    /// Set by a crash open for the length of its recovery, cleared before its seal (CK-08): a cycle then only writes. The recovery's passes dirty pages
+    /// beyond the cache, and a full cycle among them would advance CheckpointLSN over a half-recovered file — a second crash would then replay nothing over
+    /// it.
+    /// </summary>
+    internal bool RecoveryInProgress
+    {
+        get => Volatile.Read(ref _recoveryInProgress);
+        set => Volatile.Write(ref _recoveryInProgress, value);
+    }
+
+    private bool _recoveryInProgress;
+    private long _totalFlushOnlyCycles;
+
+    /// <summary>Flush-only cycles run (<see cref="RunFlushOnlyCycle"/>, and every cycle during recovery). Diagnostic.</summary>
+    public long TotalFlushOnlyCycles => Interlocked.Read(ref _totalFlushOnlyCycles);
+
+    /// <summary>
+    /// A flush-only cycle (CK-08): captures and writes the owed pages, discharging their debt, and nothing else — no CheckpointLSN advance, no meta flip,
+    /// no segment recycling, no metadata hook, no held free sealed or released. The write keeps CK-02's order (the WAL is flushed through what the copies
+    /// can reflect before their fsync) and CP-03's, as the cycle's own write does. A suspect page (its checksum failed at load) is left owed: written, its
+    /// torn bytes were checksummed again and the next open served them, whatever the suspect resolution then decided (#1304). Serialized with the cycles.
+    /// Returns the pages written.
+    /// </summary>
+    internal int RunFlushOnlyCycle()
+    {
+        lock (_cycleLock)
+        {
+            // Classified as a cycle's failure is (CK-06): a transient one is retried by the next call, a fatal one latches and the crash open fails at its
+            // next check (DatabaseEngine.RecoveryBatchPoint).
+            try
+            {
+                return RunFlushOnlyCycleCore();
+            }
+            catch (Exception ex)
+            {
+                ClassifyCycleFailure(ex);
+                return 0;
+            }
+        }
+    }
+
+    private int RunFlushOnlyCycleCore()
+    {
+        // After a fatal cycle failure nothing writes, as for the full cycles (CK-06).
+        if (_crashStop || _fatalError != null)
+        {
+            return 0;
+        }
+
+        CycleFaultInjector?.Invoke();
+
+        var pending = _mmf.WithoutSuspectPages(_mmf.CollectDirtyMemPageIndices());
+        if (pending.Length == 0)
+        {
+            return 0;
+        }
+
+        var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
+        var written = WriteDirtyPages(ref pending, ref ctx, out _);
+        Interlocked.Add(ref _totalPagesWritten, written);
+        Interlocked.Increment(ref _totalFlushOnlyCycles);
+        return written;
     }
 
     /// <summary>The highest writeback debt, in percent of the cache, at which <see cref="WriteAheadOfTheHook"/> still lets the hook run first.</summary>
@@ -759,6 +843,20 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     batch.Clear();
                     while (position < pending.Length && batchPlanned < maxPages && Stopwatch.GetTimestamp() - batchStart < WriteBatchMaxTicks)
                     {
+                        // A crash stop set mid-cycle stops it here, before the next wave captures a copy: a stopped engine's pages may hold writes the WAL
+                        // never logged (#1271). The rest stay owed — skipped, so the cycle is not covered and CheckpointLSN stays — and what the waves
+                        // before wrote is settled below.
+                        if (_crashStop)
+                        {
+                            for (var i = position; i < pending.Length; i++)
+                            {
+                                skipped.Add(pending[i]);
+                            }
+
+                            position = pending.Length;
+                            break;
+                        }
+
                         // A wave of disjoint sub-batches, within what the batch has left. Each call partitions its own range: written pages to the front,
                         // skipped ones to the back. The protected pages that lead the pass are a wave of their own, on this thread.
                         var waveSize = 0;
@@ -826,7 +924,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // Retry exactly the skipped pages, not the whole dirty set — new commits dirtying other pages must not block this cycle. After the last pass
             // they are what the caller reads as the owed tail.
             pending = skipped.ToArray();
-            if (stillSkipped == 0)
+            if (stillSkipped == 0 || _crashStop)
             {
                 break;
             }
@@ -1062,12 +1160,23 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // classification. Null in production — one negligible null-check on the background thread.
             CycleFaultInjector?.Invoke();
 
+            // The frees made so far wait for this cycle: the pages that stopped naming them were dirtied before them, so this cycle collects and writes
+            // them; only once it has written every page is reusing those chunks safe (#1251).
+            _mmf.SealQuarantinedFrees();
+
             // The whole cycle shares one bounded deadline budget: the write ahead of the hook, the barrier and the write below.
             var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(_resourceOptions.CheckpointBarrierTimeoutMs));
 
             // CK-14: the hook loads pages, and under writeback pressure the cache may have no slot left that only this cycle's writes would not have to
             // free first.
             WriteAheadOfTheHook(ref ctx);
+
+            // AP-03 stopped the engine since the cycle began (#1271): the write above stopped at its next wave, and the hook would save its pages to the data
+            // file directly.
+            if (_crashStop)
+            {
+                return;
+            }
 
             // Persist per-archetype durable metadata (segment SPIs, NextEntityKey, EntityMap meta) into the ArchetypeR1 table BEFORE the barrier, so
             // its WAL records and dirty pages are flushed by THIS cycle. This makes the consolidated cluster/EntityMap base reachable on reopen after a
@@ -1134,7 +1243,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     // question that decides the fix is identity, not count: the same page every cycle means a
                     // leaked ACW / stale seqlock counter (a bug — the gate is working as designed), whereas a
                     // churning set means the coverage gate genuinely has no liveness guarantee under load.
-                    CaptureSkipDiagnostics(pending, stillSkipped);
+                    // Not for a crash-stopped cycle: every owed page is "skipped" there, none held by a writer.
+                    if (!_crashStop)
+                    {
+                        CaptureSkipDiagnostics(pending, stillSkipped);
+                    }
 
                     writeScope.WrittenCount = writtenTotal;
                     writeBatchScope.StagingAllocated = writtenTotal;
@@ -1168,6 +1281,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                 // step 1), NOT the stale loop-sampled targetLsn (CK-02/CK-03).
                 DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn);
                 Interlocked.Exchange(ref _checkpointLsn, barrierLsn);
+
+                // Every page collected at the start is on disk: the frees sealed then are safe to reuse (#1251).
+                _mmf.ReleaseQuarantinedFrees();
 
                 // Step 8: Recycle WAL segments
                 var segmentManager = _walManager.SegmentManager;
@@ -1252,10 +1368,11 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
-    /// Test hook: latches the crash flag so NO further checkpoint writes the data file — the shutdown final cycle is suppressed AND any periodic/forced cycle that
-    /// begins afterward bails immediately (see <see cref="RunCheckpointCycle"/>). Used by <c>DatabaseEngine.SimulateHardCrash</c> to model a power cut where only
-    /// WAL-durable data survives. Must be called before <see cref="Dispose"/>. (A cycle already mid-flight when the flag is set has a small residual window — the
-    /// test sets this on an otherwise-idle engine, so in practice no cycle is in flight.)
+    /// Latches the crash flag so NO further checkpoint writes the data file: the shutdown final cycle is suppressed, any periodic or forced cycle that begins
+    /// afterward bails at once (see <see cref="RunCheckpointCycle"/>), and a cycle in flight stops before its next write wave and before its metadata hook,
+    /// its unwritten pages left owed. Its users: <c>DatabaseEngine.SimulateHardCrash</c> (a power cut, where only WAL-durable data survives), a failed open's
+    /// teardown (CS-04), and the AP-03 stop (<c>DatabaseEngine.LatchCommitPipelineFailure</c>, #1271). Residual: the wave being written when the flag is set
+    /// writes the copies it took.
     /// </summary>
     internal void PrepareCrashStop()
     {

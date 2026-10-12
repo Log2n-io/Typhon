@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-07 |
-| Domain | UnitOfWorkContext, HoldoffScope, Deadline, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
+| Last Updated | 2026-10-09 |
+| Domain | UnitOfWorkContext, HoldoffScope, Deadline, WaitContext, AccessControl, AccessControlSmall, ResourceAccessControl, EpochManager, EpochGuard |
 
 > Invariants governing cooperative cancellation and the structural-mutation regions it must not
 > interrupt. The two are a **coupled pair**: neither is safe to change without the other, which is
@@ -86,6 +86,117 @@ mid-split. The gaps cancel out — and stop cancelling the moment either one is 
   on_violation: `LockedByThreadId` returns a negative id; ownership comparisons fail; a lock is
                 released by a thread that does not hold it.
 
+---
+
+## Module: Lock waits
+
+### CX-06: A lock wait's budget starts when the wait does `[correctness]`
+  invariant ∀ acquisition A of a revision-chain lock through `RevisionChainReader.WalkChain(…, Transaction)` — a transaction's
+            point read and resolve, its first write's re-resolve, its index-scan enumerator — A waits until
+            min(the owning UoW's deadline, now_at_A + RevisionChainLockTimeout). Callers that pass their own budget compose it per
+            call (`WalkChain(…, bool skipTimeout)`: a fresh timeout, or infinite for point-in-time accessors and for a destroy's
+            resolve of a cluster entity's Versioned slots, `Transaction.ResolveClusterVersionedForDestroy`)
+  never a per-acquisition timeout composed once and reused for every acquisition of a transaction, or of any longer-lived scope:
+        the budget then runs from the scope's first acquisition, and a scope older than the timeout fails its first contended wait
+        at once
+  scope: Transaction.ChainLockWaitContext, RevisionChainReader.WalkChain, RevisionEnumerator, AccessControlSmall.TryEnterSharedAccess
+  rationale: the budget costs a clock read, so it is composed only when an acquisition has to wait. The single-entry fast path takes
+             no lock; the locked walk first tries the lock without waiting (`TryEnterSharedAccess` / `TryEnterExclusiveAccess`: no
+             clock, no contention flag, no contention event), which succeeds whenever nobody holds the chain exclusively. Only a
+             failed try composes the budget and waits. Caching the budget per transaction saved the clock read too, but turned a lock
+             timeout into a transaction lifetime. Composing it on every locked walk cost +12 ns per walk (95 -> 107 ns,
+             `RevisionLockedWalkBenchmarks`); trying first costs nothing measurable (99.4 / 102.0 ns against main's
+             100.3 / 100.4).
+  on_violation: a reader holding a snapshot longer than `RevisionChainLockTimeout` (5 s) throws `LockTimeoutException` on its
+                first walk of a chain a writer holds for microseconds. MarketHardeningTests' long readers failed that way on the
+                desks' chains, 5 s into their snapshot (#1250).
+  verified: ChainLockBudgetTests — a reader 1.5 budgets old waits out a hold on a chain it walks; the holder releases only after
+            it has seen the reader waiting (the contention flag a waiting acquisition sets), so each walk is proven to have waited
+            [VerifiesRule]; with the budget composed at the first contended walk and reused (the seam `ChainLockWaitContextProbe`),
+            the same wait throws [RuleMutant]
+
+---
+
+## Module: TXC — the transaction chain
+
+The chain is what the revision cleanup's cutoff reads, and a snapshot the cutoff cannot see is not retained (SNAP). TXC is
+the chain's side of that contract: a transaction's snapshot is visible to every cutoff from the moment it exists.
+
+### TXC-01: A cutoff never passes a snapshot that exists or is being created `[fatal]` `[silent]`
+  invariant ∀ cutoff C = `TransactionChain.ComputeNextMinTSN()`, computed by the tail L, ∀ transaction T ≠ L alive when C is
+            computed or created concurrently with it: C ≤ T.TSN. (L's own snapshot is not retained past its cutoff: L computes
+            C to clean up after itself, at its dispose. An empty commit leaves L usable, so it computes nothing.)
+  enforce (1) a transaction is in the chain before its TSN exists: `Register` pushes it with its TSN pending (0), then draws
+          the TSN and publishes it (`Volatile.Write`);
+          (2) the cutoff is the minimum over every node but the leaving tail, and over `issued + 1`, the counter read BEFORE
+          the head. A creator the walk does not see pushed after that read, so it draws above it; a pending node the walk
+          does see is awaited (`AwaitTsn`), its creator two instructions from publishing it
+  never draw a TSN before the push: a cutoff computed in between cannot see that snapshot
+  never take the second-to-last node's TSN for the minimum: concurrent creations push in any order, so the chain is not in
+        TSN order, whether the draw comes before the push or after it
+  scope: TransactionChain.Register, TransactionChain.ComputeNextMinTSN, TransactionChain.AwaitTsn, TransactionChain.Remove,
+         Transaction.Init
+  rationale: a pending node costs a cutoff walker the creator's two remaining instructions (a spin that yields — `Sleep(0)`
+             or `Yield`, never `Sleep(1)`), and a creator never waits. The minimum walks the nodes the second-to-last search
+             already walked; the TSN it reads sits beside the link it follows (`Transaction._link`), so the walk still reads one
+             cache line per node. Considered and not taken: the creator stores a lower bound (the counter + 1) before its push, so no
+             walker ever waits — at the price of a read of the counter's contended line on every begin.
+  on_violation: the cleanup trims a revision a live snapshot still needs, and that snapshot reads the component as zeros, with
+                no error: SNAP-01's exception covers unregistered snapshots only (#1254).
+  verified: TransactionCutoffTests.ACutoffNeverPassesASnapshot — a creator held between its push and its draw, in three
+            interleavings: the tail trims while it is held, staged on the tail finishing or waiting on its pending TSN
+            (writer first); or after its release, the writer before or after a younger reader. Every snapshot reads its own
+            value [VerifiesRule]; a cutoff above every TSN issued is caught [RuleMutant]. Real mutations: the draw moved before
+            the push fails `HeldAcrossTheCleanup`; the second-to-last cutoff fails `ReleasedBeforeTheCleanup_ReaderFirst`.
+            TransactionCutoffTests.AnEmptyCommitByTheTail_KeepsItsOwnSnapshot — the tail still reads its value after an empty
+            commit [VerifiesRule]; the empty commit's cleanup restored fails it.
+            TransactionChainTests.Stress_ConcurrentCreation_NoCutoffPassesALiveSnapshot — 8 readers and a writer for 300 ms,
+            each reader finding the retention floor at or below its TSN [VerifiesRule]; it catches each real mutation 3/3.
+
+### TXC-02: A chain holding a transaction has a tail `[silent]`
+  invariant whenever no Remove is in progress and no push that found the chain empty is between its head CAS and its tail
+            CAS: head ≠ null ⇒ tail = the chain's last node, the first pushed of the live transactions; and once the tail's
+            own registration has returned, MinTSN = its TSN. (Such a push leaves the chain briefly with a head and no tail; it
+            sets the tail itself, one instruction later, and MinTSN when its TSN is published.)
+  enforce a Remove of the tail alone in the chain clears the tail BEFORE the CAS that empties the head; that CAS orders the
+          clear, so a push that finds the chain empty finds the tail cleared too, and its own CAS makes it the tail. If pushes
+          beat that CAS, the Remove re-scans and makes the node now before it the tail. A Remove of a tail with a predecessor
+          makes the predecessor the tail
+  never clear the tail after the head's CAS: a push in between fails its tail CAS against the leaving transaction, and the
+        chain is left with a head and no tail
+  scope: TransactionChain.Remove, TransactionChain.SetTail, TransactionChain.PushHead
+  rationale: only the tail computes a cutoff (TXC-01). With no tail, nothing computes one: the revision cleanup and the ECS
+             cleanup queue stop until the chain empties again, which under steady traffic may be never. Ordering the clear
+             before the CAS costs nothing; a full fence and a re-read of the head after it cost +7 % on a lone read-only
+             transaction's create and dispose, which empties the chain every time. The predecessor known from the unlink
+             also replaces the walk to the chain's end the tail's Remove used to make.
+  on_violation: liveness and space: queued cleanups wait and revision chains grow (#1255).
+  verified: TransactionCutoffTests.APushIntoAnEmptyingChain_BecomesItsTail — a Remove of the lone tail held right after its
+            head CAS emptied the chain, or right before that CAS, and a push meanwhile: the pushed transaction is the tail,
+            with its TSN as MinTSN [VerifiesRule]; with the tail cleared after the CAS (`TailClearedAfterCasMutantForTest`),
+            the chain has no tail [RuleMutant]. Real mutation: the clear moved after the CAS fails it. The code before #1255
+            (a plain clear after the head read) failed the same test with the probe at that window.
+
+### TXC-03: A TSN never outgrows its 48-bit storage `[fatal]` `[silent]`
+  invariant every TSN draw — a transaction's (`CreateTransaction`) and a point-in-time snapshot's (`AllocateTSN`) — first compares the counter
+            with 2^46 (`TsnWarningThreshold`): one predictable branch, a plain read. Past it, the engine warns once (`WarnTsnHeadroomLow`); at
+            `TsnRefusalThreshold` = 2^47 − 2^24 it refuses the draw with `TransactionSequenceExhaustedException` — not transient — drawing nothing
+  invariant the margin is fixed, not per live transaction: draws pass the check and then draw, so concurrent ones overshoot it by up to one per
+            thread, and the commit-stamp design (option C) will draw a stamp at a commit point that cannot be refused. 2^24 covers both; bit 47
+            stays free for that design's pending mark
+  invariant a counter restored at open (`SetNextFreeId`) past the refusal threshold refuses the open; past 2^46 it warns then
+  invariant the 48-bit packed setters (`CompRevStorageElement.TSN`, `EntityRecordHeader.BornTSN` / `DiedTSN`) assert the range in Debug
+  never let a TSN pass 2^48: the packed setters keep its low 48 bits, and a wrapped TSN reads as "born at genesis, alive" to every MVCC check
+  scope: TransactionChain.CreateTransaction, TransactionChain.AllocateTSN, TransactionChain.SetNextFreeId, TransactionChain.TsnRefusalThreshold,
+         CompRevStorageElement.TSN, EntityRecordHeader.BornTSN, EntityRecordHeader.DiedTSN
+  rationale: #1208. The 2^46 check was an empty TODO. At a million transactions a second (read-only ones draw a TSN too) the warning comes after
+             about 2.2 years, the refusal after 4.5, and 2^48 itself would be 8.9
+  on_violation: visibility silently wrong for every revision and entity stamped past the wrap
+  verified: TsnHeadroomTests — BelowTheWarningThreshold_NothingIsLoggedOrRefused, PastTheWarningThreshold_ItWarnsOnce (a transaction's draw or a
+            snapshot's first), NearTheLimit_ATsnStoresWhole (a snapshot taken before a spawn near the limit does not see it),
+            AtTheRefusalThreshold_NoTsnIsDrawn, ACounterRestoredPastTheLimit_IsRefusedAtOpen (the counter seeded by `SetNextFreeIdForTest`)
+            [VerifiesRule]. Real mutations: the refusal removed, the check dropped from `CreateTransaction`, the open-time refusal removed — each
+            fails
 ---
 
 ## Module: SNAP — MVCC snapshot retention
@@ -227,10 +338,12 @@ lock ordering and deadlock prevention are still to come.
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
          LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
-         ChunkBasedSegment.ScanForAllocatorState,
+         ChunkBasedSegment.ScanForAllocatorState, ChunkBasedSegment.AllocatedChunks, ChunkBasedSegment.IsChunkAllocatedUnpinned,
+         ArchetypeClusterState.RebuildActiveList, ComponentRevisionManager.EnumerateVersionedChainHeads,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
-         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator
+         EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
+         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
@@ -238,8 +351,14 @@ lock ordering and deadlock prevention are still to come.
                 a chunk summary — every crash-path load — could not load a segment larger than the cache (#1144); and once the storm had
                 completed, counting its 300 000 audit entries stalled with 12 600 pages epoch-protected and none dirty: the count held every
                 cluster page it had read for its transaction
-  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) hold long scopes and dirty more pages than the
-        cache: #1183. A write cannot release its pages early either — its ChangeSet's marks keep them resident until its unit of work ends,
+  invariant a crash open's whole-segment scans read and release (#1183): the allocated chunks through ChunkBasedSegment.AllocatedChunks (each
+            page's bitmap copied under a read pin), a point check through IsChunkAllocatedUnpinned — IsChunkAllocated epoch-tags its bitmap
+            page, and a walk asking it of every chunk pinned the segment — and chunk content through a scan accessor: the active-cluster list,
+            the chain-head enumeration, the reservation, the collapse, the sweep, the entity-map rebuild's cluster walk and its EnabledBits
+            snapshot, and the spatial layer's rebuild map, serial and parallel (ArchetypeClusterState.RebuildSpatialStateFromData, #1305). Its
+            reduce files a cluster's stray slots through an epoch-tagged accessor of its own: one page per cluster that has strays
+  note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
+        outside recovery cannot release its pages early — its ChangeSet's marks keep them resident until its unit of work ends,
         which bounds a transaction's write set by the cache. EP-01's other latent sites are not converted, nor are three query reads that still
         epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
         `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
@@ -252,6 +371,14 @@ lock ordering and deadlock prevention are still to come.
             unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
             epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page
             is left held by a slot reference [VerifiesRule]
+  verified: WholeSegmentScanTests — the allocated-chunk cursor and the unpinned check walk a segment four times the cache inside one epoch scope
+            (the check epoch-tagged again times out) [VerifiesRule]; MarketHardeningTests — the crash open of a 0.4 GiB market over a 64 MiB cache
+            completes (it timed out with all 8 192 slots epoch-held)
+  verified: ClusterVisibilitySummaryIntegrityTests.TheAudit_OfAnEntityMapLargerThanTheCache_Completes — the integrity check's cluster-visibility
+            audit and a transaction's EnumerateArchetypeEntities walk an EntityMap larger than an 8 MiB cache [VerifiesRule]. Each walked it
+            through an epoch-tagged accessor, and the market's integrity check timed out once its audit map outgrew 64 MiB; both mutations killed
+  verified: ClusterRebuildMergeTests.TheRebuild_OfAClusterSegmentLargerThanTheCache_Completes — the spatial rebuild of a cluster segment larger than an
+            8 MiB cache, under one epoch scope as the open's, serial and on 4 workers [VerifiesRule]; epoch-tagged again, both time out
 
 ### EP-03: No reference the engine hands out outlives the call that produced it, except a fast-path one within its step `[fatal]`
   invariant the point-access handles hand out values, never references into a page: EntityRef.Read / TryRead / ReadRaw copy the

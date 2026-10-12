@@ -149,6 +149,12 @@ internal ref struct CommitBatchBuilder
     /// <summary>When set, records carry <see cref="RecordFlags.Committed"/> (Committed discipline).</summary>
     public readonly bool CommittedDiscipline;
 
+    /// <summary>
+    /// The commit stamp (VIS-03), written on the TxCommit record's trailer; drawn at the commit point inside <see cref="DurabilityLog.Append(ref
+    /// CommitBatchBuilder, ref WaitContext, ref long, CommitCardTable, int)"/>. 0 for a batch that draws none (fence, bulk load): recovery then takes the TSN.
+    /// </summary>
+    public long CommitStamp;
+
     public CommitBatchBuilder(CommitBatchArena arena, long tsn, ushort uowEpoch, bool fenceMode = false, bool committedDiscipline = false)
     {
         ArgumentNullException.ThrowIfNull(arena);

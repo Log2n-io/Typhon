@@ -89,6 +89,8 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                     RoutingId = _tx.DBE.RoutingIdOf(meta),
                     TargetPKs = targetPKs,
                     TSN = _tx.TSN,
+                    Cards = _tx.DBE.CommitCards,
+                    Map = engineState.EntityMap,
                 };
                 engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
                 accessor.Dispose();
@@ -154,11 +156,12 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         public ushort RoutingId;
         public List<long> TargetPKs;
         public long TSN;
+        public CommitCardTable Cards;
+        public RawValuePagedHashMap<long, PersistentStore> Map;
 
         public bool Process(long key, byte* value)
         {
-            ref var header = ref EntityRecordAccessor.GetHeader(value);
-            bool visible = header.IsVisibleAt(TSN);
+            bool visible = EntityVisibility.IsVisibleInScan(value, TSN, Cards, Map, key);
             if (visible)
             {
                 var entityId = new EntityId(key, RoutingId);

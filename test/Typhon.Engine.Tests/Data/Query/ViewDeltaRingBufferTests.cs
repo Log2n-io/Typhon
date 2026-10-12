@@ -189,33 +189,6 @@ public class ViewDeltaRingBufferTests
     }
 
     // ========================================
-    // Reset
-    // ========================================
-
-    [Test]
-    public void Reset_ClearsEverything()
-    {
-        const int capacity = 64;
-        using var buffer = CreateBuffer(capacity);
-
-        for (var i = 0; i < 10; i++)
-        {
-            buffer.TryAppend(E(i), default, default, i, 0);
-        }
-
-        // Force overflow
-        for (var i = 0; i < capacity; i++)
-        {
-            buffer.TryAppend(E(i), default, default, i, 0);
-        }
-
-        buffer.Reset();
-        Assert.That(buffer.Count, Is.EqualTo(0));
-        Assert.That(buffer.HasOverflow, Is.False);
-        Assert.That(buffer.TryPeek(long.MaxValue, out _, out _, out _, out _), Is.False);
-    }
-
-    // ========================================
     // Dispose
     // ========================================
 

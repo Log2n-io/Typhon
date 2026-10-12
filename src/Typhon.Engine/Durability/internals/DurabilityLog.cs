@@ -19,9 +19,33 @@ internal sealed class DurabilityLog : IDurabilityLog
         _wal = wal;
     }
 
-    /// <summary>Test seam (CK-13): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long)"/> after the floor is stored and
+    /// <summary>Test seam (CK-13): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long, CommitCardTable, int)"/> after the floor is stored and
     /// before the frame is published, so a fixture can fail an append after its claim. Null in production: one null check per append.</summary>
     internal Action AfterFloorProbe { get; set; }
+
+    /// <summary>Test seam (#1269): invoked inside <see cref="Append(ref CommitBatchBuilder, ref WaitContext, ref long, CommitCardTable, int)"/> and <see cref="AppendFenceBlocks"/>
+    /// after the first stop check and before the claim — where an append may wait out WAL back-pressure. Null in production: one null check per
+    /// append.</summary>
+    internal Action BeforeClaimProbe { get; set; }
+
+    /// <summary>
+    /// Stops every later append (AP-03): set by <see cref="DatabaseEngine.LatchCommitPipelineFailure"/> when a commit's publish failed after its records
+    /// were appended. Memory then holds a partial publish, and nothing more is logged over it — a commit, a fence, a bulk manifest alike. The callers check
+    /// the engine's latch first (a fence returns, a commit rolls back); this is the backstop for any that does not, and for a latch set between the two.
+    /// </summary>
+    internal void Stop(Exception failure) => Interlocked.CompareExchange(ref _stoppedBy, failure, null);
+
+    private Exception _stoppedBy;
+
+    private void ThrowIfStopped()
+    {
+        if (Volatile.Read(ref _stoppedBy) is { } stopped)
+        {
+            throw new DurabilityException(TyphonErrorCode.CommitPipelineStopped,
+                "The engine stopped committing after a commit failed between its append and the end of its publish; nothing more is appended. Reopen the "
+                + "database to recover it.", stopped);
+        }
+    }
 
     public long DurableLsn => _wal.DurableLsn;
 
@@ -55,12 +79,16 @@ internal sealed class DurabilityLog : IDurabilityLog
             return 0;
         }
 
+        ThrowIfStopped();
         var size = RecordCodec.MeasureFenceBlocks(blocks, slotIndices.Length, totalComponentSize, out _);
+        BeforeClaimProbe?.Invoke();
 
         // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
         var claim = _wal.CommitBuffer.TryClaim(size, blocks.Length, ref ctx);
         try
         {
+            // Again once claimed: the claim may have waited out back-pressure while another commit stopped the engine (#1269). Abandoned below.
+            ThrowIfStopped();
             var written = RecordCodec.WriteFenceBlocks(
                 claim.DataSpan, blocks, archetypeId, claim.FirstLSN, tsn,
                 entityKeysOffset, slotIndices, componentSizes, componentOffsets, totalComponentSize, columnHandleRanges);
@@ -85,26 +113,45 @@ internal sealed class DurabilityLog : IDurabilityLog
     public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx)
     {
         long unused = 0;
-        return Append(ref batch, ref ctx, ref unused);
+        return Append(ref batch, ref ctx, ref unused, null, -1);
     }
 
-    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor)
+    /// <summary>
+    /// Appends a transaction's batch. With <paramref name="cards"/>, the commit point is here (VIS-03): once the claim holds and the engine is still
+    /// committing, the committer's card <paramref name="cardSlot"/> is registered, its stamp drawn and stored, and the stamp rides on TxCommit
+    /// (<see cref="CommitBatchBuilder.CommitStamp"/>). Nothing between that and the frame's publish can fail. Without, the batch carries no stamp (fence and
+    /// bulk-load batches, whose effects are never staged).
+    /// </summary>
+    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot)
     {
         if (batch.IsEmpty)
         {
             return 0;
         }
 
+        ThrowIfStopped();
+
         var size = RecordCodec.Measure(in batch, out var recordCount, out _);
+        BeforeClaimProbe?.Invoke();
 
         // TryClaim throws WalBackPressureTimeoutException / WalClaimTooLargeException on failure (LOG-01) — never a sentinel.
         var claim = _wal.CommitBuffer.TryClaim(size, recordCount, ref ctx);
         try
         {
+            // Again once claimed: the claim may have waited out back-pressure while another commit stopped the engine, and appending now would log
+            // over the partial publish the stop is for (AP-03, #1269). The claim is abandoned below, as a failed write's is.
+            ThrowIfStopped();
+
             // CK-13: before the frame is published. The writer drains frames in LSN order and stops at an unpublished one (WP-06), so a checkpoint
             // barrier at or past this batch has seen the frame's release, and with it this store.
             Volatile.Write(ref inFlightFloor, claim.FirstLSN);
             AfterFloorProbe?.Invoke();
+
+            // ── The commit point (VIS-03 steps 1–3): registered, stamped. Below, only the copy into the claimed span and its publish. ──
+            if (cards != null)
+            {
+                batch.CommitStamp = cards.Register(cardSlot, batch.Tsn);
+            }
 
             var written = RecordCodec.Write(claim.DataSpan, in batch, claim.FirstLSN);
 

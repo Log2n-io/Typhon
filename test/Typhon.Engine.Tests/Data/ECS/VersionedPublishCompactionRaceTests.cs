@@ -100,8 +100,9 @@ class VersionedPublishCompactionRaceTests : TestBase<VersionedPublishCompactionR
             + "a compaction had moved the entry since, so the commit's own entry stayed isolated — invisible to every reader, for good (#1158).");
     }
 
-    /// <summary>The chain's bookkeeping, read under an epoch: entries still isolated, and the header's LCRI, first index, count and commit sequence.</summary>
-    private static (int Isolated, short Lcri, short First, short Count, int CommitSequence) ReadChain(DatabaseEngine dbe, ComponentTable table, int root)
+    /// <summary>The chain's bookkeeping, read under an epoch: entries still isolated, the newest revision by stamp, and the header's first index, count and
+    /// commit sequence.</summary>
+    private static (int Isolated, short Newest, short First, short Count, int CommitSequence) ReadChain(DatabaseEngine dbe, ComponentTable table, int root)
     {
         using var guard = EpochGuard.Enter(dbe.EpochManager);
         var revisions = table.CompRevTableSegment.CreateChunkAccessor();
@@ -116,8 +117,9 @@ class VersionedPublishCompactionRaceTests : TestBase<VersionedPublishCompactionR
                 }
             }
 
+            var newest = ComponentRevisionManager.FindNewestByStamp(ref revisions, root, dbe.CommitCards, 0, out _);
             ref var h = ref revisions.GetChunk<CompRevStorageHeader>(root);
-            return (isolated, h.LastCommitRevisionIndex, h.FirstItemIndex, h.ItemCount, h.CommitSequence);
+            return (isolated, newest, h.FirstItemIndex, h.ItemCount, h.CommitSequence);
         }
         finally
         {
@@ -182,7 +184,7 @@ class VersionedPublishCompactionRaceTests : TestBase<VersionedPublishCompactionR
             var chain = ReadChain(dbe, table, root);
             Assert.That(chain.Isolated, Is.Zero,
                 $"{Ap05Marker}: an entry of the chain is still isolated after its commit returned — the publish stamped another slot (#1158)");
-            Assert.That(chain.Lcri, Is.EqualTo(chain.First + chain.Count - 1), "the last commit is the chain's last entry, and LCRI names it");
+            Assert.That(chain.Newest, Is.EqualTo(chain.First + chain.Count - 1), "the last commit, the highest stamp, is the chain's last entry");
             Assert.That(chain.CommitSequence, Is.EqualTo(priorUpdates + 2), "one CommitSequence per commit: the spawn, the prior updates and the raced one");
         }
 

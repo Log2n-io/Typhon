@@ -29,6 +29,55 @@ internal struct VariableSizedBufferRootHeader
     internal void ExitBufferLockForTest() => Lock.ExitExclusiveAccess();
 }
 
+/// <summary>The crash-open reset of a buffer segment's root lock words (PS-20).</summary>
+internal static class VariableSizedBufferRecovery
+{
+    /// <summary>Frees every buffer lock a crash left held in <paramref name="segment"/>'s data file; returns how many were held.</summary>
+    internal static unsafe int ResetRootLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
+    {
+        var header = default(VariableSizedBufferRootHeader);
+        var lockOffset = (int)Unsafe.ByteOffset(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref header),
+            ref Unsafe.As<AccessControl, byte>(ref header.Lock));
+        return LockWordRecovery.ResetRootLocks(segment, dbe, lockOffset, sizeof(AccessControl), IsBufferRoot);
+    }
+
+    /// <summary>
+    /// Whether an unnamed chunk is a buffer's root — not its first free chunk, nor a data chunk whose predecessor's link a crash lost: referenced, and its
+    /// append cursor the root itself or a chunk its chain reaches through allocated chunks.
+    /// </summary>
+    private static unsafe bool IsBufferRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        ref var header = ref scan.GetChunk<VariableSizedBufferRootHeader>(chunkId);
+        int cursor = header.FirstStoredChunkId, next = header.Header.NextChunkId;
+        if (header.RefCounter < 1 || header.TotalCount < 0 || header.TotalFreeChunk < 0)
+        {
+            return false;
+        }
+
+        if (cursor == chunkId)
+        {
+            return true;
+        }
+
+        for (var steps = 0; next != 0 && steps < segment.AllocatedChunkCount; steps++)
+        {
+            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            {
+                return false;
+            }
+
+            if (next == cursor)
+            {
+                return true;
+            }
+
+            next = *(int*)scan.GetChunkAddress(next);
+        }
+
+        return false;
+    }
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct VariableSizedBufferChunkHeader
 {
@@ -91,19 +140,19 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
     public int BufferAddRef(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
+        Debug.Assert(bufferId != 0, "buffer id 0 is no buffer: the caller skips it (#1291)");
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
-
             return ++rh.RefCounter;
         }
         finally
         {
             // Re-fetch rh — defensive, in case future changes add slot-evicting calls in the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -116,13 +165,15 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
 
     public int BufferRelease(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
+        Debug.Assert(bufferId != 0, "buffer id 0 is no buffer: the caller skips it (#1291)");
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         var deleted = false;
         try
         {
-            LockBuffer(ref rh);
-
             var newValue = --rh.RefCounter;
+            accessor.Segment.MarkChunkModified(bufferId);   // owed even through an accessor with no change set, as the cleanup's is (#1280)
             if (newValue == 0)
             {
                 // Chain cleanup inline — do NOT call DeleteBuffer here, it would double-decrement RefCounter.
@@ -135,7 +186,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         {
             // Re-fetch rh — chain traversal may have evicted its slot
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
             if (deleted)
             {
                 accessor.Segment.FreeChunk(bufferId);
@@ -143,23 +194,30 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         }
     }
 
+    /// <summary>
+    /// Gives back one reference to the buffer; the last one frees it, its chunk chains and its root. A reference still held keeps all of it: the root was
+    /// freed whatever the count, under a referent still using it (#1279).
+    /// </summary>
     public void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> accessor)
     {
         // Fetch the root chunk — epoch protects page lifetime
         var unlock = false;
+        var deleted = false;
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = default(PagedMMF.CaptureTicket);
         try
         {
             // Lock the whole buffer as we are going to update it
             if (!rh.Lock.IsLockedByCurrentThread)
             {
-                LockBuffer(ref rh);
+                ticket = LockBuffer(ref rh, ref accessor);
                 unlock = true;
             }
 
             if (--rh.RefCounter == 0)
             {
                 FreeChunkChains(bufferId, rh.FirstFreeChunkId, ref accessor);
+                deleted = true;
             }
         }
         finally
@@ -168,9 +226,13 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             {
                 // Re-fetch rh — GetChunkAddress calls in the loop may have evicted its slot
                 rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-                ReleaseLockOnBuffer(ref rh);
+                ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
             }
-            accessor.Segment.FreeChunk(bufferId);
+
+            if (deleted)
+            {
+                accessor.Segment.FreeChunk(bufferId);
+            }
         }
     }
 
@@ -280,6 +342,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             ThrowHelper.ThrowInvalidOp($"ReadAllElementsRaw: destination holds {dest.Length} bytes, need {total * ElementSize} for {total} element(s).");
         }
 
+        var ticket = accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
         if (!rh.Lock.EnterSharedAccess(ref wc))
         {
@@ -309,6 +372,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         {
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false);
             rh.Lock.ExitSharedAccess();
+            accessor.Store.EndLockHold(in ticket);
         }
 
         return copied;
@@ -453,17 +517,23 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         }
     }
 
+    /// <summary>
+    /// Takes the buffer's exclusive lock, and the capture ticket the release gives back (PS-20): the lock word is in the root chunk, in a data page, and a
+    /// capture of the page during the hold must not stay on disk held.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void LockBuffer(ref VariableSizedBufferRootHeader rh)
+    internal PagedMMF.CaptureTicket LockBuffer(ref VariableSizedBufferRootHeader rh, ref ChunkAccessor<TStore> accessor)
     {
+        var ticket = accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
+
         // Fast path: uncontended lock — no timestamp syscall needed
-        if (rh.Lock.TryEnterExclusiveAccess())
+        if (!rh.Lock.TryEnterExclusiveAccess())
         {
-            return;
+            // Slow path: contended — create WaitContext for timeout
+            LockBufferSlow(ref rh);
         }
 
-        // Slow path: contended — create WaitContext for timeout
-        LockBufferSlow(ref rh);
+        return ticket;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -475,7 +545,12 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
             ThrowHelper.ThrowLockTimeout("SegmentAllocation/LockBuffer", TimeoutOptions.Current.SegmentAllocationLockTimeout);
         }
     }
-    internal void ReleaseLockOnBuffer(ref VariableSizedBufferRootHeader header) => header.Lock.ExitExclusiveAccess();
+    /// <summary>Releases the buffer's exclusive lock, then ends the hold <paramref name="ticket"/> was taken for (PS-20).</summary>
+    internal void ReleaseLockOnBuffer(ref VariableSizedBufferRootHeader header, ref ChunkAccessor<TStore> accessor, in PagedMMF.CaptureTicket ticket)
+    {
+        header.Lock.ExitExclusiveAccess();
+        accessor.Store.EndLockHold(in ticket);
+    }
 }
 
 /// <summary>
@@ -513,12 +588,11 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
 
         try
         {
-            // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
-
             // Detect use-after-free: refCount should be >= 1 for any live buffer.
             // refCount=0 means the buffer was freed via BufferRelease/DeleteBuffer and
             // the chunk may have been returned to the segment's free pool and reused.
@@ -616,7 +690,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted during the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -624,11 +698,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
-
             // Copy structural fields to locals BEFORE any GetChunkAddress/AllocateChunk calls.
             // These calls can evict rh's slot from the 16-slot accessor cache.
             int curChunkId = rh.FirstStoredChunkId;
@@ -646,21 +719,28 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
                 var isRoot = bufferId == curChunkId;
                 var chunkCapacity = isRoot ? ElementCountRootChunk : ElementCountPerChunk;
 
-                // If we reached capacity, get a new chunk
+                // If we reached capacity, get a new chunk — as AddElement does (#884), which this method had not caught up with (#1289).
                 if (curChunkHeader.ElementCount == chunkCapacity)
                 {
-                    // Take a free chunk or allocate a new one
+                    var previousChunkId = curChunkId;
+                    int nextFreeChunkId;
+
+                    // Take a free chunk or allocate a new one. The free list chains through NextChunkId: its head's successor is read before the
+                    // re-initialisation below zeroes it — read after, it was always 0, and every free chunk behind the head was orphaned.
                     if (firstFreeChunkId != 0)
                     {
                         curChunkId = firstFreeChunkId;
                         --totalFreeChunk;
+                        nextFreeChunkId = Unsafe.AsRef<VariableSizedBufferChunkHeader>(accessor.GetChunkAddress(curChunkId, true)).NextChunkId;
                     }
                     else
                     {
                         curChunkId = accessor.Segment.AllocateChunk(false, accessor.ChangeSet);
+                        nextFreeChunkId = 0;
                     }
 
-                    curChunkHeader.NextChunkId = curChunkId;
+                    // Link the previous chunk through a freshly resolved address: both branches above can evict its slot from this accessor's window.
+                    Unsafe.AsRef<VariableSizedBufferChunkHeader>(accessor.GetChunkAddress(previousChunkId, true)).NextChunkId = curChunkId;
 
                     // Fetch the new chunk
                     curChunkAddr = accessor.GetChunkAddress(curChunkId, true);
@@ -668,12 +748,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
                     curChunkHeader.ElementCount = 0;
                     curChunkHeader.NextChunkId = 0;
+                    firstFreeChunkId = nextFreeChunkId;
 
-                    // Update local: the free chunk we took has no next free (just zeroed above)
-                    firstFreeChunkId = curChunkHeader.NextChunkId;
-
-                    // Update root and capacity as we switched to a new chunk
                     isRoot = bufferId == curChunkId;
+                    chunkCapacity = isRoot ? ElementCountRootChunk : ElementCountPerChunk;
                 }
 
                 var copyLength = Math.Min(chunkCapacity - curChunkHeader.ElementCount, itemsLeftToCopy);
@@ -683,6 +761,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
                 totalCount += copyLength;
                 curChunkHeader.ElementCount += copyLength;
+                curSourceIndex += copyLength;
                 itemsLeftToCopy -= copyLength;
             }
 
@@ -697,7 +776,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted during the try block
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -705,11 +784,10 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
-            // Lock the whole buffer as we are going to update it
-            LockBuffer(ref rh);
-
             // Fetch the chunk storing the element — this can evict rh's slot
             var elementChunk = accessor.GetChunkAddress(elementId, true);
             ref var elementChunkHeader = ref Unsafe.AsRef<VariableSizedBufferChunkHeader>(elementChunk);
@@ -746,7 +824,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         {
             // Re-fetch for unlock — slot may have been evicted
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -775,8 +853,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
         // The acquire sits OUTSIDE the try, and that placement is the point. LockBuffer THROWS on timeout (LockBufferSlow -> ThrowLockTimeout), so acquiring
         // inside the try would run the finally's ExitExclusiveAccess for a lock this thread never took — releasing it out from under whoever actually holds it.
-        // DeleteElement has the same shape and the same exposure; it is left alone here rather than changed as a side effect of this work.
-        LockBuffer(ref rh);
+        var ticket = LockBuffer(ref rh, ref accessor);
         try
         {
             // GetChunkAddress can evict rh's slot, exactly as in DeleteElement — nothing below reads rh until the finally re-fetches it.
@@ -800,7 +877,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         finally
         {
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
-            ReleaseLockOnBuffer(ref rh);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
         }
     }
 
@@ -921,6 +998,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     private int _rootChunkId;
     private unsafe byte* _rootChunkAddr;
     private ChunkAccessor<TStore> _accessor;
+    private PagedMMF.CaptureTicket _ticket;
 
     private int _curChunkId;
     private unsafe byte* _curChunkAddr;
@@ -937,6 +1015,11 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     {
         get
         {
+            if (_rootChunkAddr == null)
+            {
+                return 0;
+            }
+
             ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
             return rh.TotalCount;
         }
@@ -946,6 +1029,11 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
     {
         get
         {
+            if (_rootChunkAddr == null)
+            {
+                return 0;
+            }
+
             ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
             return rh.RefCounter;
         }
@@ -958,12 +1046,24 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         _rootHeaderTotalSize = owner.RootHeaderTotalSize;
         _rootChunkId = rootChunkId;
 
+        // Buffer id 0 is "no buffer" — a collection never added to: an empty reader, which touches nothing. Chunk 0 is the segment's reserved sentinel;
+        // the shared hold this took on it was never given back, and a release of id 0 then waited on the leaked holds for its exclusive lock (#1291).
+        if (rootChunkId == 0)
+        {
+            return;
+        }
+
         _accessor = _segment.CreateChunkAccessor(changeSet);
 
+        // The root's address is kept for the reader's life — its lock, its capture ticket's slot — so its slot stays in the window, which keeps the page
+        // in the cache. The epoch did not: an unlatch of the page by any thread clears its tag (PS-03), and once the window let go of the page it could
+        // leave the cache, the reader's release then writing into whatever page took its memory (#1290).
         _rootChunkAddr = _accessor.GetChunkAddress(rootChunkId);
+        _accessor.KeepInWindow(rootChunkId);
         ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
 
         // Enter read mode
+        _ticket = _accessor.Store.TakeCaptureTicket(ref Unsafe.As<VariableSizedBufferRootHeader, byte>(ref rh));
         var wc = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
         if (!rh.Lock.EnterSharedAccess(ref wc))
         {
@@ -978,11 +1078,30 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         _elementAddr = _curChunkAddr + (_curChunkId==rootChunkId ? _rootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
         _elementCount = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->ElementCount;
 
-        if (_elementCount == 0) NextChunk();
+        if (_elementCount == 0)
+        {
+            // A constructor that throws is never disposed: release here what Dispose would.
+            try
+            {
+                NextChunk();
+            }
+            catch
+            {
+                rh.Lock.ExitSharedAccess();
+                _accessor.Store.EndLockHold(in _ticket);
+                _accessor.Dispose();
+                throw;
+            }
+        }
     }
 
     unsafe public bool NextChunk()
     {
+        if (_curChunkAddr == null)
+        {
+            return false;
+        }
+
         // Read next chunk from the current header
         var nextChunkId = ((VariableSizedBufferChunkHeader*)_curChunkAddr)->NextChunkId;
         var prevChunkId = _curChunkId;
@@ -996,8 +1115,9 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
             return false;
         }
 
-        // Fetch the new chunk
-        var nextChunkAddr = _accessor.GetChunkAddress(nextChunkId, true);
+        // Fetch the new chunk — a read: fetched dirty, through this accessor (no change set, usually), it marked the page as being written for the
+        // reader's whole life, which kept the checkpoint off it, and registered nothing (#1280). An unlink below marks what it writes.
+        var nextChunkAddr = _accessor.GetChunkAddress(nextChunkId);
         var nextChunkElementCount = ((VariableSizedBufferChunkHeader*)nextChunkAddr)->ElementCount;
 
         // Check if the chunk is empty, then try to remove it from the storage list
@@ -1005,72 +1125,45 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         {
             ref var rootChunk = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
 
-            // Try to promote the Buffer from read to read/write because we need to make changes
-            var wcPromote = WaitContext.FromTimeout(TimeoutOptions.Current.SegmentAllocationLockTimeout);
+            // Try to promote the Buffer from read to read/write because we need to make changes. Once, with no wait: a promotion waits for the other
+            // shared holders to leave, and two readers at an empty chunk each waited for the other, out to the lock timeout (#1290). The unlink is
+            // housekeeping: with another reader on the buffer, it is left to a later one.
+            var wcPromote = WaitContext.FromTimeout(TimeSpan.Zero);
             if (rootChunk.Lock.TryPromoteToExclusiveAccess(ref wcPromote))
             {
-                // Try to latch the root chunk for exclusive write access
-                if (_accessor.TryLatchExclusive(_rootChunkId))
+                // Every exit releases what it took: a fetch below can throw (a page-cache back-pressure timeout), and a throw left both pages latched for
+                // good — the checkpoint skips a latched page — and the buffer's lock exclusive, which Dispose's shared exit does not release.
+                try
                 {
-                    // Setup our forward link list info
-                    var curChunkId  = nextChunkId;
-                    var curChunk  = (VariableSizedBufferChunkHeader*)nextChunkAddr;
-
-                    // We don't want to chain to the free-list all the empty chunks, would be a waste of space.
-                    // Let's keep to grow the current count by 25%, approximately, with a minimum of 8 free chunks
-                    var epc = _owner.ElementCountRootChunk;
-                    var tc = rootChunk.TotalCount;
-                    var freeChunkThreshold = Math.Max(tc / (epc * 4), 8);
-
-                    // To collect an empty chunk we need to latch both the previous and current chunks.
-                    // We can't make modifications otherwise
-                    // BEWARE: Each successful latch needs its corresponding unlatch call!
-                    if (_accessor.TryLatchExclusive(prevChunkId))
+                    // Try to latch the root chunk for exclusive write access. Each latch is released by the memory page it took: the window can let go
+                    // of a latched page — a run of empty chunks on more pages than it keeps — and an unlatch looked up there found nothing, and left it
+                    // latched.
+                    if (_accessor.TryLatchExclusive(_rootChunkId, out var rootPage))
                     {
-                        // We jump over empty chunks as long as there are some — but never the append cursor. AddElement appends into FirstStoredChunkId
-                        // without looking at the chain: unlinked here, the chunk stayed the cursor, so the next appends landed in a chunk no walk reaches,
-                        // parked for reuse — and wiped when AddElement or the segment reissued it. An index lost every entry appended after the walk.
-                        while ((curChunk != null) && (curChunk->ElementCount == 0) && (curChunkId != rootChunk.FirstStoredChunkId))
+                        try
                         {
-                            if (_accessor.TryLatchExclusive(curChunkId))
-                            {
-                                // Fix the storage link-list by removing the empty chunk
-                                prevChunk->NextChunkId = curChunk->NextChunkId;
-
-                                // Check if we must free the chunk or link it to the free list
-                                if (rootChunk.TotalFreeChunk > freeChunkThreshold)
-                                {
-                                    _segment.FreeChunk(curChunkId);
-                                }
-                                else
-                                {
-                                    // Link the empty chunk to the rest of the free link-list
-                                    curChunk->NextChunkId = rootChunk.FirstFreeChunkId;
-
-                                    // First empty chunk is pointing to the one we just pop
-                                    rootChunk.FirstFreeChunkId = curChunkId;
-                                    ++rootChunk.TotalFreeChunk;
-                                }
-
-                                _accessor.UnlatchExclusive(curChunkId);
-                            }
-
-                            // Update the new current chunk to be the next in line
-                            curChunkId = prevChunk->NextChunkId;
-                            curChunk = (curChunkId != 0) ? (VariableSizedBufferChunkHeader*)_accessor.GetChunkAddress(curChunkId, true) : null;
+                            nextChunkId = UnlinkEmptyChunks(ref rootChunk, prevChunkId, prevChunk, nextChunkId, nextChunkAddr);
+                        }
+                        finally
+                        {
+                            _accessor.UnlatchExclusivePage(rootPage);
                         }
 
-                        _accessor.UnlatchExclusive(prevChunkId);
+                        nextChunkAddr = nextChunkId != 0 ? _accessor.GetChunkAddress(nextChunkId) : null;
                     }
-
-                    // Update members needed for the end of the method
-                    nextChunkId = curChunkId;
-                    nextChunkAddr = (byte*)curChunk;
-
-                    // Release exclusive latch on root
-                    _accessor.UnlatchExclusive(_rootChunkId);
                 }
-                rootChunk.Lock.DemoteFromExclusiveAccess();
+                finally
+                {
+                    rootChunk.Lock.DemoteFromExclusiveAccess();
+                }
+            }
+
+            // Step over what is still empty: the append cursor, or a chunk left linked because another reader shares the buffer or holds its page. A
+            // caller that reads chunk by chunk ends at an empty one — the enumerator does — and missed the elements after it (#1290).
+            while (nextChunkAddr != null && ((VariableSizedBufferChunkHeader*)nextChunkAddr)->ElementCount == 0)
+            {
+                nextChunkId = ((VariableSizedBufferChunkHeader*)nextChunkAddr)->NextChunkId;
+                nextChunkAddr = nextChunkId != 0 ? _accessor.GetChunkAddress(nextChunkId) : null;
             }
         }
 
@@ -1090,6 +1183,87 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         return true;
     }
 
+    /// <summary>
+    /// Unlinks the run of empty chunks from <paramref name="firstChunkId"/>, the root latched and the buffer's lock exclusive: frees them or parks them in
+    /// the root's free list. Returns the first chunk past them — empty still when it could not unlink it — or 0 at the end of the chain.
+    /// </summary>
+    private unsafe int UnlinkEmptyChunks(ref VariableSizedBufferRootHeader rootChunk, int prevChunkId, VariableSizedBufferChunkHeader* prevChunk, int firstChunkId,
+        byte* firstChunkAddr)
+    {
+        // Setup our forward link list info
+        var curChunkId = firstChunkId;
+        var curChunk = (VariableSizedBufferChunkHeader*)firstChunkAddr;
+
+        // We don't want to chain to the free-list all the empty chunks, would be a waste of space.
+        // Let's keep to grow the current count by 25%, approximately, with a minimum of 8 free chunks. Elements over elements PER CHUNK —
+        // the root's count is 0 for a collection whose root holds only its header, and divided by it, every such read threw (#1285).
+        var epc = _owner.ElementCountPerChunk;
+        var tc = rootChunk.TotalCount;
+        var freeChunkThreshold = Math.Max(tc / (epc * 4), 8);
+
+        // To collect an empty chunk we need to latch both the previous and current chunks.
+        // We can't make modifications otherwise
+        if (!_accessor.TryLatchExclusive(prevChunkId, out var prevPage))
+        {
+            return curChunkId;
+        }
+
+        try
+        {
+            // We jump over empty chunks as long as there are some — but never the append cursor. AddElement appends into FirstStoredChunkId
+            // without looking at the chain: unlinked here, the chunk stayed the cursor, so the next appends landed in a chunk no walk reaches,
+            // parked for reuse — and wiped when AddElement or the segment reissued it. An index lost every entry appended after the walk.
+            while ((curChunk != null) && (curChunk->ElementCount == 0) && (curChunkId != rootChunk.FirstStoredChunkId))
+            {
+                // Another thread holds its page: leave it linked. Retrying it spun with no bound, holding this buffer's lock and two
+                // latches — two readers each needing a page the other holds spun for good (#1290).
+                if (!_accessor.TryLatchExclusive(curChunkId, out var curPage))
+                {
+                    break;
+                }
+
+                try
+                {
+                    // Fix the storage link-list by removing the empty chunk. Marked written: with no change set to register it, the page
+                    // stayed clean, and an eviction dropped the link — leaving the chain on disk through the chunks freed below (#1280).
+                    prevChunk->NextChunkId = curChunk->NextChunkId;
+                    _segment.MarkChunkModified(prevChunkId);
+
+                    // Check if we must free the chunk or link it to the free list
+                    if (rootChunk.TotalFreeChunk > freeChunkThreshold)
+                    {
+                        _segment.FreeChunk(curChunkId);
+                    }
+                    else
+                    {
+                        // Link the empty chunk to the rest of the free link-list
+                        curChunk->NextChunkId = rootChunk.FirstFreeChunkId;
+
+                        // First empty chunk is pointing to the one we just pop
+                        rootChunk.FirstFreeChunkId = curChunkId;
+                        ++rootChunk.TotalFreeChunk;
+                        _segment.MarkChunkModified(curChunkId);
+                        _segment.MarkChunkModified(_rootChunkId);
+                    }
+                }
+                finally
+                {
+                    _accessor.UnlatchExclusivePage(curPage);
+                }
+
+                // Update the new current chunk to be the next in line
+                curChunkId = prevChunk->NextChunkId;
+                curChunk = (curChunkId != 0) ? (VariableSizedBufferChunkHeader*)_accessor.GetChunkAddress(curChunkId) : null;
+            }
+        }
+        finally
+        {
+            _accessor.UnlatchExclusivePage(prevPage);
+        }
+
+        return curChunkId;
+    }
+
     public unsafe void Dispose()
     {
         if (!IsValid)
@@ -1101,6 +1275,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
         ref var h = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(_rootChunkAddr);
         h.Lock.ExitSharedAccess();
+        _accessor.Store.EndLockHold(in _ticket);
 
         _accessor.Dispose();
         _rootChunkId = 0;

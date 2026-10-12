@@ -43,8 +43,23 @@ internal static class SegmentGeometry
     /// </summary>
     public const int StrideOffset = 54;
 
-    /// <summary>First byte after the geometry block. <c>[58,64)</c> remains free for a later increment.</summary>
+    /// <summary>First byte after the geometry block. <c>[58,62)</c> holds the segment's incarnation (<see cref="IncarnationOffset"/>), <c>[62,64)</c> is free.</summary>
     public const int EndOffset = 58;
+
+    /// <summary>
+    /// Byte offset of the segment's incarnation: a non-zero number drawn when the segment is created, written on its root and on every data page a grow
+    /// initializes — the owner stamp a crash open's completion of a torn grow keeps a page by (#1296). A page of a segment deleted before, even one rooted
+    /// at the same page, carries another; a page written before the stamp existed carries 0.
+    /// </summary>
+    public const int IncarnationOffset = 58;
+
+    /// <summary>Writes the segment incarnation into a page image.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteIncarnation(Span<byte> page, uint incarnation) => MemoryMarshal.Write(page.Slice(IncarnationOffset), incarnation);
+
+    /// <summary>Reads the segment incarnation from a page image; <c>0</c> when the page records none.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint ReadIncarnation(ReadOnlySpan<byte> page) => MemoryMarshal.Read<uint>(page.Slice(IncarnationOffset));
 
     /// <summary>Largest stride expressible here. A chunk must fit within one page's raw data area, so this is never binding in practice.</summary>
     public const int MaxStride = ushort.MaxValue;

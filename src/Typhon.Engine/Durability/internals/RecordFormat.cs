@@ -262,6 +262,9 @@ internal ref struct RecordView
     /// <summary>Component payload (Slot) or collection element (CollectionDelta); empty otherwise. Aliases the source buffer.</summary>
     public ReadOnlySpan<byte> Payload;
 
+    /// <summary>A TxCommit record's commit stamp (VIS-03), read from its trailer; 0 on every other record, and on a batch that drew none.</summary>
+    public long CommitStamp;
+
     public readonly bool IsTxBegin => (Flags & RecordFlags.TxBegin) != 0;
     public readonly bool IsTxCommit => (Flags & RecordFlags.TxCommit) != 0;
     public readonly bool IsFence => (Flags & RecordFlags.FenceRecord) != 0;

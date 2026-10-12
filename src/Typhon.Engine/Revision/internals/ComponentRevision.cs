@@ -20,9 +20,6 @@ internal ref struct ComponentRevision
         _compRevInfo = ref compRevInfo;
     }
 
-    internal short LastCommitRevisionIndex => _accessor.GetChunk<CompRevStorageHeader>(_firstChunkId).LastCommitRevisionIndex;
-    internal void SetLastCommitRevisionIndex(short index) => _accessor.GetChunk<CompRevStorageHeader>(_firstChunkId, true).LastCommitRevisionIndex = index;
-
     internal int CommitSequence => _accessor.GetChunk<CompRevStorageHeader>(_firstChunkId).CommitSequence;
     internal void IncrementCommitSequence()
     {
