@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -689,6 +690,8 @@ internal abstract partial class BTree<TKey, TStore>
                 spin.Once();
             }
 
+            OlcDescentTrace.OnPessimisticWriteReturned?.Invoke();
+
             if (args.Added)
             {
                 IncCount();
@@ -700,17 +703,11 @@ internal abstract partial class BTree<TKey, TStore>
 
             // Issue #297: snapshot the field once and guard on IsValid. AddOrUpdateCore writes _rootChunkId via CAS BEFORE writing _linkList/_reverseLinkList;
             // on x86 TSO, another thread can observe IsEmpty()=false while still seeing _reverseLinkList=default. Skip the cache update on that race — the
-            // next Add will re-read and refresh.
+            // next Add will re-read and refresh. The tail itself is maintained by the split and the merges that change it, under its latch (#1329).
             {
                 var tail = _reverseLinkList;
                 if (tail.IsValid)
                 {
-                    var next = tail.GetNext(ref accessor);
-                    if (next.IsValid)
-                    {
-                        _reverseLinkList = next;
-                        tail = next;
-                    }
                     _cachedLastKey = tail.GetLast(ref accessor).Key;
                     _hasCachedLastKey = true;
                 }
@@ -1163,6 +1160,26 @@ internal abstract partial class BTree<TKey, TStore>
         else
         {
             promoted = node.InsertLeaf(ref args, ref relatives, ref accessor);
+        }
+
+        // The tail split: its right half is the new tail. Published here — the right half fully written, the old tail still latched — because every change
+        // of the tail holds the tail's latch (this split, or a merge absorbing it), so the writes are serialised (#1329, IXW-10). Not inside the split: the
+        // right half has no latch, and the item is placed into it after SplitLeafRight returns. Maintained lazily after the write, an advance and a
+        // step-back raced, a stale one won, and the field went on naming a leaf a merge had retired and deferred reclaim had freed.
+        if (promoted != null)
+        {
+            var right = node.GetNext(ref accessor);
+            if (right.IsValid && right.ChunkId == promoted.Value.Value && !right.GetNext(ref accessor).IsValid)
+            {
+                // The right half was written with no latch of its own, and the append fast path reaches it through this field alone: its writes must be
+                // visible before the field is. The reader's TryWriteLock CAS is the acquire half; this is the release half (free on x64, TSO).
+                if (!X86Base.IsSupported)
+                {
+                    Interlocked.MemoryBarrier();
+                }
+
+                _reverseLinkList = right;
+            }
         }
 
         // Phase 2.5: Unlock leaf neighbors (version bumped by WriteUnlock) — sibling CA

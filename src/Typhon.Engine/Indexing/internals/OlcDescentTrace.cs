@@ -70,4 +70,23 @@ internal static class OlcDescentTrace
     /// rule with probability near zero and would stay green if the guard were deleted. Null in production: one null-check per pessimistic descent.
     /// </remarks>
     public static Action<int, int> OnDescentComplete;
+
+    /// <summary>
+    /// Fires in <c>RemoveIterative</c> when a root collapse has been decided, BEFORE the swap, with the root's write lock held (#1329, IXW-10).
+    /// </summary>
+    /// <remarks>
+    /// The seam that makes the collapse's latch testable: a writer parked here holds the root, so a split of the surviving child cannot publish its separator
+    /// into the root until the collapse has completed. Done after the unlock, as it was, the split's separator landed in the root between the length test and
+    /// the swap and was dropped. Null in production: one null-check per collapse.
+    /// </remarks>
+    public static Action OnRootCollapse;
+
+    /// <summary>
+    /// Fires when a pessimistic insert or remove has completed its structural work and released every latch, before its bookkeeping (#1329, IXW-10).
+    /// </summary>
+    /// <remarks>
+    /// Where the tail pointer used to be repaired, lazily and with no latch. A check here sees the tail exactly as the split or the merge left it, so it
+    /// proves the tail is maintained by the change itself. Null in production: one null-check per pessimistic write.
+    /// </remarks>
+    public static Action OnPessimisticWriteReturned;
 }

@@ -489,11 +489,10 @@ internal abstract partial class BTree<TKey, TStore>
 
             // General remove path with latch-coupled SMO — retry on lock contention
             _hasCachedLastKey = false;
-            bool merge;
             PureSpin spin = default;
             for (int attempt = 0; ; attempt++)
             {
-                merge = RemoveIterative(ref args, ref accessor, out bool removeCompleted, out int retryExit);
+                RemoveIterative(ref args, ref accessor, out bool removeCompleted, out int retryExit);
                 if (removeCompleted)
                 {
                     break;
@@ -513,35 +512,15 @@ internal abstract partial class BTree<TKey, TStore>
                 spin.Once();
             }
 
+            OlcDescentTrace.OnPessimisticWriteReturned?.Invoke();
+
             if (args.Removed)
             {
                 DecCount();
             }
 
-            // Root collapse: an INTERNAL root left with no separator hands the root to its only child. #1322: never for a LEAF root — GetChild(-1) of a leaf is
-            // default, so an emptied leaf root used to be wiped here (`_linkList = _reverseLinkList = default`), after the latches were released, with the
-            // same orphaned-insert outcome as the begin fast path's wipe. An emptied leaf root stays the root.
-            var root = Root;
-            if (merge && root.IsValid && !root.GetIsLeaf(ref accessor) && root.GetLength(ref accessor) == 0)
-            {
-                Root = root.GetChild(-1, ref accessor); // left most child becomes root
-                Height--;
-            }
-
-            // Issue #297: avoid TOCTOU on `_reverseLinkList`. Snapshot the field once and operate on
-            // the local — without this, four reads of the field could each see a different value
-            // when concurrent removers race here, ending up assigning a stale or non-tail leaf.
-            {
-                var rl = _reverseLinkList;
-                if (rl.IsValid)
-                {
-                    var prev = rl.GetPrevious(ref accessor);
-                    if (prev.IsValid && !prev.GetNext(ref accessor).IsValid)
-                    {
-                        _reverseLinkList = prev;
-                    }
-                }
-            }
+            // The root collapse is inside RemoveIterative's Phase 3, under the root's latch, and the tail is maintained by the merge that absorbs it, under the
+            // tail's latch (#1329). An emptied leaf root stays the root (#1322).
         }
         finally
         {
@@ -572,9 +551,7 @@ internal abstract partial class BTree<TKey, TStore>
         if (!DescendRecordingPath(args.Key, args.Comparer, OlcDescentTrace.OpRemove, ref ctx, ref relatives, ref accessor, ref sibAccessor,
                                   out var node, out var descentExit))
         {
-            retryExit = descentExit;
-            retryExit = InsertRetryExit.RemoveLeafObsolete;
-            retryExit = InsertRetryExit.RemoveLeafVersionChanged;
+            retryExit = descentExit;   // two assignments after this one overwrote the descent's own code with RemoveLeafVersionChanged
             return false;
         }
 
@@ -615,6 +592,17 @@ internal abstract partial class BTree<TKey, TStore>
         {
             leafLatch.AbortWriteLock();
             return false; // restart — leaf was modified between descent and lock
+        }
+
+        // IXW-05's guard, on the remove side (#1329): a path recorded under a root that has since grown a level validates cleanly when the growth happened
+        // before the descent sampled its versions. A merge propagating to its top then treats a non-root node as the root — no siblings resolved, no parent
+        // latched — and leaves it with no separator, or skips the collapse. Nothing is modified yet, so the restart costs nothing.
+        var pathTop = ctx.Depth == 0 ? node : ctx.PathNodes[0];
+        if (pathTop.ChunkId != _rootChunkId)
+        {
+            leafLatch.AbortWriteLock();
+            retryExit = InsertRetryExit.RemoveRootMovedUnderDescent;
+            return false;
         }
 
         // Issue #297: stale-separator detection. Pessimistic descent does NOT follow B-link right-pointers (unlike OptimisticDescendToLeaf at BTree.cs:1700-1738).
@@ -853,6 +841,23 @@ internal abstract partial class BTree<TKey, TStore>
                     rightSib.GetLatch(ref sibAccessor).MarkObsolete();
                     DeferredAdd(rightSib.ChunkId, retireEpoch);
                 }
+            }
+
+            // Root collapse: an INTERNAL root left with no separator hands the root to its only child — HERE, under the root's write latch, never after it
+            // is released (#1329). Done after the unlock, a split of that child could publish its separator into the root between the length test and the
+            // swap, and the swap then dropped it: the new leaf reachable only through the chain, every insert moving right onto it full and every remove of
+            // its keys routed to its left neighbour. The old root is retired like any merged node, so a descent that still holds it restarts rather than
+            // treating a detached node with no separator as a parent. #1322: never for a LEAF root — GetChild(-1) of a leaf is default.
+            if (ctx.Depth == 0 && node == Root && !node.GetIsLeaf(ref accessor) && node.GetLength(ref accessor) == 0)
+            {
+                OlcDescentTrace.OnRootCollapse?.Invoke();
+                // Height first: the volatile Root store publishes it, and a writer that sees the new root can split it and Height++ — after this, not
+                // interleaved with a read-modify-write that loses one of the two.
+                Height--;
+                Root = node.GetChild(-1, ref accessor); // left most child becomes root
+                node.GetLatch(ref accessor).MarkObsolete();
+                // Stamped AFTER the unlink, not with the Phase 2.5 epoch: a reader that pinned a later epoch can still have read the old root (#1329).
+                DeferredAdd(node.ChunkId, _segment.Store.EpochManager.BumpEpochForRetire());
             }
 
             // Unlock siblings + this path node

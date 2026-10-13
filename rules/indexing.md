@@ -640,3 +640,45 @@ written for the read path; these are the write-path obligations that went unwrit
             an AccessViolationException at teardown). LatchFreeAllocationTests.AnAllocationFault_DuringABTreeSplit_LeavesNoNodeLatched: a fault
             before any latch leaves the tree writable. Not covered by a test: the pre-write page faults (a miss cannot be injected after the
             first write without a seam in the SMO)
+
+### IXW-10: The root and the tail pointer change only under the latch of the node they stop naming `[fatal]` `[silent]`
+  invariant a root collapse — an internal root left with no separator handing the root to its only child — runs in `RemoveIterative`'s Phase 3 with the
+            root's write lock still held, re-checks there that the node is still `Root`, internal and empty, and retires the old root (`MarkObsolete`,
+            `DeferredAdd`) like any merged node — stamped with a retire epoch taken AFTER the swap (`BumpEpochForRetire`), since a reader pinned later
+            than Phase 2.5 can still have read the old root. `Height` is written before `Root`, whose volatile store publishes it. A split that must
+            publish into that root waits on its latch, or meets it obsolete and restarts
+  invariant a remove restarts when its recorded path top is no longer the root (`RemoveRootMovedUnderDescent`) — IXW-05's guard, on the remove side: a
+            merge propagating to a stale top would treat a non-root node as the root, with no sibling resolved and no parent latched
+  invariant `_reverseLinkList` changes only where the tail changes, under the tail leaf's latch: the split of the tail (`InsertIterative`, the right half
+            becomes the tail) and a merge that absorbs it (`RemoveLeaf`, the surviving leaf becomes the tail). Every change of the tail holds the tail's
+            latch, so the writes are serialised and none is stale
+  invariant a split publishes its right half as the tail only once the leaf work is done — after `InsertLeaf` has placed the item — never inside
+            `SplitLeafRight`: the right half is freshly allocated and unlatched, reachable until then only through the left leaf the splitter holds, and the
+            tail would hand it to the append fast path while the splitter still writes into it; and it publishes after a barrier on arm64, the release half
+            of the reader's TryWriteLock CAS, because the right half was written under no latch of its own
+  note: two writes of `_reverseLinkList` take no latch and need none — the first leaf of an empty tree (`AddOrUpdateCorePessimistic`, before any reader
+        can reach it) and the load (`BTree` constructor, single-threaded)
+  never a structural pointer repaired after the write released its latches: a repair races the next change, and the stale one can win
+  scope: BTree.RemoveIterative, BTree.RemoveCorePessimistic, InsertRetryExit.RemoveRootMovedUnderDescent, BTree.AddOrUpdateCorePessimistic, BTree.InsertIterative, NodeWrapper.SplitLeafRight,
+         NodeWrapper.RemoveLeaf,
+         OlcDescentTrace.OnRootCollapse, OlcDescentTrace.OnPessimisticWriteReturned
+  on_violation: the collapse ran after the unlock: a split of the root's only child published its separator into the root between the collapse's length test
+                and its swap, and the swap dropped it — a leaf on the chain under no ancestor (IXS-05), every insert routed there moving right onto it full
+                until `MaxPessimisticRestarts`, every remove of its keys routed to its left neighbour until the descent gave up. The old root, never retired,
+                was used as a parent with no separator by a stale descent (`LeftShift: length=-1` in `HandleChildMerge`). The tail was advanced by every
+                pessimistic insert and stepped back by every pessimistic remove after the fact: the two raced, the field named a non-tail leaf, and once it
+                named a leaf a merge had retired and deferred reclaim had freed, the next repair read a reused chunk — an AccessViolationException, or a
+                NullReferenceException, in `RemoveCorePessimistic`
+  measured: #1329, a bare `DoubleMultipleBTree` under 4 inserters and 4 removers on 4 CPUs, 500 ms runs: before, 6 of 8 loops failed within 0 to 220
+            runs (lost separator, `LeftShift`, tail drift, a wedge, the AccessViolationException); after, 1 200 runs clean (three 4/4 loops and a 2/2
+            loop of 300), and 30 sequential runs of the contention-split stress tests
+  verified: BTreeRootAndTailTests.ASplitRacingTheRootCollapse_CannotPublishIntoTheCollapsingRoot [VerifiesRule] — DETERMINISTIC: the remover parks at
+            `OnRootCollapse`, a second writer appends until the surviving leaf splits, and must not complete during the park. MEASURED as a mutant: the
+            collapse moved back after the unlock reddens it (the appender splits under the collapsing root).
+            BTreeRootAndTailTests.TheTailNamesTheLastLeaf_WhenEverySplitAndMergeReturns [VerifiesRule] — `ValidateLeafChain` at every
+            `OnPessimisticWriteReturned`, over 3 000 ascending inserts and their removal. MEASURED as a mutant: the lazy repairs restored reddens it.
+            BTreeRootAndTailTests.TheTailNamesTheLastLeaf_WhenTheLeftLeafAbsorbsIt [VerifiesRule] — the other merge branch (the leftmost leaf absorbs the
+            tail). MEASURED as a mutant: that branch's publish removed reddens it.
+            The publish-inside-the-split variant is caught by `OlcBTreeStressTests.Stress_ContentionSplit_TreeConsistency` (concurrent appends at the
+            tail): it failed twice in one gate run, an EntryCount drift of 2 and an `ArgumentOutOfRangeException` faulting the tree
+  requires IXS-05 (the orphaned leaf is how a lost separator becomes visible), IXW-05 (the root split holds the old root's latch the same way)
