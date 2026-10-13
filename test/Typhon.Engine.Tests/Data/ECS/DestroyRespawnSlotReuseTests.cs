@@ -534,9 +534,9 @@ class DestroyRespawnSlotReuseTests : TestBase<DestroyRespawnSlotReuseTests>
         }
     }
 
-    /// <summary>An entity spawned and destroyed in one committed transaction leaves nothing behind. It leaks its spawn's storage today (#1229).</summary>
+    /// <summary>An entity spawned and destroyed in one committed transaction leaves nothing behind: its commit frees what its spawn allocated (#1229).</summary>
     [Test]
-    [Category("Quarantine")]
+    [VerifiesRule("REAP-02")]
     public void SpawnAndDestroyInOneTransaction_LeavesNothingBehind()
     {
         using var dbe = SetupEngine(out _);
@@ -550,6 +550,90 @@ class DestroyRespawnSlotReuseTests : TestBase<DestroyRespawnSlotReuseTests>
         }
 
         AssertFreedExactlyOnce(dbe, before, 0, "entities spawned and destroyed in one transaction");
+    }
+
+    /// <summary>
+    /// A spawn whose second Versioned component the same transaction enabled, then destroyed: the commit frees both components' storage (#1229).
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    public void ASpawnEnabledThenDestroyedInOneTransaction_LeavesNothingBehind()
+    {
+        using var dbe = SetupEngine(out _);
+        var before = Measure(dbe);
+        for (var k = 0; k < 20; k++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var a = new CompA(k, 0, 0);
+            var id = tx.Spawn<CompABArch>(CompABArch.A.Set(in a));
+            tx.OpenMut(id).Enable(CompABArch.B, new CompB(7, 7));
+            tx.Destroy(id);
+            tx.Commit();
+        }
+
+        AssertFreedExactlyOnce(dbe, before, 0, "entities enabled and destroyed in the transaction that spawned them");
+        AssertFreedExactlyOnce(dbe, before, 0, "entities enabled and destroyed in the transaction that spawned them", compB: true);
+    }
+
+    /// <summary>
+    /// A commit that frees a spawn it also destroyed, then fails before its append, rolls back without freeing it again: the rollback finds nothing of it
+    /// left to free (#1229).
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    public void ACommitThatFreedASpawnItDestroyed_ThenFails_FreesItOnce()
+    {
+        using var dbe = SetupEngine(out _);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 75, 1.0)));
+            tx.Commit();
+        }
+
+        var table = dbe.GetComponentTable<CompD>();
+        FlushAll(dbe);
+        var content = table.ComponentSegment.AllocatedChunkCount;
+        var revisions = table.CompRevTableSegment.AllocatedChunkCount;
+        var doubleFrees = Interlocked.Read(ref table.ComponentSegment.DoubleFreeCount) + Interlocked.Read(ref table.CompRevTableSegment.DoubleFreeCount);
+        for (var k = 0; k < 20; k++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            tx.Destroy(tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 1_000 + k, 1.0))));
+            tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD(1f, 75, 1.0)));
+            Assert.Throws<UniqueConstraintViolationException>(() => tx.Commit(), "premise: the commit fails after PREPARE, before its append");
+        }
+
+        FlushAll(dbe);
+        Assert.That(Interlocked.Read(ref table.ComponentSegment.DoubleFreeCount) + Interlocked.Read(ref table.CompRevTableSegment.DoubleFreeCount) - doubleFrees,
+            Is.Zero, "chunks freed twice by a rolled-back commit");
+        Assert.That(table.ComponentSegment.AllocatedChunkCount - content, Is.Zero, "CompD content chunks leaked or freed twice");
+        Assert.That(table.CompRevTableSegment.AllocatedChunkCount - revisions, Is.Zero, "CompD revision chunks leaked or freed twice");
+    }
+
+    /// <summary>
+    /// The chain-head rebuild's filter (#1231): a committed destroy whose cleanup a reader still holds back leaves its chain allocated, its newest revision
+    /// a tombstone, and the filter drops it; a live entity's chain stays.
+    /// </summary>
+    [Test]
+    [VerifiesRule("REAP-02")]
+    public void AChainEndingInATombstone_IsNotALiveEntitysHead()
+    {
+        using var dbe = SetupEngine(out var ids);
+        var table = dbe.GetComponentTable<CompA>();
+        using var reader = dbe.CreateReadOnlyTransaction();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(ids[0]);
+            tx.Commit();
+        }
+
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, ids[0].ArchetypeId);
+        Assert.That(heads.ContainsKey((long)ids[0].RawValue), Is.True, "premise: the destroyed entity's chain is still allocated, its cleanup held back");
+        var dropped = ComponentRevisionManager.DropTombstonedHeads(table, heads);
+        Assert.That(dropped, Is.EqualTo(1), "the destroyed entity's chain was not the only one dropped");
+        Assert.That(heads.ContainsKey((long)ids[0].RawValue), Is.False, "a chain ending in a tombstone was kept as a live entity's head");
+        Assert.That(heads.ContainsKey((long)ids[1].RawValue), Is.True, "a live entity's chain was dropped");
     }
 
     /// <summary>
