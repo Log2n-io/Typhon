@@ -687,7 +687,10 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     /// <para>The queue's layout makes it the normal case rather than a corner: AabbRefresh appends a tick's relocations and the next tick's Prep appends
     /// its crossings behind them, so relocations sit at the low indices and are the ones overwritten. On any tick with at least as many crossings as
     /// drifters, EVERY relocation is silently dropped and step 10's placement reverts to the first fit this issue exists to repair.</para>
-    /// <para><b>The budget is deliberately generous</b>, so a missing relocation cannot be excused as a throttled one: at 5 ms nothing should be refused.
+    /// <para><b>The budget is deliberately generous</b>, so a missing relocation cannot be excused as a throttled one: ~40 ms pays for the whole population
+    /// even at the cost model's ceiling (20 x the 1 500 ns seed = 30 us, x 1 200 = 36 ms), so nothing may be refused whatever the estimate reads. It was 5 ms,
+    /// which only holds on warm code: run alone, tick 2's migrations pay JIT (7.1 ms for 307 entities, against 0.29 ms warm), the estimate seeds at 23 us
+    /// and tick 3 refused 751 relocations (#1167).
     /// </para>
     /// <para><b>What this arm proves, precisely.</b> The assertion is an INEQUALITY, not an identity, and it cannot be tightened here:
     /// <c>MigrationCount</c> sums all three migration kinds while <c>DriftersDetected</c> counts drifters alone, so the slack is this tick's crossing
@@ -700,7 +703,9 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     [VerifiesRule("TH-01")]
     public void RelocationsSurviveATickThatAlsoCarriesCellCrossings()
     {
-        using var dbe = SetupEngine(budgetMs: 5.0f);
+        // The whole population at the cost model's ceiling — CostEstimateCeilingFactor (20) x the 1 500 ns seed — plus 10 %.
+        const float everyoneAtTheCeilingMs = Population * 20 * 1500f / 1_000_000f * 1.1f;
+        using var dbe = SetupEngine(budgetMs: everyoneAtTheCeilingMs);
         Spawn(dbe);
         var rng = new Random(31337);
 
@@ -717,8 +722,8 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
             var t = dbe.GetSpatialTelemetry(ArchetypeId);
 
             Assert.That(t.RelocationsThrottled, Is.Zero,
-                $"tick {tick} throttled {t.RelocationsThrottled} relocations against a 5 ms budget that can afford far more — either the budget arithmetic "
-                + "is wrong or relocations are being lost and mis-counted");
+                $"tick {tick} throttled {t.RelocationsThrottled} relocations against a budget that affords the whole population at the estimate's "
+                + "ceiling — either the budget arithmetic is wrong or relocations are being lost and mis-counted");
 
             if (previousDetected > 0)
             {
