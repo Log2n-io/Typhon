@@ -562,9 +562,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                 CapturePreApplyHandles(table, slotIndex, new ReadOnlySpan<byte>(dst, compSize));
             }
 
-            // A Versioned slot's HEAD copy takes the replayed value only above every revision its chain already holds (VIS-05), as the live publish: the
-            // base can hold a later stamp than this record's — a commit that drew its stamp after this one's, published and checkpointed while this one
-            // was still in flight — and the scrub keeps that one in the chain.
+            // A Versioned slot's HEAD copy takes the replayed value unless the chain already holds a LATER stamp (VIS-05), as the live publish: the base can
+            // hold a commit that drew its stamp after this one's, published and checkpointed while this one was still in flight, and the scrub keeps that one
+            // in the chain. The record's own stamp in the chain is not later: a torn checkpoint can carry this commit's chain element without its content,
+            // and the open's HEAD rebuild copied that stale content into the HEAD — refusing the copy here left it there, and the cluster indexes, rebuilt
+            // from the HEAD, kept the entity under its old key (TornCaptureRecoveryTests.AnUpdateWhosePagesReachedTheDiskInPart_Recovers). A stamp is one
+            // commit's, so copying its value again is idempotent.
             var copyHead = true;
             if (table.StorageMode == StorageMode.Versioned)
             {
@@ -573,7 +576,7 @@ internal sealed unsafe class RecoveryApplier : IDisposable
                 if (existingRoot != 0)
                 {
                     var info = GetRecoveryInfo(table);
-                    copyHead = slot.Tsn > ComponentRevisionManager.HighestPublishedStamp(ref info.CompRevTableAccessor, existingRoot, -1);
+                    copyHead = slot.Tsn >= ComponentRevisionManager.HighestPublishedStamp(ref info.CompRevTableAccessor, existingRoot, -1);
                 }
             }
 
