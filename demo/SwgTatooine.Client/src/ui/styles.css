@@ -605,3 +605,71 @@ button.active {
 .kicked-actions button {
   flex: 1;
 }
+
+/*
+ * The planet's loading cover.
+ *
+ * Opaque, like the login card and for the same reason: there is nothing behind it worth seeing. The canvas underneath is
+ * alive but holds an empty scene until the field arrives, and letting that show through would be showing the very
+ * half-built world this cover exists to hide.
+ */
+.terrain-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-solid);
+  z-index: 5;
+}
+
+.terrain-loading-panel {
+  width: min(28rem, 80vw);
+  padding: 1.5rem 1.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--panel-fg);
+}
+
+.terrain-loading-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.terrain-loading-note {
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/*
+ * Indeterminate, and honestly so: the bake reports nothing until it is done, so a bar that claimed a percentage would be
+ * inventing one. It sweeps to say the page is alive and nothing more.
+ */
+.terrain-loading-bar {
+  margin-top: 1rem;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.terrain-loading-fill {
+  width: 35%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: terrain-loading-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes terrain-loading-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}

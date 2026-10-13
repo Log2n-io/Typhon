@@ -29,14 +29,19 @@ import { describeFields } from '../data/swg-format';
 import { AGG_GRID, FASTEST_TICK_PERIOD_MS, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
-import { EntityLayer, type FrameView, type PickHit, type PickRay, type PredictedOverride } from '../render/entity-layer';
+import {
+  EntityLayer,
+  type FrameView,
+  type PickHit,
+  type PickRay,
+  type PredictedOverride,
+} from '../render/entity-layer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { PlanetProfile } from '../render/planet-profile';
 import { InteriorProfile } from '../render/interior-profile';
 import { SpaceProfile } from '../render/space-profile';
 import type { SceneProfile } from '../render/scene-profile';
-import { startTerrainBake, type TerrainBake } from '../terrain/bake-client';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
@@ -224,14 +229,13 @@ export class ClientApp {
   private readonly profiles = new Map<SceneKind, SceneProfile>();
   private readonly planetProfile: PlanetProfile;
   private profile: SceneProfile;
-  /** The planet's heightfield: flat until the worker's bake lands, then the one source of ground height for everything. */
+  /** The planet's heightfield: the one source of ground height for everything, filled before the first frame. */
   private readonly field: Heightfield;
   /** Retained across clicks: the inverse view-projection, the ray through the cursor, and the winning hit. */
   private readonly pickInverse = new Float64Array(16);
   private readonly pickRay: PickRay = { ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 1 };
   private readonly pickBest: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
-  private readonly terrainBake: TerrainBake;
-  /** How long the bake took, reported once in the HUD's session block. */
+  /** How long the bake took, reported in the HUD's session block. On a cache hit this is the ORIGINAL bake's cost. */
   private terrainBakeMs = 0;
   private readonly attacks: AttackLines;
   private readonly labels: Labels;
@@ -342,7 +346,13 @@ export class ClientApp {
   private selectionTextArchetype = -1;
   private readonly unsubscribe: () => void;
 
-  constructor(canvas: HTMLCanvasElement, overlay: HTMLElement, createSource: SourceFactory) {
+  /**
+   * @param canvas The canvas the engine renders into.
+   * @param overlay The DOM layer the labels are drawn on.
+   * @param createSource Builds the session this app drives.
+   * @param terrain The planet, **already baked**. See {@link terrain/terrain-provider} for why it is a parameter.
+   */
+  constructor(canvas: HTMLCanvasElement, overlay: HTMLElement, createSource: SourceFactory, terrain: TerrainBaked) {
     this.canvas = canvas;
     this.createSource = createSource;
     this.engine = new Engine(canvas, true, {
@@ -362,19 +372,25 @@ export class ClientApp {
     this.instrumentation = new SceneInstrumentation(this.scene);
     this.instrumentation.captureFrameTime = true;
 
-    // The ground starts FLAT and gains relief about a second later, when the worker's bake lands. That is not a
-    // compromise forced by the worker — the flat field is the same code path with every post at zero, which is also the
-    // regression the tests lean on, so the first second of the session exercises it for free.
+    // The ground is REAL before anything reads it, and that is a correctness property rather than a nicety.
+    //
+    // It used to start flat and gain relief about a second later, when the worker's bake landed. Everything that samples
+    // the ground in between was answered with zero while the server's altitudes were the true ones — and the eye camera's
+    // clearance probe, which walks the pull-back ray and stops before the ground, read a spawn 20 m below sea level as
+    // entirely underground and collapsed third person to first. The player spent the first two seconds inside their own
+    // avatar, under a plane that was not there. Filling the field here means no frame, no camera and no altitude query
+    // ever sees the placeholder.
     this.field = new Heightfield();
     this.view.ground = this.field;
     this.eyeCamera.ground = this.field;
-    this.terrainBake = startTerrainBake((baked) => {
-      this.onTerrainBaked(baked);
-    });
+    this.adoptTerrain(terrain);
     this.planetProfile = new PlanetProfile(this.scene, this.field, PLANET_HALF_EXTENT_M);
     this.profiles.set('planet', this.planetProfile);
     this.profile = this.planetProfile;
     this.planetProfile.enter(PLANET_AT_START);
+    // The per-node error the bake measured: what the pixel tolerance is spent against. Measured off the main thread
+    // because it is a pass over 4.19 M posts per level and the frame budget is 2 ms.
+    this.planetProfile.refreshTerrain(terrain.nodeError, terrain.nodeMinY, terrain.nodeMaxY);
     this.attacks = new AttackLines(this.scene);
     this.labels = new Labels(overlay);
 
@@ -541,7 +557,6 @@ export class ClientApp {
       profile.dispose();
     }
 
-    this.terrainBake.terminate();
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -549,10 +564,13 @@ export class ClientApp {
   /**
    * Adopts the baked heightfield.
    *
-   * Copied into the field's own array rather than swapped in, because the GPU texture was created over that array and a
+   * Copied into the field's own array rather than swapped in, because the GPU texture is created over that array and a
    * swap would leave it pointing at the flat one. 16.8 MB is a few milliseconds, once.
+   *
+   * Called from the constructor, before the profile exists — the quadtree arrays are handed to `PlanetProfile` separately,
+   * right after it is built, because they are its data and not the field's.
    */
-  private onTerrainBaked(baked: TerrainBaked): void {
+  private adoptTerrain(baked: TerrainBaked): void {
     const grid = this.field.grid;
     if (baked.posts !== grid.posts || baked.spacingM !== grid.spacingM || baked.originM !== grid.originM) {
       // Both sides read the same constants, so this cannot happen without a bug; it is here because silently rendering a
@@ -564,9 +582,6 @@ export class ClientApp {
     grid.height.set(baked.height);
     this.field.measure();
     this.terrainBakeMs = baked.bakeMs;
-    // The per-level error the worker measured: what the pixel tolerance is spent against. Measured there because it is a
-    // pass over 4.19 M posts per level and the main thread has a 2 ms frame.
-    this.planetProfile.refreshTerrain(baked.nodeError, baked.nodeMinY, baked.nodeMaxY);
   }
 
   private resize(): void {
@@ -857,7 +872,10 @@ export class ClientApp {
       if (intent === null || intent.speedClass === SpeedClass.stop) {
         this.predictor.clearIntent();
       } else {
-        this.predictor.setIntent(intent.heading, speedForClass(intent.speedClass, source.selfNumber('walkMps'), source.selfNumber('runMps')));
+        this.predictor.setIntent(
+          intent.heading,
+          speedForClass(intent.speedClass, source.selfNumber('walkMps'), source.selfNumber('runMps')),
+        );
       }
     }
 

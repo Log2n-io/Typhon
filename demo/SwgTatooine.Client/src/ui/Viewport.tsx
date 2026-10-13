@@ -5,10 +5,12 @@ import { startInventoryPoll } from '../app/inventory-poll';
 import { fetchRealmInventory } from '../data/realm-inventory';
 import { fetchServerConfig } from '../data/server-config';
 import { RealmFade } from './RealmFade';
+import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
 import { useRealms } from '../state/realm-store';
 import { useSessionStore } from '../state/session-store';
+import { useTerrain } from '../state/terrain-store';
 import { useUi } from '../state/ui-store';
 
 /**
@@ -141,6 +143,15 @@ export function Viewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
+  // The world does not mount until the planet is in hand.
+  //
+  // <b>This is what makes the avatar appear in the right place on the first frame it is drawn.</b> The field is not
+  // optional data that arrives late — the camera's ground clearance, every altitude query and the ground mesh itself all
+  // read it, so a session that starts without it starts wrong and corrects itself visibly seconds later. The load began at
+  // module scope in `main.tsx`, so by here it is usually already finished: on a warm cache it is a database read, and on a
+  // cold one it has been running since before the login form was filled in. What is left is the remainder, if any.
+  const terrain = useTerrain((s) => s.baked);
+
   // The token the session will present. In the dependency list below, so logging in as somebody else tears the session
   // down and builds a new one rather than leaving a socket authenticated as the previous account.
   // `?as=god` means NO token, whatever is in storage: see godRequested. Read from the URL this page was opened with, which
@@ -152,12 +163,13 @@ export function Viewport() {
   useEffect(() => {
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
-    if (canvas === null || overlay === null) {
+    // Nothing is built before the ground exists; the effect re-runs when it does.
+    if (canvas === null || overlay === null || terrain === null) {
       return;
     }
 
     const kind = sourceKindFrom(window.location.search);
-    const app = new ClientApp(canvas, overlay, factoryFor(kind, token, noteClosed));
+    const app = new ClientApp(canvas, overlay, factoryFor(kind, token, noteClosed), terrain);
     app.start();
 
     // The mock honours whatever it is asked for, so its ceiling is simply the largest the slider offers — stated, not
@@ -214,12 +226,13 @@ export function Viewport() {
     };
     // `token` and `noteClosed`: a login, a logout or a login as somebody else must tear this session down and build a
     // new one. Leaving them out would keep a socket authenticated as the previous account after the UI had moved on.
-  }, [token, noteClosed]);
+  }, [token, noteClosed, terrain]);
 
   return (
     <div className="viewport">
       <canvas ref={canvasRef} className="viewport-canvas" />
       <div ref={overlayRef} className="viewport-overlay" />
+      {terrain === null ? <TerrainLoading /> : null}
       <RealmFade />
     </div>
   );
