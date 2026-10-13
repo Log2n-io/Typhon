@@ -389,10 +389,15 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
         overwrite it
   never retry PREPARE on entries a failed attempt consumed: it resets each entry's read revision (`PrevCompContentChunkId = -1`),
         so a second pass reads chunk -1 as the old value
+  invariant a conflict-handler commit takes the chain locks it retains in one global order: component type id
+            (`Transaction.PrepareOrder`), then primary key (`ComponentInfo.ForEachMutableEntryOrdered`). Taken in write order, two
+            commits writing the same entities in opposite orders each held one and waited out the other's for
+            RevisionChainLockTimeout, and every reader of those chains with them (#1321)
   never roll back while holding the retained chain locks: the rollback frees a spawn's chain, lock word included, and voids
-        with no deadline on chains another aborting conflict-handler commit may hold. Two that took their chains in crossed
-        order then wait for each other for good, and every later publish of those entities waits behind them
+        with no deadline on chains another aborting conflict-handler commit may hold. Two that held their chains in crossed
+        order would wait for each other for good; the global order above keeps that from arising, this is the second line
   scope: Transaction.PrepareClusterVersionedSlot, Transaction.AnyIndexedFieldChanged, Transaction.PublishClusterIndexes,
+         Transaction.PrepareOrder, ComponentInfo.ForEachMutableEntryOrdered,
          Transaction.PublishComponent, Transaction.PublishPreparedComponents, Transaction.Commit,
          Transaction.RollbackAfterFailedCommit, Transaction.CheckVersionedUniqueKeys, ArchetypeClusterState.IndexedSlots,
          Transaction.UnplaceSpawns, Transaction.UnmarkDestroysPending, Transaction.UnmarkEnableDisablePending
@@ -415,14 +420,15 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             PREPARE: the index keeps the committed key, a refreshed view keeps the entity, the same change then commits),
             AnAbortedWrite_LeavesNoPhantomInAView (an AllowMultiple field: no phantom, then the same write committed and the
             entity destroyed), AVersionedWriteOntoAHeldKey_IsRejectedBeforeTheAppend,
-            AnAbortedHandlerCommit_ReleasesItsChainLocksBeforeRollingBack, TwoHandlerCommitsAbortingInCrossedOrder_DoNotDeadlock
-            (each conflict handler holds its first chain at a barrier while the other's second wait times out),
+            AnAbortedHandlerCommit_ReleasesItsChainLocksBeforeRollingBack, ConcurrencyConflictTests.OppositeOrderHandlerCommits_DoNotDeadlock
+            (each commit held at its first chain lock until the other has its own: in write order both get there),
             AnAbortedDestroy_LeavesTheIndexAndTheView (a guard: the destroy's index work was already in the publish); each
             also checks the failed commit ended the transaction [VerifiesRule]; mutants
             APrepareThatReconcilesIndexes_LeavesTheAbortedKey and APrepareThatAppendsViewDeltas_LeavesAPhantom
             (`PrepareReconcilesIndexesForTest`) [RuleMutant]. Real mutations: the terminal rollback removed fails the abort
-            tests; the locks released after the rollback hangs the crossed-order test (both rollbacks wait on each other).
-            Not covered by a test: a rollback that throws (`_prepareConsumed` then refuses the retry)
+            tests; the write-order PREPARE times the opposite-order test out. Not covered by a test: a rollback that throws
+            (`_prepareConsumed` then refuses the retry), and the locks released after the rollback (no API reaches crossed holds
+            under the global order)
 
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths
@@ -657,7 +663,7 @@ CK-08 (flush-only cycles) are later increments.
             overwritten
   post: at open, ∃ ≥1 CRC-valid slot per protected page; selection = highest valid `PairGeneration`; both-invalid → open
         fails loudly (never a silent fallback)
-  exception (#936, pending Loïc's approval): on the crash path only, a segment ROOT with both slots invalid whose first sector — torn-safe,
+  exception (#936): on the crash path only, a segment ROOT with both slots invalid whose first sector — torn-safe,
         like the identity fields — records `PairGeneration` 1 is unloadable, not corrupt: the tear hit the pair's first persist (the twin is
         written from generation 2, and zeroed before generation 1, #1129), so the root never had a durable copy. The segment is replaced and
         refilled from the WAL, as a root never written; its root and twin stay claimed until then (CS-08). A map-extension page, a root at any
@@ -827,17 +833,27 @@ CK-08 (flush-only cycles) are later increments.
           deferred work (e.g. EntityMap bucket pages) — page ownership is final only afterwards. The corrected bitmap is held
           dirty (DC > 0 ⇒ never evicted stale) and consolidated by the next checkpoint / clean shutdown; a re-crash before that
           simply re-derives (idempotent — `owned` depends only on persisted segment directories)
-  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap`,
-         `ManagedPagedMMF.RederiveOccupancy`, `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on
-         `CrashRecoveryAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
+  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap` and its
+         persisted walk (`ClaimPersistedSegment`, `ClaimDirectoryTwin`), `ManagedPagedMMF.RederiveOccupancy`,
+         `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on `CrashRecoveryAtOpen`; replaces FPI repair of
+         occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
   on_violation: a torn / stale occupancy page survives recovery → a clear bit over a live page double-allocates it (data
                 corruption), or a stale set bit leaks the page forever
+  note (2026-10-05, #850): the occupancy reserves and the CK-05 twins (both walks) are claimed up to the bitmap's extent, not
+        the file's page count. Both are bit-set when handed out and written only on first use, so a fresh one legitimately
+        sits past the written end of the file; bounding them by it dropped them, and the wholesale adoption wrote them free
+        while the metadata still named them. Segment pages, directory-map extensions and the reserved roots stay bounded by
+        the file.
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
             `RunStorageIntegrityCheck` reports 0 orphans / 0 phantoms; `LastOpenOccupancyRederiveWordsChanged > 0` genuineness)
             [VerifiesRule]; OwnedBitmapIsIdenticalWithAndWithoutSchema (#771 — the file-only property itself: the derived
             `owned` set is bit-identical with and without the schema registered) [VerifiesRule];
-            RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses and leaves the bitmap
-            untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
+            CrashRederiveKeepsTheUnwrittenReserveAndTwinsOwned (#850 — after a hard crash, the occupancy data reserve and a
+            directory twin both past the written end stay allocated through the re-derive; genuineness: the re-derive reclaims
+            a leaked page) [VerifiesRule], falsified for each half by Mutant_ARederiveClippedToTheWrittenEndIsCaught [RuleMutant];
+            UnwrittenTwinsAreOwnedWithAndWithoutSchema (#850 — the registered and the persisted walk each claim a twin past the
+            written end) [VerifiesRule]; RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses
+            and leaves the bitmap untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
 
 ### CK-10: A checkpoint persists the per-archetype segment pointers it consolidates `[fatal]` `[silent]`
   invariant a checkpoint that consolidates a cluster / EntityMap / per-archetype-index segment's DATA pages into the data file MUST
@@ -1567,7 +1583,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant when dirty slot evicted from ChunkAccessor 16-slot cache,
     ACW decrement deferred until CommitChanges() or Dispose()
   scope: ChunkAccessor.CommitChanges; ChangeSet.DeferEviction / FlushDeferredEvictions (the deferral queue
-         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28)
+         is owned by ChangeSet, not ChunkAccessor — corrected 2026-07-28); ChunkBasedSegment.ReturnWarmAccessor /
+         ReturnWarmSiblingAccessor / ExitBatchMode (a cached warm accessor drops its renter's set once flushed, or its
+         next cold rent flushes the deferrals of whoever owns the set next — #946)
+  verified: ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn (four cases, one per drop site;
+            removing any one drop reddens exactly its case)
   on_violation: early decrement allows checkpoint to snapshot page
     while caller still holds OLC write lock on evicted slot's node;
     same corruption as CP-11
@@ -1855,9 +1875,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     downstream "not found in PK index" in Versioned copy-on-write); the failed chunks are drained, so the system processes a fraction of its entities
     with nothing reported (#1116: 12 to 192 of 600 per tick)
   scope: UnitOfWork.CreateConcurrentTransaction, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
-         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation
+         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation, ChunkBasedSegment.ReturnWarmAccessor / ReturnWarmSiblingAccessor /
+         ExitBatchMode (a [ThreadStatic] warm accessor must not keep the set past its rent: the set's owner hands it on — #946)
   verified: ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
-            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail
+            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail.
+            ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn covers the warm caches (see CP-12)
 
 ### PS-10: A page's writeback debt is discharged only by a durable write `[fatal][silent]`
   invariant every path that modifies a page's bytes records it (MarkPageModified, or IncrementDirty which implies it)
@@ -2934,10 +2956,10 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        | `NextFreeTSN` | `ScrubVersionedChains` + `RecoveryDriver` | ✅ RB-05 |
        | `ArchetypeEngineState.NextEntityKey` | `RebuildEntityMaps*` (persisted base) + `RecoveryDriver` (replayed window) | ✅ fixed #697 / #705 |
        | WAL LSN (`WalCommitBuffer._lsnBase`) | `DatabaseEngine.InitializeWal` via `Math.Max(lastValidLSN, checkpointLsn)` | 🔴 **#712** — both terms are 0 when the prior session crashed without checkpointing, because WAL v2 recovery has not run yet at that point; the writer restarts at 1 and collides with the window it is about to replay |
-       | VSBS buffer free-list | — | 🔴 **#770** — restarts from empty, re-issuing handles live recovered entities still hold. Retargeted from #389 on 2026-08-11: #389 fixed collection CONTENT redo and explicitly does not touch this allocator, so leaving the pointer on a closed issue would have read as fixed |
+       | VSBS buffer free-list | the segment's own chunk bitmap (durable to the checkpoint), found at open through the bootstrap stride → root map, which is persisted when a segment is created (`GetComponentCollectionSegment`, #1283) | ✅ #770 — before #1283 the map reached disk only at a clean close, so a crash reopened a fresh empty segment that re-issued live handles |
        | Cluster slot cursors | derived from the cluster occupancy at rebuild | ✅ |
 
-       The two open rows are the same defect shape as #697, on different allocators. #697's own acceptance asked
+       The open row is the same defect shape as #697, on another allocator. #697's own acceptance asked
        for this audit precisely because fixing one instance says nothing about the others.
   scope: RecoveryDriver (window watermarks), DatabaseEngine.RebuildEntityMaps* / InitializeWal (persisted base),
          RecoveryApplier.MaxEntityKeyByArchetype (the window's entity-key half)

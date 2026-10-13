@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Numerics;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
@@ -44,7 +46,7 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
     private static ClMigPos PointAt(float x, float y, int tag) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Tag = tag };
 
-    /// <summary>One engine per DI scope: every arm gets a fresh in-memory world, and the arms can run inside one test.</summary>
+    /// <summary>One engine per DI scope, so the arms can run inside one test; each over a fresh data file (see <see cref="RunArmOn"/>).</summary>
     private static DatabaseEngine SetupEngine(IServiceScope scope)
     {
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -172,6 +174,13 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
     private Outcome RunArmOn(int workerCount, bool checkZoneMaps = false)
     {
+        // A fresh data file per arm (#946). A second CreateScope() in one test REOPENS the database the first scope closed after a clean shutdown — the WAL
+        // is per scope, the data file is not — so the arm under test used to start from the serial arm's persisted world with a second spawn on top of it,
+        // and a defect of close-and-reopen failed here as if Prep had (a buffer lock found held after the reopen, reported on #946). The delete swallows
+        // its errors, so whether it happened is checked: a silent failure would bring the reopen back.
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        var bundle = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BundleDirectory;
+        Assert.That(Directory.Exists(bundle) || File.Exists(bundle), Is.False, $"the previous arm's database at {bundle} was not deleted");
         using var scope = ServiceProvider.CreateScope();
         var dbe = SetupEngine(scope);
         var ids = Spawn(dbe);
@@ -187,9 +196,10 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
                 return;
             }
 
-            // The entity's TAG as well as (chunk, slot): two engines in one process neither place a seeded spawn into the same slots nor number entities
-            // from the same id, so the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the ordering contract
-            // is checked structurally within each arm.
+            // The entity's TAG as well as (chunk, slot): the queues of two arms are compared by WHICH entity (its unique tag) crosses to WHICH cell, and the
+            // ordering contract is checked structurally within each arm. The reason given here used to be that two engines place a seeded spawn into
+            // different slots; that was the reopen RunArmOn now prevents (#946). Over fresh files the two queues are equal element for element, and
+            // AssertArmMatchesSerialCore asserts that too; the tag comparison stays because it is the one that says WHICH entities disagree.
             var accessor = state.ClusterSegment.CreateChunkAccessor();
             try
             {
@@ -549,6 +559,9 @@ class PrepSliceEquivalenceTests : TestBase<PrepSliceEquivalenceTests>
 
             Assert.That(Crossings(arm.Queue), Is.EquivalentTo(Crossings(serial.Queue)),
                 () => $"W={w}: the same entities must cross to the same cells whichever path detected them. {QueueDelta(arm.Queue, serial.Queue)}");
+            // AC-7 as written (#946): both arms start from the same fresh file and place the seeded spawn identically, so the queue is the serial one
+            // element for element — same (chunk, slot), same order, including the order inside one destination cell that TH-01 admits from.
+            Assert.That(arm.Queue, Is.EqualTo(serial.Queue), $"W={w}: the queue must be the serial queue element for element");
             Assert.That(IsInDrainOrder(arm.Queue), Is.True,
                 $"W={w}: the prefix Migrate slices must be in drain order — ascending destination cell (#910's sort, which the slice planner carves on), "
                 + "and inside one cell the order the detector appends in and the slices' crossings are concatenated in (TH-01 admits the first N)");

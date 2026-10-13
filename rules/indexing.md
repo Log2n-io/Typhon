@@ -596,3 +596,25 @@ written for the read path; these are the write-path obligations that went unwrit
                 was emptied, then walked by a reader, lost the next append
   verified: OwnerIndexChurnTests.AKeyWhoseLastChunkWasEmptied_ThenWalked_FindsWhatIsAppendedNext [VerifiesRule] — move a key's last 1, 2, 8, 32 or
             100 items out, walk the key, move one back: the key finds it (before the fix, at 100: "finds 300, expected 301")
+
+### IXW-09: A write that throws under its latches faults the tree; an SMO faults in its pages before its first write `[fatal]`
+  invariant an exception that leaves a B+Tree write holding more latches than it started with (`OlcLatchHeld.Count`, kept by `OlcLatch`) faults
+            the tree (`BTree.OnWriteException`): every later descent and latch wait throws instead of spinning on the abandoned latches or reading
+            a half-modified node. A throw before any latch — a reservation that cannot grow the segment, a unique key already taken — leaves the
+            tree sound and the next write proceeds
+  invariant a pessimistic remove or insert faults in, before its first write, every page its SMO can write: the leaf's neighbours, a right
+            merge's `rightNext`, and the siblings of each path node the SMO can reach (one removal leaves it under half full; full, for a split)
+  never a page-cache miss after an SMO's first write: back-pressure throws there out of a half-done merge
+  scope: OlcLatchHeld, OlcLatch.TryWriteLock, OlcLatch.WriteUnlock, OlcLatch.AbortWriteLock, BTree.OnWriteException, BTree.ThrowIfFaulted,
+         BTree.PreDirtySiblings, BTree.RemoveIterative, BTree.InsertIterative
+  on_violation: the latches stay held and every writer of the node spins on them for good — UltimateStress hung that way, and the teardown freed
+                the engine under the spinners (AccessViolationException). A right merge that threw relinking `rightNext` left its previous pointer on
+                the absorbed node; a cascade that threw admitting a level's siblings left a parent routing to a retired leaf, freed by deferred
+                reclaim and reissued — a chain pointer to someone else's chunk, read as a node id (65536, 589824 in #739)
+  rationale: #1321. Releasing the latches instead would hand a half-done SMO to every other writer; a B+Tree write runs in the commit's publish, past
+             the append, where AP-03 stops the engine anyway — failing its index fast is what stops the halt from hanging
+  verified: BTreeChurnRaceTests.AFaultUnderALeafLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning [VerifiesRule] — a new AllowMultiple key
+            whose buffer allocation fails under the leaf latch; the next write throws "faulted" (without the fault: it spins, and the host dies with
+            an AccessViolationException at teardown). LatchFreeAllocationTests.AnAllocationFault_DuringABTreeSplit_LeavesNoNodeLatched: a fault
+            before any latch leaves the tree writable. Not covered by a test: the pre-write page faults (a miss cannot be injected after the
+            first write without a seam in the SMO)

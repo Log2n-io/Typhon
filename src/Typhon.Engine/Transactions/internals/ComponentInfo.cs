@@ -206,4 +206,33 @@ internal sealed class ComponentInfo
             action.Process(ref context);
         }
     }
+
+    /// <summary>
+    /// <see cref="ForEachMutableEntry{TAction}"/> in ascending primary-key order: the order a handler commit takes its chain locks in (#1321).
+    /// </summary>
+    public void ForEachMutableEntryOrdered<TAction>(ref CommitContext context, ref TAction action) where TAction : struct, IEntryAction
+    {
+        var keys = System.Buffers.ArrayPool<long>.Shared.Rent(SingleCache.Count);
+        try
+        {
+            SingleCache.Keys.CopyTo(keys, 0);
+            var span = keys.AsSpan(0, SingleCache.Count);
+            span.Sort();
+            foreach (var key in span)
+            {
+                ref var cri = ref CollectionsMarshal.GetValueRefOrNullRef(SingleCache, key);
+                if (cri.Operations == OperationType.Read)
+                {
+                    continue;
+                }
+                context.PrimaryKey = key;
+                context.CompRevInfo = ref cri;
+                action.Process(ref context);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<long>.Shared.Return(keys);
+        }
+    }
 }

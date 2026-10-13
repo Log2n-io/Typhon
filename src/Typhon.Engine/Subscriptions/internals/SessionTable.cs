@@ -1649,8 +1649,32 @@ internal sealed unsafe class SessionTable : IDisposable
 
     /// <summary>The identity occupying a slot right now, or <see cref="SessionId.None"/>.</summary>
     /// <param name="slot">The slot.</param>
-    /// <returns>The identity.</returns>
+    /// <returns>The identity; <see cref="SessionId.None"/> once disposal has latched.</returns>
+    /// <remarks>
+    /// Behind the caller gate like every other transport-callable member (#1165): send pumps and transport threads call this while the runtime disposes the
+    /// table, and a null check on the rows pointer is a check-then-use — a caller parked between the two reads the block after it is freed.
+    /// </remarks>
     internal SessionId IdAt(int slot)
+    {
+        if (!TryEnter())
+        {
+            return SessionId.None;
+        }
+
+        try
+        {
+            return OwnerIdAt(slot);
+        }
+        finally
+        {
+            Exit();
+        }
+    }
+
+    /// <summary><see cref="IdAt"/> without the caller gate, for the tick thread's own walk, which meets <see cref="Dispose"/> only when wedged.</summary>
+    /// <param name="slot">The slot.</param>
+    /// <returns>The identity; <see cref="SessionId.None"/> on a disposed table, for a tick still running past the scheduler's bounded join.</returns>
+    private SessionId OwnerIdAt(int slot)
     {
         var rows = _rows;
         return rows == null ? SessionId.None : SessionId.FromValue(GateId(Volatile.Read(ref (rows + slot)->Gate)));
@@ -1669,7 +1693,7 @@ internal sealed unsafe class SessionTable : IDisposable
         }
 
         /// <summary>The session at the cursor.</summary>
-        public SessionId Current => _table.IdAt(_table._openSlots[_index]);
+        public SessionId Current => _table.OwnerIdAt(_table._openSlots[_index]);
 
         /// <summary>Advances the cursor.</summary>
         /// <returns><see langword="false"/> at the end.</returns>

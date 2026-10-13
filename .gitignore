@@ -317,6 +317,9 @@ nul
 # Claude Code skill runtime state (wb-dev PIDs, logs, etc. — local-only, per-machine)
 .claude/state/
 
+# Claude Code agent worktrees (local-only)
+.claude/worktrees/
+
 # Throwaway POC / single-file scripts
 scratch/
 
