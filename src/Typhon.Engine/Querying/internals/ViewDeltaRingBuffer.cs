@@ -51,6 +51,15 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     // Cold path — written only during Dispose
     private int _disposed;
 
+    // #865: the subscription state every publisher tests before appending — SubscriptionOpen, SubscriptionClosed (the owning view's Dispose), or
+    // SubscriptionAbandoned (the owning view was finalized without one). The registries hold this buffer, never the view, so an abandoned view is
+    // collectable; its finalizer only flips this and the next registration sweeps the entry (see MarkAbandoned).
+    private int _subscription;
+    private ViewBufferReclaimer _abandonedReclaimer;
+    private const int SubscriptionOpen = 0;
+    private const int SubscriptionClosed = 1;
+    private const int SubscriptionAbandoned = 2;
+
     public ViewDeltaRingBuffer(IMemoryAllocator allocator, IResource resourceParent, int capacity = DefaultCapacity, long baseTSN = 0)
     {
         if (capacity <= 0 || (capacity & (capacity - 1)) != 0)
@@ -248,6 +257,32 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </remarks>
     public bool ClearOverflow() => Interlocked.Exchange(ref _overflow, 0) != 0;
 
+    /// <summary>True once the owning view is disposed or abandoned: publishers skip the buffer. A plain load — one per view per published entity.</summary>
+    internal bool IsClosed => _subscription != SubscriptionOpen;
+
+    /// <summary>True when the owning view was finalized without <c>Dispose</c> and its registrations have yet to be swept.</summary>
+    internal bool IsAbandoned => Volatile.Read(ref _subscription) == SubscriptionAbandoned;
+
+    /// <summary>The owning view's <c>Dispose</c>: publishers stop appending from here on. Its own deregistration and retire follow.</summary>
+    internal void Close() => Interlocked.CompareExchange(ref _subscription, SubscriptionClosed, SubscriptionOpen);
+
+    /// <summary>
+    /// The owning view's finalizer (#865): records the reclaimer and flips the state, nothing else — no lock, no native memory, no registry. The
+    /// registries remove the entry on their next <c>Register</c>/<c>Deregister</c>, under their own lock, and retire the block (<see cref="RetireAbandoned"/>).
+    /// </summary>
+    /// <remarks>The CAS is a full fence: the reclaimer store is visible to any thread that reads the abandoned state.</remarks>
+    internal void MarkAbandoned(ViewBufferReclaimer reclaimer)
+    {
+        _abandonedReclaimer = reclaimer;
+        Interlocked.CompareExchange(ref _subscription, SubscriptionAbandoned, SubscriptionOpen);
+    }
+
+    /// <summary>
+    /// Retire an abandoned buffer, once a registry has removed it. Idempotent (<see cref="Retire"/> is), so a view listed in several registries — or
+    /// field slots — is retired by whichever sweep reaches it first; a publisher on a registry not yet swept skips it on <see cref="IsClosed"/>.
+    /// </summary>
+    internal void RetireAbandoned() => Retire(_abandonedReclaimer);
+
     /// <summary>True while the pinned block behind this buffer is still mapped — false once it has actually been freed.</summary>
     /// <remarks>Exists so a verifier can assert that a write racing a disposal lands in live memory, which is the whole claim of #864's fix.</remarks>
     internal bool BlockIsLive => _block is { IsDisposed: false };
@@ -262,6 +297,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
     /// </remarks>
     internal void Retire(ViewBufferReclaimer reclaimer)
     {
+        Close();
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
@@ -310,6 +346,7 @@ internal sealed unsafe class ViewDeltaRingBuffer : IDisposable
 
     public void Dispose()
     {
+        Close();   // a buffer freed by its owner is closed to publishers whatever the owner told the registries (#865)
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;

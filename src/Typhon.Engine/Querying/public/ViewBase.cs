@@ -301,6 +301,8 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
             return;
         }
 
+        GC.SuppressFinalize(this);
+        DeltaBuffer.Close();
         DeregisterFromRegistries();
 
         // RETIRE, not free — and the order matters: deregistration must complete first, because the retire stamp taken inside Retire is what
@@ -315,6 +317,23 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         _addedCount = 0;
         _removedCount = 0;
         _modifiedCount = 0;
+    }
+
+    /// <summary>
+    /// A view abandoned without <see cref="Dispose"/> (#865). The registries hold its buffer, never the view, so the view is collectable; this only marks
+    /// the buffer abandoned — no lock, no native memory, no registry — and the next registration or deregistration on each registry removes the entry and
+    /// retires the buffer. Publishers skip it from here on (<c>ViewDeltaRingBuffer.IsClosed</c>).
+    /// </summary>
+    /// <remarks>
+    /// <c>Dispose</c> remains the contract and suppresses this. A view that never registered (a filtered pull view) has nothing to sweep, and its buffer's
+    /// block is still released only by <c>Dispose</c>.
+    /// </remarks>
+    ~ViewBase()
+    {
+        if (_disposed == 0)
+        {
+            DeltaBuffer?.MarkAbandoned(BufferReclaimer);
+        }
     }
 
     /// <summary>

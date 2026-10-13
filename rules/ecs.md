@@ -211,7 +211,7 @@ entry may be used for. Both are silent when broken, which is why they are rules 
 
 ### MEMB-04: A disposed view's delta buffer is retired, never freed under a publisher `[fatal][silent]`
   invariant ∀ append into a view's delta buffer: the pinned block behind it is still MAPPED, whether or not that view has been disposed
-  never freeing the block inside `ViewBase.Dispose`. The publisher reads `IsDisposed` and then writes 24 bytes through raw pointers; those are two
+  never freeing the block inside `ViewBase.Dispose`. The publisher reads `DeltaBuffer.IsClosed` then writes 24 bytes through raw pointers; those are two
         steps with nothing sequencing them, and `Thread.SpinWait(100)` — ~200 ns — is not a happens-before edge. Reasoning about the DURATION of an
         append against the duration of a spin is not reasoning about ordering
   never nulling the buffer's pointers on the retire path. A null base in unsafe pointer arithmetic is an access violation, not a catchable

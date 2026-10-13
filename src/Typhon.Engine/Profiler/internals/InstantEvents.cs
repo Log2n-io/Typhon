@@ -782,7 +782,7 @@ internal ref partial struct EcsViewProcessEntryOrEvent
     [BeginParam] public uint BitmapDelta;
 }
 
-/// <summary>ECS view registry register. Payload: u16 viewId, u16 fieldIdx, u16 regCount (6 B).</summary>
+/// <summary>ECS view registry register. Payload: u16 viewId, u16 fieldIdx (0xFFFF: the archetype membership registry), u16 regCount (6 B).</summary>
 [TraceEvent(TraceEventKind.EcsViewRegistryRegister, Shape = TraceEventShape.Instant, Gate = "EcsViewRegistryRegisterActive")]
 internal ref partial struct EcsViewRegistryRegisterEvent
 {
@@ -791,7 +791,7 @@ internal ref partial struct EcsViewRegistryRegisterEvent
     [BeginParam] public ushort RegCount;
 }
 
-/// <summary>ECS view registry deregister. Payload: u16 viewId, u16 fieldIdx, u16 regCount (6 B).</summary>
+/// <summary>ECS view registry deregister. Payload: u16 viewId, u16 fieldIdx (0xFFFF: the archetype membership registry), u16 regCount (6 B).</summary>
 [TraceEvent(TraceEventKind.EcsViewRegistryDeregister, Shape = TraceEventShape.Instant, Gate = "EcsViewRegistryDeregisterActive")]
 internal ref partial struct EcsViewRegistryDeregisterEvent
 {

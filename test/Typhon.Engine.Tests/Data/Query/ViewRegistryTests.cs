@@ -54,6 +54,52 @@ class ViewRegistryTests
         }
     }
 
+    /// <summary>
+    /// #865 review: a view on two fields whose finalizer flags it while a sweep is between the two slots leaves that sweep still listed in the first; it
+    /// must be counted out once, when its last entry leaves — not once per sweep, which drove ViewCount below the live views.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public void AViewAbandonedMidSweep_IsCountedOutOnce()
+    {
+        var registry = new ViewRegistry(2);
+        using var live = new MockView(_allocator, _parent) { ViewId = 1, FieldDependencies = [0] };
+        using var abandoned = new MockView(_allocator, _parent) { ViewId = 2, FieldDependencies = [0, 1] };
+        registry.RegisterView(live, live.DeltaBuffer);
+        registry.RegisterView(abandoned, abandoned.DeltaBuffer);
+        Assert.That(registry.ViewCount, Is.EqualTo(2), "PREMISE");
+
+        // Field 0 is scanned before the flag lands, field 1 after it.
+        ViewRegistry.SweepFieldProbe = f =>
+        {
+            if (f == 1)
+            {
+                abandoned.DeltaBuffer.MarkAbandoned(null);
+            }
+        };
+        using var trigger1 = new MockView(_allocator, _parent) { ViewId = 3, FieldDependencies = [1] };
+        try
+        {
+            registry.RegisterView(trigger1, trigger1.DeltaBuffer);
+        }
+        finally
+        {
+            ViewRegistry.SweepFieldProbe = null;
+        }
+
+        Assert.That(registry.ViewCount, Is.EqualTo(3), "the abandoned view is still listed on field 0, so it still counts");
+        Assert.That(abandoned.DeltaBuffer.BlockIsLive, Is.True, "and its buffer is not retired while a slot still names it");
+
+        registry.DeregisterView(trigger1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.ViewCount, Is.EqualTo(1), "the second sweep removes its last entry and counts it out — once");
+            Assert.That(registry.GetViewsForField(0).Length, Is.EqualTo(1));
+            Assert.That(registry.GetViewsForField(1).Length, Is.EqualTo(0));
+            Assert.That(abandoned.DeltaBuffer.BlockIsLive, Is.False, "retired once nothing lists it");
+        });
+    }
+
     [Test]
     public void EmptyRegistry_AllFieldsReturnEmptySpan()
     {
@@ -75,7 +121,7 @@ class ViewRegistryTests
 
         var views = registry.GetViewsForField(2);
         Assert.That(views.Length, Is.EqualTo(1));
-        Assert.That(views[0].View, Is.SameAs(view));
+        Assert.That(views[0].ViewId, Is.EqualTo(view.ViewId));
     }
 
     [Test]
@@ -87,15 +133,15 @@ class ViewRegistryTests
         registry.RegisterView(view, view.DeltaBuffer);
 
         Assert.That(registry.GetViewsForField(0).Length, Is.EqualTo(1));
-        Assert.That(registry.GetViewsForField(0)[0].View, Is.SameAs(view));
+        Assert.That(registry.GetViewsForField(0)[0].ViewId, Is.EqualTo(view.ViewId));
 
         Assert.That(registry.GetViewsForField(1).Length, Is.EqualTo(0), "Field 1 not in dependencies");
 
         Assert.That(registry.GetViewsForField(2).Length, Is.EqualTo(1));
-        Assert.That(registry.GetViewsForField(2)[0].View, Is.SameAs(view));
+        Assert.That(registry.GetViewsForField(2)[0].ViewId, Is.EqualTo(view.ViewId));
 
         Assert.That(registry.GetViewsForField(3).Length, Is.EqualTo(1));
-        Assert.That(registry.GetViewsForField(3)[0].View, Is.SameAs(view));
+        Assert.That(registry.GetViewsForField(3)[0].ViewId, Is.EqualTo(view.ViewId));
     }
 
     [Test]
@@ -112,9 +158,9 @@ class ViewRegistryTests
 
         var views = registry.GetViewsForField(1);
         Assert.That(views.Length, Is.EqualTo(3));
-        Assert.That(views[0].View, Is.SameAs(viewA));
-        Assert.That(views[1].View, Is.SameAs(viewB));
-        Assert.That(views[2].View, Is.SameAs(viewC));
+        Assert.That(views[0].ViewId, Is.EqualTo(viewA.ViewId));
+        Assert.That(views[1].ViewId, Is.EqualTo(viewB.ViewId));
+        Assert.That(views[2].ViewId, Is.EqualTo(viewC.ViewId));
     }
 
     [Test]
@@ -131,11 +177,11 @@ class ViewRegistryTests
 
         var field0 = registry.GetViewsForField(0);
         Assert.That(field0.Length, Is.EqualTo(1));
-        Assert.That(field0[0].View, Is.SameAs(viewB));
+        Assert.That(field0[0].ViewId, Is.EqualTo(viewB.ViewId));
 
         var field1 = registry.GetViewsForField(1);
         Assert.That(field1.Length, Is.EqualTo(1));
-        Assert.That(field1[0].View, Is.SameAs(viewB));
+        Assert.That(field1[0].ViewId, Is.EqualTo(viewB.ViewId));
     }
 
     [Test]
@@ -203,12 +249,12 @@ class ViewRegistryTests
 
         var field0 = registry.GetViewsForField(0);
         Assert.That(field0.Length, Is.EqualTo(1));
-        Assert.That(field0[0].View, Is.SameAs(view));
+        Assert.That(field0[0].ViewId, Is.EqualTo(view.ViewId));
         Assert.That(field0[0].ComponentTag, Is.EqualTo(1));
 
         var field2 = registry.GetViewsForField(2);
         Assert.That(field2.Length, Is.EqualTo(1));
-        Assert.That(field2[0].View, Is.SameAs(view));
+        Assert.That(field2[0].ViewId, Is.EqualTo(view.ViewId));
         Assert.That(field2[0].ComponentTag, Is.EqualTo(1));
 
         // Unregistered field should be empty
@@ -226,9 +272,9 @@ class ViewRegistryTests
 
         var field0 = registry.GetViewsForField(0);
         Assert.That(field0.Length, Is.EqualTo(2));
-        Assert.That(field0[0].View, Is.SameAs(view));
+        Assert.That(field0[0].ViewId, Is.EqualTo(view.ViewId));
         Assert.That(field0[0].ComponentTag, Is.EqualTo(0));
-        Assert.That(field0[1].View, Is.SameAs(view));
+        Assert.That(field0[1].ViewId, Is.EqualTo(view.ViewId));
         Assert.That(field0[1].ComponentTag, Is.EqualTo(1));
     }
 
@@ -278,8 +324,7 @@ class ViewRegistryTests
                             // Access every element to detect torn reads
                             for (var i = 0; i < span.Length; i++)
                             {
-                                var v = span[i].View;
-                                if (v == null)
+                                if (span[i].DeltaBuffer == null)
                                 {
                                     Interlocked.Increment(ref errors);
                                 }

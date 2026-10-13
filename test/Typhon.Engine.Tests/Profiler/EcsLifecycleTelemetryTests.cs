@@ -226,6 +226,33 @@ internal sealed class EcsLifecycleTelemetryTests : TestBase<EcsLifecycleTelemetr
         Assert.That(events.OfType<EcsDestroyEventDto>().Count(d => d.EntityId == (ulong)victim.RawValue), Is.EqualTo(1));
     }
 
+    /// <summary>
+    /// #865: the archetype membership registry, where an unfiltered view subscribes, records its register and deregister as the field registry does,
+    /// marked by field index 0xFFFF — before, a leaked membership view left no trace at all.
+    /// </summary>
+    [Test]
+    [Category("TelemetryGated")]   // the ECS subtree is off by default; shard.py's T pass turns it on
+    public void AnUnfilteredView_RecordsItsMembershipRegisterAndDeregister()
+    {
+        Assume.That(TelemetryConfig.EcsViewRegistryRegisterActive && TelemetryConfig.EcsViewRegistryDeregisterActive, Is.True,
+            "needs TYPHON__PROFILER__ECS__ENABLED=true");
+        var viewId = -1;
+        var events = CaptureEngineWorkload(dbe =>
+        {
+            using var t = dbe.CreateQuickTransaction();
+            var view = t.Query<EcsUnit>().ToView();
+            viewId = view.ViewId;
+            view.Dispose();
+        });
+
+        // One registry per archetype the query covers (the archetype and its subtree), so count them rather than assume one.
+        var id = (ushort)viewId;
+        var registers = events.OfType<EcsViewRegistryRegisterEventDto>().Count(e => e.ViewId == id && e.FieldIdx == ushort.MaxValue);
+        var deregisters = events.OfType<EcsViewRegistryDeregisterEventDto>().Count(e => e.ViewId == id && e.FieldIdx == ushort.MaxValue);
+        Assert.That(registers, Is.GreaterThan(0), "the view's membership registration is recorded");
+        Assert.That(deregisters, Is.EqualTo(registers), "every membership registration is matched by a deregistration on Dispose");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Harness
     // ═══════════════════════════════════════════════════════════════════════
