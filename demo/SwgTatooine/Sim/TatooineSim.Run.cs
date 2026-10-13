@@ -257,6 +257,9 @@ public sealed partial class TatooineSim
     /// <summary>LSNs the durability watermark gained across the measured window.</summary>
     public long WalLsnGained => _bridge?.WalLsnGained ?? 0L;
 
+    /// <summary>The measured window's WAL records by source and each advancing tick's gain. See <c>SimBridge.WalWriterBreakdown</c>.</summary>
+    public string WalWriterBreakdown => _bridge?.WalWriterBreakdown ?? "";
+
     /// <summary>Combat events dropped at the queue's growth ceiling — a dropped effect, and expected to be zero (SWG-02).</summary>
     public long CombatQueueOverflow => _bridge?.CombatQueue?.OverflowCount ?? 0L;
 

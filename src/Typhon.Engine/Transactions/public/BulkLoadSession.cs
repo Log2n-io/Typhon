@@ -415,7 +415,7 @@ public sealed class BulkLoadSession : IDisposable
         batch.AddBulkManifest(BulkSessionId, isBegin ? 0 : BulkBeginLsn, isFinal ? EntitiesSpawned : 0, isFinal ? EntitiesUpdated : 0);
 
         var wc = WaitContext.FromTimeout(Options.CheckpointTimeout);
-        return _engine.DurabilityLog.Append(ref batch, ref wc);
+        return _engine.DurabilityLog.Append(ref batch, ref wc, WalSource.BulkLoad);
     }
 
     private readonly DatabaseEngine _engine;

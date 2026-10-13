@@ -3,6 +3,15 @@ using System;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>Who appended a batch to the WAL, for <see cref="IDurabilityLog.LsnsAppendedBy"/>.</summary>
+internal enum WalSource
+{
+    Transaction = 0,
+    TableFence = 1,
+    ClusterFence = 2,
+    BulkLoad = 3,
+}
+
 /// <summary>
 /// The single seam every WAL emitter goes through (01 §3). One <c>Append</c> entry point appends a transaction's (or
 /// fence's) record batch through the codec into the kept transport. Failure THROWS — never a sentinel (LOG-01) — so an
@@ -22,10 +31,14 @@ internal interface IDurabilityLog
     /// chunks (02 §5). Returns the batch's highest LSN, or 0 when the batch is empty. Throws on back-pressure timeout or an
     /// over-large record (LOG-01).
     /// </summary>
-    long Append(ref CommitBatchBuilder batch, ref WaitContext ctx);
+    long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, WalSource source = WalSource.TableFence);
+
+    /// <summary>LSNs (records) published by <paramref name="source"/> since the log opened. Diagnostic: a test that bounds the WAL's growth names the
+    /// writer it did not expect with it.</summary>
+    long LsnsAppendedBy(WalSource source);
 
     /// <summary>
-    /// <see cref="Append(ref CommitBatchBuilder, ref WaitContext)"/>, also storing the batch's first LSN into <paramref name="inFlightFloor"/> after
+    /// <see cref="Append(ref CommitBatchBuilder, ref WaitContext, WalSource)"/> for a transaction, also storing the batch's first LSN into <paramref name="inFlightFloor"/> after
     /// claiming it and before publishing the frame (CK-13). A barrier that covers the batch has drained that frame, so it also sees the floor. With
     /// <paramref name="cards"/>, the transaction's commit point (VIS-03): its card <paramref name="cardSlot"/> registered and its stamp drawn once the claim
     /// holds, the stamp written on TxCommit and left in <see cref="CommitBatchBuilder.CommitStamp"/>.

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 
 namespace SwgTatooine;
@@ -56,6 +57,29 @@ public sealed partial class SimBridge
     /// <summary>Total LSNs the durability watermark gained across the measured window.</summary>
     public long WalLsnGained => Interlocked.Read(ref _walLsnGained);
 
+    // Who appended the WAL's records over the measured window, from the durability log's per-source counters, and the gain of each advancing tick: what
+    // AC-2 prints when the watermark moved more than loot and rewards explain, so the failure names the writer instead of leaving it to be guessed.
+    private readonly long[] _walSourceFirst = new long[4];
+    private readonly long[] _walSourceLast = new long[4];
+    private bool _walSourceSampled;
+    private readonly List<string> _walAdvanceLog = [];
+
+    /// <summary>The measured window's WAL records by source, and each advancing tick's gain (SWG-02's diagnostic).</summary>
+    public string WalWriterBreakdown
+    {
+        get
+        {
+            var sb = new StringBuilder("records appended in the window by source: ");
+            for (var k = 0; k < _walSourceLast.Length; k++)
+            {
+                sb.Append(k == 0 ? "" : ", ").Append((WalSource)k).Append(' ').Append(_walSourceLast[k] - _walSourceFirst[k]);
+            }
+
+            sb.Append("; advances (tick: LSNs gained, appended by source since the previous sample): ").AppendJoin("; ", _walAdvanceLog);
+            return sb.ToString();
+        }
+    }
+
     /// <summary>Report phase, every tick past warm-up: fold the previous fence's per-archetype counters.</summary>
     public void SpatialTelemetryTick(TickContext ctx)
     {
@@ -74,12 +98,30 @@ public sealed partial class SimBridge
         }
 
         var lsn = Dbe.DurableLsn;
+        Span<long> sources = stackalloc long[4];
+        for (var k = 0; k < sources.Length; k++)
+        {
+            sources[k] = Dbe.DurabilityLog.LsnsAppendedBy((WalSource)k);
+        }
+
         if (_walLsnLast >= 0 && lsn > _walLsnLast)
         {
             _walAdvances++;
             _walLsnGained += lsn - _walLsnLast;
+            if (_walAdvanceLog.Count < 32)
+            {
+                _walAdvanceLog.Add($"{ctx.TickNumber}: {lsn - _walLsnLast} (tx {sources[0] - _walSourceLast[0]}, table fence {sources[1] - _walSourceLast[1]}, "
+                    + $"cluster fence {sources[2] - _walSourceLast[2]}, bulk {sources[3] - _walSourceLast[3]})");
+            }
         }
 
+        if (!_walSourceSampled)
+        {
+            sources.CopyTo(_walSourceFirst);
+            _walSourceSampled = true;
+        }
+
+        sources.CopyTo(_walSourceLast);
         _walLsnLast = lsn;
 
         _telemetryIds ??=
