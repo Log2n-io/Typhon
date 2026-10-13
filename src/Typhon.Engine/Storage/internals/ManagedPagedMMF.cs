@@ -1296,6 +1296,9 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     /// </summary>
     private void SeedDirectoryPair(int primaryPageIndex, int twinPageIndex) => _pairState[primaryPageIndex] = new DirPair(twinPageIndex, twinPageIndex, 0);
 
+    // What a slot reads as when zeroed: generation 0, invalid (CK-05).
+    private static readonly byte[] ZeroPage = new byte[PageSize];
+
     /// <summary>
     /// Persists a protected directory page (CK-05 write protocol): under <see cref="_pairLock"/>, write the full image to
     /// the NON-current slot with <c>PairGeneration = gen+1</c> and a fresh CRC, fsync, then flip the in-memory current
@@ -1319,6 +1322,15 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             }
             var alternate = (dp.CurrentSlot == primaryPageIndex) ? dp.Twin : primaryPageIndex;
             var newGen = dp.Gen + 1;
+
+            // A seeded pair's first persist: the twin's page number may be reused, and on disk it can hold a deleted segment's directory at any
+            // generation, which would outrank this one at the next open (#1129). Zeroed first, with its own fsync — generation 0 reads invalid —
+            // unless it lies past the end of the file, where nothing was ever written.
+            if (dp.Gen == 0 && (dp.Twin + 1L) * PageSize <= FileSize)
+            {
+                WritePageDirect(dp.Twin, ZeroPage);
+                FlushToDisk();
+            }
 
             var span = new Span<byte>(image, PageSize);
             PageBaseHeader.WritePairGeneration(span, newGen);

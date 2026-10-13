@@ -663,6 +663,9 @@ CK-08 (flush-only cycles) are later increments.
             overwritten
   post: at open, ∃ ≥1 CRC-valid slot per protected page; selection = highest valid `PairGeneration`; both-invalid → open
         fails loudly (never a silent fallback)
+  invariant a pair's first persist zeroes its twin first, with its own fsync, unless the twin lies past the file's end: a twin page number is
+            reused from freed pages, and its disk image — a deleted directory's, at any generation — outranked the new pair's generation 1 at the
+            next open, which loaded the deleted segment (#1129)
   invariant every directory page of a segment has a twin — the map page a directory needs only for its terminator, when its
             entries end at a page's end, included — and the open walk registers the current slot of every page in the chain
   scope: META PAIR (C1): `ManagedPagedMMF.PersistMetaNow` (write: alternate slot + gen + CRC + fsync + flip), `LoadMeta` (read:
@@ -685,7 +688,8 @@ CK-08 (flush-only cycles) are later increments.
             TornCurrentSlot_ReopenSelectsSibling, BothSlotsCorrupt_OpenFailsLoudly, MultiExtensionSegment_RoundTripsReopen,
             RootGetsTwin_OccupancyMarkedAndAccounted, DeleteSegment_FreesTwinAndClearsPairState (A1.10),
             ATerminatorOnlyMapPage_IsPaired_AndTheMapPagesPastItReopenFromTheirCurrentSlot (#1206) + falsification;
-            TornCaptureRecoveryTests.ATornSegmentReplacedAtACrashOpen_GivesUpItsDirectoryPair [VerifiesRule] (#1302).
+            TornCaptureRecoveryTests.ATornSegmentReplacedAtACrashOpen_GivesUpItsDirectoryPair [VerifiesRule] (#1302);
+            DirPair_AReusedTwinHoldingADeletedSegmentsDirectory_DoesNotWinAtReopen [VerifiesRule] (#1129, red without the zeroing).
             MetaPairStructuralFlushTests — the SOLE-WRITER property: after a full engine lifecycle both slots verify,
             their generations are consecutive, and shutdown writes strictly alternate. That is the property the
             violation below broke, and no earlier test covered it: every one above checks the pair's READ selection or

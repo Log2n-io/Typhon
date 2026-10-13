@@ -336,6 +336,53 @@ public class DirectoryPairTests
             "DeleteSegment must clear the PairState entry — a stale entry mis-routes a cold read after the primary is reallocated");
     }
 
+    /// <summary>
+    /// A new pair seeded over the pages of a deleted segment's pair: the twin still holds that segment's directory on disk, at a higher generation than the
+    /// new pair's first persist. The reopen must load the new directory, not the deleted one (#1129).
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CK-05")]
+    public void DirPair_AReusedTwinHoldingADeletedSegmentsDirectory_DoesNotWinAtReopen()
+    {
+        const int length = 5;
+        int root;
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+            var cs0 = mmf.CreateChangeSet();
+            var deleted = mmf.AllocateSegment(PageBlockType.None, length, cs0, StorageSegmentKind.Other);
+            cs0.SaveChanges();                                 // persist #1: the primary, gen 1
+            root = deleted.RootPageIndex;
+            var twin = TwinOf(mmf, root);
+            using (var guard = EpochGuard.Enter(mmf.EpochManager))
+            {
+                mmf.RequestPageEpoch(root, guard.Epoch, out var rootMem);
+                var cs1 = mmf.CreateChangeSet();
+                cs1.AddByMemPageIndex(rootMem);
+                cs1.SaveChanges();                             // persist #2: the twin, gen 2
+            }
+
+            Assert.That(ReadSlotGeneration(mmf, twin), Is.EqualTo(2UL), "precondition: the deleted segment's directory sits in the twin at generation 2");
+
+            var cs2 = mmf.CreateChangeSet();
+            mmf.DeleteSegment(root, cs2);
+            cs2.SaveChanges();
+
+            var cs3 = mmf.CreateChangeSet();
+            var reused = mmf.AllocateSegment(PageBlockType.None, length, cs3, StorageSegmentKind.Component);
+            cs3.SaveChanges();                                 // the new pair's first persist: the primary, gen 1
+            Assert.That((reused.RootPageIndex, TwinOf(mmf, reused.RootPageIndex)), Is.EqualTo((root, twin)),
+                "precondition: the new segment reuses the deleted one's root and twin");
+            mmf.FlushToDisk();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var mmf2 = scope2.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+        Assert.That(mmf2.GetSegment(root).Kind, Is.EqualTo(StorageSegmentKind.Component),
+            "the reopen loaded the deleted segment's directory from the reused twin");
+    }
+
     [Test]
     [CancelAfter(10000)]
     [VerifiesRule("CK-05")]
