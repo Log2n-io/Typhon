@@ -851,6 +851,81 @@ internal sealed class CollectionDurabilityTests
     }
 
     /// <summary>
+    /// A collection buffer a checkpoint consolidated is still its entity's after a hard crash, and the allocator does not hand it out again (#770, RB-06).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The checkpoint is the point. Without one, recovery replays every collection from the log and allocates each buffer afresh, so the handles it writes
+    /// and the allocator it draws them from agree by construction — which is why <see cref="Collections_SurviveAHardCrash"/> could never see this. With
+    /// one, the entities come back from the data file, holding handles into a pool the reopen has to find again.
+    /// </para>
+    /// <para>
+    /// The second seed is the collision probe: same element type, so the same pool. A handle it receives that a recovered entity also holds means one buffer
+    /// now has two owners — and the recovered entity's content is re-read AFTER that seed, because the overwrite is the observable consequence.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("RB-06")]
+    public void CheckpointedCollections_SurviveAHardCrash_AndAreNotReissued()
+    {
+        int segmentRoot;
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True,
+                "the checkpoint must consolidate the seed — otherwise recovery replays it from the log and this test degenerates into the no-checkpoint one");
+            segmentRoot = dbe.GetComponentCollectionSegment<int>().RootPageIndex;
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            Assert.That(dbe.GetComponentCollectionSegment<int>().RootPageIndex, Is.EqualTo(segmentRoot),
+                "the reopen must reload the collection segment the checkpoint consolidated — a fresh one is an empty allocator over handles it never issued");
+            AssertRecoveredContent(dbe, versioned, single);
+
+            var recovered = CollectionHandlesOf(dbe, versioned, single);
+            var (freshVersioned, freshSingle) = SeedBoth(dbe);
+            var fresh = CollectionHandlesOf(dbe, freshVersioned, freshSingle);
+
+            Assert.That(recovered, Is.Unique, "two recovered entities share one collection buffer");
+            Assert.That(fresh, Is.Unique, "two post-recovery entities were handed the same collection buffer");
+            Assert.That(fresh.Intersect(recovered), Is.Empty,
+                "RB-06: a post-recovery allocation re-issued a buffer a recovered entity still holds — one buffer, two owners. Recovered: "
+                + string.Join(",", recovered) + "; fresh: " + string.Join(",", fresh));
+
+            AssertRecoveredContent(dbe, versioned, single);
+            AssertRecoveredContent(dbe, freshVersioned, freshSingle);
+        }
+    }
+
+    /// <summary>Every entity's collection handle, Versioned first then SingleVersion, in the order given.</summary>
+    private static List<int> CollectionHandlesOf(DatabaseEngine dbe, IReadOnlyList<EntityId> versioned, IReadOnlyList<EntityId> single)
+    {
+        var handles = new List<int>();
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in versioned)
+        {
+            handles.Add(tx.Open(id).Read(CcVersionedArch.C).Items._bufferId);
+        }
+
+        foreach (var id in single)
+        {
+            handles.Add(tx.Open(id).Read(CcSingleArch.C).Items._bufferId);
+        }
+
+        return handles;
+    }
+
+    /// <summary>
     /// Applying the same recovery window TWICE converges — AP-12, proven by actually re-applying it.
     /// </summary>
     /// <remarks>

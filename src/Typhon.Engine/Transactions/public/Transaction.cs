@@ -1749,6 +1749,33 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    private KeyValuePair<Type, ComponentInfo>[] _prepareOrder;
+
+    /// <summary>
+    /// The component types in the order PREPARE visits them. A handler commit holds every chain lock it takes there until its publish, so it takes them
+    /// in one global order — component type id, then primary key (<see cref="ComponentInfo.ForEachMutableEntryOrdered{TAction}"/>). In insertion order,
+    /// two commits writing the same entities in opposite orders each held one lock and waited for the other's until RevisionChainLockTimeout (#1321).
+    /// </summary>
+    private ReadOnlySpan<KeyValuePair<Type, ComponentInfo>> PrepareOrder(bool ordered)
+    {
+        var count = _componentInfos.Count;
+        if (_prepareOrder == null || _prepareOrder.Length < count)
+        {
+            _prepareOrder = new KeyValuePair<Type, ComponentInfo>[Math.Max(count, 8)];
+        }
+
+        ((ICollection<KeyValuePair<Type, ComponentInfo>>)_componentInfos).CopyTo(_prepareOrder, 0);
+        var span = _prepareOrder.AsSpan(0, count);
+        if (ordered && count > 1)
+        {
+            span.Sort(static (a, b) => a.Value.ComponentTypeId != b.Value.ComponentTypeId
+                ? a.Value.ComponentTypeId.CompareTo(b.Value.ComponentTypeId)
+                : string.CompareOrdinal(a.Key.FullName, b.Key.FullName));
+        }
+
+        return span;
+    }
+
     /// <summary>Action struct for commit PREPARE iteration: delegates to <see cref="PrepareComponent"/>.</summary>
     private struct PrepareAction : IEntryAction
     {
@@ -2719,9 +2746,10 @@ public unsafe partial class Transaction : EntityAccessor
         // the holdoff `using` and span try/finally inside RollbackCore (slow), this fast-path shim stays EH-free and inlinable into Dispose.
         AssertThreadAffinity();
 
-        // Nothing to do if the transaction is empty
+        // Nothing to undo if the transaction is empty, but it ends here all the same: left in Created, it kept accepting writes (TX-01, #1056)
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Rollbacked;
             return true;
         }
 
@@ -3245,23 +3273,26 @@ public unsafe partial class Transaction : EntityAccessor
     {
         AssertThreadAffinity();
 
+        // Can't commit a transaction already processed — read-only included: one that was rolled back is not committed by this call (TX-01) — nor
+        // one a failed commit's PREPARE consumed (#1262), should its rollback have failed
+        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
+        {
+            return false;
+        }
+
         // Read-only transactions have nothing to commit — trivially succeed
         if (IsReadOnly)
         {
             return true;
         }
 
-        // Nothing to commit if the transaction is empty. Its deferred cleanups wait for its Dispose: an empty commit leaves the transaction usable (still
-        // Created), and the cutoff a tail computes leaves its own snapshot out — trimming to it here took revisions this transaction can still read (TXC-01).
+        // Nothing to commit if the transaction is empty, but it is committed all the same: left in Created, it kept accepting writes its caller believed
+        // came after the commit (TX-01, #1056). Its deferred cleanups wait for its Dispose: the cutoff a tail computes leaves its own snapshot out, and
+        // trimming to it here took revisions this transaction can still read (TXC-01).
         if (State is TransactionState.Created)
         {
+            State = TransactionState.Committed;
             return true;
-        }
-
-        // Can't commit a transaction already processed — nor one a failed commit's PREPARE consumed (#1262), should its rollback have failed
-        if (State is TransactionState.Rollbacked or TransactionState.Committed || _prepareConsumed)
-        {
-            return false;
         }
 
         // AP-03: an engine whose commit pipeline stopped holds a partial publish in memory. Nothing more is appended over it: the restart that recovers
@@ -3341,7 +3372,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Process every Component Type and their components (old CRUD path — Versioned only). AP-01: this is the PREPARE pass — all fallible work,
             // no visibility. The matching PUBLISH pass (PublishPreparedComponents) runs after the WAL Append.
             var prepareAction = new PrepareAction { Tx = this };
-            foreach (var kvp in _componentInfos)
+            foreach (var kvp in PrepareOrder(handler != null))
             {
                 var info = kvp.Value;
 
@@ -3374,7 +3405,14 @@ public unsafe partial class Transaction : EntityAccessor
 
                     try
                     {
-                        kvp.Value.ForEachMutableEntry(ref context, ref prepareAction);
+                        if (handler != null)
+                        {
+                            kvp.Value.ForEachMutableEntryOrdered(ref context, ref prepareAction);
+                        }
+                        else
+                        {
+                            kvp.Value.ForEachMutableEntry(ref context, ref prepareAction);
+                        }
                     }
                     finally
                     {

@@ -134,6 +134,21 @@ internal abstract partial class BTree<TKey, TStore>
     }
     private void AddOrUpdateCore(ref InsertArguments args)
     {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            AddOrUpdateCoreUnguarded(ref args);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private void AddOrUpdateCoreUnguarded(ref InsertArguments args)
+    {
         ref var accessor = ref args.Accessor;
 
         // 1. Empty tree initialization.
@@ -1127,6 +1142,13 @@ internal abstract partial class BTree<TKey, TStore>
             // counted, and the next pass never reserved. Left standing, it makes the next insert into this leaf reserve before it latches.
             node.SetContentionHint(0, ref accessor);
             Interlocked.Increment(ref _contentionSplitCount);
+        }
+
+        // #1321: the siblings a propagated split can spill into are faulted in before the first write, as RemoveIterative does for its merges. Admitted in
+        // Phase 3 instead, a miss threw with the leaf split and the path still latched. A level takes a spill only when full.
+        for (var i = ctx.Depth - 1; i >= 0 && ctx.PathNodes[i].GetIsFull(ref accessor); i--)
+        {
+            PreDirtySiblings(ctx.PathRelatives[i], ref sibAccessor);   // a copy: Phase 3 resolves them again, as before
         }
 
         // insert/split at leaf

@@ -32,15 +32,14 @@ class SeqlockCounterSlotReuseTests
         dbe.RegisterComponentFromAccessor<ItemData>();
     }
 
-    // Quarantined against #892: red on main, ~4 runs in 10, and its own docstring's claim that it has no timing dependence is what the issue disproves.
-    // The nightly still runs the category, which is where a known-red test is supposed to be observed; the merge gate does not, so it does not teach
-    // everyone to read a red gate as normal. Un-quarantine with the fix, not before.
+    // Its red runs (#892) were never this test's invariant: CreateOrGrow's post-condition read a slot the checkpoint had just handed to another page (#840,
+    // fixed by reading under a slot reference, #1144), and TryAcquire's back-off erased an owner's "ready" so a requester timed out on SlotReady (#1201).
     [Test]
-    [Category("Quarantine")]
     public void SlotReuseUnderCachePressure_LeavesNoQuiescentPageWithOddSeqlock()
     {
         // Pre-fix the invariant violation reproduced on a fraction of builds; loop so a regression is caught reliably. Each build overflows the min cache
-        // (forcing the eviction/reuse path), then asserts the invariant directly — no timing dependence, so the test is deterministic once the fix holds.
+        // (forcing the eviction/reuse path), then asserts the invariant directly. Which slots get reused depends on the checkpoint thread's timing, so a
+        // run exercises a different interleaving each time; what is asserted does not depend on it.
         var baseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SeqlockCounterSlotReuseTests));
         Directory.CreateDirectory(baseDir);
 

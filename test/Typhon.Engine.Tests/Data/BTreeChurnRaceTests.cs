@@ -1,0 +1,356 @@
+using Microsoft.Extensions.DependencyInjection;
+using NUnit.Framework;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using Typhon.Engine.Internals;
+
+namespace Typhon.Engine.Tests;
+
+/// <summary>
+/// #1322 (found on #1321): an AllowMultiple B+Tree under concurrent insert/remove churn of random keys — the shape <c>ChaosStressTests.UltimateStress_AllSubsystems</c> puts
+/// on CompD's double index (2 creators adding random keys, 2 deleters removing them), stripped of transactions, the WAL and the ECS.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+class BTreeChurnRaceTests
+{
+    private IServiceProvider _serviceProvider;
+
+    [SetUp]
+    public void Setup()
+    {
+        var name = $"btchurn_{TestContext.CurrentContext.Test.Name}";
+        var services = new ServiceCollection();
+        services
+            .AddLogging()
+            .AddResourceRegistry()
+            .AddMemoryAllocator()
+            .AddEpochManager()
+            .AddScopedManagedPagedMemoryMappedFile(options =>
+            {
+                options.DatabaseName = name[..Math.Min(63, name.Length)];
+                options.DatabaseCacheSize = 64UL * 1024 * 1024;
+            });
+
+        _serviceProvider = services.BuildServiceProvider();
+        _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+    }
+
+    [TearDown]
+    public void TearDown() => (_serviceProvider as IDisposable)?.Dispose();
+
+    private readonly record struct Entry(double Key, int ElementId, int Value);
+
+    private const int MaxLive = 20_000;
+
+    private static string FirstFrame(Exception ex) => ex.StackTrace?.Split((char)10)[0].Trim();
+
+    /// <summary>
+    /// #1321: removing a key that is ABSENT from its leaf, where the key falls between the leaf's last entry and its HighKey. The B-link right-walk in
+    /// OptimisticDescendToLeaf decides "past this leaf" by content (key &gt; last), so it overshot into the next leaf; the authoritative-leaf search then
+    /// rejected that leaf (key below its lower bound) and re-descended into the same overshoot until it threw "no progress in 200 retries" — past the WAL
+    /// append in the engine, which halts it. Single-threaded and deterministic: a random removal order puts many removed keys in that band.
+    /// </summary>
+    [Test]
+    public unsafe void RemoveOfAnAbsentKeyBetweenLastAndHighKey_ReportsNotFound()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 400, sizeof(Index64Chunk));
+        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            const int n = 2000;
+            var elementIds = new int[n + 1];
+            for (var i = 1; i <= n; i++)
+            {
+                elementIds[i] = tree.Add(i, i, ref accessor);
+            }
+
+            var order = new int[n];
+            for (var i = 0; i < n; i++)
+            {
+                order[i] = i + 1;
+            }
+            new Random(1321).Shuffle(order);
+
+            foreach (var k in order)
+            {
+                Assert.That(tree.RemoveValue(k, elementIds[k], k, ref accessor), Is.True, $"present key {k}");
+                Assert.That(tree.RemoveValue(k, elementIds[k], k, ref accessor), Is.False, $"absent key {k} must report not-found");
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
+        }
+    }
+
+    /// <summary>
+    /// #1321: a write that throws while it holds a node latch faults the tree. A new AllowMultiple key allocates its value buffer under the leaf's latch;
+    /// failing that allocation left the latch held, and the next write into the leaf spun on it for good — UltimateStress's hang. Now that write throws.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXW-09")]
+    [CancelAfter(20_000)]
+    public unsafe void AFaultUnderALeafLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 40, sizeof(Index64Chunk));
+        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+
+        void Add(double key)
+        {
+            var scope = epochManager.EnterScope();
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                tree.Add(key, (int)key, ref accessor);
+            }
+            finally
+            {
+                accessor.Dispose();
+                epochManager.ExitScope(scope);
+            }
+        }
+
+        for (var k = 1; k <= 5; k++)
+        {
+            Add(k);
+        }
+
+        var faultingThread = Environment.CurrentManagedThreadId;
+        ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = _ =>
+        {
+            if (Environment.CurrentManagedThreadId == faultingThread)
+            {
+                throw new System.IO.IOException("injected allocation fault");
+            }
+        };
+        try
+        {
+            Assert.That(() => Add(10), Throws.TypeOf<System.IO.IOException>(), "premise: the new key's buffer allocation fails");
+        }
+        finally
+        {
+            ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = null;
+        }
+
+        var later = Task.Run(() => Add(11));
+        Assert.That(() => later.Wait(TimeSpan.FromSeconds(5)), Throws.InstanceOf<AggregateException>()
+            .With.InnerException.TypeOf<InvalidOperationException>().And.InnerException.Message.Contains("faulted"),
+            "the next write into the leaf throws instead of spinning on the abandoned latch");
+        Assert.That(tree.IsFaulted, Is.True);
+    }
+
+    [TestCase(2, 2, 0, 0, 500)]
+    [TestCase(4, 4, 0, 0, 500)]
+    [TestCase(2, 2, 1, 0, 500)]
+    [TestCase(2, 2, 2, 0, 500)]
+    [CancelAfter(30_000)]
+    public unsafe void DoubleMultiple_RandomInsertRemoveChurn_NeverWedgesAndLosesNothing(int inserters, int removers, int movers, int prefill, int durationMs)
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 400, sizeof(Index64Chunk));
+        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+
+        var pool = new ConcurrentQueue<Entry>();
+        var errors = new ConcurrentBag<string>();
+        var removed = new ConcurrentDictionary<int, byte>();
+        var inserted = new ConcurrentDictionary<int, Entry>();
+        int nextValue = 0;
+        var stop = Stopwatch.StartNew();
+        using var start = new ManualResetEventSlim(false);
+        var tasks = new List<Task>();
+        var maxLive = Math.Max(MaxLive, prefill + 5_000);
+
+        // Prefill: a multi-level tree, so leaves have cousins (siblings under different parents) and separators live above the leaves' parents.
+        if (prefill > 0)
+        {
+            var scope = epochManager.EnterScope();
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                var rand = new Random(42);
+                for (var i = 0; i < prefill; i++)
+                {
+                    var value = Interlocked.Increment(ref nextValue);
+                    var key = rand.NextDouble();
+                    var e = new Entry(key, tree.Add(key, value, ref accessor), value);
+                    inserted[value] = e;
+                    pool.Enqueue(e);
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+                epochManager.ExitScope(scope);
+            }
+        }
+
+        for (var t = 0; t < inserters; t++)
+        {
+            var seed = 1000 + t;
+            tasks.Add(Task.Factory.StartNew(() =>
+            {
+                var rand = new Random(seed);
+                start.Wait();
+                while (stop.ElapsedMilliseconds < durationMs && errors.IsEmpty)
+                {
+                    // Bound the live population: this bare harness has no checkpointer, so an unbounded tree fills the cache with dirty pages and the run ends on
+                    // page-cache back-pressure instead of on the tree. The race lives at small populations anyway (the tree empties and refills constantly).
+                    if (pool.Count > maxLive)
+                    {
+                        Thread.SpinWait(50);
+                        continue;
+                    }
+
+                    var scope = epochManager.EnterScope();
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        var value = Interlocked.Increment(ref nextValue);
+                        var key = rand.NextDouble();
+                        var elementId = tree.Add(key, value, ref accessor);
+                        var e = new Entry(key, elementId, value);
+                        inserted[value] = e;
+                        pool.Enqueue(e);
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"insert: {ex.GetType().Name}: {ex.Message} @ {FirstFrame(ex)}");
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                        epochManager.ExitScope(scope);
+                    }
+                }
+            }, TaskCreationOptions.LongRunning));
+        }
+
+        for (var t = 0; t < removers; t++)
+        {
+            tasks.Add(Task.Factory.StartNew(() =>
+            {
+                start.Wait();
+                while (stop.ElapsedMilliseconds < durationMs && errors.IsEmpty)
+                {
+                    if (!pool.TryDequeue(out var e))
+                    {
+                        Thread.SpinWait(50);
+                        continue;
+                    }
+
+                    var scope = epochManager.EnterScope();
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        if (!tree.RemoveValue(e.Key, e.ElementId, e.Value, ref accessor))
+                        {
+                            errors.Add($"remove: value {e.Value} under key {e.Key} not found");
+                        }
+                        else
+                        {
+                            removed[e.Value] = 0;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"remove: {ex.GetType().Name}: {ex.Message} @ {FirstFrame(ex)}");
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                        epochManager.ExitScope(scope);
+                    }
+                }
+            }, TaskCreationOptions.LongRunning));
+        }
+
+        // Movers: UltimateStress's role 9 — re-key a live entry (MoveValue) while inserts and removes churn the same tree. An entry is owned by whoever
+        // dequeued it, so a move and a remove never target the same element at once.
+        for (var t = 0; t < movers; t++)
+        {
+            var seed = 5000 + t;
+            tasks.Add(Task.Factory.StartNew(() =>
+            {
+                var rand = new Random(seed);
+                start.Wait();
+                while (stop.ElapsedMilliseconds < durationMs && errors.IsEmpty)
+                {
+                    if (!pool.TryDequeue(out var e))
+                    {
+                        Thread.SpinWait(50);
+                        continue;
+                    }
+
+                    var scope = epochManager.EnterScope();
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        var newKey = rand.NextDouble();
+                        var newElementId = tree.MoveValue(e.Key, newKey, e.ElementId, e.Value, ref accessor, out _, out _);
+                        if (newElementId < 0)
+                        {
+                            errors.Add($"move: value {e.Value} under key {e.Key} not found");
+                        }
+                        else
+                        {
+                            var moved = new Entry(newKey, newElementId, e.Value);
+                            inserted[e.Value] = moved;
+                            pool.Enqueue(moved);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"move: {ex.GetType().Name}: {ex.Message} @ {ex.StackTrace?.Split((char)10)[0]?.Trim()}");
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                        epochManager.ExitScope(scope);
+                    }
+                }
+            }, TaskCreationOptions.LongRunning));
+        }
+
+        stop.Restart();
+        start.Set();
+        Task.WaitAll(tasks.ToArray(), TestContext.CurrentContext.CancellationToken);
+
+        Assert.That(errors, Is.Empty, $"{errors.Count} errors after {nextValue} inserts / {removed.Count} removes; first: "
+            + string.Join(" | ", new List<string>(errors).GetRange(0, Math.Min(5, errors.Count))));
+
+        // Census: every inserted-and-not-removed value is present exactly once under its key; nothing removed is still there.
+        var seen = new HashSet<int>();
+        using (var en = tree.EnumerateRangeMultiple(double.MinValue, double.MaxValue))
+        {
+            while (en.MoveNextKey())
+            {
+                do
+                {
+                    var values = en.CurrentValues;
+                    for (var i = 0; i < values.Length; i++)
+                    {
+                        Assert.That(seen.Add(values[i]), Is.True, $"value {values[i]} listed twice");
+                        Assert.That(removed.ContainsKey(values[i]), Is.False, $"removed value {values[i]} still listed");
+                    }
+                }
+                while (en.NextChunk());
+            }
+        }
+
+        Assert.That(seen.Count, Is.EqualTo(inserted.Count - removed.Count), "live values in the tree");
+    }
+}
