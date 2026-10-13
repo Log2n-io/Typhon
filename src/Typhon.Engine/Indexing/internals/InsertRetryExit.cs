@@ -149,8 +149,11 @@ internal static class InsertRetryExit
     /// </summary>
     public const int SplitReservationShort = 27;
 
+    /// <summary>The remove's recorded path top is no longer the root (IXW-05's guard on the remove side, #1329). A REMOVE code, after the insert's 27.</summary>
+    public const int RemoveRootMovedUnderDescent = 28;
+
     /// <summary>One past the highest code — sizes the counter array without hard-coding the count at each call site.</summary>
-    public const int Count = 28;
+    public const int Count = 29;
 
     /// <summary>Short names, indexed by code, for diagnostic dumps.</summary>
     public static readonly string[] Names =
@@ -183,5 +186,6 @@ internal static class InsertRetryExit
         "RemovePathLockFailed",
         "RemovePathVersionChanged",
         "SplitReservationShort",
+        "RemoveRootMovedUnderDescent",
     ];
 }

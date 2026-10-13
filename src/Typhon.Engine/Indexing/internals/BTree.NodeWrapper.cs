@@ -185,6 +185,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
             right.SetPrevious(this, ref accessor);
             SetNext(right, ref accessor);
+            // Not published as the tail here even when it is one: the caller still writes into it (InsertLeaf places the new item), and it holds no latch —
+            // the tail would hand it to the append fast path mid-write. InsertIterative publishes it once the leaf work is done (#1329, IXW-10).
             return right;
         }
 
@@ -607,6 +609,10 @@ internal abstract partial class BTree<TKey, TStore>
                             {
                                 next.SetPrevious(previous, ref sibAccessor);
                             }
+                            else
+                            {
+                                _storage.Owner._reverseLinkList = previous;   // the tail merged into its left neighbour, both latched (#1329)
+                            }
 
                             Validate();
                             Validate();
@@ -622,6 +628,10 @@ internal abstract partial class BTree<TKey, TStore>
                             if (rightNext.IsValid)
                             {
                                 rightNext.SetPrevious(this, ref sibAccessor);
+                            }
+                            else
+                            {
+                                _storage.Owner._reverseLinkList = this;   // this leaf absorbed the tail, both latched (#1329)
                             }
 
                             Validate();
