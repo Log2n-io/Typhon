@@ -89,7 +89,9 @@ public unsafe partial class Transaction : EntityAccessor
     // blittable (FirstChunkId, CurRevisionIndex). Pooled, reused across pooled Transaction lifetimes; cleared after each commit.
     private List<PublishEntry> _publishEntries;
 
-    // The first supplies this commit claimed in PREPARE (DatabaseEngine.FirstSupplyClaims), released after its publish or at its abort.
+    // The first supplies this transaction wrote (a Versioned component supplied to a published entity that had none), and those its commit claimed
+    // (DatabaseEngine.FirstSupplyClaims), released after its publish or on any exit of the commit.
+    private List<(long Pk, int ComponentTypeId)> _firstSupplies;
     private List<(long Pk, int ComponentTypeId)> _firstSupplyClaims;
 
     // AP-01 Debug guard: set true after the WAL Append phase, asserted when the PUBLISH phase begins so any future reorder that publishes before
@@ -1705,39 +1707,63 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// PREPARE of a first supply — a Versioned component supplied to a published entity that had none (STAGE-02, QENABLE-01). The write created a chain of its
-    /// own, and two supplies of one component would each publish theirs: the record keeps one, the slot and the index the other's value. So one supply of an
-    /// (entity, component) commits at a time (<see cref="DatabaseEngine.FirstSupplyClaims"/>): a second waits for the claim, bounded by
-    /// <see cref="TimeoutOptions.RevisionChainLockTimeout"/>, and finds the root the first published — and joins that chain as an update would
-    /// (<see cref="JoinPublishedChain"/>), so the later commit's value wins, or the conflict handler decides, as for any write-write conflict.
+    /// The first supplies this transaction wrote — a Versioned component supplied to a published entity that had none (STAGE-02, QENABLE-01) — claimed before
+    /// PREPARE (<see cref="DatabaseEngine.FirstSupplyClaims"/>), so one supply of an (entity, component) commits at a time: the write created a chain of its
+    /// own, and two supplies would each publish theirs — the record keeping one, the slot and the index the other's value. A second waits for the claim,
+    /// bounded by <see cref="TimeoutOptions.RevisionChainLockTimeout"/>, then finds the root the first published (<see cref="PrepareFirstSupply"/>).
     /// </summary>
     /// <remarks>
-    /// A first supply aborted meanwhile publishes no root, and the waiter commits as the first. The wait holds whatever chain locks this commit took for
-    /// earlier entries (handler path); a supplier waiting on one of them times out, and one of the two commits fails.
+    /// In one global order — (entity, component type) — and before PREPARE takes any chain lock: two commits supplying two components in crossed order
+    /// cannot each hold one claim and wait for the other's, and a waiter holds nothing a claim holder needs. A first supply aborted meanwhile publishes no
+    /// root, and the waiter commits as the first.
     /// </remarks>
+    private void ClaimFirstSupplies(ref UnitOfWorkContext ctx)
+    {
+        if (_firstSupplies is not { Count: > 0 } supplies)
+        {
+            return;
+        }
+
+        supplies.Sort();
+        var claims = _dbe.FirstSupplyClaims;
+        for (var i = 0; i < supplies.Count; i++)
+        {
+            var key = supplies[i];
+            if (i > 0 && supplies[i - 1] == key)
+            {
+                continue;
+            }
+
+            if (!claims.TryAdd(key, TSN))
+            {
+                _dbe.FirstSupplyWaitProbe?.Invoke();
+                var wc = ComposeWaitContext(ref ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+                var waiter = new AdaptiveWaiter();
+                while (!claims.TryAdd(key, TSN))
+                {
+                    if (!waiter.Wait(ref wc))
+                    {
+                        ThrowHelper.ThrowLockTimeout("FirstSupply/Claim", TimeoutOptions.Current.RevisionChainLockTimeout);
+                    }
+                }
+            }
+
+            (_firstSupplyClaims ??= []).Add(key);
+            _dbe.FirstSupplyClaimedProbe?.Invoke(key.Pk, key.ComponentTypeId);
+        }
+    }
+
+    /// <summary>
+    /// PREPARE of a claimed first supply (<see cref="ClaimFirstSupplies"/>): when a supply that committed meanwhile published the record's root, this one
+    /// joins that chain as an update would (<see cref="JoinPublishedChain"/>), so the later commit's value wins, or the conflict handler decides, as for any
+    /// write-write conflict.
+    /// </summary>
     private void PrepareFirstSupply(ref CommitContext context)
     {
         var pk = context.PrimaryKey;
         var info = context.Info;
-        var key = (pk, info.ComponentTypeId);
-        var claims = _dbe.FirstSupplyClaims;
-        if (!claims.TryAdd(key, TSN))
-        {
-            _dbe.FirstSupplyWaitProbe?.Invoke();
-            var wc = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
-            var waiter = new AdaptiveWaiter();
-            while (!claims.TryAdd(key, TSN))
-            {
-                if (!waiter.Wait(ref wc))
-                {
-                    ThrowHelper.ThrowLockTimeout("FirstSupply/Claim", TimeoutOptions.Current.RevisionChainLockTimeout);
-                }
-            }
-        }
 
-        (_firstSupplyClaims ??= []).Add(key);
-
-        // The root a supply that committed meanwhile published: its publish set it before releasing the claim this one just took.
+        // The root a supply that committed meanwhile published: its publish set it before releasing the claim this one took.
         var entityId = EntityId.FromRaw(pk);
         var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
         var es = _dbe._archetypeStates[meta.ArchetypeId];
@@ -1763,31 +1789,67 @@ public unsafe partial class Transaction : EntityAccessor
 
     /// <summary>
     /// A first supply that lost the race gives its own chain up for <paramref name="root"/>, the one the winner published: its value becomes a revision of
-    /// that chain, pending as any update's, and the supply an update that read the component absent — no read value, and a commit since (the winner's).
-    /// Its own chain, which no other transaction can reach, is freed.
+    /// that chain, pending as any update's, and the supply an update that read the component absent — no read value, and a commit since (the winner's). A
+    /// supply this transaction then destroyed joins as the tombstone its own revision had become (REAP-02). Its own chain, which no other transaction can
+    /// reach, is freed.
     /// </summary>
+    /// <remarks>
+    /// Built on a copy and swapped in only once it holds: a throw before — the chain lock's timeout, a page access — leaves the entry naming its own Created
+    /// chain, which the rollback frees, with the entry added to the winner's chain voided and its chunk freed here. Swapped in first, the rollback took the
+    /// entry for a Created one and freed the winner's chain, still named by the record.
+    /// </remarks>
     private void JoinPublishedChain(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, int root)
     {
         var ownRoot = compRevInfo.CompRevTableFirstChunkId;
         var ownContent = compRevInfo.CurCompContentChunkId;
+        var tombstone = ownContent == 0;
 
-        compRevInfo.CompRevTableFirstChunkId = root;
-        compRevInfo.CurCompContentChunkId = 0;
-        compRevInfo.CurRevisionIndex = -1;
-        ComponentRevisionManager.AddCompRev(info, ref compRevInfo, TSN, UowId, false);
+        var joined = compRevInfo;
+        joined.CompRevTableFirstChunkId = root;
+        joined.CurCompContentChunkId = 0;
+        joined.CurRevisionIndex = -1;
+        var added = false;
+        try
+        {
+            ComponentRevisionManager.AddCompRev(info, ref joined, TSN, UowId, tombstone);
+            added = true;
+            _dbe.FirstSupplyJoinProbe?.Invoke();
 
-        // The bytes, collection handles included, move to the new revision's chunk, which takes over the buffers they name: the old chunk is freed raw, as
-        // the conflict resolution frees its orphan.
-        var size = info.ComponentTable.ComponentTotalSize;
-        new ReadOnlySpan<byte>(info.CompContentAccessor.GetChunkAddress(ownContent), size)
-            .CopyTo(new Span<byte>(info.CompContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId, true), size));
-        info.CompContentSegment.FreeChunk(ownContent);
+            // The bytes, collection handles included, move to the new revision's chunk, which takes over the buffers they name: the old chunk is freed raw,
+            // as the conflict resolution frees its orphan.
+            if (!tombstone)
+            {
+                var size = info.ComponentTable.ComponentTotalSize;
+                new ReadOnlySpan<byte>(info.CompContentAccessor.GetChunkAddress(ownContent), size)
+                    .CopyTo(new Span<byte>(info.CompContentAccessor.GetChunkAddress(joined.CurCompContentChunkId, true), size));
+            }
+        }
+        catch
+        {
+            if (added)
+            {
+                ComponentRevisionManager.VoidOwnPendingEntry(info, root, joined.CurCompContentChunkId, TSN, joined.CurRevisionIndex);
+                if (joined.CurCompContentChunkId != 0)
+                {
+                    info.CompContentSegment.FreeChunk(joined.CurCompContentChunkId);
+                }
+            }
+
+            throw;
+        }
+
+        if (!tombstone)
+        {
+            info.CompContentSegment.FreeChunk(ownContent);
+        }
+
         info.CompRevTableSegment.FreeChunk(ownRoot);
 
-        compRevInfo.Operations = (compRevInfo.Operations & ~ComponentInfo.OperationType.Created) | ComponentInfo.OperationType.Updated;
-        compRevInfo.PrevCompContentChunkId = 0;
-        compRevInfo.PrevRevisionIndex = -1;
-        compRevInfo.ReadCommitSequence = 0;
+        joined.Operations = (joined.Operations & ~ComponentInfo.OperationType.Created) | (tombstone ? 0 : ComponentInfo.OperationType.Updated);
+        joined.PrevCompContentChunkId = 0;
+        joined.PrevRevisionIndex = -1;
+        joined.ReadCommitSequence = 0;
+        compRevInfo = joined;
     }
 
     /// <summary>The first supplies this commit claimed, released. Idempotent: after the publish, and on every exit of the commit.</summary>
@@ -1801,7 +1863,8 @@ public unsafe partial class Transaction : EntityAccessor
         _dbe.FirstSupplyReleaseProbe?.Invoke();
         foreach (var key in claimed)
         {
-            _dbe.FirstSupplyClaims.TryRemove(key, out _);
+            // Only this transaction's: a claim another commit took since is not this one's to drop.
+            _dbe.FirstSupplyClaims.TryRemove(new KeyValuePair<(long Pk, int ComponentTypeId), long>(key, TSN));
         }
 
         claimed.Clear();
@@ -1938,7 +2001,7 @@ public unsafe partial class Transaction : EntityAccessor
         ref var compRevInfo = ref context.CompRevInfo;
 
         // A component supplied to a published entity that had none (STAGE-02): before its chain is read below, as it may be another's by then.
-        if ((compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0 && !SpawnedContains(EntityId.FromRaw(pk)))
+        if (_firstSupplyClaims is { Count: > 0 } && (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0 && !SpawnedContains(EntityId.FromRaw(pk)))
         {
             PrepareFirstSupply(ref context);
         }
@@ -3557,6 +3620,9 @@ public unsafe partial class Transaction : EntityAccessor
             _publishDrainIndex = 0;
             _pendingUniqueMoves = 0;
 
+            // QENABLE-01: the first supplies, claimed before any chain lock and in one order (ClaimFirstSupplies). A timeout here leaves the commit retryable.
+            ClaimFirstSupplies(ref ctx);
+
             // An entity this transaction spawned and destroyed never exists for anyone else: its storage goes back now, as a rollback's would (#1229).
             ReleaseSpawnsDestroyedHere();
 
@@ -3762,6 +3828,9 @@ public unsafe partial class Transaction : EntityAccessor
             // past its append has pinned its floor on the engine (AP-03).
             Volatile.Write(ref _inFlightLsnFloor, 0);
 
+            // Next, and it cannot throw: a claim left behind would make every later supply of its component time out for the engine's life.
+            ReleaseFirstSupplyClaims();
+
             // AP-01 safety net: if the commit threw between PREPARE and PUBLISH, retained handler locks would otherwise be orphaned. On the success
             // path PublishPreparedComponents already drained and cleared _publishEntries, so this is a no-op.
             ReleaseRetainedPublishLocks();
@@ -3769,7 +3838,6 @@ public unsafe partial class Transaction : EntityAccessor
             // VIS-03: a commit that failed before its commit point gives its card back. A leaked reservation would block its window for good, and a
             // retried commit of this transaction would wait on itself. A no-op on success (released after the publish).
             ReleaseCommitCard();
-            ReleaseFirstSupplyClaims();
             scope.Dispose();
         }
     }

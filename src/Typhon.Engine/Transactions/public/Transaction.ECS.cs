@@ -89,6 +89,9 @@ public unsafe partial class Transaction
         // older snapshot resolves no chain for this slot and correctly sees the component as absent.
         var chunkId = AllocateVersionedSlotContent(meta, table, slot, id, out _);
 
+        // A first supply: claimed at the commit, so a concurrent one of the same component joins one chain (QENABLE-01, Transaction.ClaimFirstSupplies).
+        (_firstSupplies ??= []).Add(((long)id.RawValue, info.ComponentTypeId));
+
         var dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
         Unsafe.WriteUnaligned(ref dst[table.ComponentOverhead], value);
         return chunkId;
@@ -5193,5 +5196,6 @@ public unsafe partial class Transaction
         _pendingDestroys?.Clear();
         _pendingDeathClusters?.Clear();
         _pendingEnableDisable?.Clear();
+        _firstSupplies?.Clear();
     }
 }

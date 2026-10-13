@@ -171,6 +171,57 @@ class QueryIndexPathSnapshotTests : TestBase<QueryIndexPathSnapshotTests>
     }
 
     /// <summary>
+    /// Many clusters, destroys in two of them: the side stream (the clusters a newer death touched) and the tree stream (the rest) each contribute rows,
+    /// merged in key order across pages, ascending and descending.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    public void AnOrderedQueryAcrossClusters_MergesTheTreeAndTheClustersReadWhole()
+    {
+        using var dbe = OpenEngine();
+        var tiers = Enumerable.Range(0, 300).Select(i => (i * 37) % 300).ToArray();
+        var ids = Spawn(dbe, tiers);
+        var byTier = ids.Zip(tiers).OrderBy(p => p.Second).Select(p => p.First).ToList();
+        using var reader = dbe.CreateQuickTransaction();
+        Destroy(dbe, ids[10], ids[200]);
+
+        EcsQuery<StatsArch> Q() => reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 0);
+        Assert.That(Q().OrderByField<StatsRanked, int>(x => x.Tier).ExecuteOrdered(), Is.EqualTo(byTier), "ascending");
+        Assert.That(Q().OrderByFieldDescending<StatsRanked, int>(x => x.Tier).ExecuteOrdered(), Is.EqualTo(Enumerable.Reverse(byTier)), "descending");
+        Assert.That(Q().OrderByField<StatsRanked, int>(x => x.Tier).Skip(25).Take(250).ExecuteOrdered(), Is.EqualTo(byTier.GetRange(25, 250)), "a page");
+    }
+
+    /// <summary>A destroy lands during every attempt of the merge: past its attempts the query is answered by the scans and sorted, still right.</summary>
+    [Test]
+    [VerifiesRule("VIS-09")]
+    public void AnOrderedQueryRacedOnEveryAttempt_FallsBackAndStillAnswers()
+    {
+        using var dbe = OpenEngine();
+        var ids = Spawn(dbe, 1, 2, 3, 4, 5);
+        using var reader = dbe.CreateQuickTransaction();
+
+        QueryPathProbe.Reset();
+        try
+        {
+            var raced = 0;
+            QueryPathProbe.OrderedBeforeStreamsHook = () =>
+            {
+                if (raced < 3)
+                {
+                    Destroy(dbe, ids[raced++]);
+                }
+            };
+            var ordered = reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 1).OrderByField<StatsRanked, int>(x => x.Tier).ExecuteOrdered();
+            Assert.That(raced, Is.EqualTo(3), "premise: every attempt was raced");
+            Assert.That(ordered, Is.EqualTo(ids), "the fallback lost an entity its snapshot sees");
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
+    }
+
+    /// <summary>
     /// The destroy publishes between the selective scan's tree read and its cluster reads, after it read the destroy stamp: the tree named the slot, the
     /// slot is hidden by the time it is read, and its record decides it.
     /// </summary>

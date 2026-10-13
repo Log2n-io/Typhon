@@ -1064,13 +1064,15 @@ both fast and exact inside the window; this rule fixes what it does promise.
             bit is clear, and presence fails `Disabled<T>`); its first supply moves that entry to the supplied value
             (`Transaction.PublishClusterIndexes`) — added instead, it outlived the supply under a key the entity never had. Enable and
             disable never touch an index
-  invariant two supplies of one absent Versioned component end in one chain: a first supply claims (entity, component) in PREPARE
-            (`Transaction.PrepareFirstSupply`, `DatabaseEngine.FirstSupplyClaims`) and releases it once its publish set the record's
-            root, or at its abort (`Transaction.ReleaseFirstSupplyClaims`). A second supply waits for the claim, bounded by the chain-lock
-            timeout, and finds that root: its revision joins the chain as an update's (`Transaction.JoinPublishedChain`) — the later
-            commit wins, or the conflict handler decides, shown no read value (`ConcurrencyConflictSolver.ReadWasAbsent`). Each supply
-            creating its own chain left the record on the first one published and the slot and index on the other's value: a point read
-            and every query disagreed for good, and the second chain was unreachable
+  invariant two supplies of one absent Versioned component end in one chain: a commit claims each (entity, component) it first-supplies
+            before PREPARE takes any chain lock, in one global order (`Transaction.ClaimFirstSupplies`, `DatabaseEngine.FirstSupplyClaims`),
+            and releases them once its publish set the records' roots, or on any exit of the commit, its own entries only
+            (`Transaction.ReleaseFirstSupplyClaims`). A second supply waits for the claim, bounded by the chain-lock timeout, and finds that
+            root: its revision joins the chain as an update's (`Transaction.PrepareFirstSupply`, `Transaction.JoinPublishedChain`) — the
+            later commit wins, or the conflict handler decides, shown no read value (`ConcurrencyConflictSolver.ReadWasAbsent`); a supply
+            the transaction then destroyed joins as its tombstone. The join is built aside and swapped in once it holds, so a failure leaves
+            the entry naming its own chain. Each supply creating its own chain left the record on the first one published and the slot and
+            index on the other's value: a point read and every query disagreed for good, and the second chain was unreachable
   invariant a spawn that leaves a unique-indexed component unsupplied is refused before its append, Versioned and SingleVersion alike
             (`Transaction.CheckSpawnUniqueKeys`): a SingleVersion one held key 0 against every later spawn that supplied 0. Supplied means the
             bits the spawn publishes with — an `Enable(comp, value)` on the pending spawn counts
@@ -1085,7 +1087,7 @@ both fast and exact inside the window; this rule fixes what it does promise.
          EcsQuery.ScanClusterSoa, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteOrderedClustered, ArchetypeSortedStream.TryAdmitCurrent,
          EcsQuery.ToView, EcsQuery.Where, EcsQuery.AdmitsT2, EcsQuery.CollectPendingSpawnsWithFieldFilter, EcsQuery.ExecuteSpatial,
          EntityRef.TryReadForPredicate, Transaction.InsertClusterIndexEntries, Transaction.PublishClusterIndexes, Transaction.CheckSpawnUniqueKeys,
-         Transaction.PrepareFirstSupply, Transaction.JoinPublishedChain, Transaction.ReleaseFirstSupplyClaims
+         Transaction.ClaimFirstSupplies, Transaction.PrepareFirstSupply, Transaction.JoinPublishedChain, Transaction.ReleaseFirstSupplyClaims
   on_violation: a query returns entities whose component is disabled or was never supplied — under the bytes their slot happened to hold
                 — or misses them under `Disabled<T>`, and the same query answers differently depending on the plan the cardinality picks
   verified: QueryEnabledContractTests [VerifiesRule] — absent, disabled, enabled, supplied mid-life, re-enabled; Versioned and SingleVersion;
@@ -1100,11 +1102,14 @@ both fast and exact inside the window; this rule fixes what it does promise.
             record's latest bits, a spawn announcing a disabled component to views, a `Disabled<T>` view kept incremental, the unique
             check reading the spawn's supplied mask, the first supply adding, the SingleVersion unique spawn accepted, a predicate read
             ignoring `Disabled<T>`, a predicate reading an absent component, the spatial and pending-spawn T2 tests removed; two
-            concurrent first supplies, sequential and staged mid-publish, without a handler and with one, and after an aborted one —
-            mutants: no claim, no join, the claim released before the root is published, the absent read unflagged. The mid-scan
+            concurrent first supplies, sequential and staged mid-publish, without a handler and with one, after an aborted one, a waiter on a
+            commit that fails before its append, a join that fails, a supply destroyed in its transaction, the claim order; a spatial query
+            over the transaction's own destroy; an ordered page past rows the gate refuses — mutants: no claim, no join, the claim released
+            before the root is published, the absent read unflagged, the join swapped in first, a destroyed supply joined live, the claims
+            unsorted, the claims kept on a failed commit, the spatial check opening a destroyed entity. The mid-scan
             re-check of the overrides has no staged test: it needs a commit landing between a cluster's word loads, with no hook there
-  note: the second supply waits inside PREPARE holding the chain locks a conflict-handler commit took for its earlier entries; a first
-        supply waiting on one of them times out, and one of the two commits fails rather than resolves
+  note: a second supply waits for a claim before its PREPARE, holding no chain lock; the wait ends at the holder's publish or exit, or at
+        the chain-lock timeout, which fails the waiting commit and leaves it retryable
 
 ## Module: EMAP — Where an entity map keeps its buckets
 

@@ -699,6 +699,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Test hook: a commit is about to release the first-supply claims it holds; the roots must be published by then (QENABLE-01).</summary>
     internal Action FirstSupplyReleaseProbe { get; set; }
 
+    /// <summary>Test hook: a commit took the first-supply claim of (entity key, component type) — in the order it takes them all.</summary>
+    internal Action<long, int> FirstSupplyClaimedProbe { get; set; }
+
+    /// <summary>Test hook: a losing first supply added its revision to the winner's chain and is about to move its bytes there; a throw fails its commit.</summary>
+    internal Action FirstSupplyJoinProbe { get; set; }
+
     /// <summary>Test seam (VIS-03): invoked by every writing <see cref="Transaction"/> commit once its commit card is reserved, before its PREPARE takes
     /// any lock, so a fixture can hold a reserving committer there. Null in production: one null check per commit.</summary>
     internal Action CommitAfterReserveProbe { get; set; }

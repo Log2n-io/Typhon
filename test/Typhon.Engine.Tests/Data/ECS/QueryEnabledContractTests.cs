@@ -292,6 +292,14 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         dbe.WriteTickFence(++_tick);
         EcsQuery<QcSpArch> Box(Transaction tx) => tx.Query<QcSpArch>().WhereInAABB<QcSpatial>(0, 0, -10, 100, 100, 10);
 
+        // The transaction's own destroy: the spatial index still holds the entity, which no longer exists for it.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(id);
+            Assert.That(Box(tx).Enabled<StatsTag>().Execute(), Is.Empty, "an own destroyed entity under Enabled<U>");
+            Assert.That(Box(tx).Where<StatsTag>(_ => true).Execute(), Is.Empty, "an own destroyed entity under Where<T>");
+        }
+
         using (var tx = dbe.CreateQuickTransaction())
         {
             Assert.That(Box(tx).Execute(), Is.EquivalentTo(new[] { id }), "premise: the entity is in the box");
@@ -525,6 +533,40 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         }
     }
 
+    /// <summary>Whether the <see cref="StatsRanked"/> chain at <paramref name="root"/> is still allocated, and whether its newest published revision is a tombstone.</summary>
+    private static (bool Live, bool NewestIsTombstone) RankedChain(DatabaseEngine dbe, int root)
+    {
+        var segment = dbe.GetComponentTable<StatsRanked>().CompRevTableSegment;
+        if (!segment.IsChunkLive(root))
+        {
+            return (false, false);
+        }
+
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            var first = accessor.GetChunk<CompRevStorageHeader>(root).FirstItemIndex;
+            var count = accessor.GetChunk<CompRevStorageHeader>(root).ItemCount;
+            long newest = -1;
+            var newestChunk = -1;
+            for (var i = 0; i < count; i++)
+            {
+                var element = ComponentRevisionManager.GetRevisionElement(ref accessor, root, (short)(first + i)).Element;
+                if (!element.IsVoid && !element.IsolationFlag && element.TSN > newest)
+                {
+                    newest = element.TSN;
+                    newestChunk = element.ComponentChunkId;
+                }
+            }
+
+            return (true, newestChunk == 0);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
     /// <summary>After two supplies of one absent component: one value everywhere — the point read, every query path, the index.</summary>
     private static void AssertSuppliedOnce(DatabaseEngine dbe, EntityId id, int value, int lost)
     {
@@ -537,7 +579,187 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         OnEveryPath(dbe, tx => VersionedTier(tx, lost), id, false, "the losing supply's key");
         Assert.That(TierEntries<StatsRanked>(dbe, lost), Is.Empty, "the losing supply's key outlived it");
         Assert.That(TierEntries<StatsRanked>(dbe, value), Is.EqualTo(new[] { (long)id.RawValue }), "the winning supply's key");
+        Assert.That(dbe.FirstSupplyClaims, Is.Empty, "a first-supply claim outlived its commit");
     }
+
+    /// <summary>The losing supply's join fails after it added its revision to the winner's chain: its commit fails, the winner's chain and value stand.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_AFirstSupplyWhoseJoinFails_LeavesTheWinnersChain()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, null);
+        using (var first = dbe.CreateQuickTransaction())
+        using (var second = dbe.CreateQuickTransaction())
+        {
+            first.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(5, 1));
+            second.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(7, 1));
+            Assert.That(first.Commit(), Is.True, "premise: the first supply commits");
+            var root = RankedChainRoot(dbe, id);
+            dbe.FirstSupplyJoinProbe = () => throw new InvalidOperationException("staged join failure");
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => second.Commit(), "premise: the join fails");
+            }
+            finally
+            {
+                dbe.FirstSupplyJoinProbe = null;
+            }
+
+            Assert.That(RankedChainRoot(dbe, id), Is.EqualTo(root), "the record's root moved");
+            Assert.That(RankedChain(dbe, root).Live, Is.True, "the failed join's rollback freed the winner's chain");
+        }
+
+        AssertSuppliedOnce(dbe, id, 5, 7);
+        Committed(dbe, tx => tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(9, 1)));
+        AssertSuppliedOnce(dbe, id, 9, 5);
+    }
+
+    /// <summary>A supply the losing transaction then destroyed joins the winner's chain as the destroy: the entity is gone, no value survives it.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_AFirstSupplyDestroyedInItsTransaction_JoinsAsTheDestroy()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, null);
+        using (var first = dbe.CreateQuickTransaction())
+        using (var second = dbe.CreateQuickTransaction())
+        {
+            first.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(5, 1));
+            second.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(7, 1));
+            second.Destroy(id);
+            Assert.That(first.Commit(), Is.True, "premise: the first supply commits");
+            var root = RankedChainRoot(dbe, id);
+            using var between = dbe.CreateQuickTransaction();
+            Assert.That(second.Commit(), Is.True, "premise: the destroying supply commits");
+            Assert.That(between.Open(id).Read(StatsArch.Ranked).Tier, Is.EqualTo(5), "a snapshot between the two commits");
+            Assert.That(RankedChain(dbe, root), Is.EqualTo((true, true)), "the destroy did not reach the winner's chain as its newest revision");
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.TryOpen(id, out _), Is.False, "the destroyed entity is still there");
+        }
+
+        OnEveryPath(dbe, tx => VersionedTier(tx, 5), id, false, "the winner's key after the destroy");
+        OnEveryPath(dbe, tx => VersionedTier(tx, 7), id, false, "the destroying supply's key");
+        Assert.That(dbe.FirstSupplyClaims, Is.Empty, "a first-supply claim outlived its commit");
+    }
+
+    /// <summary>A commit's first supplies are claimed in one global order, whatever order they were written in: crossed commits cannot wait on each other.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void FirstSupplies_AreClaimedInOneOrder()
+    {
+        using var dbe = OpenEngine();
+        var a = SpawnVersioned(dbe, null);
+        var b = SpawnVersioned(dbe, null);
+        var claimed = new List<long>();
+        dbe.FirstSupplyClaimedProbe = (pk, _) => claimed.Add(pk);
+        try
+        {
+            Committed(dbe, tx =>
+            {
+                tx.OpenMut(b).Enable(StatsArch.Ranked, new StatsRanked(5, 1));
+                tx.OpenMut(a).Enable(StatsArch.Ranked, new StatsRanked(5, 2));
+            });
+        }
+        finally
+        {
+            dbe.FirstSupplyClaimedProbe = null;
+        }
+
+        var expected = new List<long> { (long)a.RawValue, (long)b.RawValue };
+        expected.Sort();
+        Assert.That(claimed, Is.EqualTo(expected), "the claims were taken in the order the supplies were written");
+        Assert.That(dbe.FirstSupplyClaims, Is.Empty);
+    }
+
+    /// <summary>The first supply fails before its append while a second waits on its claim: the claim goes back, and the second commits as the first.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_AFirstSupplyWaitingOnACommitThatFails_CommitsAsTheFirst()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, null);
+        using var ready = new System.Threading.ManualResetEventSlim();
+        using var go = new System.Threading.ManualResetEventSlim();
+        using var waiting = new System.Threading.ManualResetEventSlim();
+        Exception workerFailure = null;
+        var secondCommitted = false;
+        var worker = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                using var second = dbe.CreateQuickTransaction();
+                second.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(7, 1));
+                ready.Set();
+                go.Wait();
+                secondCommitted = second.Commit();
+            }
+            catch (Exception e)
+            {
+                workerFailure = e;
+                waiting.Set();
+            }
+        });
+
+        using (var first = dbe.CreateQuickTransaction())
+        {
+            first.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(5, 1));
+            worker.Start();
+            Assert.That(ready.Wait(5_000), Is.True, "premise: the second supply is written");
+            dbe.FirstSupplyWaitProbe = () => waiting.Set();
+            dbe.CommitBeforeAppendProbe = () =>
+            {
+                dbe.CommitBeforeAppendProbe = null;
+                go.Set();
+                Assert.That(waiting.Wait(5_000), Is.True, "premise: the second supply waits for the first's claim");
+                throw new InvalidOperationException("staged failure before the append");
+            };
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => first.Commit(), "premise: the first supply fails");
+            }
+            finally
+            {
+                dbe.CommitBeforeAppendProbe = null;
+                go.Set();
+            }
+        }
+
+        Assert.That(worker.Join(10_000), Is.True, "the second supply never finished");
+        dbe.FirstSupplyWaitProbe = null;
+        Assert.That(workerFailure, Is.Null, "the second supply failed");
+        Assert.That(secondCommitted, Is.True, "premise: the second supply commits");
+        AssertSuppliedOnce(dbe, id, 7, 5);
+    }
+
+    /// <summary>Rows the enabled gate refuses are not counted against an ordered query's Skip or Take.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void AnOrderedPage_SkipsAndTakesOnlyEnabledRows()
+    {
+        using var dbe = OpenEngine();
+        var ids = new List<EntityId>();
+        for (var tier = 1; tier <= 10; tier++)
+        {
+            ids.Add(SpawnVersioned(dbe, tier));
+        }
+
+        Committed(dbe, tx =>
+        {
+            tx.OpenMut(ids[1]).Disable(StatsArch.Ranked);   // tier 2
+            tx.OpenMut(ids[2]).Disable(StatsArch.Ranked);   // tier 3
+        });
+
+        using var reader = dbe.CreateQuickTransaction();
+        Assert.That(reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 1).OrderByField<StatsRanked, int>(x => x.Tier).Skip(2).Take(3)
+            .ExecuteOrdered(), Is.EqualTo(new[] { ids[4], ids[5], ids[6] }), "ascending: tiers 5, 6, 7");
+        Assert.That(reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier >= 1).OrderByFieldDescending<StatsRanked, int>(x => x.Tier).Skip(6)
+            .Take(3).ExecuteOrdered(), Is.EqualTo(new[] { ids[3], ids[0] }), "descending: tiers 4, 1");
+    }
+
 
     /// <summary>
     /// Two transactions supply one absent component concurrently: the later commit wins, as for any write-write conflict — its revision joins the chain

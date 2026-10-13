@@ -322,7 +322,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     private bool AdmitsT2(EntityId id)
     {
-        var entity = _tx.Open(id);
+        // TryOpen: a spatial hit can be an entity this transaction destroyed, or one the snapshot does not see — no entity, nothing to admit.
+        if (!_tx.TryOpen(id, out var entity))
+        {
+            return false;
+        }
+
         return ResolveT2Masks(entity._archetype, out var requiredEnabled, out var requiredDisabled)
                && (entity._enabledBits & requiredEnabled) == requiredEnabled && (entity._enabledBits & requiredDisabled) == 0;
     }
@@ -430,7 +435,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var prevFilter = _whereFilter;
         _whereFilter = prevFilter == null ? (id, tx, readDisabled) =>
             {
-                var entity = tx.Open(id);
+                if (!tx.TryOpen(id, out var entity))
+                {
+                    return false;
+                }
+
                 return entity.TryReadForPredicate<T>(readDisabled.Contains(typeId), out var value) && predicate(value);
             } : (id, tx, readDisabled) =>
             {
@@ -438,7 +447,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     return false;
                 }
-                var entity = tx.Open(id);
+                if (!tx.TryOpen(id, out var entity))
+                {
+                    return false;
+                }
+
                 return entity.TryReadForPredicate<T>(readDisabled.Contains(typeId), out var value) && predicate(value);
             };
         return this;
@@ -522,7 +535,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         _pendingSpawnFieldFilter = prevPendingFilter == null ? (id, tx, readDisabled) =>
             {
                 compiledPredicate ??= ((Expression<Func<T, bool>>)predicateExpr).Compile();
-                var entity = tx.Open(id);
+                if (!tx.TryOpen(id, out var entity))
+                {
+                    return false;
+                }
+
                 return entity.TryReadForPredicate<T>(readDisabled.Contains(typeId), out var value) && compiledPredicate(value);
             } : (id, tx, readDisabled) =>
             {
@@ -531,7 +548,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     return false;
                 }
                 compiledPredicate ??= ((Expression<Func<T, bool>>)predicateExpr).Compile();
-                var entity = tx.Open(id);
+                if (!tx.TryOpen(id, out var entity))
+                {
+                    return false;
+                }
+
                 return entity.TryReadForPredicate<T>(readDisabled.Contains(typeId), out var value) && compiledPredicate(value);
             };
 
@@ -1506,9 +1527,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var compSize = layout.ComponentSize(compSlot);
         var recordSize = meta._entityRecordSize;
         byte* record = stackalloc byte[recordSize];
-        var bitmapWords = (clusterState.ClusterSegment.ChunkCapacity + 63) >> 6;
-        wholeClusters = ArrayPool<ulong>.Shared.Rent(bitmapWords);
-        Array.Clear(wholeClusters, 0, bitmapWords);
+
+        // The active list first, then the capacity: every cluster the walk visits fits the bitmap. Cleared whole — the stream tests a row of any cluster
+        // against it, and one created since lands past the capacity, on what the last renter left.
+        var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
+        wholeClusters = ArrayPool<ulong>.Shared.Rent((clusterState.ClusterSegment.ChunkCapacity + 63) >> 6);
+        Array.Clear(wholeClusters);
 
         var keys = ArrayPool<long>.Shared.Rent(64);
         var locations = ArrayPool<int>.Shared.Rent(64);
@@ -1517,7 +1541,6 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
         try
         {
-            var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
             for (var c = 0; c < activeCount; c++)
             {
                 var clusterChunkId = activeIds[c];
@@ -2600,7 +2623,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var matchBitsArr = ArrayPool<ulong>.Shared.Rent(chunkCapacity);
         try
         {
-            Array.Clear(matchBitsArr, 0, chunkCapacity);
+            Array.Clear(matchBitsArr);   // whole: a cluster created since the capacity read indexes past it, into what the last renter left
             var hasAny = false;
 
             CollectClusterLocationsFromBTree(primaryIndex, plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax, primaryField.AllowMultiple,
@@ -2669,7 +2692,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 for (var c = 0; c < activeCount; c++)
                 {
                     var clusterChunkId = activeIds[c];
-                    var candidateBits = matchBitsArr[clusterChunkId];
+                    var candidateBits = (uint)clusterChunkId < (uint)matchBitsArr.Length ? matchBitsArr[clusterChunkId] : 0;
+                    if (candidateBits == 0 && !walkDeaths)
+                    {
+                        continue;   // before the slot words: a point lookup touches only the clusters the tree named
+                    }
+
                     ref var slotWords = ref visGated ? ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId) : ref Unsafe.NullRef<long>();
                     var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref slotWords);   // before the occupancy word — see ScanClusterSoa
 
@@ -2914,8 +2942,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         var clusterLocation = values[i];
                         var chunkId = clusterLocation >> 6;
                         var slotIdx = clusterLocation & 0x3F;
-                        matchBitsArr[chunkId] |= 1UL << slotIdx;
-                        hasAny = true;
+                        if ((uint)chunkId < (uint)matchBitsArr.Length)
+                        {
+                            matchBitsArr[chunkId] |= 1UL << slotIdx;
+                            hasAny = true;
+                        }
                     }
                 } while (enumerator.NextChunk());
             }
@@ -2929,8 +2960,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 var clusterLocation = item.Value;
                 var chunkId = clusterLocation >> 6;
                 var slotIdx = clusterLocation & 0x3F;
-                matchBitsArr[chunkId] |= 1UL << slotIdx;
-                hasAny = true;
+                if ((uint)chunkId < (uint)matchBitsArr.Length)
+                {
+                    matchBitsArr[chunkId] |= 1UL << slotIdx;
+                    hasAny = true;
+                }
             }
         }
     }

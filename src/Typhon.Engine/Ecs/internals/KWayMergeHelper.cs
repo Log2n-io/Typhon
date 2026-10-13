@@ -350,7 +350,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         }
 
         var chunkId = location >> 6;
-        if (_wholeClusters != null && (_wholeClusters[chunkId >> 6] & (1UL << chunkId)) != 0)
+        if (_wholeClusters != null && (uint)(chunkId >> 6) < (uint)_wholeClusters.Length && (_wholeClusters[chunkId >> 6] & (1UL << chunkId)) != 0)
         {
             return false;
         }
