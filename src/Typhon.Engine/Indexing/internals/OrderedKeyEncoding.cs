@@ -50,6 +50,26 @@ internal static class OrderedKeyEncoding
     }
 
     /// <summary>
+    /// <see cref="Encode{TKey}"/> of the <paramref name="keyType"/> value stored at <paramref name="field"/> — a component field read in place, for rows an
+    /// ordered query takes from the cluster rather than from the tree (#1347).
+    /// </summary>
+    public static unsafe long EncodeAt(byte* field, KeyType keyType) =>
+        keyType switch
+        {
+            KeyType.Float => Encode(*(float*)field, keyType),
+            KeyType.Double => Encode(*(double*)field, keyType),
+            KeyType.UShort => Encode(*(ushort*)field, keyType),
+            KeyType.UInt => Encode(*(uint*)field, keyType),
+            KeyType.ULong => Encode(*(ulong*)field, keyType),
+            KeyType.Byte => Encode(*field, keyType),
+            KeyType.SByte => Encode(*(sbyte*)field, keyType),
+            KeyType.Short => Encode(*(short*)field, keyType),
+            KeyType.Int => Encode(*(int*)field, keyType),
+            KeyType.Long => Encode(*(long*)field, keyType),
+            _ => 0
+        };
+
+    /// <summary>
     /// Reinterprets a key's raw bits out of the <see cref="long"/> slot they were parked in. This is NOT <see cref="Encode{TKey}"/>'s inverse and must never be
     /// confused with it.
     /// </summary>

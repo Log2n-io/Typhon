@@ -124,6 +124,20 @@ internal static class QueryPathProbe
     [ThreadStatic]
     internal static Action PrePublishAppendHook;
 
+    /// <summary>
+    /// Invoked on the query thread by the selective B+Tree scan between its tree read and its cluster reads, after it read the archetype's destroy stamp
+    /// (#1347). Null in production; set by tests only, to commit a destroy the tree read saw and the stamp read did not.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action SelectiveAfterTreeScanHook;
+
+    /// <summary>
+    /// Invoked on the query thread by an ordered query after it read each archetype's destroy stamp and before it opens its sorted streams (#1347). Null in
+    /// production; set by tests only, to commit a destroy the stamp read did not see and the streams' tree reads will.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action OrderedBeforeStreamsHook;
+
     /// <summary>Refreshes of a membership view short-circuited by the structural-epoch gate on this thread since the last <see cref="Reset"/>.</summary>
     /// <remarks>
     /// The gate is the whole point of the membership channel at realistic view counts — most archetypes are untouched on most ticks — and "it was fast" is not
@@ -147,6 +161,8 @@ internal static class QueryPathProbe
         ForceViewRequery = false;
         MembershipPrePublishBumpHook = null;
         PrePublishAppendHook = null;
+        SelectiveAfterTreeScanHook = null;
+        OrderedBeforeStreamsHook = null;
         MembershipGateHits = 0;
         MembershipDrains = 0;
         ViewRequeries = 0;

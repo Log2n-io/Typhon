@@ -380,6 +380,36 @@ public unsafe ref struct EntityRef
         return true;
     }
 
+    /// <summary>
+    /// A query predicate's read of <typeparamref name="T"/> (QENABLE-01): its value when enabled, or — when <paramref name="readDisabled"/>, the query naming
+    /// <c>Disabled&lt;T&gt;()</c> — when disabled and present. False when the archetype has no such component, or a Versioned one is absent at this snapshot
+    /// (STAGE-02): never supplied, its chain resolving to no revision.
+    /// </summary>
+    internal readonly bool TryReadForPredicate<T>(bool readDisabled, out T value) where T : unmanaged
+    {
+        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        if (typeId < 0 || !_archetype.TryGetSlot(typeId, out byte slot) || ((_enabledBits & (1 << slot)) == 0 && (!readDisabled || !IsPresent(slot))))
+        {
+            value = default;
+            return false;
+        }
+
+        value = ReadSlotRef<T>(slot);
+        return true;
+    }
+
+    /// <summary>Whether the component at <paramref name="slot"/> exists at this snapshot: a SingleVersion or Transient one from the spawn, a Versioned one once supplied.</summary>
+    private readonly bool IsPresent(byte slot)
+    {
+        if ((_archetype.VersionedSlotMask & (1 << slot)) == 0)
+        {
+            return true;
+        }
+
+        EnsureVersionedResolved(slot);
+        return _locations[slot] != 0;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Non-generic / runtime access — for tooling that decodes by field layout
     // ═══════════════════════════════════════════════════════════════════════

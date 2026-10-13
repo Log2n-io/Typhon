@@ -53,6 +53,9 @@ t.Commit(RebaseDelta);          // conflicting writers rebase instead of clobber
 | `solver.TakeCommitting<T>()` | Keep this transaction's value (also the default with no handler) |
 | `solver.ToCommitData<T>() = ...` | Write a custom resolution (rebase, merge, clamp, …) |
 
+A component the entity did not have yet, supplied by two transactions at once (`Enable(comp, value)`), resolves the same way: the later commit's
+revision joins the chain the first one created. The handler then sees `ReadWasAbsent` set and zeroes in `ReadData` — there was no value to read.
+
 ## ⚠️ Guarantees & limits
 
 - **No handler = last writer wins** — the default `Commit()` overload never inspects conflicts; the committing

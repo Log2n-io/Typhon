@@ -1895,7 +1895,7 @@ public unsafe partial class Transaction
     /// </remarks>
     private void InsertClusterIndexEntries<TStore>(ref SpawnContext ctx, ClusterIndexSlot<TStore>[] ixSlots, byte* dataBase, byte* primaryBase,
         ArchetypeClusterInfo layout, int clusterChunkId, int slotIdx, int clusterLocation, EntityId entityId, ref ChunkAccessor<TStore> idxAccessor,
-        ref ChunkAccessor<TStore> idxAccessorS64, ChunkBasedSegment<TStore> s64Segment) where TStore : struct, IPageStore
+        ref ChunkAccessor<TStore> idxAccessorS64, ChunkBasedSegment<TStore> s64Segment, ushort enabledBits) where TStore : struct, IPageStore
     {
         if (ixSlots == null)
         {
@@ -1930,7 +1930,14 @@ public unsafe partial class Transaction
                     *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIdx)) = elementId;
                 }
 
-                // Notify views of creation (isCreation flag so incremental views detect the new entity)
+                // Notify views of creation (isCreation flag so incremental views detect the new entity) — of an enabled component only: a view's drain
+                // applies a creation from its key, and a component the spawn left disabled or never supplied matches no field predicate (QENABLE-01). Its
+                // enable announces it later (NotifyViewsForEnableDisable).
+                if ((enabledBits & (1 << ixSlot.Slot)) == 0)
+                {
+                    continue;
+                }
+
                 var spawnTable = ctx.EngineState.SlotToComponentTable[ixSlot.Slot];
                 var views = spawnTable.ViewRegistry.GetViewsForField(fi);
                 // Hoisted out of the per-view loop: a [ThreadStatic] read is a TLS-base helper call, not a plain load, and this loop is the spawn
@@ -2533,6 +2540,22 @@ public unsafe partial class Transaction
             }
             else
             {
+                // A SingleVersion component the spawn does not supply is staged as zeros, disabled: indexed, it held key 0 against every later spawn that
+                // supplies 0, and the first two such spawns collided past their append. Refused, as the Versioned case above (QENABLE-01). Supplied means
+                // the bits it publishes with: an Enable(comp, value) on the pending spawn stages its bit in the overlay.
+                var spawnBits = entry.EnabledBits;
+                if (_pendingEnableDisable != null && _pendingEnableDisable.TryGetValue(entry.Id, out var stagedBits))
+                {
+                    spawnBits = stagedBits;
+                }
+
+                if ((spawnBits & (1 << ixSlot.Slot)) == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"A spawn must provide each SingleVersion component a unique index covers (slot {ixSlot.Slot} is missing): unset, it would hold "
+                        + "key 0 in that index.");
+                }
+
                 var stage = entry.Stage[ixSlot.Slot];
                 if (stage == 0)
                 {
@@ -3210,8 +3233,15 @@ public unsafe partial class Transaction
         // the ordering path's JIT. So the inserts stay where they are.
         {
             int clusterLocation = clusterChunkId * 64 + slotIdx;
+            // The bits the spawn publishes with, as PlaceSpawns records them: an enable or disable staged on the pending spawn wins.
+            var enabledBits = entry.EnabledBits;
+            if (_pendingEnableDisable != null && _pendingEnableDisable.TryGetValue(entry.Id, out var pendingBits))
+            {
+                enabledBits = pendingBits;
+            }
+
             InsertClusterIndexEntries(ref ctx, ctx.ClusterState.IndexSlots, clusterBase, clusterBase, layout, clusterChunkId, slotIdx,
-                clusterLocation, entry.Id, ref ctx.ClusterIdxAccessor, ref ctx.ClusterIdxAccessorS64, ctx.ClusterState.IndexSegmentString64);
+                clusterLocation, entry.Id, ref ctx.ClusterIdxAccessor, ref ctx.ClusterIdxAccessorS64, ctx.ClusterState.IndexSegmentString64, enabledBits);
 
             if (ctx.ClusterState.TransientIndexSlots != null)
             {
@@ -3220,7 +3250,7 @@ public unsafe partial class Transaction
                 byte* transientBase = clusterTransientBase != null ? clusterTransientBase : clusterBase;
                 InsertClusterIndexEntries(ref ctx, ctx.ClusterState.TransientIndexSlots, transientBase, clusterBase, layout, clusterChunkId,
                     slotIdx, clusterLocation, entry.Id, ref ctx.ClusterTransientIdxAccessor, ref ctx.ClusterTransientIdxAccessorS64,
-                    ctx.ClusterState.TransientIndexSegmentString64);
+                    ctx.ClusterState.TransientIndexSegmentString64, enabledBits);
             }
         }
     }
@@ -4047,6 +4077,14 @@ public unsafe partial class Transaction
                         int clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(readBuf);
                         byte slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(readBuf);
 
+                        // H1 ordering: the died watermark is folded BEFORE ReleaseSlot clears the occupancy bit, and the order is the whole point. A reader
+                        // that sees the cleared bit must also see the watermark, or it drops an entity whose death postdates its snapshot — the occupancy
+                        // word is current state while a reader is at a snapshot, and only the watermark separates them. Folding early is free because the
+                        // watermark is conservative UPWARD: a value recorded before the bit is cleared, or for a destroy that then fails, costs a per-entity
+                        // probe and can never make the gate say "visible" when it is not (#722 review). And before the B+Tree entries go (#1347): an index
+                        // path whose tree read misses them reads the archetype's destroy stamp and this watermark above its snapshot, and looks at the cluster.
+                        destroyClusterState?.NoteDestroyPublished(clusterChunkId, PublishStamp);
+
                         // Remove per-archetype B+Tree entries before releasing the slot.
                         // If the entity was written this tick (shadow bitmap set), the tick fence's ProcessClusterShadowEntries detects occupancy=0 and
                         // removes the OLD key — which is the only correct key, because the cluster data may already hold the post-mutation value while the
@@ -4091,16 +4129,6 @@ public unsafe partial class Transaction
                                         ref destroyClusterTransientIdxAccessorS64, destroyClusterState.TransientIndexSegmentString64);
                                 }
                             }
-                        }
-
-                        // H1 ordering: the died watermark is folded BEFORE ReleaseSlot clears the occupancy bit, and the order is the whole point. A reader
-                        // that sees the cleared bit must also see the watermark, or it drops an entity whose death postdates its snapshot — the occupancy
-                        // word is current state while a reader is at a snapshot, and only the watermark separates them. Folding early is free because the
-                        // watermark is conservative UPWARD: a value recorded before the bit is cleared, or for a destroy that then fails, costs a per-entity
-                        // probe and can never make the gate say "visible" when it is not (#722 review).
-                        if (destroyClusterState != null)
-                        {
-                            destroyClusterState.NoteClusterDied(clusterChunkId, PublishStamp);
                         }
 
                         // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup

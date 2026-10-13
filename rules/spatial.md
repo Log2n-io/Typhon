@@ -487,7 +487,7 @@
   never stackalloc the record buffer inside the per-archetype loop — it is sized once, to the widest gated
     record, and reused, or the frame grows with the number of spatial archetypes in the query
   scope: EcsQuery`1.ExecuteSpatial, EcsQuery`1.CollectClusterRay, EcsQuery`1.CollectClusterFrustum,
-    EcsQuery`1.IsVisibleAtSnapshot, ArchetypeClusterState.IsClusterFullyVisibleAt,
+    SnapshotSlot.IsVisibleAtSnapshot, ArchetypeClusterState.IsClusterFullyVisibleAt,
     ClusterSpatialQueryResult.ClusterChunkId
   verified: SpatialSnapshotIsolationTests.ASpatialQueryDoesNotSeeEntitiesCommittedAfterItsSnapshot over both
     Versioned spatial shapes the axis kit builds (PureVersioned and VerPlusTransient): a reader takes its

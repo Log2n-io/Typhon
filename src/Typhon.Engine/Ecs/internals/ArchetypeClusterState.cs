@@ -2463,6 +2463,31 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal bool AreClusterWatermarksVisibleAt(int clusterChunkId, long txTsn) => WatermarksVisibleAt(ref SlotWords(SlotWordTable, clusterChunkId), txTsn);
 
+    private long _maxDestroyStamp;
+
+    /// <summary>
+    /// The highest stamp a destroy of this archetype has published, by acquire; 0 before the first. Only rises. A reader whose snapshot is at or above it
+    /// finds no entity a destroy hid from the B+Trees (VIS-09) that it still sees alive, so an index path needs no look at the hidden slots (#1347).
+    /// </summary>
+    internal long MaxDestroyStamp => Volatile.Read(ref _maxDestroyStamp);
+
+    /// <summary>
+    /// A destroy's stamp, folded into <see cref="MaxDestroyStamp"/> and its cluster's died watermark (<see cref="NoteClusterDied"/>) BEFORE its B+Tree entries
+    /// are removed: a reader whose tree read misses the entry then reads both above its snapshot and looks at the cluster (#1347).
+    /// </summary>
+    internal void NoteDestroyPublished(int clusterChunkId, long stamp)
+    {
+        NoteClusterDied(clusterChunkId, stamp);
+        while (true)
+        {
+            var current = Volatile.Read(ref _maxDestroyStamp);
+            if (stamp <= current || Interlocked.CompareExchange(ref _maxDestroyStamp, stamp, current) == current)
+            {
+                return;
+            }
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only
     // clusters with bits set here do any work at fence time. See claude/design/spatial/write-time-spatial.md.

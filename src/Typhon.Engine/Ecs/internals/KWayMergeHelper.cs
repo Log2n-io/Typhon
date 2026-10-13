@@ -66,6 +66,22 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     private int _compOffset;
     private int _compSize;
 
+    // QENABLE-01: the query's enabled gate on this archetype, applied to every page; open (admitting everything) for a caller that passes none.
+    private EnabledGate _gate;
+    private bool _gated;
+
+    // #1347: the reader's snapshot — every row's born and died tested against it, as the scans test them — and the clusters a side stream already holds
+    // whole, whose rows this stream drops. Null state: no snapshot test (a non-Versioned archetype, or a caller that maps keys only).
+    private ArchetypeClusterState _clusterState;
+    private ArchetypeEngineState _visState;
+    private CommitCardTable _cards;
+    private long _txTsn;
+    private int _recordSize;
+    private ulong[] _wholeClusters;
+    private bool _filtering;    // any of the three above, or the gate: TryAdmitCurrent tests the row
+    private ChunkAccessor<PersistentStore> _mapAccessor;
+    private bool _mapOpen;
+
     public bool HasCurrent
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -104,8 +120,12 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     /// <param name="evaluators">The query's predicates, re-checked on the entities written since the last fence (QFENCE-01): the tree holds such an entity
     /// under its key as of the fence, so a value that has left the range since must not ride it into the result. <c>null</c> streams the tree as is.</param>
     /// <param name="componentSlot">The archetype slot of the component <paramref name="evaluators"/> read.</param>
+    /// <param name="gate">The query's enabled gate on this archetype (QENABLE-01); <c>null</c> admits every slot.</param>
+    /// <param name="snapshot">The reader's snapshot, for a Versioned archetype (#1347): a row born after it, or died at or before it, is dropped, and a row
+    /// whose slot a destroy hid since the tree read is decided by its record. <c>null</c> streams HEAD.</param>
     public static ArchetypeSortedStream Create(BTreeBase<PersistentStore> tree, KeyType keyType, long scanMin, long scanMax, bool descending,
-        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, FieldEvaluator[] evaluators = null, int componentSlot = -1)
+        ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, FieldEvaluator[] evaluators = null, int componentSlot = -1,
+        EnabledGate? gate = null, StreamSnapshot? snapshot = null)
     {
         // Bool and String64 have no typed B+Tree. Dispatch is virtual now, so such a tree would not fall out of a switch
         // — it would fill pages whose keys all encode to 0, comparing equal, and the merge would return this archetype's
@@ -123,6 +143,15 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _tree = tree,
             _layout = layout,
             _fenceWritten = evaluators != null && componentSlot >= 0 && clusterState.MayHaveFenceStaleKeys(componentSlot) ? clusterState.ClusterShadowBitmap : null,
+            _gate = gate ?? default,
+            _gated = gate.HasValue,
+            _clusterState = clusterState,
+            _visState = snapshot?.State,
+            _cards = snapshot?.Cards,
+            _txTsn = snapshot?.TxTsn ?? 0,
+            _recordSize = snapshot?.RecordSize ?? 0,
+            _wholeClusters = snapshot?.WholeClusters,
+            _filtering = gate.HasValue || snapshot.HasValue,
             _evaluators = evaluators,
             _compOffset = componentSlot >= 0 ? layout.ComponentOffset(componentSlot) : 0,
             _compSize = componentSlot >= 0 ? layout.ComponentSize(componentSlot) : 0,
@@ -153,6 +182,24 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
 
         return stream;
     }
+
+    /// <summary>
+    /// A stream over rows already filtered and sorted — the clusters an ordered query read whole for a snapshot older than a destroy (#1347). Takes
+    /// ownership of the two arrays, rented from <see cref="ArrayPool{T}"/>.
+    /// </summary>
+    public static ArchetypeSortedStream FromSorted(long[] orderedKeys, int[] locations, int count, ArchetypeClusterState clusterState,
+        ArchetypeClusterInfo layout) =>
+        new()
+        {
+            _layout = layout,
+            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
+            _hasAccessors = true,
+            _orderedKeys = orderedKeys,
+            _locations = locations,
+            _count = count,
+            _pageCapacity = Math.Min(orderedKeys.Length, locations.Length),
+            _cursor = new LeafPageCursorState { Exhausted = true }
+        };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool Advance()
@@ -233,7 +280,16 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
                 var clusterBase = _clusterAccessor.GetChunkAddress(chunkId);
                 if ((Volatile.Read(ref *(ulong*)clusterBase) & bit) == 0)
                 {
-                    continue;   // destroyed since its write
+                    if (_visState == null)
+                    {
+                        continue;   // destroyed since its write
+                    }
+
+                    // Destroyed, its slot hidden from HEAD and kept for older snapshots (VIS-09): TryAdmitCurrent decides it from its record and its bytes.
+                    _orderedKeys[kept] = _orderedKeys[i];
+                    _locations[kept] = location;
+                    kept++;
+                    continue;
                 }
 
                 var entityComp = clusterBase + _compOffset + (location & 0x3F) * _compSize;
@@ -259,6 +315,139 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// Whether the current row is one the query returns: the query's enabled gate admits it (QENABLE-01) and, with a snapshot, the snapshot sees it (#1347)
+    /// — born at or before it, not dead at it, not in a cluster a side stream holds whole. <paramref name="entityPK"/>: the row's entity key, read on the
+    /// way when <paramref name="resolve"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Asked by the merge for the row it is about to consume — emitted or skipped — and for no other. Filtering each page as it was read cost a cluster
+    /// access for every row read ahead and a second one for each row emitted: on an ordered <c>Take(50)</c> the read-ahead alone was a third of the query.
+    /// The rows a page holds sit in clusters uncorrelated with key order, so a check here is one cluster access per row consumed, shared with the
+    /// resolution of the entity key.
+    /// </para>
+    /// <para>
+    /// A row whose slot is no longer occupied was hidden by a destroy after the tree read (VIS-09): its record decides it, as the SoA scan decides a slot
+    /// claimed and not occupied, and its predicates are evaluated on the bytes the slot kept. The pending deaths are read before the occupancy word and the
+    /// claims after it, as in <c>ScanClusterSoa</c>.
+    /// </para>
+    /// </remarks>
+    public bool TryAdmitCurrent(bool resolve, out long entityPK)
+    {
+        var location = _locations[_pos];
+        entityPK = 0;
+        if (!_filtering)
+        {
+            if (resolve)
+            {
+                entityPK = ResolveEntityPK(location, ref _clusterAccessor, _layout);
+            }
+
+            return true;
+        }
+
+        var chunkId = location >> 6;
+        if (_wholeClusters != null && (_wholeClusters[chunkId >> 6] & (1UL << chunkId)) != 0)
+        {
+            return false;
+        }
+
+        var slotIndex = location & 0x3F;
+        var bit = 1UL << slotIndex;
+        var clusterBase = _clusterAccessor.GetChunkAddress(chunkId);
+        var occupancy = ulong.MaxValue;
+        ulong pend = 0;
+        var clusterVisible = true;
+        if (_visState != null)
+        {
+            ref var words = ref ArchetypeClusterState.SlotWords(_clusterState.SlotWordTable, chunkId);
+            var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref words);
+            occupancy = Volatile.Read(ref *(ulong*)clusterBase);
+            if (Unsafe.IsNullRef(ref words))
+            {
+                words = ref ArchetypeClusterState.SlotWords(_clusterState.SlotWordTable, chunkId);
+            }
+
+            pend = ArchetypeClusterState.ClaimOf(ref words) & ~occupancy;
+            clusterVisible = pendingDeaths == 0 && ArchetypeClusterState.WatermarksVisibleAt(ref words, _txTsn);
+        }
+
+        bool admitted;
+        if ((occupancy & bit) == 0)
+        {
+            // Hidden since the tree read, or released: only a slot still claimed holds an entity a snapshot can see.
+            admitted = (pend & bit) != 0 && AdmitsHidden(clusterBase, chunkId, slotIndex);
+        }
+        else
+        {
+            var exact = true;
+            var mask = _gated ? _gate.ClusterMask(clusterBase, out exact) : ulong.MaxValue;
+            admitted = (mask & bit) != 0
+                       && ((clusterVisible && (!_gated || !_gate.NeedsPerSlot(exact))) || AdmitsByRecord(clusterBase, slotIndex, exact, clusterVisible));
+        }
+
+        if (admitted && resolve)
+        {
+            entityPK = *(long*)(clusterBase + _layout.EntityIdsOffset + slotIndex * 8);
+        }
+
+        return admitted;
+    }
+
+    /// <summary>An occupied row the cluster words cannot decide: the gate's per-slot resolution, the snapshot's born and died, each from the record.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool AdmitsByRecord(byte* clusterBase, int slotIndex, bool exact, bool clusterVisible)
+    {
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        var rawId = *(long*)(clusterBase + _layout.EntityIdsOffset + slotIndex * 8);
+        if (_gated && _gate.NeedsPerSlot(exact))
+        {
+            if (_gate.NeedsRecords)
+            {
+                OpenMap(_gate.State);
+            }
+
+            if (!_gate.Admits(rawId, clusterBase, slotIndex, exact, record, ref _mapAccessor))
+            {
+                return false;
+            }
+        }
+
+        if (!clusterVisible)
+        {
+            OpenMap(_visState);
+            return SnapshotSlot.IsVisibleAtSnapshot(rawId, true, _visState, record, _recordSize, _txTsn, _cards, ref _mapAccessor);
+        }
+
+        return true;
+    }
+
+    /// <summary>A row whose slot a destroy hid since the tree read: its predicates on the bytes the slot kept, then its record at the snapshot.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool AdmitsHidden(byte* clusterBase, int chunkId, int slotIndex)
+    {
+        if (_evaluators != null && !SnapshotSlot.MatchesAll(_evaluators, clusterBase + _compOffset + slotIndex * _compSize))
+        {
+            return false;
+        }
+
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        var rawId = *(long*)(clusterBase + _layout.EntityIdsOffset + slotIndex * 8);
+        OpenMap(_visState);
+        return SnapshotSlot.IsReservedSpawnVisible(rawId, chunkId, slotIndex, _visState, record, _txTsn, _cards, ref _mapAccessor)
+               && (!_gated || _gate.AdmitsRecord(rawId, record));
+    }
+
+    private void OpenMap(ArchetypeEngineState state)
+    {
+        if (!_mapOpen)
+        {
+            _mapAccessor = state.EntityMap.Segment.CreateScanAccessor();
+            _mapOpen = true;
+        }
     }
 
     /// <summary>Resolve a ClusterLocation (packed int) to an EntityPK by reading the cluster's EntityIds array.</summary>
@@ -320,7 +509,32 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _clusterAccessor.Dispose();
             _indexAccessor.Dispose();
         }
+
+        if (_mapOpen)
+        {
+            _mapOpen = false;
+            _mapAccessor.Dispose();
+        }
     }
+}
+
+/// <summary>The reader's snapshot an <see cref="ArchetypeSortedStream"/> tests its rows against (#1347).</summary>
+internal readonly struct StreamSnapshot
+{
+    /// <summary>The archetype's engine state, whose EntityMap holds the records.</summary>
+    public ArchetypeEngineState State { get; init; }
+
+    /// <summary>The engine's commit cards, through which a pending born or died resolves.</summary>
+    public CommitCardTable Cards { get; init; }
+
+    /// <summary>The reader's snapshot.</summary>
+    public long TxTsn { get; init; }
+
+    /// <summary>The archetype's EntityMap record size.</summary>
+    public int RecordSize { get; init; }
+
+    /// <summary>One bit per cluster a side stream holds whole (<see cref="ArchetypeSortedStream.FromSorted"/>); null for none.</summary>
+    public ulong[] WholeClusters { get; init; }
 }
 
 /// <summary>
@@ -388,36 +602,40 @@ internal struct KWayMergeState : IDisposable
     /// <c>Skip(2000).Take(50)</c> paid 2 050 lookups to return 50 rows. The stream defers resolution precisely so that
     /// the merge can decline it; asking for it unconditionally here threw that away.
     /// </param>
+    /// <remarks>A row its stream refuses (<see cref="ArchetypeSortedStream.TryAdmitCurrent"/>) is consumed and not counted: the next one is taken.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext(out long entityPK, bool resolveEntity = true)
     {
-        if (_heapSize == 0)
+        while (_heapSize > 0)
         {
-            entityPK = 0;
-            return false;
-        }
+            int topStream = _heap[0];
+            var admitted = _streams[topStream].TryAdmitCurrent(resolveEntity, out entityPK);
 
-        int topStream = _heap[0];
-        entityPK = resolveEntity ? _streams[topStream].CurrentEntityPK : 0;
-
-        // Advance the stream that yielded the current entry
-        if (_streams[topStream].Advance())
-        {
-            // Stream has more entries — re-heapify from root
-            SiftDown(0);
-        }
-        else
-        {
-            // Stream exhausted — remove from heap
-            _heapSize--;
-            if (_heapSize > 0)
+            // Advance the stream that yielded the current entry
+            if (_streams[topStream].Advance())
             {
-                _heap[0] = _heap[_heapSize];
+                // Stream has more entries — re-heapify from root
                 SiftDown(0);
+            }
+            else
+            {
+                // Stream exhausted — remove from heap
+                _heapSize--;
+                if (_heapSize > 0)
+                {
+                    _heap[0] = _heap[_heapSize];
+                    SiftDown(0);
+                }
+            }
+
+            if (admitted)
+            {
+                return true;
             }
         }
 
-        return true;
+        entityPK = 0;
+        return false;
     }
 
     /// <summary>Peek at the current top key without consuming it.</summary>
