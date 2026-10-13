@@ -338,6 +338,22 @@ keys.
             OwnerIndexChurnTests.AnOwnerIndex_ChurnedOnSeveralThreads_HoldsExactlyEachOwnersItems (the unreadable leaf, under churn);
             the row validation has no test that kills its removal — it is the OLC read discipline, not a measured defect
 
+### IXS-10: An index reader never waits on a revision chain's lock while it holds a value buffer's `[fatal]`
+  invariant a reader of a multi-value key that resolves its entities through their chains — `Transaction.EnumerateIndex`, the FK
+            reverse lookup's action — copies the key's values and releases its buffer first (`RangeMultipleEnumerator.DrainCurrentKey`).
+            A reader that only collects locations under the buffer (the selective query's bitmasks, the leaf page cursor) takes no
+            chain lock and may hold it
+  rationale: the buffer's shared lock, held across a chain walk, closed a cycle with a publish that holds the entity's chain
+             exclusively (a conflict-handler commit always; every Versioned commit since #1263, AP-06) and moves the entity off the key —
+             a move that takes the buffer exclusively, under the key's leaf latch. Each waited the other out; meanwhile every other
+             writer of the key met the latched leaf on each pass and threw its retry bound (IXW-01), inside a publish: the engine
+             stopped. Every concurrent index reader in the suite read keys no writer was moving entities off, so none saw it
+  scope: BTree.RangeMultipleEnumerator.DrainCurrentKey, IndexEntityEnumerator.TryNextEntry, FkReverseLookup.ScanClusterArchetype
+  on_violation: a read of a multi-value key times out on a chain lock, and a commit moving an entity off that key stops the engine
+  verified: IndexReaderLockOrderTests.ReadersOfASharedMultiValueKey_AndMovesOffIt_NeverWaitEachOtherOut [VerifiesRule] — readers
+            enumerate the key every writer moves entities on and off, both commit kinds; with the buffer held across the walk the
+            handler case stopped the engine within its first moves on main, and both cases with Phase A under the chain lock
+
 ---
 
 ## Module: IXW — Index writes under OLC
@@ -696,3 +712,16 @@ written for the read path; these are the write-path obligations that went unwrit
             The publish-inside-the-split variant is caught by `OlcBTreeStressTests.Stress_ContentionSplit_TreeConsistency` (concurrent appends at the
             tail): it failed twice in one gate run, an EntryCount drift of 2 and an `ArgumentOutOfRangeException` faulting the tree
   requires IXS-05 (the orphaned leaf is how a lost separator becomes visible), IXW-05 (the root split holds the old root's latch the same way)
+
+### IXW-11: A duplicate key is decided on the leaf, never on the last-key cache `[fatal]`
+  invariant the append fast path's cached last key is a hint: a unique insert equal to it throws a duplicate only once the tail leaf's
+            last key, read under the leaf's version, is the same key; otherwise the cache is cleared and the insert restarts
+            (`BTree.TryInsertOlc`). A move clears the cache, as a removal does (`BTree.Move`, `BTree.MoveValue`)
+  rationale: a move took the tree's last key away and left it cached. The next insert of that key compared equal to the cache and
+             threw a duplicate no entry held — a spawn onto the largest unique key an update had freed, past its commit's append, and
+             the engine stopped (#1263's review)
+  scope: BTree.TryInsertOlc, BTree.Move, BTree.MoveValue
+  on_violation: an insert of a free key throws UniqueConstraintViolation; in a publish the engine stops
+  verified: BTreeChurnRaceTests.AKeyMovedOffTheEndOfAUniqueTree_CanBeInsertedAgain [VerifiesRule] (red on main);
+            LastWriterWinsIndexTests.ASpawnOntoTheLargestKeyAnUpdateFreed_Commits [VerifiesRule] (red on main: the engine stopped);
+            AKeyMovedOffTheEndOfAMultiValueTree_CanBeAppendedAgain guards the multi-value restart, which passes on main too

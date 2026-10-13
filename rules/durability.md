@@ -254,8 +254,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          DatabaseEngine.RemoveEmptyClosingRealms
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
-          (indexes and views, AP-07), before the lock, allocates and can throw: B+Tree nodes past the publish limit, segment
-          growth, a unique collision (#1258). Any throw is the failed publish above; a retained lock (handler path) is released
+          (indexes and views, AP-07), under the lock since #1263, allocates and can throw: B+Tree nodes past the publish limit,
+          segment growth, a unique collision (#1258). Any throw is the failed publish above; a retained lock (handler path) is released
           once — by the publish on a normal exit, by the abort path (`ReleaseRetainedPublishLocks`) after a throw. The spawn and pending-operation publishes allocate (cluster claim and growth, EntityMap insert, index
           nodes): their back-pressure is waited out, and a failure that is not back-pressure — a page-cache or segment lock
           timeout (5-10 s, a stall rather than pressure), the data file failing to grow — stops the engine as above. A
@@ -356,16 +356,38 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
 
 ### AP-06: The cluster slot holds the newest committed revision `[fatal]` `[silent]`
   invariant a publish copies its value into the entity's cluster slot only under the chain's exclusive lock (AP-05), and only when
-            its revision is the newest committed one: its index ≥ the chain's LastCommitRevisionIndex before its own stamp
+            its revision is the newest committed one: its stamp above every other published revision's (VIS-05)
   invariant so two publishes of one entity never copy concurrently, and the slot never moves back to an older revision
+  invariant the entity's index entries follow the same revision: a publish's index and view reconcile (Phase A) runs under the chain's
+            exclusive lock, before its stamp, and moves the entries from the newest published revision's value — not the one its transaction
+            read — to its own, only when its stamp is above that revision's; over a tombstone it moves nothing, the destroy owning the entries
+            (Transaction.PublishComponent, ComponentRevisionManager.NewestPublished). A write that left every indexed field as it read them still
+            moves them when another commit landed in between (PublishEntry.SlotIndexed)
+  invariant PREPARE measures the write against the newest committed revision it sees (PublishEntry.BaseCompChunkId, under the chain's
+            shared lock, or its exclusive one on the handler path), not the read one: whether it owes a move, and the unique-key check
+            before the append (Transaction.CheckVersionedUniqueKeys), see the key the entity holds now. A write back onto a key another
+            entity took since the read is rejected before the append; against the read, nothing checked it and the publish's backstop
+            stopped the engine. A commit landing between that check and the publish is not seen there (#1258's shape)
+  requires IXS-10: the reconcile now runs under the chain's exclusive lock, so no index reader may wait on that lock while holding a
+            value buffer the reconcile takes
   rationale: two transactions may update one entity concurrently — without a handler each prepares its own revision — and their
              appends need not finish in revision order. The copy ran after the lock was released, unconditionally: the older
              revision publishing last overwrote the newer, so point reads, which walk the chain, saw the newer value while bulk
-             iteration and Path-B scans, which read the slot, saw the older; a clean close then persisted the slot (CS-03)
-  scope: Transaction.PublishComponent, Transaction.PublishClusterVersionedSlot
-  on_violation: the cluster slot silently disagrees with the chain's HEAD until the entity's next commit
+             iteration and Path-B scans, which read the slot, saw the older; a clean close then persisted the slot (CS-03). The index went
+             the same way from the other side (#1263): each publish moved the entries from its READ value, the first moved them off it, and
+             the second found nothing to move — the entity read the second writer's value under the first writer's unique key, unreachable
+             by its own, with the first writer's key held by an entity that no longer had it
+  scope: Transaction.PublishComponent, Transaction.PublishClusterVersionedSlot, Transaction.PublishClusterIndexes,
+    ComponentRevisionManager.NewestPublished, ComponentRevisionManager.NewestPublishedUnlocked, Transaction.PrepareClusterVersionedSlot,
+    Transaction.CheckVersionedUniqueKeys
+  on_violation: the cluster slot silently disagrees with the chain's HEAD until the entity's next commit; an index entry names a value the
+    entity no longer has, and a query by its value misses it
   verified: VersionedPublishOrderTests.TwoUpdatesPublishedOutOfOrder_LeaveTheNewerValueInTheClusterSlot (the older publish held
-            after its append while the newer one commits) [VerifiesRule]
+            after its append while the newer one commits) [VerifiesRule]; LastWriterWinsIndexTests [VerifiesRule] — two updates from one read
+            leave the unique and the multi-value index on the last writer's key alone; a write that keeps its read key moves the entry back
+            from an intervening commit; an older update published last moves nothing. Mutations killed: the move from the read value, the
+            intervening commit ignored, the older publish moving; a write back onto a key taken since its read is rejected before
+            the append, the engine going on
 
 ### AP-07: An abort before the append leaves no trace `[fatal]` `[silent]`
   invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending effects, each
@@ -374,10 +396,11 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             `UnmarkEnableDisablePending`, run by `RollbackAfterFailedCommit` while `_prepareStaged`. A Versioned commit's
             index and view reconcile (Phase A) runs in its publish (`PublishClusterIndexes`), not in PREPARE.
             PREPARE only decides it is owed (`IndexPending`: an index covers the slot and the write inserts, deletes or changes
-            an indexed field). It runs first in `PublishComponent`, before the chain lock and the stamp, so the index never
-            lags a visible revision and readers of the entity never wait out an index update. It runs before AP-05's
-            vanished-entry check too, which therefore leaves the index moved for an unstamped revision, as PREPARE did. A
-            destroy's index removal and deletion deltas are in the publish already (`FlushPendingDestroys`)
+            an indexed field). It runs in `PublishComponent`, under the chain lock and before the stamp, so the index never
+            lags a visible revision, and after AP-05's vanished-entry check, so no index moves for an unstamped revision.
+            Readers of the entity wait out the index update: before the lock, its move started from the value its transaction
+            read, which a concurrent last-writer-wins commit had already moved off (#1263, AP-06). A destroy's index removal
+            and deletion deltas are in the publish already (`FlushPendingDestroys`)
   invariant a commit that fails before its append, once PREPARE has begun on its entries (after `PrepareEcsDestroys`), ends the
             transaction: it releases its retained chain locks, then rolls back without the unit of work's deadline
             (`RollbackAfterFailedCommit`), and `Commit` again returns false — even if that rollback failed
@@ -407,12 +430,12 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
              commits routinely, so it was no longer an edge case. The unique check now moves with Phase A into
              `ValidatePublishBeforeAppend`, in publish order: the Versioned writes first, then spawns, destroys and staged writes.
              The publish drain runs in batch mode, as PREPARE's pass did, and the unchanged-field guard stays in PREPARE, so
-             a write that moves no key costs the publish nothing
+             a write that moves no key costs the publish nothing — unless another commit landed after its read (AP-06)
   status: **RESIDUAL:**
           - a Versioned unique key taken by two concurrent commits now passes the check in both, and the later publish stops the
             engine (#1258, which this widens: in PREPARE the loser failed clean);
-          - two last-writer-wins updates of one entity leave its index on the first writer's key: Phase A's old key is the
-            read value, and the ignored `Move` result hides it (#1263, pre-existing);
+          - a last-writer-wins commit landing between PREPARE's unique-key check and the publish can make the publish move a key
+            back onto one another entity took in between: the backstop stops the engine, as #1258;
           - a changed Versioned unique key costs two descents, the check and the publish's backstop
   on_violation: the index loses an entity's committed key and maps a key no commit made — it is unreachable by its value — and
                 incremental views report removals and moves that never happened; or two aborting commits deadlock

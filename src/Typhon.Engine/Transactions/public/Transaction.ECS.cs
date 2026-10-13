@@ -2254,7 +2254,8 @@ public unsafe partial class Transaction
             byte* newComp = e.CurCompContentChunkId != 0
                 ? check.Contents.For(table.ComponentSegment).GetChunkAddress(e.CurCompContentChunkId) + overhead
                 : null;
-            byte* oldComp = e.ReadCompChunkId != 0 ? check.Contents.For(table.ComponentSegment).GetChunkAddress(e.ReadCompChunkId) + overhead : null;
+            // Against the newest committed revision PREPARE saw, not the read one: a key a concurrent commit moved off is the one this write moves from (#1263).
+            byte* oldComp = e.BaseCompChunkId != 0 ? check.Contents.For(table.ComponentSegment).GetChunkAddress(e.BaseCompChunkId) + overhead : null;
             var location = e.ClusterChunkId * 64 + e.SlotIndex;
             for (var ixs = 0; ixs < cs.IndexSlots.Length; ixs++)
             {

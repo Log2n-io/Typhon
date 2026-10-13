@@ -32,7 +32,11 @@ internal abstract partial class BTree<TKey, TStore>
         var held = OlcLatchHeld.Count;
         try
         {
-            return MoveUnguarded(oldKey, newKey, value, ref accessor);
+            // A move can take the tree's last key away, as a removal can, and the append path trusts this cache (#1263: a unique key moved off the end read
+            // back as a duplicate to the next insert of it). Cleared after the move, as Remove clears it; the next append re-reads the tail.
+            var moved = MoveUnguarded(oldKey, newKey, value, ref accessor);
+            _hasCachedLastKey = false;
+            return moved;
         }
         catch (Exception e)
         {
@@ -371,7 +375,10 @@ internal abstract partial class BTree<TKey, TStore>
         var held = OlcLatchHeld.Count;
         try
         {
-            return MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
+            // As Move: the old key may have been the tree's last, emptied and removed.
+            var elementIdAfter = MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
+            _hasCachedLastKey = false;
+            return elementIdAfter;
         }
         catch (Exception e)
         {

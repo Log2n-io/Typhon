@@ -444,4 +444,80 @@ class BTreeChurnRaceTests
             epochManager.ExitScope(scope);
         }
     }
+
+    /// <summary>
+    /// IXW-11: a move that takes the tree's last key away leaves no duplicate behind. The append fast path compares a new key with a cached last key, which
+    /// a removal cleared and a move did not: a unique key moved off the end then read as a duplicate to the next insert of it, and the insert threw —
+    /// past a commit's append, the engine stopped (#1263).
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXW-11")]
+    public unsafe void AKeyMovedOffTheEndOfAUniqueTree_CanBeInsertedAgain()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var tree = new IntSingleBTree<PersistentStore>(segment);
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            tree.Add(10, 100, ref accessor);
+            tree.Add(60, 600, ref accessor);
+            Assert.That(tree.Move(60, 30, 600, ref accessor), Is.True, "premise: the last key moves");
+            Assert.DoesNotThrow(() => tree.Add(60, 601, ref accessor), "a key no entry holds was refused as a duplicate");
+            Assert.Throws<UniqueConstraintViolationException>(() => tree.Add(60, 602, ref accessor), "a key an entry holds was accepted");
+            var found = tree.TryGet(60, ref accessor);
+            Assert.That(found.IsSuccess && found.Value == 601, Is.True, "the reinserted key does not hold its value");
+        }
+        finally
+        {
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
+        }
+    }
+
+    /// <summary>
+    /// IXW-11, multi-value: a key whose only value moves off the end of the tree, then appended to again, completes. On the stale cache the append re-checked
+    /// the leaf, restarted, and met the same cache on every pass.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXW-11")]
+    public unsafe void AKeyMovedOffTheEndOfAMultiValueTree_CanBeAppendedAgain()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var tree = new IntMultipleBTree<PersistentStore>(segment);
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            tree.Add(10, 100, ref accessor);
+            var element = tree.Add(60, 600, ref accessor);
+            tree.MoveValue(60, 30, element, 600, ref accessor, out _, out _);
+            Assert.DoesNotThrow(() => tree.Add(60, 601, ref accessor), "an append to a key moved off the end did not complete");
+            var values = new List<int>();
+            using (var e = tree.EnumerateRangeMultiple(60, 60))
+            {
+                while (e.MoveNextKey())
+                {
+                    do
+                    {
+                        foreach (var v in e.CurrentValues)
+                        {
+                            values.Add(v);
+                        }
+                    } while (e.NextChunk());
+                }
+            }
+
+            Assert.That(values, Is.EqualTo(new[] { 601 }), "key 60 does not hold exactly its new value");
+        }
+        finally
+        {
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
+        }
+    }
 }

@@ -144,8 +144,8 @@ class ViewDeltaRingDefectTests : TestBase<ViewDeltaRingDefectTests>
 
     /// <summary>
     /// Two last-writer-wins updates of one entity, both from the value 60 (in the view): the first commits 30 (out), the second 70 (in). Each delta's
-    /// "before" is its writer's read value, 60 — so the second does not say the entity was out when it applies. The view must end holding X: its
-    /// newest committed value, 70, passes.
+    /// "before" was its writer's read value, 60, so the second did not say the entity was out when it applied; since #1263 it is the newest published
+    /// value, 30. The view must end holding X: its newest committed value, 70, passes.
     /// </summary>
     [Test]
     [VerifiesRule("VDELTA-01")]

@@ -203,31 +203,34 @@ internal static unsafe class FkReverseLookup
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         try
         {
+            // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
+            // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
+            var values = Array.Empty<int>();
             var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
             try
             {
                 while (enumerator.MoveNextKey())
                 {
-                    do
+                    var count = enumerator.DrainCurrentKey(ref values);
+                    for (var j = 0; j < count; j++)
                     {
-                        var values = enumerator.CurrentValues;
-                        for (var j = 0; j < values.Length; j++)
+                        var clusterLocation = values[j];
+                        var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
+                        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + (clusterLocation & 0x3F) * 8);
+                        if (!action.Process(sourcePK, meta))
                         {
-                            var clusterLocation = values[j];
-                            var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
-                            var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + (clusterLocation & 0x3F) * 8);
-                            if (!action.Process(sourcePK, meta))
-                            {
-                                return false;
-                            }
+                            return false;
                         }
                     }
-                    while (enumerator.NextChunk());
                 }
             }
             finally
             {
                 enumerator.Dispose();
+                if (values.Length > 0)
+                {
+                    System.Buffers.ArrayPool<int>.Shared.Return(values);
+                }
             }
         }
         finally
