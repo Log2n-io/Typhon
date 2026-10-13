@@ -137,9 +137,7 @@ class ClusterThrottleParallelTests : TestBase<ClusterThrottleParallelTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // The tag is read to derive the new value written back on the next line.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

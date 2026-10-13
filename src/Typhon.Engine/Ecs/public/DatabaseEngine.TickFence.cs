@@ -1498,6 +1498,11 @@ public partial class DatabaseEngine
             var noClusterAccessor = default(ChunkAccessor<PersistentStore>);
             try
             {
+                // This tick's written-slot union, taken BEFORE the drain below, which skips the components it does not name: taken after it, as it was,
+                // the drain read the previous tick's union, and a tick that wrote only an unindexed component made the next tick's key moves read as
+                // unwritten — reset unread, the tree kept the old key (#1187 review). The cluster branch below takes it before its drain too.
+                clusterState.FenceWrittenSlots = Interlocked.Exchange(ref clusterState.WrittenSlotUnion, 0);
+
                 // Drain the archetype's own index shadow buffers (#655). This branch had none: a pure-Transient archetype could not carry per-archetype
                 // indexes at all, so an in-place write to an indexed field captured a shadow entry that nothing ever consumed — the index would keep the
                 // pre-mutation key forever. Runs before the dormancy sweep, matching the ordering of the cluster branch below.
@@ -1528,7 +1533,6 @@ public partial class DatabaseEngine
                     // Zone maps, same as the cluster branch below (#655). Without this a pure-Transient archetype's maps keep the bounds spawn widened them
                     // to, so Path B prunes away any cluster whose indexed field was later mutated OUT of that range — a silently empty query, not a stale
                     // count. Spawn widens eagerly, which is why the miss only shows after an in-place write.
-                    clusterState.FenceWrittenSlots = Interlocked.Exchange(ref clusterState.WrittenSlotUnion, 0);
                     RecomputeClusterZoneMaps(clusterState, transientDirtyBits, ref noClusterAccessor);
 
                     for (var slot = 0; slot < clusterState.Layout.ComponentCount; slot++)
@@ -1557,6 +1561,29 @@ public partial class DatabaseEngine
         if (!clusterState.ClusterDirtyBitmap.HasDirty)
         {
             clusterState.PreviousTickDirtySnapshot = null;
+
+            // Every path that records an entity's old keys marks it dirty in the same call (IX-07), so this branch should find none. Drained here if it
+            // does: a recorded key must not outlive its fence — the next drain would match it to whatever then occupies the slot — and a released slot
+            // still marked stays unclaimable until the bitmap is cleared (IX-06).
+            if (clusterState.ClusterShadowBitmap is { AnyTestAndSetSinceClear: true })
+            {
+                // No written-slot union was taken on this branch, and the one left from the last dirty tick would make the drain skip — reset unread —
+                // every component it does not name. Every indexed column counts as written: the drain moves all the records, and the zone maps of the
+                // clusters they name are re-derived, or the scan path would keep pruning a moved key. (Zero, the drain's own fail-safe, is the zone-map
+                // pass's "nothing written".)
+                clusterState.FenceWrittenSlots = clusterState.FenceIndexedSlotMask;
+                var owed = clusterState.ClusterShadowBitmap.Snapshot();
+                var shadowAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+                try
+                {
+                    ProcessClusterShadowEntries(clusterState, engineState, changeSet, ref shadowAccessor);
+                    RecomputeClusterZoneMaps(clusterState, owed, ref shadowAccessor);
+                }
+                finally
+                {
+                    shadowAccessor.Dispose();
+                }
+            }
 
             if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic && clusterState.ActiveClusterCount > 0)
             {

@@ -45,7 +45,7 @@ public unsafe partial class EntityAccessor
         }
         return ClusterEnumerator<TArch>.CreateScoped(es.ClusterState, meta,
             es.ClusterState.ClusterSegment, es.ClusterState.TransientSegment,
-            startIndex, endIndex);
+            startIndex, endIndex, this);
     }
 
     /// <summary>
@@ -61,7 +61,7 @@ public unsafe partial class EntityAccessor
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
         }
         return ClusterEnumerator<TArch>.Create(es.ClusterState, meta,
-            es.ClusterState.ClusterSegment, es.ClusterState.TransientSegment);
+            es.ClusterState.ClusterSegment, es.ClusterState.TransientSegment, this);
     }
 
     /// <summary>
@@ -83,7 +83,7 @@ public unsafe partial class EntityAccessor
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
         }
         return ClusterEnumerator<TArch>.CreateScoped(es.ClusterState, meta, es.ClusterState.ClusterSegment, es.ClusterState.TransientSegment, clusterIds, 
-            startIndex, endIndex);
+            startIndex, endIndex, this);
     }
 
     /// <summary>
@@ -102,7 +102,7 @@ public unsafe partial class EntityAccessor
 
         _dbe.CheckRealmRegistered(realm);
         var ids = es.ClusterState.ReadRealmClusterList(realm.Value, out var count);
-        return ClusterEnumerator<TArch>.CreateScoped(meta, es.ClusterState, ids, count);
+        return ClusterEnumerator<TArch>.CreateScoped(meta, es.ClusterState, ids, count, this);
     }
 
     /// <summary>Get cached ComponentInfo by type ID. For ArchetypeAccessor's Versioned chain walk.</summary>

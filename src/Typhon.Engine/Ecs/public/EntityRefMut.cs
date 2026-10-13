@@ -285,14 +285,10 @@ public unsafe ref struct EntityRefMut
             // Transient cluster: in-place write to TransientStore segment (no COW, no revision chain)
             if (_ref._transientClusterBase != null && (_ref._archetype.TransientSlotMask & (1 << slot)) != 0)
             {
-                // Shadow capture for SV indexed fields (first write per entity per tick — captures SV fields, skips T and V)
+                // Shadow capture for the fence-maintained indexed fields (first write per entity per tick)
                 if (clusterState.IndexSlots != null)
                 {
-                    int entityIndex = _ref._clusterChunkId * 64 + _ref._clusterSlotIndex;
-                    if (!clusterState.ClusterShadowBitmap.TestAndSet(entityIndex))
-                    {
-                        ShadowClusterIndexedFields(clusterState);
-                    }
+                    ShadowClusterIndexedFields(clusterState);
                 }
                 clusterState.SetDirty(_ref._clusterChunkId, _ref._clusterSlotIndex, slot);
                 return ref Unsafe.AsRef<T>(
@@ -323,11 +319,7 @@ public unsafe ref struct EntityRefMut
             // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
             if (clusterState.IndexSlots != null)
             {
-                int entityIndex = _ref._clusterChunkId * 64 + _ref._clusterSlotIndex;
-                if (!clusterState.ClusterShadowBitmap.TestAndSet(entityIndex))
-                {
-                    ShadowClusterIndexedFields(clusterState);
-                }
+                ShadowClusterIndexedFields(clusterState);
             }
 
             _ref._accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
@@ -370,19 +362,18 @@ public unsafe ref struct EntityRefMut
     }
 
     /// <summary>
-    /// Capture old indexed field values from cluster SoA for all indexed components.
-    /// Called once per entity per tick, before the first write mutation.
+    /// Capture old indexed field values from cluster SoA for all indexed components, on the entity's first write this tick
+    /// (<see cref="ArchetypeClusterState.CaptureFirstWrite"/>).
     /// </summary>
     /// <remarks>
     /// Walks both index homes since #655. A slot's bytes live in the segment matching its storage mode, so the base is chosen per home rather than taken from
     /// <c>_clusterBase</c> for all of them — a Transient slot's key read off a MIXED archetype's cluster base would capture whatever the SoA holds at that
     /// offset, which is another component's data. That is silent: the shadow entry looks well-formed and the drain moves the index off a key the entity never
-    /// had.
+    /// had. A PURE-Transient archetype has no second base (<c>_transientClusterBase</c> is null, <c>_clusterBase</c> IS the Transient one); the helper falls
+    /// back to the primary base, without which it captured nothing and the tree kept the spawn key for the entity's whole lifetime.
     /// </remarks>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
-        int entityIndex = _ref._clusterChunkId * 64 + _ref._clusterSlotIndex;
-
         // Skip every slot whose index is maintained at COMMIT rather than at the fence — Versioned always, and SingleVersion too when this transaction runs
         // under Commit discipline (its writes are staged and reconciled by PublishStagedCommitWrites). Capturing a commit-maintained slot is not merely
         // wasted work: the fence would then apply a SECOND Move for it, from a pre-write OldKey the commit publish has already moved away from, which
@@ -392,47 +383,7 @@ public unsafe ref struct EntityRefMut
         // disagreeing is what #711 was.
         var skipMask = (ushort)~_ref._archetype.FenceMaintainedSlotsUnder(_ref._accessor.Discipline);
         // Through ClusterBase(): a Transient write lands here without having refreshed the primary base, which may be stale (#1199).
-        var clusterBase = _ref.ClusterBase();
-        CaptureIndexedSlots(clusterState.IndexSlots, clusterBase, entityIndex, skipMask);
-
-        // A PURE-Transient archetype has no second base — _clusterBase already IS the Transient one (see the field comment on _transientClusterBase), so it
-        // stays null here. Passing it straight through hit CaptureIndexedSlots' null guard and captured NOTHING, leaving the tree on the pre-mutation key for
-        // the entity's whole lifetime: spawn indexed correctly, every later in-place write was invisible to the index.
-        byte* transientBase = _ref._transientClusterBase != null ? _ref._transientClusterBase : clusterBase;
-        CaptureIndexedSlots(clusterState.TransientIndexSlots, transientBase, entityIndex, skipMask);
-    }
-
-    /// <summary>
-    /// Appends every indexed field of every non-skipped slot in <paramref name="slots"/> to its shadow buffer, reading from
-    /// <paramref name="segmentBase"/>.
-    /// </summary>
-    private void CaptureIndexedSlots<TStore>(ClusterIndexSlot<TStore>[] slots, byte* segmentBase, int entityIndex, ushort skipMask)
-        where TStore : struct, IPageStore
-    {
-        if (slots == null || segmentBase == null)
-        {
-            return;
-        }
-
-        for (int s = 0; s < slots.Length; s++)
-        {
-            ref var ixSlot = ref slots[s];
-
-            if ((skipMask & (1 << ixSlot.Slot)) != 0)
-            {
-                continue;
-            }
-
-            int compSize = _ref._clusterLayout.ComponentSize(ixSlot.Slot);
-            byte* compBase = segmentBase + _ref._clusterLayout.ComponentOffset(ixSlot.Slot) + _ref._clusterSlotIndex * compSize;
-
-            for (int f = 0; f < ixSlot.Fields.Length; f++)
-            {
-                ref var field = ref ixSlot.Fields[f];
-                var oldKey = KeyBytes8.FromPointer(compBase + field.FieldOffset, field.FieldSize);
-                ixSlot.ShadowBuffers[f].Append(entityIndex, _ref._id, oldKey);
-            }
-        }
+        clusterState.CaptureFirstWrite(_ref._clusterChunkId, _ref._clusterSlotIndex, _ref._id, _ref.ClusterBase(), _ref._transientClusterBase, skipMask);
     }
 
     /// <summary>Disable a component by handle. Stages the change for commit.</summary>

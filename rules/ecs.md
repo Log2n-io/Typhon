@@ -1015,16 +1015,15 @@ both fast and exact inside the window; this rule fixes what it does promise.
              the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
              `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
   note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
-        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186); a write through
-        `ClusterRef.GetSpan` / `Get` marks no entity and records no old key, so the indexes never follow it, even at the
-        fence (#1187); a slot destroyed after a write and reused by a spawn before the fence makes an ordered query
-        return the new entity twice, and the fence then leaves the indexes answering keys no entity holds (#1188). Reads
+        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). Writable cluster
+        memory over a SingleVersion or Transient indexed component is refused, so every write reaches this rule's
+        mechanism (IX-07). Reads
         of an index that test no value — `Transaction.EnumerateIndex`, foreign-key navigation — are not queries and are
         not covered
   verified: QueryBetweenWriteAndFenceTests [VerifiesRule] — the old value, a range left and a range still matched, the
             new value before and after the fence (inside and outside the cluster's old bounds), the `AllowMultiple`
             index, a second vectorisable predicate (the SIMD branch), a write followed by a destroy, and a write to
-            ANOTHER component followed by a destroy and a respawn into the freed slot, each on the
+            ANOTHER component followed by a destroy and a spawn (which the freed slot does not take before the fence, IX-06), each on the
             planner's path and both forced paths; the ordered query (ascending, descending, Skip / Take, before and after
             the fence, a destroyed entity), which takes the merge whatever path is forced; the gate (a write to another
             component leaves the re-test off, a write to this one turns it on, the fence turns it off); and the

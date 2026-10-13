@@ -101,18 +101,26 @@ scoped.
             fence's shadow capture actually recorded for that entity:
             `deferred(entity) == ArchetypeMetadata.FenceMaintainedSlotsUnder(tx.Discipline)`, and the destroy removes the
             complement inline
-  never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set by a
-        write to ANY component; the shadow BUFFERS hold only the indexed non-Versioned slots that `ShadowClusterIndexedFields`
+  never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set by an
+        `EntityRefMut` write to ANY component (and by `ClusterRef.Set` or a key-changing `WriteSpatial` on an indexed one); the shadow BUFFERS hold only
+        the indexed non-Versioned slots that `ShadowClusterIndexedFields`
         captured, and under `CommitDiscipline.Commit` not even those - the SingleVersion members are reconciled by the commit
         publish instead
+  invariant a slot so released is not claimed again before that fence: its index entries are still in the trees, and the drain matches a shadow
+            entry to its slot, not to its entity (#1188)
   enforce both sides read the split from ONE method (`ArchetypeMetadata.FenceMaintainedSlotsUnder`) rather than each computing it
-  scope: ArchetypeMetadata.FenceMaintainedSlotsUnder (the single definition), EntityRefMut.ShadowClusterIndexedFields (skips its
+  enforce every claim path counts a slot marked in `ClusterShadowBitmap` as taken (`ArchetypeClusterState.FenceOwedBits`, read inside `TakenBits`,
+          `ClaimFirstFree` and `ClaimExact`); the fence clears the bitmap after its drain and before Migrate claims, so the hold lasts one tick at most
+  scope: ArchetypeMetadata.FenceMaintainedSlotsUnder (the single definition), ArchetypeClusterState.CaptureFirstWrite (the capture, given the skip mask
+         by EntityRefMut and ClusterRef.Set), EntityRefMut.ShadowClusterIndexedFields (skips its
          complement), Transaction.FlushEcsPendingOperations (the destroy hand-off; removes its complement via
          RemoveClusterIndexEntries' slot mask), Transaction.ReconcileClusterIndexAndViews (commit-scoped maintenance must not run
-         for an entity the same transaction destroys)
+         for an entity the same transaction destroys), ArchetypeClusterState.FenceOwedBits, ArchetypeClusterState.TakenBits (the slot hold)
   on_violation: the index keeps an entry for a released cluster slot. Loud on the next rebuild for a `Unique` index
                 (`EntryCount` exceeds the distinct keys the data holds); SILENT for `AllowMultiple` - a leaf value naming an
-                unoccupied slot, served by whichever query plan reaches it.
+                unoccupied slot, served by whichever query plan reaches it. Reused before the fence, the slot's new occupant is taken for
+                the destroyed entity with changed keys: the drain moves the dead entity's entries onto it, the index answers keys no
+                entity holds, and until the fence an ordered query returns the newcomer twice.
   rationale: #711. One write to an UNINDEXED Transient sibling was enough to reach it - no key move required, which is why the
              issue's "mutate-then-destroy" title describes a symptom rather than the trigger. The boundary is stated by a pair of
              cases: writing only the indexed component and destroying passes; writing only the unindexed sibling and destroying
@@ -120,7 +128,47 @@ scoped.
   requires IX-01 (one home per (archetype, field) is what makes "the set of slots" well defined)
   verified: ClusterIndexMatrixTests.MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing,
             DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing (the sharper half - no key move anywhere),
-            DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing (the control, green before the fix) [VerifiesRule]
+            DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing (the control, green before the fix) [VerifiesRule];
+            QueryBetweenWriteAndFenceTests.ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt [VerifiesRule] — a write (to another component, or a key
+            move), a destroy, a spawn into a full archetype, a write to the newcomer, the fence: the newcomer is returned once before the fence and the
+            index agrees with the data after it; both cases red with the hold removed
+
+### IX-07: No writable memory over a fence-maintained indexed field; every write to one records the old keys first `[silent]`
+  invariant cluster iteration hands out no writable memory (`ClusterRef.GetSpan`, `ClusterRef.Get`) over a component slot with an `[Index]`
+            field the tick fence maintains — SingleVersion or Transient (`ArchetypeClusterState.FenceIndexedSlotMask`, independent of the
+            discipline). It throws, in every build
+  invariant every write to such a slot goes through a path that, on the entity's first write this tick, records the keys of ALL its
+            fence-maintained indexed fields before the store (`ArchetypeClusterState.CaptureFirstWrite`): `EntityRefMut.Set`, `ClusterRef.Set`,
+            and `ClusterRef.WriteSpatial` when the value changes an indexed field of the spatial component
+  invariant the keys are recorded before the entity's shadow bit is set, and kept only by the call that sets it
+  invariant the same call marks the entity dirty, so the fence drains the records on its dirty branch; a fence that finds records with nothing
+            dirty drains them too, every indexed column counted as written, and re-derives those clusters' zone maps — no record outlives its
+            fence. No write path reaches that backstop by design
+  invariant the drain's skip of components nobody wrote reads THIS tick's written-slot union: every branch takes it before its drain
+  never detecting writes through handed-out memory (a copy of the keys at hand-out, diffed at the fence): it cannot know which entities a
+        span will write, so it records and diffs all of them (+16 ns per entity, measured), and records left by a span only read outlived a
+        fence that skipped the drain and moved a dead entity's keys onto the next occupant of its slot (the reverted first attempt at #1187)
+  enforce the mask test in `GetSpan` / `Get` (one load and one bit test per call); `ClusterRef.Set` refuses what an in-place store cannot do —
+          a Versioned slot, a Commit-default component, the spatial slot, the realm key, a SingleVersion slot under the Commit discipline, an
+          empty slot
+  scope: ArchetypeClusterState.FenceIndexedSlotMask, ArchetypeClusterState.CaptureFirstWrite, ArchetypeClusterState.IndexedKeysDiffer,
+         ClusterRef.GetSpan, ClusterRef.Get, ClusterRef.Set, ClusterRef.WriteSpatial, EntityRefMut.ShadowClusterIndexedFields,
+         DatabaseEngine.PrepareArchetypeFenceCore, ArchetypeClusterState.FenceWrittenSlots
+  on_violation: the index keeps the key the entity held before the write, for good: an index-path query returns the entity for a value it
+                no longer holds and misses it for the one it does, while a scan answers correctly — which one a caller gets depends on the
+                planner's estimate
+  rationale: #1187. A span is "change anything, any time, without saying": an index keyed on the old value can only follow it by guessing
+             with copies. ADR-070 already settled point access the same way: an explicit `Set`
+  requires IX-06 (the records are what a destroy hands to the fence)
+  verified: ClusterRefIndexedWriteTests [VerifiesRule] — GetSpan / Get throw on an indexed component and not on another; Set moves a unique
+            and a multi-value key at the fence on every path, with nothing returned at the old key before it; Set and OpenMut in one tick, either
+            order; Set, destroy, spawn, fence; a Transient indexed component under both disciplines, read off its tree; the clean-branch backstop,
+            staged by draining the dirty bitmap by hand after a tick that wrote only another component (red with the stale union kept).
+            ClusterMigrationTests.WriteSpatial_ChangingTheIndexedTag_MovesItsKey (single; batched, beside a neighbour keeping its tag) and
+            WriteSpatial_KeepingTheIndexedTag_RecordsNothing [VerifiesRule]. ClusterPureTransientIndexTests.ClusterSet_MovesTheKeyInTheTreeAtTheFence
+            (the one-base capture) and AKeyMove_AfterATickThatWroteOnlyAnotherComponent_MovesTheKey (the pure-Transient fence read the previous
+            tick's union; red before) [VerifiesRule]. Without the capture in `ClusterRef.RecordWrite` (Set's and WriteSpatial's), nine cases fail;
+            the others — the throws, OpenMut first, an unchanged tag, the refusals, the OpenMut-only two-tick case — do not depend on it
 
 ## Module: IXS — Ordered index reads
 

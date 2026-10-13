@@ -153,6 +153,26 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
 
     private static int KeyOf(Transaction tx, EntityId id) => tx.Open(id).Read(QfUnit.Data).Key;
 
+    /// <summary>The (cluster, slot) holding <paramref name="id"/>.</summary>
+    private static (int chunkId, int slot) LocationOf(DatabaseEngine dbe, EntityId id)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        using var accessor = tx.For<QfUnit>();
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var entityIds = cluster.EntityIds;
+            for (var slot = 0; slot < cluster.ClusterSize; slot++)
+            {
+                if ((cluster.OccupancyBits & (1UL << slot)) != 0 && entityIds[slot] == (long)id.RawValue)
+                {
+                    return (cluster.ChunkId, slot);
+                }
+            }
+        }
+
+        return (-1, -1);
+    }
+
     /// <summary>The rule's guarantee, checked row by row: every entity returned satisfies the condition on its CURRENT value.</summary>
     private static void NoRowFailsItsCondition(string where, IEnumerable<EntityId> rows, Transaction tx, Func<QfData, bool> condition)
     {
@@ -344,11 +364,12 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
 
     /// <summary>
     /// A write to ANOTHER component still makes a later destroy leave this component's index entries for the fence — the destroy sees a pending shadow
-    /// capture, which records every indexed slot. Neither the destroyed entity nor the entity respawned into its slot may come back at its stale key.
+    /// capture, which records every indexed slot. Neither the destroyed entity nor a spawn that follows may come back at the stale key. The spawn does
+    /// not take the freed slot before the fence (#1188, IX-06); <see cref="ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt"/> is that case.
     /// </summary>
     [Test]
     [VerifiesRule("QFENCE-01")]
-    public void ADestroyAfterAWriteToAnotherComponent_LeavesNoStaleRow_EvenOnceTheSlotIsReused()
+    public void ADestroyAfterAWriteToAnotherComponent_LeavesNoStaleRow_WhenASpawnFollows()
     {
         var dbe = SetupEngine();
         var ids = Spawn(dbe);
@@ -373,7 +394,7 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
             Assert.That(ordered, Has.Count.EqualTo(9).And.Not.Contain(default(EntityId)).And.Not.Contain(ids[5]), "ordered, after the destroy");
         }
 
-        // Every cluster is full, so the spawn takes the freed slot — where the tree still holds the destroyed entity's keys (10, group 5).
+        // Every cluster is full, and the freed slot — where the tree still holds the destroyed entity's keys (10, group 5) — is held until the fence.
         EntityId reborn;
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -395,6 +416,102 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
 
         OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Key == 999_999).Execute(),
             (name, rows, _) => Assert.That(rows, Is.EquivalentTo(new[] { reborn }), $"{name}: the reborn entity under its own key"));
+    }
+
+    /// <summary>
+    /// #1188: a slot released by a destroy that left its index entries to the fence is not handed to a spawn before that fence. Reused, the fence's drain
+    /// took the spawn for the destroyed entity with changed keys — it moved the dead entity's entries onto the newcomer instead of removing them, and the
+    /// index answered keys no entity held — and before the fence an ordered query returned the newcomer twice, once at the dead entity's key.
+    /// </summary>
+    [TestCase(false, TestName = "AfterAWriteToAnotherComponent")]
+    [TestCase(true, TestName = "AfterAKeyMove")]
+    [VerifiesRule("IX-06")]
+    public void ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt(bool moveTheKey)
+    {
+        var dbe = SetupEngine();
+        var ids = Spawn(dbe);
+        var cs = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<QfUnit>().ArchetypeId].ClusterState;
+        var (deadChunk, deadSlot) = LocationOf(dbe, ids[5]);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var target = tx.OpenMut(ids[5]);
+            if (moveTheKey)
+            {
+                var d = target.Read(QfUnit.Data);
+                d.Key = 100_001;   // 10 → 100 001: the tree keeps 10 until the fence
+                target.Set(QfUnit.Data, d);
+            }
+            else
+            {
+                var o = target.Read(QfUnit.Other);
+                o.Hp = 1;
+                target.Set(QfUnit.Other, o);
+            }
+
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(ids[5]);
+            tx.Commit();
+        }
+
+        // Every cluster is full: the spawn takes the freed slot unless it is held. Key 11 and group 3 both satisfy the queries below that the dead entity's
+        // stale keys (10, group 5) also satisfy, so a newcomer seen through them would be counted twice.
+        EntityId reborn;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var d = new QfData(3, 11);
+            var o = new QfOther();
+            reborn = tx.Spawn<QfUnit>(QfUnit.Data.Set(in d), QfUnit.Other.Set(in o));
+            tx.Commit();
+        }
+
+        Assert.That(LocationOf(dbe, reborn), Is.Not.EqualTo((deadChunk, deadSlot)), "the newcomer did not take the slot owing the fence");
+        Assert.That(cs.FenceOwedBits(deadChunk) & (1UL << deadSlot), Is.Not.Zero, "premise: the slot is held");
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var ordered = tx.Query<QfUnit>().WhereField<QfData>(d => d.Key >= 0 && d.Key < 20).OrderByField<QfData, int>(d => d.Key).ExecuteOrdered();
+            Assert.That(ordered, Has.Count.EqualTo(10).And.Not.Contain(ids[5]), "ordered, before the fence: nine survivors and the newcomer");
+            Assert.That(ordered.FindAll(id => id == reborn), Has.Count.EqualTo(1), "ordered, before the fence: the newcomer once");
+        }
+
+        // The newcomer written later in the same tick: its own old key must be captured, so the fence moves it.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var e = tx.OpenMut(reborn);
+            var d = e.Read(QfUnit.Data);
+            d.Key = 13;
+            e.Set(QfUnit.Data, d);
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        // The hold lasts one tick: the fence cleared the bitmap, so the slot is free for the next claim.
+        unsafe
+        {
+            using var epoch = EpochGuard.Enter(dbe.EpochManager);
+            var accessor = cs.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                var occupancy = *(ulong*)accessor.GetChunkAddress(deadChunk);
+                Assert.That(cs.TakenBits(occupancy, deadChunk) & (1UL << deadSlot), Is.Zero, "after the fence, the slot is claimable again");
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+
+        IndexDataOracle.AssertIndexAgreesWithData<QfUnit>(dbe, "after the fence");
+        OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Key == 10).Execute(),
+            (name, rows, _) => Assert.That(rows, Is.Empty, $"{name}: no entity holds 10"));
+        OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Key == 13).Execute(),
+            (name, rows, _) => Assert.That(rows, Is.EquivalentTo(new[] { reborn }), $"{name}: the newcomer under the key it was written to"));
+        OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Group == 5).Count(),
+            (name, count, _) => Assert.That(count, Is.EqualTo(ids.Length / 8 - 1), $"{name}: group 5 lost the dead entity"));
     }
 
     /// <summary>

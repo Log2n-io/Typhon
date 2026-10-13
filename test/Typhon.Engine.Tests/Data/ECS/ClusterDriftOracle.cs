@@ -82,9 +82,7 @@ static class ClusterDriftOracle
 
                 scanned++;
 
-#pragma warning disable TYPHON009 // Read-only: this is the oracle.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
 
                 // The cluster's true bound, from its entities — not from ClusterAabbs.
                 float minX = float.PositiveInfinity, minY = float.PositiveInfinity;

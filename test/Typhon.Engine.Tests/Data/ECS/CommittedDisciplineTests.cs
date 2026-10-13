@@ -655,4 +655,42 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         Assert.That((p.X, p.Y), Is.EqualTo((7f, 7f)), "the spawn's value, not the destroyed entity's staged write");
         Assert.That(read.IsAlive(victim), Is.False, "the destroyed entity");
     }
+
+    /// <summary>
+    /// #1187: <c>ClusterRef.Set</c> refuses a component that defaults to the Commit discipline — its writes are staged and published at commit, which an
+    /// in-place store would skip. The value is untouched.
+    /// </summary>
+    [Test]
+    public void ClusterSet_OnACommitDefaultComponent_IsRefused()
+    {
+        using var dbe = SetupEngine();
+        var id = SpawnAnt(dbe, 1, 2, 100);
+        Exception refused = null;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            using var accessor = tx.For<CmEntity>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                refused = TrySetWallet(cluster, System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits));
+            }
+        }
+
+        Assert.That(refused, Is.InstanceOf<InvalidOperationException>().With.Message.Contains("Commit discipline"));
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.Open(id).Read(CmEntity.Wallet).Gold, Is.EqualTo(100));
+    }
+
+    // A ClusterRef is a ref struct, which no lambda can capture.
+    private static Exception TrySetWallet(ClusterRef<CmEntity> cluster, int slot)
+    {
+        try
+        {
+            cluster.Set(CmEntity.Wallet, slot, new CmWallet(1));
+            return null;
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+    }
 }
