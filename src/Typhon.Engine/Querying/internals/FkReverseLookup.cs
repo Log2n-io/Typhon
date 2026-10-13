@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -206,6 +207,11 @@ internal static unsafe class FkReverseLookup
             // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
             // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
             var values = Array.Empty<int>();
+            // A SingleVersion slot is re-checked against the target, as IndexEntityEnumerator does: its destroy releases the slot at once, and a spawn may
+            // have taken it after the copy. A Versioned slot is released only by the entity cleanup, past every snapshot the destroy could hide from.
+            var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;
+            var fkOffset = layout.ComponentOffset(componentSlot) + ixSlot.Fields[fkFieldOrdinal].FieldOffset;
+            var fkStride = layout.ComponentSize(componentSlot);
             var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
             try
             {
@@ -215,8 +221,15 @@ internal static unsafe class FkReverseLookup
                     for (var j = 0; j < count; j++)
                     {
                         var clusterLocation = values[j];
+                        var slot = clusterLocation & 0x3F;
                         var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
-                        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + (clusterLocation & 0x3F) * 8);
+                        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
+                        if ((*(ulong*)clusterBase & (1UL << slot)) == 0 || sourcePK == 0
+                            || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
+                        {
+                            continue;   // released since the copy, or another entity's now
+                        }
+
                         if (!action.Process(sourcePK, meta))
                         {
                             return false;

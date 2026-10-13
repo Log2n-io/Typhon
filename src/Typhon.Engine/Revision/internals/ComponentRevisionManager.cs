@@ -414,13 +414,14 @@ internal ref struct ComponentRevisionManager
 
     /// <summary>
     /// <see cref="NewestPublished"/> for a caller that holds no lock on the chain — PREPARE without a conflict handler: read under the chain's shared lock,
-    /// which the enumerator takes, and throws on its timeout. Unpublished entries, this transaction's own among them, are left out.
+    /// which the enumerator takes on <paramref name="budgetOwner"/>'s wait budget (CX-06), and throws on its timeout. Unpublished entries, this
+    /// transaction's own among them, are left out.
     /// </summary>
-    internal static long NewestPublishedUnlocked(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, out int contentChunkId)
+    internal static long NewestPublishedUnlocked(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, Transaction budgetOwner, out int contentChunkId)
     {
         long highest = 0;
         contentChunkId = 0;
-        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc);
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc, budgetOwner);
         while (enumerator.MoveNext())
         {
             ref var element = ref enumerator.Current;

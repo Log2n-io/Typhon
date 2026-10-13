@@ -747,10 +747,8 @@ internal abstract partial class BTree<TKey, TStore>
                         }
                         // Fall through
                     }
-                    else if (order == 0)
-                    {
-                        ThrowHelper.ThrowUniqueConstraintViolation();
-                    }
+                    // A unique key equal to the cached last key falls through: the general path decides the duplicate on the leaf. The cache can be stale
+                    // (IXW-11), and a throw on it refused a key nothing held.
                 }
             }
 

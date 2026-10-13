@@ -387,7 +387,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             leave the unique and the multi-value index on the last writer's key alone; a write that keeps its read key moves the entry back
             from an intervening commit; an older update published last moves nothing. Mutations killed: the move from the read value, the
             intervening commit ignored, the older publish moving; a write back onto a key taken since its read is rejected before
-            the append, the engine going on
+            the append, the engine going on (mutation killed: PREPARE measuring against the read); a commit landing between PREPARE and
+            the append is moved back from (mutation killed: the publish's intervening-commit term dropped)
 
 ### AP-07: An abort before the append leaves no trace `[fatal]` `[silent]`
   invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending effects, each
@@ -436,6 +437,8 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             engine (#1258, which this widens: in PREPARE the loser failed clean);
           - a last-writer-wins commit landing between PREPARE's unique-key check and the publish can make the publish move a key
             back onto one another entity took in between: the backstop stops the engine, as #1258;
+          - a write over an entity another commit destroyed is judged before the append against its read key, while its publish moves
+            nothing: it can be refused a key it would never have taken;
           - a changed Versioned unique key costs two descents, the check and the publish's backstop
   on_violation: the index loses an entity's committed key and maps a key no commit made — it is unreachable by its value — and
                 incremental views report removals and moves that never happened; or two aborting commits deadlock

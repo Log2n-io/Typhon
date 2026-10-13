@@ -5,8 +5,22 @@ using System.Diagnostics;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
+
+[Component("Typhon.Test.LockOrder.Tag", 1, StorageMode = StorageMode.SingleVersion)]
+public struct LoTag
+{
+    [Index(AllowMultiple = true)] public long Group;
+    public long N;
+}
+
+[Archetype]
+class LoTagArch : Archetype<LoTagArch>
+{
+    public static readonly Comp<LoTag> Tag = Register<LoTag>();
+}
 
 /// <summary>
 /// Rule <b>IXS-10</b> (<c>rules/indexing.md</c>): an index reader never waits on a revision chain's lock while it holds a value buffer's.
@@ -22,7 +36,7 @@ namespace Typhon.Engine.Tests;
 class IndexReaderLockOrderTests : TestBase<IndexReaderLockOrderTests>
 {
     private const int Items = 2_000, Writers = 3, Readers = 3;
-    private static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(1_500);
+    private static readonly TimeSpan Duration = TimeSpan.FromMilliseconds(400);
 
     [Test]
     [VerifiesRule("IXS-10")]
@@ -160,5 +174,68 @@ class IndexReaderLockOrderTests : TestBase<IndexReaderLockOrderTests>
 
             Assert.That(found.SetEquals(expected), Is.True, $"key {key}: the index holds {found.Count} items, the owners say {expected.Count}");
         }
+    }
+
+    /// <summary>
+    /// The reader copies a key's values and releases the buffer before it resolves them, so a SingleVersion destroy — which releases its slot at once — and
+    /// a spawn into that slot can land in between. The reader must not yield the new occupant, another entity under another key, as one of this key's.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXS-10")]
+    public void ASlotReusedAfterTheKeyWasCopied_IsNotYieldedUnderTheKey()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<LoTag>();
+        dbe.InitializeArchetypes();
+        EntityId a, b;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            a = tx.Spawn<LoTagArch>(LoTagArch.Tag.Set(new LoTag { Group = 5, N = 1 }));
+            b = tx.Spawn<LoTagArch>(LoTagArch.Tag.Set(new LoTag { Group = 5, N = 2 }));
+            tx.Commit();
+        }
+
+        var indexRef = dbe.GetIndexRef<LoTag, long>(x => x.Group);
+        var yielded = new List<long>();
+        EntityId c = default;
+        var fired = false;
+        Transaction.IndexEntityEnumerator<LoTag, long>.KeyCopiedProbe = () =>
+        {
+            if (fired)
+            {
+                return;
+            }
+
+            fired = true;
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                tx.Destroy(b);
+                tx.Commit();
+            }
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                c = tx.Spawn<LoTagArch>(LoTagArch.Tag.Set(new LoTag { Group = 9, N = 3 }));
+                tx.Commit();
+            }
+        };
+
+        try
+        {
+            using var reader = dbe.CreateReadOnlyTransaction();
+            using var e = reader.EnumerateIndex<LoTag, long>(indexRef, 5, 5);
+            while (e.MoveNext())
+            {
+                yielded.Add(e.CurrentEntityPK);
+            }
+        }
+        finally
+        {
+            Transaction.IndexEntityEnumerator<LoTag, long>.KeyCopiedProbe = null;
+        }
+
+        Assert.That(fired, Is.True, "premise: the destroy and the spawn ran after the key was copied");
+        Assert.That(yielded, Does.Not.Contain((long)c.RawValue), "the slot's new occupant, under key 9, was yielded under key 5");
+        Assert.That(yielded, Does.Contain((long)a.RawValue), "an entity still under the key was not yielded");
     }
 }

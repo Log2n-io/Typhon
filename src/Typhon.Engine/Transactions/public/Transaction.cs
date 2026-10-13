@@ -764,6 +764,7 @@ public unsafe partial class Transaction : EntityAccessor
                 RecordSize = meta._entityRecordSize,
                 CompOffset = layout.ComponentOffset(compSlot),
                 CompSize = layout.ComponentSize(compSlot),
+                FieldOffset = field.FieldOffset,
                 VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
             });
 
@@ -916,6 +917,9 @@ public unsafe partial class Transaction : EntityAccessor
         public int CompOffset;
         public int CompSize;
 
+        /// <summary>The indexed field's offset in the component: a SingleVersion slot's key is re-checked there (IXS-10).</summary>
+        public int FieldOffset;
+
         /// <summary>Position among the archetype's Versioned slots, or -1 when this component is SingleVersion here.</summary>
         public int VersionedIndex;
     }
@@ -948,6 +952,10 @@ public unsafe partial class Transaction : EntityAccessor
 
         // The current key's values, copied out of its buffer before any of them is resolved (IXS-10). Pooled; returned by Dispose.
         private int[] _keyValues;
+
+        /// <summary>Test seam (IXS-10): runs after a key's values are copied and its buffer released, before any is resolved. Null in production.</summary>
+        [ThreadStatic]
+        internal static Action KeyCopiedProbe;
 
         private ChunkAccessor<PersistentStore> _compRevAccessor;
         private ChunkAccessor<PersistentStore> _compContentAccessor;
@@ -1008,8 +1016,10 @@ public unsafe partial class Transaction : EntityAccessor
 
             _maxRecordSize = maxRecord;
 
-            _compRevAccessor = ct.CompRevTableSegment.CreateChunkAccessor(changeSet);
-            _compContentAccessor = ct.ComponentSegment.CreateChunkAccessor(changeSet);
+            // A SingleVersion component has no revision chains and no content segment: its bytes are the cluster slot. The accessors stay default,
+            // which MoveNext never touches for it and Dispose skips; created unconditionally, an index read of such a component threw here.
+            _compRevAccessor = ct.CompRevTableSegment != null ? ct.CompRevTableSegment.CreateChunkAccessor(changeSet) : default;
+            _compContentAccessor = ct.ComponentSegment != null ? ct.ComponentSegment.CreateChunkAccessor(changeSet) : default;
             _tx = tx;
             _transactionTSN = tx.TSN;
             _componentOverhead = ct.ComponentOverhead;
@@ -1077,8 +1087,14 @@ public unsafe partial class Transaction : EntityAccessor
 
                 if (src.VersionedIndex < 0)
                 {
-                    // SingleVersion in this archetype: the cluster slot IS the component.
+                    // SingleVersion in this archetype: the cluster slot IS the component. Its key is re-checked: the key's values were copied out of
+                    // their buffer before this (IXS-10), and a SingleVersion destroy releases its slot at once — a spawn can have taken it since, another
+                    // entity under another key. The buffer's lock used to hold the destroy's index removal, and so the release, off until the read was done.
                     _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
+                    if (!_currentComponentSpan.Slice(src.FieldOffset, sizeof(TKey)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<TKey>(ref key))))
+                    {
+                        continue;
+                    }
                 }
                 else
                 {
@@ -1182,6 +1198,7 @@ public unsafe partial class Transaction : EntityAccessor
                 var count = _innerMultiple.DrainCurrentKey(ref _keyValues);
                 _currentValues = new ReadOnlySpan<int>(_keyValues, 0, count);
                 _currentValueIndex = 0;
+                KeyCopiedProbe?.Invoke();
             }
         }
 
@@ -2262,7 +2279,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 var newestStamp = lockHeld
                     ? ComponentRevisionManager.NewestPublished(ref compRevAccessor, firstChunkId, -1, out var newestChunkId)
-                    : ComponentRevisionManager.NewestPublishedUnlocked(ref compRevAccessor, firstChunkId, out newestChunkId);
+                    : ComponentRevisionManager.NewestPublishedUnlocked(ref compRevAccessor, firstChunkId, this, out newestChunkId);
                 if (newestStamp != 0 && newestChunkId != 0)
                 {
                     baseCompChunkId = newestChunkId;

@@ -187,6 +187,71 @@ class LastWriterWinsIndexTests : TestBase<LastWriterWinsIndexTests>
     }
 
     /// <summary>
+    /// T2 reads X at B=60 and writes it unchanged; between its PREPARE and its append, T1 moves X to 30 and commits. T2's PREPARE saw 60 as the newest, owed
+    /// no move, and is the newest commit: its publish must find T1's 30 and move X back to 60.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-06")]
+    public void ACommitLandingBetweenPrepareAndPublish_IsMovedBackFrom()
+    {
+        using var dbe = OpenEngine();
+        var x = Seed(dbe, new CompD(1f, 60, 1.0));
+        var pk = (long)x.RawValue;
+        Exception failure = null;
+        var fired = false;
+        dbe.CommitBeforeAppendProbe = () =>
+        {
+            if (fired)
+            {
+                return;
+            }
+
+            fired = true;
+            var other = new Thread(() =>
+            {
+                try
+                {
+                    using var t1 = dbe.CreateQuickTransaction();
+                    Write(t1, x, new CompD(1f, 30, 1.0));
+                    if (!t1.Commit())
+                    {
+                        throw new InvalidOperationException("premise: T1 commits");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            }) { IsBackground = true };
+            other.Start();
+            if (!other.Join(Patience))
+            {
+                failure = new TimeoutException("T1 did not commit while T2 sat before its append");
+            }
+        };
+
+        try
+        {
+            using var t2 = dbe.CreateQuickTransaction();
+            Write(t2, x, new CompD(1f, 60, 1.0));
+            Assert.That(t2.Commit(), Is.True, "premise: T2 commits");
+        }
+        finally
+        {
+            dbe.CommitBeforeAppendProbe = null;
+        }
+
+        Assert.That(fired && failure == null, Is.True, $"premise: T1 committed between T2's PREPARE and its append ({failure?.Message})");
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(x).Read(CompDArch.D).B, Is.EqualTo(60), "premise: T2's value is the newest committed");
+        }
+
+        Assert.That(UniqueHolders(dbe, 60), Is.EqualTo(new[] { pk }), "the entity is not indexed under the value it reads");
+        Assert.That(UniqueHolders(dbe, 30), Is.Empty, "T1's key is still held");
+    }
+
+    /// <summary>
     /// The older update — the lower stamp — is held at its publish while the newer one commits. The entity reads the newer value; the older publish, last,
     /// must move nothing.
     /// </summary>
@@ -243,7 +308,10 @@ class LastWriterWinsIndexTests : TestBase<LastWriterWinsIndexTests>
             {
                 using var tx = dbe.CreateQuickTransaction();
                 Write(tx, x, new CompD(1f, b, 1.0));
-                tx.Commit();
+                if (!tx.Commit())
+                {
+                    throw new InvalidOperationException($"premise: the update to {b} commits");
+                }
             }
             catch (Exception ex)
             {
