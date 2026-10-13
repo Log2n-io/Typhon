@@ -27,6 +27,17 @@ internal sealed class ArchetypeMembershipRegistry
     private ViewRegistration[] _views = [];
 
     /// <summary>
+    /// The <c>FieldIdx</c> this registry's register/deregister instants carry: it has no field number, and no indexed field reaches this value (#865).
+    /// </summary>
+    internal const ushort MembershipFieldIdx = ushort.MaxValue;
+
+    private static void EmitRegister(int viewId, int count)
+        => TyphonEvent.EmitEcsViewRegistryRegister((ushort)Math.Min(viewId, ushort.MaxValue), MembershipFieldIdx, (ushort)Math.Min(count, ushort.MaxValue));
+
+    private static void EmitDeregister(int viewId, int count)
+        => TyphonEvent.EmitEcsViewRegistryDeregister((ushort)Math.Min(viewId, ushort.MaxValue), MembershipFieldIdx, (ushort)Math.Min(count, ushort.MaxValue));
+
+    /// <summary>
     /// Monotonic counter of COMMITS that spawned or destroyed at least one entity in this archetype — not of entities, so a 50 000-entity
     /// batch moves it by one.
     /// </summary>
@@ -114,6 +125,7 @@ internal sealed class ArchetypeMembershipRegistry
             // Release: the publisher reads this array with no lock, and every field of the new registration must be visible to it before the
             // reference is.
             Volatile.Write(ref _views, updated);
+            EmitRegister(view.ViewId, updated.Length);
         }
     }
 
@@ -152,6 +164,7 @@ internal sealed class ArchetypeMembershipRegistry
             if (existing.Length == 1)
             {
                 Volatile.Write(ref _views, []);
+                EmitDeregister(view.ViewId, 0);
                 return;
             }
 
@@ -159,6 +172,7 @@ internal sealed class ArchetypeMembershipRegistry
             Array.Copy(existing, 0, updated, 0, index);
             Array.Copy(existing, index + 1, updated, index, existing.Length - index - 1);
             Volatile.Write(ref _views, updated);
+            EmitDeregister(view.ViewId, updated.Length);
         }
     }
 
@@ -202,6 +216,7 @@ internal sealed class ArchetypeMembershipRegistry
             if (existing[i].DeltaBuffer.IsAbandoned && !Contains(_views, existing[i].ViewId))
             {
                 existing[i].DeltaBuffer.RetireAbandoned();
+                EmitDeregister(existing[i].ViewId, _views.Length);
             }
         }
     }
