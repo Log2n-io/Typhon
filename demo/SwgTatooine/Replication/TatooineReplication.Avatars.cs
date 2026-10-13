@@ -582,7 +582,7 @@ public static partial class TatooineReplication
         saved.LastRealm = realm.Value;
         saved.Credits = body.Read(Player.Inventory).Credits;
         saved.LastSavedUtcTicks = DateTime.UtcNow.Ticks;
-        profile.Write(CharacterArch.Profile) = saved;
+        profile.Set(CharacterArch.Profile, saved);
 
         System.Threading.Interlocked.Increment(ref _locationsSaved);
     }

@@ -154,7 +154,7 @@ public static class CharacterStore
         // The whole component is rewritten, Account included, with the same value. The commit path's unchanged-field guard (#665)
         // compares the full key, so the account index is not touched by a position save — which matters, because A6 does this on a
         // cadence for every live avatar and a B+Tree write per avatar per cadence would be a cost nobody budgeted.
-        entity.Write(CharacterArch.Profile) = updated;
+        entity.Set(CharacterArch.Profile, updated);
         tx.Commit();
         return true;
     }

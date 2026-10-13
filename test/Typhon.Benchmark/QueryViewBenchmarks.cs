@@ -141,7 +141,7 @@ public class QueryViewBenchmarks : IDisposable
                 // keeps the component, its stride and its four indexes exactly as they were, so what this benchmark measures does not change;
                 // only the setup path does, and setup is not measured.
                 var eid = tx.Spawn<BenchItemArch>();
-                tx.OpenMut(eid).Write(BenchItemArch.Item) = item;
+                tx.OpenMut(eid).Set(BenchItemArch.Item, item);
 
                 // Track Epic+ items for view cycling
                 if (item.Rarity >= 3)

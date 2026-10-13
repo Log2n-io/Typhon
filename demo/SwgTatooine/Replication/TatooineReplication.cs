@@ -1961,11 +1961,12 @@ public static partial class TatooineReplication
                 continue;
             }
 
-            ref var move = ref player.Write(Player.Move);
+            var move = player.Read(Player.Move);
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
             SteerTo(ref move, ref player, subs);
+            player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
@@ -1984,13 +1985,14 @@ public static partial class TatooineReplication
 
             // A heading is turned into a destination one second of travel away rather than into a velocity, so that this and MoveTo leave the player in the
             // same state and PlayerMove needs to know nothing about which one sent it. A held key re-sends every frame, and each one renews the second.
-            ref var move = ref player.Write(Player.Move);
+            var move = player.Read(Player.Move);
             var place = player.Read(Player.Bounds);
             move.SpeedMps = speed;
             var reach = MathF.Max(speed, 1f);
             move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
             move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
             SteerTo(ref move, ref player, subs);
+            player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
@@ -2001,10 +2003,11 @@ public static partial class TatooineReplication
                 continue;
             }
 
-            ref var owner = ref player.Write(Player.Session);
+            var owner = player.Read(Player.Session);
             if (command.Value.NetId == 0u)
             {
                 owner.Target = EntityId.Null;
+                player.Set(Player.Session, owner);
                 continue;
             }
 
@@ -2029,6 +2032,8 @@ public static partial class TatooineReplication
                 owner.Target = EntityId.Null;
                 System.Threading.Interlocked.Increment(ref _targetsRefused);
             }
+
+            player.Set(Player.Session, owner);
         }
 
         // SWG-09. What a client says becomes a Chat heard by whoever is near enough IN THE SPEAKER'S REALM — the speaker's
@@ -2105,7 +2110,7 @@ public static partial class TatooineReplication
         // the code rather than of two implementations happening to agree.
         var moving = SimBridge.Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTickForIntents, place.X, place.Z, move.DestX, move.DestZ);
 
-        ref var state = ref player.Write(Player.State);
+        var state = player.Read(Player.State);
 
         // A player going nowhere is Idle, not Travelling. `Activity` is replicated, so getting this wrong tells every client watching that a standing player is
         // running — which is the one visible consequence in the whole intent path, and a stop is the commonest intent there is.
@@ -2113,6 +2118,7 @@ public static partial class TatooineReplication
 
         // Zero, because a possessed player has no server-side timer: see the remarks on ApplyIntents.
         state.ActivityTicks = 0;
+        player.Set(Player.State, state);
         subs.Replicate(in player);
     }
 

@@ -240,7 +240,7 @@ public static class AccountStore
         // comparing all 64 bytes), so the name's B+Tree is not touched by a login. AccountSecret is not opened at all.
         var updated = entity.Read(AccountArch.Identity);
         updated.LastSeenUtcTicks = DateTime.UtcNow.Ticks;
-        entity.Write(AccountArch.Identity) = updated;
+        entity.Set(AccountArch.Identity, updated);
         tx.Commit();
     }
 
