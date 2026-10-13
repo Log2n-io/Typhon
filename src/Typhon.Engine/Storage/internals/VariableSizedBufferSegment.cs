@@ -817,6 +817,35 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         }
     }
 
+    /// <summary>
+    /// The position of <paramref name="value"/> among a chunk's <paramref name="count"/> elements, or -1: a vectorized search for the integer element types
+    /// an index stores (#1346 — the fence's batched moves find one element per move), the comparer loop otherwise. The chunk is page-cache memory the
+    /// caller has mapped.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe int IndexOfElement(T* elements, int count, T value)
+    {
+        if (typeof(T) == typeof(int))
+        {
+            return new ReadOnlySpan<int>(elements, count).IndexOf(Unsafe.As<T, int>(ref value));
+        }
+
+        if (typeof(T) == typeof(long))
+        {
+            return new ReadOnlySpan<long>(elements, count).IndexOf(Unsafe.As<T, long>(ref value));
+        }
+
+        for (var i = 0; i < count; i++)
+        {
+            if (EqualityComparer<T>.Default.Equals(elements[i], value))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     unsafe public int DeleteElement(int bufferId, int elementId, T element, ref ChunkAccessor<TStore> accessor)
     {
         // Fetch the root chunk — epoch protects page lifetime
@@ -833,16 +862,8 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
 
             // Look for our element
             var count = elementChunkHeader.ElementCount;
-            int i;
-            for (i = 0; i < count; i++)
-            {
-                if (EqualityComparer<T>.Default.Equals(baseElementAddr[i], element))
-                {
-                    break;
-                }
-            }
-
-            if (i == count) return -1;
+            var i = IndexOfElement(baseElementAddr, count, element);
+            if (i < 0) return -1;
 
             // Replace this slot by the last element to keep an un-fragmented collection
             baseElementAddr[i] = baseElementAddr[count - 1];
@@ -899,17 +920,14 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
             var isRoot = bufferId == elementId;
             var baseElementAddr = (T*)(elementChunk + (isRoot ? RootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader)));
 
-            var count = elementChunkHeader.ElementCount;
-            for (var i = 0; i < count; i++)
+            var i = IndexOfElement(baseElementAddr, elementChunkHeader.ElementCount, oldElement);
+            if (i < 0)
             {
-                if (EqualityComparer<T>.Default.Equals(baseElementAddr[i], oldElement))
-                {
-                    baseElementAddr[i] = newElement;
-                    return true;
-                }
+                return false;
             }
 
-            return false;
+            baseElementAddr[i] = newElement;
+            return true;
         }
         finally
         {

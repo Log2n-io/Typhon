@@ -993,14 +993,15 @@ both fast and exact inside the window; this rule fixes what it does promise.
             in the tree — and Skip / Take count only the rows returned
   never trusting a tree key for an entity written since the fence: the index path skips re-testing the predicate its
         range enforced (`PrimaryRangeAdmitsOnlyMatches`), and the ordered merge tests no value at all, so both re-test the
-        entities whose shadow-bitmap bit is set (`ClusterShadowBitmap`, set before the in-place write lands)
+        entities whose shadow-bitmap bit is set (`ClusterShadowBitmap`, set before a key-changing in-place write lands; a write that keeps every
+        key leaves the tree key exact and sets nothing, IX-07)
   never looking for the new values by checking every entity written since the fence: that costs each query in proportion
         to the tick's writes — measured at +0.9 ms per point lookup with 100 000 entities written — where the index's
         point is a cost independent of them. A caller that needs the new value inside the tick uses the Commit
         discipline, or fences first
   enforce the re-test runs only while the queried component may have stale keys
           (`ArchetypeClusterState.MayHaveFenceStaleKeys`): some entity marked since the fence, AND its slot written, OR a
-          slot released this tick (a destroy after a write to ANY component leaves this one's entries for the fence), OR
+          slot released this tick (a destroy after a key-changing write leaves this one's entries for the fence), OR
           an empty written-slot union (a path that does not maintain it) — the fence drain's own three-term gate. A tick
           that only writes other components and destroys nothing costs an index query on this one nothing
   scope: EcsQuery.ScanPerArchetypeBTreeSelective, ArchetypeSortedStream, ArchetypeSortedStream.Create,
@@ -1023,7 +1024,8 @@ both fast and exact inside the window; this rule fixes what it does promise.
   verified: QueryBetweenWriteAndFenceTests [VerifiesRule] — the old value, a range left and a range still matched, the
             new value before and after the fence (inside and outside the cluster's old bounds), the `AllowMultiple`
             index, a second vectorisable predicate (the SIMD branch), a write followed by a destroy, and a write to
-            ANOTHER component followed by a destroy and a spawn (which the freed slot does not take before the fence, IX-06), each on the
+            ANOTHER component followed by a destroy and a spawn (the destroy removes the entries itself, so the spawn takes the freed slot at once;
+            after a key move the slot is held until the fence, IX-06), each on the
             planner's path and both forced paths; the ordered query (ascending, descending, Skip / Take, before and after
             the fence, a destroyed entity), which takes the merge whatever path is forced; the gate (a write to another
             component leaves the re-test off, a write to this one turns it on, the fence turns it off); and the

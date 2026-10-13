@@ -160,7 +160,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     {
         if ((_meta.TransientSlotMask & (1 << slot)) == 0)
         {
-            _state.NoteClusterPageModified(_chunkId);
+            _state.NoteClusterPageModifiedAt(_base);   // by address: the enumerator holds the page (#1346)
         }
     }
 
@@ -191,7 +191,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <remarks>
     /// Refused for a component with an <c>[Index]</c> field the tick fence maintains (SingleVersion or Transient): the index moves an entity's entry from
     /// the key recorded at its first write, and a write through handed-out memory records nothing, so the index would keep the old key for good (#1187,
-    /// IX-07). Read such a component with <see cref="GetReadOnlySpan{T}"/> and write it with <see cref="Set{T}"/> or <c>OpenMut(...).Set</c>.
+    /// IX-07). Read such a component with <see cref="GetReadOnlySpan{T}"/> and write it with <see cref="Set{T}(Comp{T}, int, in T)"/> or
+    /// <c>OpenMut(...).Set</c>.
     /// </remarks>
     /// <typeparam name="T">Component value type.</typeparam>
     /// <param name="comp">Handle identifying the component within the archetype.</param>
@@ -378,16 +379,117 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled for the entity in cluster slot {slotIndex}.");
         }
 
-        RecordWrite(slot, slotIndex);
-        *(T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T)) = value;
+        var copy = value;   // on the stack: value may live in a managed array, and a pointer is taken only over the stack
+        RecordWrite(slot, slotIndex, (byte*)&copy);
+        *(T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T)) = copy;
         NotePageWritten(slot);
     }
 
     /// <summary>
-    /// The bookkeeping of an in-place write to <paramref name="slotIndex"/>'s component <paramref name="slot"/>, made before the store: the old keys of
-    /// the entity's fence-maintained indexed fields on its first write this tick, then the dirty mark that makes the fence drain them (IX-07).
+    /// Store several entities' values of a component in one call: <see cref="Set{T}(Comp{T}, int, in T)"/> for every slot of <paramref name="slots"/>,
+    /// with <paramref name="values"/> indexed by slot. Its bookkeeping is per cluster rather than per entity — one shadow word, one dirty word, one page
+    /// note (#1346) — so a pass writing most of a cluster's entities pays it once.
     /// </summary>
-    private readonly void RecordWrite(byte slot, int slotIndex)
+    /// <typeparam name="T">Component value type.</typeparam>
+    /// <param name="comp">Handle identifying the component within the archetype.</param>
+    /// <param name="slots">The entities' slots: bits of <see cref="OccupancyBits"/>.</param>
+    /// <param name="values">The values, by slot: <c>values[i]</c> is stored at slot <c>i</c>. Long enough for the highest slot of
+    /// <paramref name="slots"/>.</param>
+    /// <exception cref="InvalidOperationException">As <see cref="Set{T}(Comp{T}, int, in T)"/>.</exception>
+    /// <exception cref="ArgumentException">A slot of <paramref name="slots"/> holds no entity, or <paramref name="values"/> is too short.</exception>
+    public readonly void Set<T>(Comp<T> comp, ulong slots, scoped ReadOnlySpan<T> values) where T : unmanaged
+    {
+        CheckStep();
+        SystemAccessValidator.AssertWrite<T>();
+        var slot = _meta.GetSlot(comp._componentTypeId);
+        CheckStride<T>(slot);
+        if ((_state.SetRefusedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowSetRefused(slot);
+        }
+
+        if ((slots & ~OccupancyBits) != 0)
+        {
+            ThrowHelper.ThrowArgument($"ClusterRef.Set: slots {slots & ~OccupancyBits:X} of cluster {_chunkId} hold no entity.");
+        }
+
+        if (slots == 0)
+        {
+            return;
+        }
+
+        if (64 - BitOperations.LeadingZeroCount(slots) > values.Length)
+        {
+            ThrowHelper.ThrowArgument(
+                $"ClusterRef.Set: {values.Length} values, indexed by slot, do not reach slot {63 - BitOperations.LeadingZeroCount(slots)}.");
+        }
+
+        if (CheckConfig.Enabled && (EnabledBits(slot) & slots) != slots)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled for an entity of cluster slots {slots & ~EnabledBits(slot):X}.");
+        }
+
+        RecordWrites(slot, slots, values);
+        var column = (T*)(ResolveBase(slot) + _layout.ComponentOffset(slot));
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            column[i] = values[i];
+        }
+
+        NotePageWritten(slot);
+    }
+
+    /// <summary><see cref="RecordWrite"/> for the batched <see cref="Set{T}(Comp{T}, ulong, ReadOnlySpan{T})"/>, before any store.</summary>
+    private readonly void RecordWrites<T>(byte slot, ulong slots, scoped ReadOnlySpan<T> values) where T : unmanaged
+    {
+        var discipline = _owner?.Discipline ?? CommitDiscipline.TickFence;
+        if ((_meta.TransientSlotMask & (1 << slot)) == 0)
+        {
+            if (discipline == CommitDiscipline.Commit)
+            {
+                ThrowHelper.ThrowInvalidOp($"An in-place cluster write to SingleVersion component slot {slot} under the Commit discipline: "
+                                         + "write it with OpenMut(...).Set, which stages it.");
+            }
+
+            _owner?.NoteSvInPlaceWrite();   // CM-02
+        }
+
+        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            var column = ResolveBase(slot) + _layout.ComponentOffset(slot);
+            var changed = 0UL;
+            for (var rest = slots; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                var copy = values[i];   // on the stack: values may be a managed array, and a pointer is taken only over the stack
+                if (_state.IndexedKeysDiffer(slot, column + i * sizeof(T), (byte*)&copy))
+                {
+                    changed |= 1UL << i;
+                }
+            }
+
+            if (changed != 0)
+            {
+                _state.CaptureFirstWrites(_chunkId, changed, _base, _transientBase, (ushort)~_meta.FenceMaintainedSlotsUnder(discipline));
+            }
+        }
+
+        _state.SetDirtySlots(_chunkId, slots, slot);
+    }
+
+    /// <summary>
+    /// The bookkeeping of an in-place write to <paramref name="slotIndex"/>'s component <paramref name="slot"/>, made before the store: the old keys of
+    /// the entity's fence-maintained indexed fields on its first key-changing write this tick, then the dirty mark that makes the fence drain them (IX-07).
+    /// </summary>
+    /// <param name="slot">The component slot written.</param>
+    /// <param name="slotIndex">The entity's slot in the cluster.</param>
+    /// <param name="newValue">
+    /// The value about to be stored, on the stack, or <c>null</c> when the caller already knows it changes a key. A value that keeps every indexed key of
+    /// the component records nothing (#1346): the tree's keys are still the entity's, a later write that does change one records them then, and a destroy
+    /// with no record removes them itself.
+    /// </param>
+    private readonly void RecordWrite(byte slot, int slotIndex, byte* newValue)
     {
         var discipline = _owner?.Discipline ?? CommitDiscipline.TickFence;
         if ((_meta.TransientSlotMask & (1 << slot)) == 0)
@@ -403,7 +505,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             _owner?.NoteSvInPlaceWrite();   // CM-02: blocks a later escalation to Commit
         }
 
-        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0
+            && (newValue == null
+                || _state.IndexedKeysDiffer(slot, ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * _layout.ComponentSize(slot), newValue)))
         {
             var skipMask = (ushort)~_meta.FenceMaintainedSlotsUnder(discipline);
             _state.CaptureFirstWrite(_chunkId, slotIndex, GetEntityId(slotIndex), _base, _transientBase, skipMask);
@@ -420,7 +524,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     {
         if (SpatialWriteChangesKeys(slot, slotIndex, in newValue))
         {
-            RecordWrite(slot, slotIndex);
+            RecordWrite(slot, slotIndex, null);
         }
     }
 
@@ -746,7 +850,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
             for (; keysChanged != 0; keysChanged &= keysChanged - 1)
             {
-                RecordWrite(slot, BitOperations.TrailingZeroCount(keysChanged));
+                RecordWrite(slot, BitOperations.TrailingZeroCount(keysChanged), null);
             }
         }
 

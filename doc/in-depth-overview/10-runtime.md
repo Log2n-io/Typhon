@@ -240,7 +240,7 @@ RunParallelFence
   ↓ (serial prep on TickDriver: context reset, dormancy drain, table fences)
   ↓
 scheduler.DispatchDeferredTracks()
-  ↓ (Fence DAG on workers: FencePrep → FenceMigrate → FenceAabbRefresh → FenceFinalize)
+  ↓ (Fence DAG on workers: FencePrep → FenceIndexMoves → FenceMigrate → FenceIndexMassUpdate → FenceEntityMapUpdate → FenceAabbRefresh → FenceFinalize)
 ```
 
 The fence emits its own WAL records (`ClusterTickFence` chunks) and the subsequent `UoW.Flush` waits for the LSN covering them — see [11-durability §recovery](11-durability.md).

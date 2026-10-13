@@ -465,6 +465,106 @@ internal sealed unsafe partial class ArchetypeClusterState
         AppendIndexedKeys(TransientIndexSlots, entityIndex, entityId, skipMask, keys, n);
     }
 
+    /// <summary>
+    /// <see cref="CaptureFirstWrite"/> for every slot of <paramref name="slots"/> in one cluster (#1346): the keys of the entities not yet recorded this
+    /// tick are read, then one <see cref="DirtyBitmap.TestAndSetWord"/> publishes their bits, and only the entities whose bit it set are appended — one
+    /// reservation per field for the run. Per bit the rule is <see cref="CaptureFirstWrite"/>'s: read before marked, recorded only by the marker.
+    /// </summary>
+    internal void CaptureFirstWrites(int clusterChunkId, ulong slots, byte* primaryBase, byte* transientBase, ushort skipMask)
+    {
+        var shadow = ClusterShadowBitmap;
+        var need = slots & ~shadow.ReadWord(clusterChunkId);
+        if (need == 0)
+        {
+            return;
+        }
+
+        var perEntity = Math.Max(1, FenceIndexedFieldCount);
+        var count = BitOperations.PopCount(need);
+        if (count * perEntity > BatchedCaptureKeyBudget)
+        {
+            // An archetype with many indexed fields: the key buffer would not fit the stack budget, so the run is recorded one entity at a time.
+            for (var rest = need; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                CaptureFirstWrite(clusterChunkId, i, EntityId.FromRaw(*(long*)(primaryBase + Layout.EntityIdsOffset + i * 8)), primaryBase, transientBase,
+                    skipMask);
+            }
+
+            return;
+        }
+
+        transientBase = transientBase != null ? transientBase : primaryBase;
+        var keys = stackalloc KeyBytes8[count * perEntity];   // entity-major: entity e's keys at [e * perEntity, ...)
+        var e = 0;
+        for (var rest = need; rest != 0; rest &= rest - 1, e++)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var n = ReadIndexedKeys(IndexSlots, primaryBase, i, skipMask, keys + e * perEntity, 0);
+            ReadIndexedKeys(TransientIndexSlots, transientBase, i, skipMask, keys + e * perEntity, n);
+        }
+
+        var won = need & ~shadow.TestAndSetWord(clusterChunkId, need);
+        if (won == 0)
+        {
+            return;   // other writers recorded every one of them first
+        }
+
+        var f = AppendIndexedKeyRuns(IndexSlots, clusterChunkId, need, won, primaryBase, skipMask, keys, perEntity, 0);
+        AppendIndexedKeyRuns(TransientIndexSlots, clusterChunkId, need, won, primaryBase, skipMask, keys, perEntity, f);
+    }
+
+    /// <summary>
+    /// The first unique-index collision this tick's batched index moves found (#1346): raised once the drain that found it has finished and reset its
+    /// buffers, not in the middle of it, so no record outlives the fence (IX-07).
+    /// </summary>
+    internal Exception PendingIndexCollision;
+
+
+    /// <summary>Stack budget of <see cref="CaptureFirstWrites"/>'s key buffer, in keys: 4 KiB. Settable only so a test can reach the per-entity
+    /// fallback.</summary>
+    internal static int BatchedCaptureKeyBudget = 512;
+
+    // The same walk as ReadIndexedKeys: field f of entity e is keys[e * perEntity + f]. Entity ordinals count the bits of `need`, the read set.
+    private int AppendIndexedKeyRuns<TStore>(ClusterIndexSlot<TStore>[] slots, int clusterChunkId, ulong need, ulong won, byte* primaryBase,
+        ushort skipMask, KeyBytes8* keys, int perEntity, int f) where TStore : struct, IPageStore
+    {
+        if (slots == null)
+        {
+            return f;
+        }
+
+        var wonCount = BitOperations.PopCount(won);
+        for (var s = 0; s < slots.Length; s++)
+        {
+            ref var ixSlot = ref slots[s];
+            if ((skipMask & (1 << ixSlot.Slot)) != 0)
+            {
+                continue;
+            }
+
+            for (var fi = 0; fi < ixSlot.Fields.Length; fi++, f++)
+            {
+                var buffer = ixSlot.ShadowBuffers[fi];
+                var at = buffer.Reserve(wonCount);
+                var e = 0;
+                for (var rest = need; rest != 0; rest &= rest - 1, e++)
+                {
+                    var i = BitOperations.TrailingZeroCount(rest);
+                    if ((won & (1UL << i)) == 0)
+                    {
+                        continue;
+                    }
+
+                    var entityId = EntityId.FromRaw(*(long*)(primaryBase + Layout.EntityIdsOffset + i * 8));
+                    buffer.WriteAt(at++, clusterChunkId * 64 + i, entityId, keys[e * perEntity + f]);
+                }
+            }
+        }
+
+        return f;
+    }
+
     private int ReadIndexedKeys<TStore>(ClusterIndexSlot<TStore>[] slots, byte* segmentBase, int slotIndex, ushort skipMask, KeyBytes8* keys, int n)
         where TStore : struct, IPageStore
     {
@@ -701,8 +801,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// (<c>DrainClusterShadowSlots</c>), for the same reasons:
     /// <list type="bullet">
     /// <item>the slot was written (<see cref="WrittenSlotUnion"/>, <see cref="AllSlotsWritten"/> included);</item>
-    /// <item>a slot was released this tick (<see cref="SlotReleasesThisTick"/>): a destroy after a write to ANY component leaves this one's index entries
-    /// for the fence, on a slot a spawn may already have reused;</item>
+    /// <item>a slot was released this tick (<see cref="SlotReleasesThisTick"/>): a destroy after a key-changing write to any indexed component leaves this
+    /// one's index entries for the fence (the record is per entity);</item>
     /// <item>the union is empty while entities are marked: a path that does not maintain the union (a pure-Transient archetype's writes) — a
     /// contradiction, answered by doing the work.</item>
     /// </list>
@@ -4003,6 +4103,20 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void NoteClusterPageModified(int clusterChunkId) => ClusterSegment?.MarkChunkModified(clusterChunkId);
 
     /// <summary>
+    /// <see cref="NoteClusterPageModified"/> for a caller holding <paramref name="clusterBase"/>, the cluster's address on the primary segment, mapped: the
+    /// page from the address, with no page lookup (#1346). A Transient-only archetype has no persistent segment and needs nothing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteClusterPageModifiedAt(byte* clusterBase)
+    {
+        var segment = ClusterSegment;
+        if (segment != null)
+        {
+            segment.Store.MarkPageModified(PagedMMF.MemPageIndexOfRawData(clusterBase, segment.Store.MemPagesBaseAddress));
+        }
+    }
+
+    /// <summary>
     /// Mark an entity slot dirty for tick-fence processing, recording WHICH component slot was written so the fence can emit only
     /// the columns that actually changed (#559 §4.5).
     /// </summary>
@@ -4030,6 +4144,38 @@ internal sealed unsafe partial class ArchetypeClusterState
         // NOTE: must NOT delegate to the component-less overload — that one poisons the mask to AllSlotsWritten, which would
         // undo the narrowing this overload exists to perform.
         MarkEntityDirty(clusterChunkId, slotIndex);
+    }
+
+    /// <summary>
+    /// <see cref="SetDirty(int, int, int)"/> for every slot of <paramref name="slots"/> in one cluster: one written-slot test, one bitmap word (#1346).
+    /// </summary>
+    internal void SetDirtySlots(int clusterChunkId, ulong slots, int componentSlot)
+    {
+        if (slots == 0)
+        {
+            return;
+        }
+
+        var bit = 1 << componentSlot;
+        if ((WrittenSlotUnion & bit) == 0)
+        {
+            Interlocked.Or(ref WrittenSlotUnion, bit);
+        }
+
+        if (componentSlot == SpatialSlot.Slot && SpatialSlot.HasSpatialIndex)
+        {
+            NoteStructureSlots(clusterChunkId, slots);
+        }
+
+        if ((ClusterDirtyBitmap.ReadWord(clusterChunkId) & slots) != slots)
+        {
+            ClusterDirtyBitmap.OrWord(clusterChunkId, (long)slots);
+        }
+
+        if (SleepStates != null && clusterChunkId < SleepStates.Length && SleepStates[clusterChunkId] == ClusterSleepState.Sleeping)
+        {
+            PendingWakeRequests.Enqueue(clusterChunkId);
+        }
     }
 
     /// <summary>

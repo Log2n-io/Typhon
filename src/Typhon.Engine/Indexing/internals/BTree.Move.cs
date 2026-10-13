@@ -425,7 +425,23 @@ internal abstract partial class BTree<TKey, TStore>
                 }
 
                 // followRightLink: false, for the same reason as Move — see the note there. This is the AllowMultiple twin and carries the identical hole.
-                var (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                // #221, as Move: no second descent when the leaf already standing owns newKey's range — a move to a nearby key, the common one, paid two
+                // root-to-leaf descents for what the first already answered (#1346). Concludes only on a validated read; the authority check under the
+                // latch below asks the same question again.
+                int newLeafId;
+                int newVersion;
+                var standingLeaf = _storage.LoadNode(oldLeafId);
+                if (!KeyOutsideLeafAuthority(standingLeaf, newKey, Comparer, ref opAccessor)
+                    && standingLeaf.GetLatch(ref opAccessor).ValidateVersion(oldVersion))
+                {
+                    newLeafId = oldLeafId;
+                    newVersion = oldVersion;
+                }
+                else
+                {
+                    (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                }
+
                 if (newLeafId == 0)
                 {
                     Interlocked.Increment(ref _optimisticRestarts);
@@ -478,7 +494,9 @@ internal abstract partial class BTree<TKey, TStore>
                     // merge — so bail to it now, while nothing has been written. Move's two-leaf path has always had this guard; MoveValue had it nowhere,
                     // and CheckConsistency found the empty leaves it left behind (#887).
                     var emptiesOldBuffer = _storage.BufferElementCount(oldBufferId, ref sibAccessor) == 1;
-                    var newKeyPresent = leaf.Find(newKey, Comparer, ref opAccessor) >= 0;
+                    // newKey's position, found once: nothing below changes the leaf's items before the buffer removal, which does not touch them (#1346).
+                    var newKeyIndex = leaf.Find(newKey, Comparer, ref opAccessor);
+                    var newKeyPresent = newKeyIndex >= 0;
                     if (emptiesOldBuffer && newKeyPresent && !CanLoseAnEntryInPlace(leaf, ref opAccessor))
                     {
                         latch.AbortWriteLock();
@@ -497,9 +515,8 @@ internal abstract partial class BTree<TKey, TStore>
 
                     // #1190, also before the first storage write: the new key's buffer chunk (a new key's root, or an append into a full buffer) comes from
                     // the reservation. Short of it, release with nothing written, reserve holding nothing, and retry.
-                    var moveNeed = newKeyPresent
-                        ? _storage.BufferChunksNeededToAppend(leaf.GetItem(leaf.Find(newKey, Comparer, ref opAccessor), ref opAccessor).Value, ref sibAccessor)
-                        : 1;
+                    var newKeyBufferId = newKeyPresent ? leaf.GetItem(newKeyIndex, ref opAccessor).Value : 0;
+                    var moveNeed = newKeyPresent ? _storage.BufferChunksNeededToAppend(newKeyBufferId, ref sibAccessor) : 1;
                     if (!ChunkReservation<TStore>.HasReserved(_segment, moveNeed))
                     {
                         latch.AbortWriteLock();
@@ -524,13 +541,14 @@ internal abstract partial class BTree<TKey, TStore>
                     }
 
                     // Find or prepare newKey
-                    var ni = leaf.Find(newKey, Comparer, ref opAccessor);
+                    var ni = newKeyIndex;
                     int newBufferId;
                     int newElementId;
+                    var countChanged = false;
                     if (ni >= 0)
                     {
                         // newKey exists — append to its buffer
-                        newBufferId = leaf.GetItem(ni, ref opAccessor).Value;
+                        newBufferId = newKeyBufferId;
                         newElementId = _storage.Append(newBufferId, value, ref sibAccessor);
                     }
                     else
@@ -557,6 +575,7 @@ internal abstract partial class BTree<TKey, TStore>
                         }
                         leaf.Insert(ni, new KeyValueItem(newKey, newBufferId), ref opAccessor);
                         Interlocked.Increment(ref _count);
+                        countChanged = true;
                     }
                     newHeadBufferId = newBufferId;
 
@@ -570,11 +589,18 @@ internal abstract partial class BTree<TKey, TStore>
                             leaf.RemoveAtInternal(oi, ref opAccessor);
                             _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
                             Interlocked.Decrement(ref _count);
+                            countChanged = true;
                         }
                     }
 
                     latch.WriteUnlock();
-                    SyncHeader(ref opAccessor);
+                    // The directory entry holds the key count and the root: neither moves unless a key came or went, and rewriting it dirtied the directory
+                    // page on every move (#1346).
+                    if (countChanged)
+                    {
+                        SyncHeader(ref opAccessor);
+                    }
+
                     return newElementId;
                 }
                 else
@@ -625,11 +651,13 @@ internal abstract partial class BTree<TKey, TStore>
                         continue;
                     }
 
+                    // newKey's position in the receiving leaf, found once: the buffer removal below does not touch either leaf's items (#1346).
+                    var newIndexBefore = newLeaf.Find(newKey, Comparer, ref opAccessor);
+
                     // Pre-check: if newLeaf is full and newKey doesn't exist, bail to pessimistic (we'd need to insert a new entry which could cause overflow)
                     if (newLeaf.GetIsFull(ref opAccessor))
                     {
-                        var preNi = newLeaf.Find(newKey, Comparer, ref opAccessor);
-                        if (preNi < 0)
+                        if (newIndexBefore < 0)
                         {
                             secondLatch.AbortWriteLock();
                             firstLatch.AbortWriteLock();
@@ -661,10 +689,8 @@ internal abstract partial class BTree<TKey, TStore>
                     }
 
                     // #1190: as the same-leaf path — the new key's buffer chunk is reserved before the first storage write.
-                    var newIndexBefore = newLeaf.Find(newKey, Comparer, ref opAccessor);
-                    var moveNeed = newIndexBefore >= 0
-                        ? _storage.BufferChunksNeededToAppend(newLeaf.GetItem(newIndexBefore, ref opAccessor).Value, ref sibAccessor)
-                        : 1;
+                    var newBufferIdBefore = newIndexBefore >= 0 ? newLeaf.GetItem(newIndexBefore, ref opAccessor).Value : 0;
+                    var moveNeed = newIndexBefore >= 0 ? _storage.BufferChunksNeededToAppend(newBufferIdBefore, ref sibAccessor) : 1;
                     if (!ChunkReservation<TStore>.HasReserved(_segment, moveNeed))
                     {
                         secondLatch.AbortWriteLock();
@@ -691,12 +717,13 @@ internal abstract partial class BTree<TKey, TStore>
                     }
 
                     // Append to new buffer
-                    var ni = newLeaf.Find(newKey, Comparer, ref opAccessor);
+                    var ni = newIndexBefore;
                     int newBufferId;
                     int newElementId;
+                    var countChanged = false;
                     if (ni >= 0)
                     {
-                        newBufferId = newLeaf.GetItem(ni, ref opAccessor).Value;
+                        newBufferId = newBufferIdBefore;
                         newElementId = _storage.Append(newBufferId, value, ref sibAccessor);
                     }
                     else
@@ -706,6 +733,7 @@ internal abstract partial class BTree<TKey, TStore>
                         ni = ~ni;
                         newLeaf.Insert(ni, new KeyValueItem(newKey, newBufferId), ref opAccessor);
                         Interlocked.Increment(ref _count);
+                        countChanged = true;
                     }
                     newHeadBufferId = newBufferId;
 
@@ -718,12 +746,17 @@ internal abstract partial class BTree<TKey, TStore>
                             oldLeaf.RemoveAtInternal(oi, ref opAccessor);
                             _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
                             Interlocked.Decrement(ref _count);
+                            countChanged = true;
                         }
                     }
 
                     secondLatch.WriteUnlock();
                     firstLatch.WriteUnlock();
-                    SyncHeader(ref opAccessor);
+                    if (countChanged)
+                    {
+                        SyncHeader(ref opAccessor);   // as the same-leaf path: only when a key came or went
+                    }
+
                     return newElementId;
                 }
             }

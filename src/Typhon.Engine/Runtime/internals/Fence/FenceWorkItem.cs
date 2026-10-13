@@ -49,6 +49,11 @@ internal enum FenceWorkKind : byte
     /// <see cref="PrepSlice"/>.</summary>
     FinalizeEmitSlice = 10,
 
+    /// <summary>Phase 1.5 — one leaf-disjoint key range of one indexed field's staged moves, the shadow drain's batch (#1346). <c>FieldId</c> names the field
+    /// (<c>DatabaseEngine.IndexMoveFieldCode</c>), <c>SliceStart</c> the range. Runs after every <see cref="PrepSlice"/> — the slices stage the moves — and
+    /// before the Prep tail finishes the batch and Migrate reads the trees.</summary>
+    IndexMoveSlice = 11,
+
     /// <summary>Phase 4 — per-archetype Finalize work: bookkeeping clear, dormancy sweep, dirty-ring archive, WAL emit. One item per cluster-eligible archetype.
     /// Must run AFTER all <see cref="AabbRefreshSlice"/> slices for the same archetype have completed.</summary>
     ArchetypeFinalize = 5,
@@ -82,5 +87,5 @@ internal struct FenceWorkItem
     public int SliceStart;     // PendingMigrations index where this slice begins (MigrationApply only)
     public int SliceCount;     // number of migrations in this slice (MigrationApply only)
     public int UnitCount;      // cost-attribution unit count: entities for MigrationApply, clusters for AabbRefreshSlice; 0 otherwise
-    public int FieldId;        // flattened (slot, field) index into the archetype's IndexUpdateStaging (IndexUpdateSlice only)
+    public int FieldId;        // flattened (slot, field) index into the archetype's IndexUpdateStaging (IndexUpdateSlice); the field's code (IndexMoveSlice)
 }

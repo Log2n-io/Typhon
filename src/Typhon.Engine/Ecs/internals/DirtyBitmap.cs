@@ -69,8 +69,16 @@ internal sealed class DirtyBitmap
     internal void Set(int chunkId)
     {
         var word = chunkId >> 6;
+        var mask = 1L << (chunkId & 63);
         var block = ResolveBlock(word >> WordsPerBlockShift);
-        Interlocked.Or(ref block[word & WordInBlockMask], 1L << (chunkId & 63));
+        // A plain test first (#1346): a bit seen set is what the OR would have produced at that instant, and no caller relies on the OR's ordering — each
+        // marks before its store — so a second write of the entity skips the atomic. A concurrent drain clearing the word after the read is the same race
+        // as one clearing it after the OR.
+        ref var slot = ref block[word & WordInBlockMask];
+        if ((Volatile.Read(ref slot) & mask) == 0)
+        {
+            Interlocked.Or(ref slot, mask);
+        }
     }
 
     /// <summary>
@@ -93,8 +101,26 @@ internal sealed class DirtyBitmap
     }
 
     /// <summary>
+    /// <see cref="TestAndSet"/> for every bit of <paramref name="mask"/> in word <paramref name="wordIndex"/>, in one interlocked operation: returns the bits
+    /// of the mask that were already set. The batched shadow capture's gate (#1346) — only the bits it returns clear are the caller's to record.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ulong TestAndSetWord(int wordIndex, ulong mask)
+    {
+        var block = ResolveBlock(wordIndex >> WordsPerBlockShift);
+        var wasSet = (ulong)Interlocked.Or(ref block[wordIndex & WordInBlockMask], (long)mask) & mask;
+        if (wasSet != mask)
+        {
+            NoteSet();
+        }
+
+        return wasSet;
+    }
+
+    /// <summary>
     /// Whether <see cref="TestAndSet"/> has set any bit since the last <see cref="Clear"/> — one read, where scanning the words costs one per 64 ids.
-    /// Raised only by <see cref="TestAndSet"/>, the shadow bitmap's writer; conservative, since bits cleared one word at a time leave it raised until
+    /// Raised only by <see cref="TestAndSet"/> and <see cref="TestAndSetWord"/>, the shadow bitmap's writers; conservative, since bits cleared one word at a
+    /// time leave it raised until
     /// the next <see cref="Clear"/>.
     /// </summary>
     internal bool AnyTestAndSetSinceClear => Volatile.Read(ref _anySet) != 0;

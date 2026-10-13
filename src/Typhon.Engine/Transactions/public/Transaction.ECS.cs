@@ -4054,7 +4054,8 @@ public unsafe partial class Transaction
                         //
                         // #711: that hand-off is only valid for the slots the fence actually shadows. ShadowClusterIndexedFields captures every indexed
                         // NON-Versioned slot and skips Versioned ones (their index is maintained on the commit path instead), while the shadow BITMAP is
-                        // per-entity and set by a write to ANY component. So one write to an unindexed Transient sibling was enough to make this branch skip
+                        // per-entity — set, since #1344 / #1346, by a key-changing write to any fence-indexed component. So one such write was enough to make
+                        // this branch skip
                         // a Versioned slot's removal and hand it to a fence that never had an entry for it — nobody removed it, and the index kept an entry
                         // for a released slot. Silent for AllowMultiple, loud on the next rebuild for Unique. No key move is needed to reach it.
                         //

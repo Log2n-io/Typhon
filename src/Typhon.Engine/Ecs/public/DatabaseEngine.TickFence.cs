@@ -891,6 +891,7 @@ public partial class DatabaseEngine
         clusterState.FinalizeSliceable = false;
         clusterState.FenceBranchPath = 0;
         clusterState.FenceDirtyBits = null;
+        clusterState.PendingIndexCollision = null;   // a tick that threw before raising its collision must not raise it on the next one
 
         // The pending-migration queue is deliberately NOT cleared here, nor in Finalize where it used to be. See
         // ArchetypeClusterState.PendingMigrationDrainCount: the queue has producers on both sides of its consumer, so a per-tick reset destroyed
@@ -1357,6 +1358,31 @@ public partial class DatabaseEngine
             return;
         }
 
+        // The slices staged the index moves; the IndexMoves phase applied their in-place part on the workers. Every archetype's batches are finished here
+        // first, serially, before any buffer is reset and before Migrate (#1346), and every tail then runs, whatever throws; the first failure is raised
+        // at the end. A batch applied in place but left unfinished, or a tail skipped (its shadow bits kept over emptied buffers, so the next tick's
+        // writes record nothing), would corrupt healthy trees. Nothing is kept for a replay: a batch that cannot finish has faulted its tree (IXW-09),
+        // and a faulted tree refuses every later batch.
+        Exception failure = null;
+        for (var aid = 0; aid < states.Length; aid++)
+        {
+            var clusterState = states[aid]?.ClusterState;
+            if (clusterState == null || !clusterState.PrepSliceable)
+            {
+                continue;
+            }
+
+            try
+            {
+                failure ??= ApplyStagedIndexMoves(clusterState, changeSet);
+            }
+            catch (Exception e)
+            {
+                failure ??= e;   // the epoch or the cluster accessor: the archetype's other fields are reset by its tail regardless
+            }
+        }
+
+        Exception collision = null;
         for (var aid = 0; aid < states.Length; aid++)
         {
             var clusterState = states[aid]?.ClusterState;
@@ -1370,8 +1396,22 @@ public partial class DatabaseEngine
             clusterState.LastTickHysteresisAbsorbedCount += clusterState.PrepSliceHysteresisAbsorbed;
             clusterState.TotalHysteresisAbsorbedCount += clusterState.PrepSliceHysteresisAbsorbed;
             clusterState.ResetShadowBuffersAfterSlices();
+
+            collision ??= clusterState.PendingIndexCollision;
+            clusterState.PendingIndexCollision = null;
             // ⑧ is inside FinishArchetypeFencePrep now — see the comment at its tail.
             FinishArchetypeFencePrep(clusterState, true, tickNumber, changeSet);
+        }
+
+        // A unique collision is raised once every archetype's tail has run (#1342): raised mid-loop, it left later archetypes' buffers unreset.
+        if (failure != null && collision != null)
+        {
+            throw new AggregateException(failure, collision);   // both raised: the collision's entity has left the index (IX-08)
+        }
+
+        if (failure != null || collision != null)
+        {
+            throw failure ?? collision;
         }
     }
 

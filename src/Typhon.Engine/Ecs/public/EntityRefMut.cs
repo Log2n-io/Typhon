@@ -109,10 +109,20 @@ public unsafe ref struct EntityRefMut
     {
         if (_ref._archetype.RealmKeySlotMask == 0)
         {
-            WriteRef(comp) = value;
+            Store(comp, in value);
             return;
         }
         SetOnRealmKeyedArchetype(comp._componentTypeId, in value);
+    }
+
+    /// <summary>
+    /// The store of every <c>Set</c>: the value goes down with the write, so a value that keeps every fence-maintained indexed key of the component records
+    /// none (#1346).
+    /// </summary>
+    private void Store<T>(Comp<T> comp, in T value) where T : unmanaged
+    {
+        var copy = value;   // on the stack: value may live in a managed array, and a pointer is taken only over the stack
+        WriteRef(comp, (byte*)&copy) = copy;
     }
 
     /// <summary>Set a component by type: as <see cref="Set{T}(Comp{T}, in T)"/>, resolving the slot via archetype metadata.</summary>
@@ -121,7 +131,13 @@ public unsafe ref struct EntityRefMut
     {
         if (_ref._archetype.RealmKeySlotMask == 0)
         {
-            WriteRef<T>() = value;
+            var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+            if (CheckConfig.Enabled && typeId < 0)
+            {
+                ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
+            }
+
+            Store(new Comp<T>(typeId), in value);
             return;
         }
         SetOnRealmKeyedArchetype(ArchetypeRegistry.GetComponentTypeId<T>(), in value);
@@ -140,7 +156,7 @@ public unsafe ref struct EntityRefMut
         byte slot = _ref._archetype.GetSlot(componentTypeId);
         if ((_ref._archetype.RealmKeySlotMask & (1 << slot)) == 0)
         {
-            WriteRef(comp) = value;
+            Store(comp, in value);
             return;
         }
 
@@ -151,7 +167,7 @@ public unsafe ref struct EntityRefMut
             spatial.RealmKeyOffset));
         if (newRealm == oldRealm)
         {
-            WriteRef(comp) = value;
+            Store(comp, in value);
             return;
         }
 
@@ -167,7 +183,7 @@ public unsafe ref struct EntityRefMut
             }
         }
 
-        WriteRef(comp) = value;
+        Store(comp, in value);
 
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit. Otherwise the slot is flagged as
         // Teleport flags it — a barrier-only archetype's fence runs no dirty scan and would never see the move.
@@ -182,7 +198,10 @@ public unsafe ref struct EntityRefMut
     /// current call only, so it stays internal (#1199): <see cref="Set{T}(Comp{T}, in T)"/> stores through it at once.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref T WriteRef<T>(Comp<T> comp) where T : unmanaged
+    internal ref T WriteRef<T>(Comp<T> comp) where T : unmanaged => ref WriteRef(comp, null);
+
+    /// <summary><see cref="WriteRef{T}(Comp{T})"/> for a store of <paramref name="newValue"/> (on the stack), or of an unknown value when null.</summary>
+    private ref T WriteRef<T>(Comp<T> comp, byte* newValue) where T : unmanaged
     {
         SystemAccessValidator.AssertWrite<T>();
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
@@ -197,7 +216,7 @@ public unsafe ref struct EntityRefMut
             ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
         }
 
-        return ref WriteSlotRef<T>(slot, comp._componentTypeId);
+        return ref WriteSlotRef<T>(slot, comp._componentTypeId, newValue);
     }
 
     /// <summary>
@@ -261,12 +280,18 @@ public unsafe ref struct EntityRefMut
             ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
         }
 
-        return ref WriteSlotRef<T>(slot, typeId);
+        return ref WriteSlotRef<T>(slot, typeId, null);
     }
 
     /// <summary>The write paths of every storage mode, for a validated <paramref name="slot"/>.</summary>
+    /// <param name="slot">The validated component slot.</param>
+    /// <param name="componentTypeId">The component's type id.</param>
+    /// <param name="newValue">
+    /// The value the caller is about to store, on the stack, or <c>null</c> when unknown (a returned ref). A known value that keeps every fence-maintained
+    /// indexed key of the component records none (#1346); an unknown one records them on the entity's first write, as before.
+    /// </param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ref T WriteSlotRef<T>(byte slot, int componentTypeId) where T : unmanaged
+    private ref T WriteSlotRef<T>(byte slot, int componentTypeId, byte* newValue) where T : unmanaged
     {
         if (_ref._clusterBase != null)
         {
@@ -285,14 +310,18 @@ public unsafe ref struct EntityRefMut
             // Transient cluster: in-place write to TransientStore segment (no COW, no revision chain)
             if (_ref._transientClusterBase != null && (_ref._archetype.TransientSlotMask & (1 << slot)) != 0)
             {
-                // Shadow capture for the fence-maintained indexed fields (first write per entity per tick)
-                if (clusterState.IndexSlots != null)
+                // Shadow capture for the fence-maintained indexed fields (first write per entity per tick), only when the written component carries one:
+                // a write to another component leaves the tree's keys in place, and a later write that does change one records them then (#1344). The
+                // same holds for a value that keeps every key of this one (#1346).
+                var transientPtr = _ref._transientClusterBase + _ref._clusterLayout.ComponentOffset(slot)
+                                   + _ref._clusterSlotIndex * _ref._clusterLayout.ComponentSize(slot);
+                if ((clusterState.FenceIndexedSlotMask & (1 << slot)) != 0
+                    && (newValue == null || clusterState.IndexedKeysDiffer(slot, transientPtr, newValue)))
                 {
                     ShadowClusterIndexedFields(clusterState);
                 }
                 clusterState.SetDirty(_ref._clusterChunkId, _ref._clusterSlotIndex, slot);
-                return ref Unsafe.AsRef<T>(
-                    _ref._transientClusterBase + _ref._clusterLayout.ComponentOffset(slot) + _ref._clusterSlotIndex * _ref._clusterLayout.ComponentSize(slot));
+                return ref Unsafe.AsRef<T>(transientPtr);
             }
 
             // SV cluster fast path: direct pointer arithmetic into SoA array.
@@ -316,8 +345,9 @@ public unsafe ref struct EntityRefMut
                     svTable, componentTypeId, (long)_ref._id.RawValue, _ref._clusterChunkId * 64 + _ref._clusterSlotIndex, svHeadPtr);
             }
 
-            // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
-            if (clusterState.IndexSlots != null)
+            // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick), only for a component with a fence-maintained
+            // index (#1344) and a value that changes one of its keys (#1346), as the Transient arm above.
+            if ((clusterState.FenceIndexedSlotMask & (1 << slot)) != 0 && (newValue == null || clusterState.IndexedKeysDiffer(slot, svHeadPtr, newValue)))
             {
                 ShadowClusterIndexedFields(clusterState);
             }

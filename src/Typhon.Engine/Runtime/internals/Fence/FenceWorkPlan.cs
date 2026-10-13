@@ -203,6 +203,9 @@ internal sealed class FenceWorkPlan
             case FencePhase.EntityMapUpdate:
                 EmitEntityMapUpdateSliceItems(engine, costModel);
                 break;
+            case FencePhase.IndexMoves:
+                EmitIndexMoveSliceItems(engine, costModel);
+                break;
         }
 
         if (ItemCount == 0)
@@ -272,6 +275,61 @@ internal sealed class FenceWorkPlan
                         SliceStart = start,
                         SliceCount = count,
                         UnitCount = count,
+                    });
+                }
+            }
+        }
+    }
+
+    // ─── Phase IndexMoves: one item per (indexed field × leaf-disjoint key range of its staged moves) ─────────────────
+
+    /// <summary>
+    /// Turns each field's prepared move batch into one item per key range (#1346). The ranges were cut in <see cref="FenceIndexMovesExecSystem.Prepare"/>,
+    /// which has the trees; a field with no staged move has none and emits nothing.
+    /// </summary>
+    private void EmitIndexMoveSliceItems(DatabaseEngine engine, LiveFenceCostModel costModel)
+    {
+        var states = engine._archetypeStates;
+        if (states == null)
+        {
+            return;
+        }
+
+        for (var aid = 0; aid < states.Length; aid++)
+        {
+            var clusterState = states[aid]?.ClusterState;
+            if (clusterState == null || !clusterState.PrepSliceable)
+            {
+                continue;
+            }
+
+            EmitIndexMoveSliceItems(aid, clusterState.IndexSlots, false, costModel);
+            EmitIndexMoveSliceItems(aid, clusterState.TransientIndexSlots, true, costModel);
+        }
+    }
+
+    private void EmitIndexMoveSliceItems<TStore>(int archetypeId, ClusterIndexSlot<TStore>[] ixSlots, bool transient, LiveFenceCostModel costModel)
+        where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                var buffer = ixSlots[s].ShadowBuffers[f];
+                for (var r = 0; r < buffer.MoveRangeCount; r++)
+                {
+                    var events = buffer.MoveRanges[r].EstimatedEvents;
+                    var scanned = buffer.StagedMoves.Length / 4;   // every range scans the whole batch for its events: about a quarter of an event each
+                    AppendItem(new FenceWorkItem
+                    {
+                        Kind = FenceWorkKind.IndexMoveSlice,
+                        TargetId = archetypeId,
+                        FieldId = DatabaseEngine.IndexMoveFieldCode(transient, s, f),
+                        // An event is a key-ordered step of the leaf walk, close to a staged index update's cost.
+                        Cost = costModel.IndexUpdateCost * (events + scanned),
+                        SliceStart = r,
+                        SliceCount = events,
+                        UnitCount = events,
                     });
                 }
             }
@@ -925,4 +983,5 @@ internal enum FencePhase : byte
     Finalize = 3,
     IndexMassUpdate = 4,
     EntityMapUpdate = 5,
+    IndexMoves = 6,
 }

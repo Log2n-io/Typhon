@@ -1599,6 +1599,7 @@ public partial class DatabaseEngine
         if (resetBuffers)
         {
             clusterState.ClusterShadowBitmap.Clear();
+            ThrowPendingIndexCollision(clusterState);   // the drain is complete and its buffers reset (#1342)
         }
 
         return totalShadowEntries;
@@ -1715,14 +1716,45 @@ public partial class DatabaseEngine
                     // three times per slice.
                     var order = resetBuffers 
                         ? clusterState.BuildShadowDrainOrder(buffer, count) : buffer.DrainOrderForClusters(firstWord, firstWord + wordCount);
+                    var planBase = resetBuffers ? 0 : buffer.PlanPositionOf(firstWord);   // a slice stages at its entries' plan positions
                     var included = order.Length;
                     totalShadowEntries += included;
                     var idxAccessor = CreateIndexAccessor(field.Index.Segment, changeSet);
 
+                    // Batch mode for the field's tree operations (#1346): each Move / MoveValue rents this thread's warm accessors and, outside batch mode,
+                    // commits their dirty pages on every return — a page marked, recorded in the ChangeSet and unmarked again for each of the 3 to 6 pages one
+                    // move touches. In batch mode the marks stay until an exit, which commits them once through the index accessor's ChangeSet (a Prep
+                    // slice's carries its chunk's); the commit path's publish does the same (Transaction.cs). Per thread: each Prep slice worker enters and
+                    // exits its own. Until an exit the touched pages keep an active writer, which a checkpoint skips — so, as the publish does, the batch is
+                    // flushed every 1 024 entries: a checkpoint overlapping a long drain would otherwise skip those pages on every coverage pass.
+                    // The order is ascending by cluster, so one cluster's entries come in a run: its bases are resolved once per run, and the element-id
+                    // writes of a run are recorded once, after its last one (#1346) — the record must follow the stores (PS-10, CP-04), and every store of the
+                    // run is to the same page.
+                    var runChunk = -1;
+                    byte* primaryBase = null;
+                    byte* dataBase = null;
+                    if (resetBuffers)
+                    {
+                        buffer.PrepareMoves(count);   // the atomic path stages and applies within this field; the slices' staging is sized at the head
+                    }
+
+                    // Per field, not per entry: the column's place in the cluster, the key's place in the component, the views watching the field.
+                    var compSize = clusterState.Layout.ComponentSize(ixSlot.Slot);
+                    var fieldInComponent = clusterState.Layout.ComponentOffset(ixSlot.Slot) + field.FieldOffset;
+                    var fieldSize = field.FieldSize;
+                    var fieldViews = engineState.SlotToComponentTable[ixSlot.Slot].ViewRegistry.GetViewsForField(f);
+
+                    ChunkBasedSegment<TIdx>.EnterBatchMode();
                     try
                     {
                         for (var k = 0; k < included; k++)
                         {
+                            if ((k & 0x3FF) == 0x3FF)
+                            {
+                                ChunkBasedSegment<TIdx>.ExitBatchMode();
+                                ChunkBasedSegment<TIdx>.EnterBatchMode();
+                            }
+
                             ref var entry = ref buffer[order[k]];
                             var clusterChunkId = entry.ChunkId >> 6;   // entityIndex → chunkId
                             var slotIndex = entry.ChunkId & 0x3F;      // entityIndex → slot
@@ -1730,8 +1762,13 @@ public partial class DatabaseEngine
                             // Check occupancy (entity may have been destroyed this tick). The occupancy word and the elementId tail come from the PRIMARY
                             // segment; this slot's component bytes come from the DATA one. They are the same chunk of the same segment for a SingleVersion /
                             // Versioned slot, and different segments for a Transient slot in a mixed archetype (#655).
-                            var primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-                            var dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
+                            if (clusterChunkId != runChunk)
+                            {
+                                runChunk = clusterChunkId;
+                                primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+                                dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
+                            }
+
                             var occupancy = *(ulong*)primaryBase;
                             if ((occupancy & (1UL << slotIndex)) == 0)
                             {
@@ -1772,11 +1809,9 @@ public partial class DatabaseEngine
                             }
 
                             // Read current (post-mutation) field value from cluster SoA
-                            var compSize = clusterState.Layout.ComponentSize(ixSlot.Slot);
-                            var compBase = dataBase + clusterState.Layout.ComponentOffset(ixSlot.Slot) + slotIndex * compSize;
-                            var fieldPtr = compBase + field.FieldOffset;
+                            var fieldPtr = dataBase + fieldInComponent + slotIndex * compSize;
                             var oldKey = entry.OldKey;
-                            var newKey = KeyBytes8.FromPointer(fieldPtr, field.FieldSize);
+                            var newKey = KeyBytes8.FromPointer(fieldPtr, fieldSize);
 
                             if (oldKey.RawValue == newKey.RawValue)
                             {
@@ -1785,58 +1820,32 @@ public partial class DatabaseEngine
 
                             mutations++;   // past the guard, so this is real tree work (#665)
 
-                            // Update per-archetype B+Tree: remove old key, insert new key, same ClusterLocation value
-                            var clusterLocation = entry.ChunkId; // entityIndex = clusterLocation
-                            if (field.AllowMultiple)
+                            // Staged, not applied (#1346): the field's moves are applied in one batch once its drain is done — below on the atomic path,
+                            // after the Prep slices by the IndexMoves phase and the tail (ApplyStagedIndexMoves). One Move / MoveValue per changed key cost
+                            // ~350–450 ns, nearly all of it per call: a descent, a latch, the accessors' rent and return. An AllowMultiple move carries the
+                            // entity's element id (the cluster's elementId tail, read from the primary segment); the batch writes the new one back (#659). A
+                            // unique collision is decided on the batch's final state (#1342) and raised once the drain has reset its buffers (#675).
+                            var move = new IndexMove
                             {
-                                // A multi-value leaf holds a VSBS buffer id, not an entity location: a plain Move would overwrite it with the
-                                // raw clusterLocation and every entity at that key would vanish from the index (issue #659). MoveValue moves
-                                // just this entity's element and returns its new id, which goes back into the cluster's elementId tail.
-                                var writableBase = primaryAccessor.GetChunkAddress(clusterChunkId, true);
-                                var elementIdPtr = (int*)(writableBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                                *elementIdPtr = field.Index.MoveValue(&oldKey, fieldPtr, *elementIdPtr, clusterLocation, ref idxAccessor, out _, out _);
-
-                                // The new id is a write to the cluster page, and it must be recorded as one (PS-10, #1171). The accessor here holds
-                                // no ChangeSet (a Prep slice's never does), so its dirty flag only blocks a checkpoint while the slice runs. Whatever
-                                // the shadowed write recorded may have been written back since. Unrecorded, the page went clean the moment the slice
-                                // released it: Migrate's own loads could evict it before the fence's WAL emit recorded it, Migrate then read the old
-                                // id from the reloaded image, its location update named a chunk that no longer held the element and was dropped, and
-                                // the index kept the entity at the slot it had left.
-                                clusterState.NoteClusterPageModified(clusterChunkId);
+                                OldKey = oldKey,
+                                NewKey = newKey,
+                                Value = entry.ChunkId,   // entityIndex = clusterLocation
+                                ElementId = field.AllowMultiple
+                                    ? *(int*)(primaryBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex))
+                                    : 0,
+                            };
+                            if (resetBuffers)
+                            {
+                                buffer.StageMove(in move);
                             }
                             else
                             {
-                                // The SV mutation path. A SingleVersion component has no revision chain, so its index maintenance happens HERE, at the
-                                // tick-fence shadow drain, rather than on the commit path — which is why guarding only the commit sites left the collision
-                                // reachable (#675).
-                                //
-                                // #886 lead C: no pre-read. Every arm of BTree.Move re-finds newKey under the leaf's write latch and returns false, with the
-                                // tree untouched, when another entry holds it — a verdict that stays true when two workers drain two clusters at once,
-                                // which a TryGet-then-Move pair does not: both can pass the read and both then insert. false also means "oldKey is not in
-                                // the tree", which was silent before and stays silent; the cold-path check below tells the two apart and raises #675's
-                                // message for the first. The pessimistic arm is the one whose existence check is not latched, and it reports the same
-                                // collision by throwing after having removed the old key — the state the pre-read's throw also left, since the data already
-                                // holds the colliding value either way.
-                                bool moved;
-                                try
-                                {
-                                    moved = field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
-                                }
-                                catch (UniqueConstraintViolationException)
-                                {
-                                    moved = false;
-                                }
-
-                                if (!moved)
-                                {
-                                    Transaction.RejectUniqueIndexCollision(ref field, fieldPtr, clusterLocation, ref idxAccessor);
-                                }
+                                buffer.StageMoveAt(planBase + k, in move);
                             }
 
                             // Notify registered views (same pattern as ProcessShadowFieldEntries)
                             {
-                                var table = engineState.SlotToComponentTable[ixSlot.Slot];
-                                var views = table.ViewRegistry.GetViewsForField(f);
+                                var views = fieldViews;
                                 for (var v = 0; v < views.Length; v++)
                                 {
                                     var reg = views[v];
@@ -1851,10 +1860,22 @@ public partial class DatabaseEngine
                                 }
                             }
                         }
+
+                        if (resetBuffers)
+                        {
+                            ApplyStagedMoves(clusterState, ref field, buffer, ref primaryAccessor, ref idxAccessor);
+                        }
                     }
                     finally
                     {
-                        idxAccessor.Dispose();
+                        try
+                        {
+                            ChunkBasedSegment<TIdx>.ExitBatchMode();
+                        }
+                        finally
+                        {
+                            idxAccessor.Dispose();   // even if the exit's commit throws: an undisposed accessor keeps its pages' active writers (CP-13)
+                        }
                     }
 
                     if (resetBuffers)
@@ -1868,6 +1889,325 @@ public partial class DatabaseEngine
         // to a threshold.
         Interlocked.Add(ref clusterState._mutationsSinceRebuild.Value, mutations);
         return totalShadowEntries;
+    }
+
+    /// <summary>
+    /// Applies one field's staged moves in one batch (#1346) and writes each AllowMultiple entity's new element id into its cluster's elementId tail.
+    /// </summary>
+    /// <remarks>
+    /// The tail writes are recorded per cluster run, after the run's last store (PS-10, #1171): unrecorded, Migrate's loads could evict the page before the
+    /// fence's WAL emit recorded it, Migrate then read the old id from the reloaded image, its location update named a chunk that no longer held the element,
+    /// and the index kept the entity at the slot it had left. A run is noted before the next one's chunk is mapped, so the noted page is still the one written.
+    /// A unique collision is kept in <see cref="ArchetypeClusterState.PendingIndexCollision"/> for the caller to raise once its drain is complete.
+    /// </remarks>
+    private static unsafe void ApplyStagedMoves<TIdx, TPrimary>(ArchetypeClusterState clusterState, ref ClusterIndexField<TIdx> field,
+        FieldShadowBuffer buffer, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TIdx> idxAccessor)
+        where TIdx : struct, IPageStore
+        where TPrimary : struct, IPageStore
+    {
+        var moves = buffer.StagedMoves;
+        if (moves.Length == 0)
+        {
+            return;
+        }
+
+        // Prepared by the parallel fence's IndexMoves phase, whose workers applied its ranges: only the structural remainder is left. Otherwise whole.
+        var outcome = buffer.MoveRangeCount > 0
+            ? field.Index.FinishMoveBatch(moves, buffer.MoveRanges.AsSpan(0, buffer.MoveRangeCount), ref idxAccessor)
+            : field.Index.ApplyMoves(moves, ref idxAccessor);
+        if (outcome.Misses > 0)
+        {
+            Interlocked.Add(ref BTreeMoveValueMisses.Count, outcome.Misses);
+        }
+
+        if (field.AllowMultiple)
+        {
+            var runChunk = -1;
+            byte* runBase = null;
+            for (var i = 0; i < moves.Length; i++)
+            {
+                var location = moves[i].Value;
+                if (location >> 6 != runChunk)
+                {
+                    if (runBase != null)
+                    {
+                        clusterState.NoteClusterPageModifiedAt(runBase);
+                    }
+
+                    runChunk = location >> 6;
+                    runBase = primaryAccessor.GetChunkAddress(runChunk, true);
+                }
+
+                *(int*)(runBase + clusterState.Layout.IndexElementIdOffset(field.MultiFieldIndex, location & 63)) = moves[i].ElementId;
+            }
+
+            if (runBase != null)
+            {
+                clusterState.NoteClusterPageModifiedAt(runBase);
+            }
+        }
+
+        if (!field.AllowMultiple && outcome.Collisions > 0 && clusterState.PendingIndexCollision == null)
+        {
+            ref var collided = ref moves[outcome.FirstCollision];
+            var key = collided.NewKey;
+            var holder = field.Index.TryGet(&key, ref idxAccessor);
+            clusterState.PendingIndexCollision = new InvalidOperationException(
+                $"unique index collision: cluster location {collided.Value} is being indexed under a key already held by the entity at cluster location "
+                + $"{(holder.IsSuccess ? holder.Value : -1)}. A unique index stores one entity per key, so writing this would make the incumbent unreachable "
+                + "through the index while it remains present in the data. Declare the field [Index(AllowMultiple = true)] if its values are meant to repeat. "
+                + $"See https://github.com/Log2n-io/Typhon/issues/675. ({outcome.Collisions} collision(s) this tick.)");
+        }
+
+        buffer.ClearStagedMoves();   // not PrepareMoves(0): that gives a large staging back, and the next tick's drain would allocate it again
+    }
+
+    /// <summary>Test seam: called by each IndexMoves work item before its range is applied; a throw there leaves the range unapplied, its tree
+    /// healthy.</summary>
+    internal static Action IndexMoveRangeProbe;
+
+    /// <summary>Marks a work item's field as one of the archetype's Transient index slots (<see cref="IndexMoveFieldCode"/>).</summary>
+    internal const int IndexMoveTransientFlag = 1 << 30;
+
+    /// <summary>A field of an archetype's index slots, as an IndexMoves work item names it: the slot array, the slot, the field.</summary>
+    internal static int IndexMoveFieldCode(bool transient, int slot, int field) => (transient ? IndexMoveTransientFlag : 0) | (slot << 12) | field;
+
+    /// <summary>
+    /// The parallel fence's IndexMoves phase, serial half (#1346): for every archetype whose Prep ran as slices, packs each field's staged moves and cuts
+    /// the batch into at most <paramref name="desiredParts"/> leaf-disjoint key ranges, which the phase's workers gather, sort and apply. The tail
+    /// (<see cref="ApplyStagedIndexMoves"/>) finishes each batch. Single-threaded: the phase's Prepare.
+    /// </summary>
+    internal void PrepareStagedIndexMoveBatches(int desiredParts)
+    {
+        var states = _archetypeStates;
+        if (states == null)
+        {
+            return;
+        }
+
+        for (var aid = 0; aid < states.Length; aid++)
+        {
+            var clusterState = states[aid]?.ClusterState;
+            if (clusterState == null || !clusterState.PrepSliceable)
+            {
+                continue;
+            }
+
+            PrepareMoveBatches(clusterState.IndexSlots, desiredParts);
+            PrepareMoveBatches(clusterState.TransientIndexSlots, desiredParts);
+        }
+    }
+
+    private static void PrepareMoveBatches<TStore>(ClusterIndexSlot<TStore>[] ixSlots, int desiredParts) where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                var buffer = ixSlots[s].ShadowBuffers[f];
+                buffer.CompactStagedMoves();
+                buffer.MoveRangeCount = 0;
+                var moves = buffer.StagedMoves;
+                if (moves.Length == 0)
+                {
+                    continue;
+                }
+
+                var tree = ixSlots[s].Fields[f].Index;
+                if (buffer.MoveRanges.Length < desiredParts)
+                {
+                    buffer.MoveRanges = new IndexMoveRange[desiredParts];
+                }
+
+                try
+                {
+                    var accessor = tree.Segment.CreateChunkAccessor();
+                    try
+                    {
+                        buffer.MoveRangeCount = tree.PrepareMoveBatch(moves, desiredParts, buffer.MoveRanges, ref accessor);
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                    }
+                }
+                catch (Exception e)
+                {
+                    // Not thrown from the phase's Prepare: that would fail Migrate, whose Prepare runs every archetype's tail, on every tick the tree stays
+                    // faulted. The field emits no work item; the tail applies its batch whole (a faulted tree throws there, field by field) and raises this.
+                    buffer.MoveRangeCount = 0;
+                    buffer.MoveRangeFailure ??= e;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The parallel fence's IndexMoves phase, one work item: applies range <paramref name="range"/> of one field's prepared batch, concurrently with the
+    /// batch's other ranges. A range that throws is raised by the tail, after every batch is finished: the tree is faulted and <c>FinishMoveBatch</c>
+    /// raises it, or it is not and the tail applies the range then raises <see cref="FieldShadowBuffer.MoveRangeFailure"/> (#1346). Thrown here, it would
+    /// fail every later phase of the fence, the tail among them, and every other tree's batch would be left applied in place but never finished.
+    /// </summary>
+    internal void ApplyIndexMoveRange(int archetypeId, int fieldCode, int range, ChangeSet changeSet)
+    {
+        var clusterState = _archetypeStates[archetypeId].ClusterState;
+        var slot = (fieldCode & ~IndexMoveTransientFlag) >> 12;
+        var field = fieldCode & 0xFFF;
+        if ((fieldCode & IndexMoveTransientFlag) != 0)
+        {
+            ApplyIndexMoveRange(clusterState.TransientIndexSlots, slot, field, range, changeSet);
+        }
+        else
+        {
+            ApplyIndexMoveRange(clusterState.IndexSlots, slot, field, range, changeSet);
+        }
+    }
+
+    private static void ApplyIndexMoveRange<TStore>(ClusterIndexSlot<TStore>[] ixSlots, int slot, int field, int range, ChangeSet changeSet)
+        where TStore : struct, IPageStore
+    {
+        var buffer = ixSlots[slot].ShadowBuffers[field];
+        var tree = ixSlots[slot].Fields[field].Index;
+        var accessor = CreateIndexAccessor(tree.Segment, changeSet);
+        try
+        {
+            IndexMoveRangeProbe?.Invoke();
+            tree.ApplyMoveRange(buffer.StagedMoves, ref buffer.MoveRanges[range], ref accessor);
+        }
+        catch (Exception e)
+        {
+            // Faulted: FinishMoveBatch raises the fault in the tail. Not: the range is not applied, FinishMoveBatch applies it, and the tail raises this.
+            Interlocked.CompareExchange(ref buffer.MoveRangeFailure, e, null);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The serial tail's half of the sliced shadow drain (#1346): finishes every field's batch — the IndexMoves phase applied its in-place part — or applies
+    /// it whole. Before the buffers are reset and before Migrate, which reads the elementId tails and the trees. Every field is finished even when one
+    /// throws; the first exception is returned, for the tail to raise once every archetype's tail has run.
+    /// </summary>
+    internal unsafe Exception ApplyStagedIndexMoves(ArchetypeClusterState clusterState, ChangeSet changeSet)
+    {
+        CompactStagedMoves(clusterState.IndexSlots);
+        CompactStagedMoves(clusterState.TransientIndexSlots);
+        if (!HasStagedMoves(clusterState.IndexSlots) && !HasStagedMoves(clusterState.TransientIndexSlots))
+        {
+            return null;
+        }
+
+        Exception failure = null;
+
+        using var epoch = EpochGuard.Enter(EpochManager);
+        if (clusterState.ClusterSegment == null)
+        {
+            var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+            try
+            {
+                ApplyStagedMoves(clusterState, clusterState.TransientIndexSlots, ref transientAccessor, changeSet, ref failure);
+            }
+            finally
+            {
+                transientAccessor.Dispose();
+            }
+
+            return failure;
+        }
+
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+        try
+        {
+            ApplyStagedMoves(clusterState, clusterState.IndexSlots, ref clusterAccessor, changeSet, ref failure);
+            ApplyStagedMoves(clusterState, clusterState.TransientIndexSlots, ref clusterAccessor, changeSet, ref failure);
+        }
+        finally
+        {
+            clusterAccessor.Dispose();
+        }
+
+        return failure;
+    }
+
+    private static void ApplyStagedMoves<TIdx, TPrimary>(ArchetypeClusterState clusterState, ClusterIndexSlot<TIdx>[] ixSlots,
+        ref ChunkAccessor<TPrimary> primaryAccessor, ChangeSet changeSet, ref Exception failure)
+        where TIdx : struct, IPageStore
+        where TPrimary : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                var buffer = ixSlots[s].ShadowBuffers[f];
+                if (buffer.StagedMoves.Length == 0)
+                {
+                    continue;
+                }
+
+                ref var field = ref ixSlots[s].Fields[f];
+                var rangeFailure = buffer.MoveRangeFailure;
+                try
+                {
+                    var idxAccessor = CreateIndexAccessor(field.Index.Segment, changeSet);
+                    try
+                    {
+                        ApplyStagedMoves(clusterState, ref field, buffer, ref primaryAccessor, ref idxAccessor);
+                    }
+                    finally
+                    {
+                        idxAccessor.Dispose();
+                    }
+
+                    failure ??= rangeFailure;
+                }
+                catch (Exception e)
+                {
+                    // The other fields are still finished — the IndexMoves phase applied every batch's in-place part. Nothing of this one is kept for a
+                    // replay: a batch that could not finish faulted its tree, and one that did must not be applied twice (the tail resets every buffer).
+                    failure ??= e;
+                }
+            }
+        }
+    }
+
+    private static void CompactStagedMoves<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                ixSlots[s].ShadowBuffers[f].CompactStagedMoves();
+            }
+        }
+    }
+
+    private static bool HasStagedMoves<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            for (var f = 0; f < ixSlots[s].Fields.Length; f++)
+            {
+                if (ixSlots[s].ShadowBuffers[f].StagedMoves.Length > 0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Raises the collision a batched index move left pending (<see cref="ArchetypeClusterState.PendingIndexCollision"/>), once.</summary>
+    private static void ThrowPendingIndexCollision(ArchetypeClusterState clusterState)
+    {
+        var pending = clusterState.PendingIndexCollision;
+        if (pending != null)
+        {
+            clusterState.PendingIndexCollision = null;
+            throw pending;
+        }
     }
 
     /// <summary>
@@ -1934,7 +2274,7 @@ public partial class DatabaseEngine
             if (index.AllowMultiple)
             {
                 var elementId = *(int*)(chunkPtr + ifi.OffsetToIndexElementId);
-                var newElementId = index.MoveValue(&oldKey, newFieldPtr, elementId, entry.ChunkId, ref idxAccessor, out _, out _);
+                var newElementId = index.MoveValueOrReindex(&oldKey, newFieldPtr, elementId, entry.ChunkId, ref idxAccessor);
                 // Write back new element ID — page is already dirty from the mutation that triggered shadowing
                 *(int*)(chunkPtr + ifi.OffsetToIndexElementId) = newElementId;
             }
