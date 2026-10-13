@@ -259,20 +259,23 @@ class OwnerIndexChurnTests : TestBase<OwnerIndexChurnTests>
     /// <summary>
     /// The same churn on four threads, read through the index itself. Items are interleaved across the workers, so every cluster and the market's key
     /// are shared; each worker has owners of its own and checks them after every change it commits — nobody else moves those keys, so the index must
-    /// agree with its model exactly. Moves out of the shared key were lost within a dozen operations (#1232, fixed). Quarantined: #1235 — a read of a
-    /// populated key still answers empty now and then while other threads split leaves; the same read a moment later finds every entry.
+    /// agree with its model exactly. Moves out of the shared key were lost within a dozen operations (#1232, fixed). A read of a populated key then
+    /// answered empty, or with entries of another key, while other threads split leaves (#1235): the range cursor positioned itself under an older
+    /// version of its leaf than the one it read, and ended the scan on a leaf it could not read. It now reads its position and every row under one
+    /// validated version (IXS-09).
     /// </summary>
     [Test]
-    [Category("Quarantine")]
+    [VerifiesRule("IXS-09")]
     public void AnOwnerIndex_ChurnedOnSeveralThreads_HoldsExactlyEachOwnersItems([Values(false, true)] bool rollbacks, [Values(false, true)] bool consumes)
         => ChurnOnThreads(rollbacks, consumes, ClusterScanPath.Planner, throughIndex: true);
 
     /// <summary>
-    /// The same churn read through a query, on each scan path. Quarantined: #1234 — a query concurrent with spawns emits half-written cluster slots
-    /// (entities that do not match, <c>Entity(Null)</c>) while the index is right.
+    /// The same churn read through a query, on each scan path. A query concurrent with spawns emitted half-written cluster slots (entities that do not
+    /// match, <c>Entity(Null)</c>) while the index was right (#1234): a claim set the slot's occupancy bit before its data was in. A claim sets the
+    /// claim word only since 274e876c (VIS-08).
     /// </summary>
     [Test]
-    [Category("Quarantine")]
+    [VerifiesRule("VIS-08")]
     public void AQueryOnAChurnedOwnerIndex_OnSeveralThreads_FindsExactlyEachOwnersItems([Values(false, true)] bool rollbacks,
         [Values(false, true)] bool consumes, [Values(ClusterScanPath.Selective, ClusterScanPath.FullScan)] ClusterScanPath path)
         => ChurnOnThreads(rollbacks, consumes, path, throughIndex: false);

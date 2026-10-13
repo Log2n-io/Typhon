@@ -110,9 +110,13 @@ below names the invariant that proves it.
             sentinel is the highest-stamp skipped revision; the crash scrub (RB-03) keeps the highest stamp; the replay
             (AP-11) keeps the highest stamp per (entity, slot) for Versioned records, against the base HEAD's stamp too.
             Fence and Commit-discipline records keep CM-03's LSN order
+  never the replay refuses a record's HEAD copy for the record's own stamp in the chain: a torn checkpoint can carry the
+        commit's chain element without its content, the open's HEAD rebuild copies that stale content into the HEAD, and
+        the cluster indexes are rebuilt from the HEAD — the entity stays under its old key. Only a later stamp refuses
+        the copy (RecoveryApplier; TornCaptureRecoveryTests.AnUpdateWhosePagesReachedTheDiskInPart_Recovers)
   scope: RevisionChainReader.WalkChainCore, ComponentRevisionManager.CleanUpUnusedEntriesCore, ComponentRevisionManager.ScrubChainToHead,
          ComponentRevisionManager.FindNewestByStamp, ComponentRevisionManager.HighestPublishedStamp, RecoveryDriver.Run,
-         SchemaEvolutionEngine.FindHeadElement
+         SchemaEvolutionEngine.FindHeadElement, RecoveryApplier
   spec: tla/CommitStamp.tla — SnapshotRead (chainorder, with two commits in flight: CommitStamp-twoslots.cfg)
   on_violation: chain order, highest TSN and highest LSN disagree whenever two writers of one entity commit concurrently:
                 the live read, the HEAD, the scrub and the replay pick different newest values, and a snapshot holding one
