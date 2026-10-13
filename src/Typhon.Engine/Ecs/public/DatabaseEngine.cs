@@ -4729,6 +4729,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Build the SV ComponentCollection descriptor so destroy can release CC buffers held in cluster slots (SV CC has no revision chain — the slot
                 // is the sole owner). No-op for archetypes without an SV CC field.
                 _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeCollections(slotToTable);
+                _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeWriteMasks(slotToTable);
 
                 // Initialize per-archetype B+Tree indexes for cluster archetypes with indexed fields.
                 if (meta.HasClusterIndexes)
@@ -4953,6 +4954,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
                         clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
                         meta.RealmKeySlotMask = clusterState.SpatialSlot.HasRealmKey ? (ushort)(1 << clusterState.SpatialSlot.RealmKeySlot) : (ushort)0;
+                        // ClusterRef.Set stores neither: a position goes through WriteSpatial, a realm key through OpenMut (#1187).
+                        if (clusterState.SpatialSlot.HasSpatialIndex)
+                        {
+                            clusterState.SetRefusedSlotMask |= (ushort)((1 << clusterState.SpatialSlot.Slot) | meta.RealmKeySlotMask);
+                        }
 
                         // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)

@@ -168,9 +168,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
                 }
 
                 var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-#pragma warning disable TYPHON009 // Read-only: the value is written straight back unchanged.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 cluster.WriteSpatial(ClMigUnit.Pos, slot, positions[slot]);
                 break;
             }

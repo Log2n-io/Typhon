@@ -368,7 +368,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         {
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
         }
-        return ClusterEnumerator<TArch>.Create(_clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment);
+        return ClusterEnumerator<TArch>.Create(_clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, _accessor);
     }
 
     /// <summary>
@@ -382,7 +382,8 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         {
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
         }
-        return ClusterEnumerator<TArch>.CreateScoped(_clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, startIndex, endIndex);
+        return ClusterEnumerator<TArch>.CreateScoped(
+            _clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, startIndex, endIndex, _accessor);
     }
 
     /// <summary>
@@ -400,7 +401,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
         }
         return ClusterEnumerator<TArch>.CreateScoped(
-            _clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, clusterIds, startIndex, endIndex);
+            _clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, clusterIds, startIndex, endIndex, _accessor);
     }
 
     /// <summary>
@@ -419,7 +420,7 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
 
         _accessor.DBE.CheckRealmRegistered(realm);
         var ids = _clusterState.ReadRealmClusterList(realm.Value, out var count);
-        return ClusterEnumerator<TArch>.CreateScoped(_archetype, _clusterState, ids, count);
+        return ClusterEnumerator<TArch>.CreateScoped(_archetype, _clusterState, ids, count, _accessor);
     }
 
     /// <summary>How many clusters of this archetype are in realm <paramref name="realm"/>.</summary>

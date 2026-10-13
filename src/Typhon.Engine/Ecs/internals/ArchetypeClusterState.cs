@@ -423,6 +423,131 @@ internal sealed unsafe partial class ArchetypeClusterState
         ClusterShadowBitmap?.Clear();
     }
 
+    /// <summary>
+    /// Records, on an entity's first write this tick, the keys its fence-maintained indexed fields hold, for the fence to move its index entries from
+    /// (IX-06, IX-07). Every such field of every slot outside <paramref name="skipMask"/>, whichever component the write is about to change: the mark is
+    /// per entity, so a later write to another component finds it set and records nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Recorded before marked.</b> The keys are read before the bit is set, and kept only by the call that sets it. A writer finding the bit set
+    /// writes at once, so had the bit gone up first, a writer of another component of the same entity could store its value before this call read it, and
+    /// that value would be recorded as the old key: the index would never move off the key the tree holds.</para>
+    /// <para>The caller marks the entity dirty in the same call: the fence drains the shadow buffers on its dirty branch (IX-07).</para>
+    /// </remarks>
+    /// <param name="clusterChunkId">The entity's cluster.</param>
+    /// <param name="slotIndex">The entity's slot in the cluster.</param>
+    /// <param name="entityId">The entity, recorded for the fence's view notifications.</param>
+    /// <param name="primaryBase">The cluster's base on its primary segment, where SingleVersion columns live.</param>
+    /// <param name="transientBase">The cluster's base on the Transient segment of a mixed archetype; <c>null</c> otherwise.</param>
+    /// <param name="skipMask">The slots the fence does not maintain under the writer's discipline: <c>~FenceMaintainedSlotsUnder(discipline)</c>.</param>
+    internal void CaptureFirstWrite(int clusterChunkId, int slotIndex, EntityId entityId, byte* primaryBase, byte* transientBase, ushort skipMask)
+    {
+        var entityIndex = clusterChunkId * 64 + slotIndex;
+        var shadow = ClusterShadowBitmap;
+        if (shadow.Test(entityIndex))
+        {
+            return;
+        }
+
+        // A pure-Transient archetype has no second base: the primary one IS the Transient segment's.
+        transientBase = transientBase != null ? transientBase : primaryBase;
+        var keys = stackalloc KeyBytes8[Math.Max(1, FenceIndexedFieldCount)];
+        var n = ReadIndexedKeys(IndexSlots, primaryBase, slotIndex, skipMask, keys, 0);
+        n = ReadIndexedKeys(TransientIndexSlots, transientBase, slotIndex, skipMask, keys, n);
+        // The buffer is sized from the storage modes, the walk filtered by the skip mask; a mask that let a Versioned slot through would overrun it.
+        Debug.Assert(n <= Math.Max(1, FenceIndexedFieldCount), "CaptureFirstWrite read more keys than FenceIndexedFieldCount sized for");
+        if (shadow.TestAndSet(entityIndex))
+        {
+            return;   // another writer recorded first, before setting the bit
+        }
+
+        n = AppendIndexedKeys(IndexSlots, entityIndex, entityId, skipMask, keys, 0);
+        AppendIndexedKeys(TransientIndexSlots, entityIndex, entityId, skipMask, keys, n);
+    }
+
+    private int ReadIndexedKeys<TStore>(ClusterIndexSlot<TStore>[] slots, byte* segmentBase, int slotIndex, ushort skipMask, KeyBytes8* keys, int n)
+        where TStore : struct, IPageStore
+    {
+        if (slots == null)
+        {
+            return n;
+        }
+
+        for (var s = 0; s < slots.Length; s++)
+        {
+            ref var ixSlot = ref slots[s];
+            if ((skipMask & (1 << ixSlot.Slot)) != 0)
+            {
+                continue;
+            }
+
+            var compBase = segmentBase + Layout.ComponentOffset(ixSlot.Slot) + slotIndex * Layout.ComponentSize(ixSlot.Slot);
+            for (var f = 0; f < ixSlot.Fields.Length; f++)
+            {
+                keys[n++] = KeyBytes8.FromPointer(compBase + ixSlot.Fields[f].FieldOffset, ixSlot.Fields[f].FieldSize);
+            }
+        }
+
+        return n;
+    }
+
+    // The same walk as ReadIndexedKeys, so the n-th key read is the n-th appended.
+    private static int AppendIndexedKeys<TStore>(ClusterIndexSlot<TStore>[] slots, int entityIndex, EntityId entityId, ushort skipMask, KeyBytes8* keys,
+        int n) where TStore : struct, IPageStore
+    {
+        if (slots == null)
+        {
+            return n;
+        }
+
+        for (var s = 0; s < slots.Length; s++)
+        {
+            ref var ixSlot = ref slots[s];
+            if ((skipMask & (1 << ixSlot.Slot)) != 0)
+            {
+                continue;
+            }
+
+            for (var f = 0; f < ixSlot.Fields.Length; f++)
+            {
+                ixSlot.ShadowBuffers[f].Append(entityIndex, entityId, keys[n++]);
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>
+    /// True when <paramref name="newComponent"/> holds another key than <paramref name="oldComponent"/> in any indexed field of component slot
+    /// <paramref name="slot"/>, a slot of <see cref="FenceIndexedSlotMask"/>. Both point at the component's bytes.
+    /// </summary>
+    internal bool IndexedKeysDiffer(int slot, byte* oldComponent, byte* newComponent) =>
+        IndexedKeysDiffer(IndexSlots, slot, oldComponent, newComponent) || IndexedKeysDiffer(TransientIndexSlots, slot, oldComponent, newComponent);
+
+    private static bool IndexedKeysDiffer<TStore>(ClusterIndexSlot<TStore>[] slots, int slot, byte* oldComponent, byte* newComponent)
+        where TStore : struct, IPageStore
+    {
+        for (var s = 0; slots != null && s < slots.Length; s++)
+        {
+            if (slots[s].Slot != slot)
+            {
+                continue;
+            }
+
+            var fields = slots[s].Fields;
+            for (var f = 0; f < fields.Length; f++)
+            {
+                if (KeyBytes8.FromPointer(oldComponent + fields[f].FieldOffset, fields[f].FieldSize).RawValue
+                    != KeyBytes8.FromPointer(newComponent + fields[f].FieldOffset, fields[f].FieldSize).RawValue)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private static void ResetShadowBuffers<TStore>(ClusterIndexSlot<TStore>[] ixSlots) where TStore : struct, IPageStore
     {
         if (ixSlots == null)
@@ -2548,6 +2673,23 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>.</summary>
     public DirtyBitmap ClusterShadowBitmap;
+
+    /// <summary>
+    /// The component slots whose indexed fields the tick fence maintains under some discipline: every SingleVersion and Transient slot with an
+    /// <c>[Index]</c> field (#1187, IX-07). <c>ClusterRef.GetSpan</c> and <c>Get</c> refuse them: a write through memory handed out records no old key, so the
+    /// index never follows it. Independent of the discipline — a span writes in place whatever the transaction's — and 0 for an archetype with no index.
+    /// </summary>
+    internal ushort FenceIndexedSlotMask;
+
+    /// <summary>The indexed fields of <see cref="FenceIndexedSlotMask"/>'s slots, both homes: the most keys <see cref="CaptureFirstWrite"/> records.</summary>
+    internal int FenceIndexedFieldCount;
+
+    /// <summary>
+    /// The component slots <c>ClusterRef.Set</c> refuses, because a value stored there needs more than an in-place store: a Versioned slot (a revision),
+    /// a SingleVersion one whose component defaults to the Commit discipline (a staged write), the spatial slot (<c>WriteSpatial</c>'s bookkeeping) and the
+    /// realm key (a realm change, RM-05).
+    /// </summary>
+    internal ushort SetRefusedSlotMask;
 
     /// <summary>
     /// Approximate count of index mutations since the last statistics rebuild, and the threshold <see cref="StatisticsWorker"/> trips on (#665). The only such
@@ -10339,6 +10481,26 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// The Versioned and Commit-default slots of <see cref="SetRefusedSlotMask"/>; the engine adds the spatial slot and the realm key once
+    /// <see cref="InitializeSpatial"/> has resolved them.
+    /// </summary>
+    internal void InitializeWriteMasks(ComponentTable[] slotToTable)
+    {
+        ushort refused = 0;
+        for (var slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var table = slotToTable[slot];
+            if (table != null && (table.StorageMode == StorageMode.Versioned
+                                  || (table.StorageMode == StorageMode.SingleVersion && table.Discipline == CommitDiscipline.Commit)))
+            {
+                refused |= (ushort)(1 << slot);
+            }
+        }
+
+        SetRefusedSlotMask = refused;
+    }
+
+    /// <summary>
     /// Build the SingleVersion <c>ComponentCollection</c> descriptor (<see cref="CollectionSlots"/>) used by <c>ReleaseSlot</c> to free CC buffers on destroy.
     /// Only SingleVersion CC fields are tracked: the cluster slot is their sole owner. Versioned CC is owned by content chunks (released via the revision
     /// cleanup); Transient CC is rejected at registration. No-op for archetypes without an SV CC field (leaves <see cref="CollectionSlots"/> null).
@@ -10552,6 +10714,28 @@ internal sealed unsafe partial class ArchetypeClusterState
             $"Cluster elementId tail: InitializeIndexes counted {multiFieldCounter} AllowMultiple fields but Layout reserves {Layout.MultipleIndexedFieldCount}");
 
         ClusterShadowBitmap = new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64));
+
+        // The slots the fence maintains (#1187): the indexed SingleVersion and Transient ones. Versioned slots share IndexSlots, but their index moves
+        // at commit.
+        ushort fenceIndexed = 0;
+        var fenceIndexedFields = 0;
+        for (var s = 0; s < IndexSlots.Length; s++)
+        {
+            if (slotToTable[IndexSlots[s].Slot].StorageMode == StorageMode.SingleVersion)
+            {
+                fenceIndexed |= (ushort)(1 << IndexSlots[s].Slot);
+                fenceIndexedFields += IndexSlots[s].Fields.Length;
+            }
+        }
+
+        for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
+        {
+            fenceIndexed |= (ushort)(1 << TransientIndexSlots[s].Slot);
+            fenceIndexedFields += TransientIndexSlots[s].Fields.Length;
+        }
+
+        FenceIndexedSlotMask = fenceIndexed;
+        FenceIndexedFieldCount = fenceIndexedFields;
 
         // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against. Persistent slots only: the migration path that produces the
         // staged entries writes IndexSlots and nothing else (DatabaseEngine.ClusterMigration.cs, the `hasIdxAccessor && IndexSlots != null` block).

@@ -401,9 +401,7 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read-only: the value is written straight back unchanged.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
@@ -478,9 +476,7 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read for the tag only; the position is replaced.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
@@ -563,9 +559,7 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read to derive the next position from the current one.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

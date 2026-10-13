@@ -1477,6 +1477,211 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         });
     }
 
+    /// <summary>
+    /// #1187: a WriteSpatial that changes an indexed field of the spatial component (<see cref="ClMigPos.Tag"/>) is a key move. It records the old key and
+    /// marks the entity dirty, and the fence moves the entry; before, the index kept the old tag for good. Single and batched forms; the batch also
+    /// moves a neighbour that keeps its tag.
+    /// </summary>
+    [TestCase(false, TestName = "WriteSpatial_ChangingTheIndexedTag_MovesItsKey_Single")]
+    [TestCase(true, TestName = "WriteSpatial_ChangingTheIndexedTag_MovesItsKey_Batched")]
+    [VerifiesRule("IX-07")]
+    public void WriteSpatial_ChangingTheIndexedTag_MovesItsKey(bool batched)
+    {
+        using var dbe = SetupEngineWithGrid();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(10f + i, 10f, 100 + i)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            }
+
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f, 7)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var (chunkId, slot) = ReadLocation(dbe, id);
+        var neighbour = default(EntityId);
+        var neighbourSlot = -1;
+        Span<ClMigPos> values = stackalloc ClMigPos[64];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId != chunkId)
+                {
+                    continue;
+                }
+
+                if (batched)
+                {
+                    neighbourSlot = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits & ~(1UL << slot));
+                    neighbour = cluster.GetEntityId(neighbourSlot);
+                    values[slot] = PointAt(60f, 60f, 9);
+                    values[neighbourSlot] = PointAt(61f, 61f, cluster.GetReadOnly(ClMigUnit.Pos, neighbourSlot).Tag);
+                    cluster.WriteSpatial(ClMigUnit.Pos, (1UL << slot) | (1UL << neighbourSlot), values);
+                }
+                else
+                {
+                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(60f, 60f, 9));
+                }
+            }
+
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+
+        IndexDataOracle.AssertIndexAgreesWithData<ClMigUnit>(dbe, "after the fence");
+        using var check = dbe.CreateQuickTransaction();
+        Assert.That(check.Query<ClMigUnit>().WhereField<ClMigPos>(p => p.Tag == 9).Execute(), Is.EquivalentTo(new[] { id }), "the new tag");
+        Assert.That(check.Query<ClMigUnit>().WhereField<ClMigPos>(p => p.Tag == 7).Execute(), Is.Empty, "the old tag");
+        if (batched)
+        {
+            var neighbourTag = check.Open(neighbour).Read(ClMigUnit.Pos).Tag;
+            Assert.That(check.Query<ClMigUnit>().WhereField<ClMigPos>(p => p.Tag == neighbourTag).Execute(), Is.EquivalentTo(new[] { neighbour }),
+                "the neighbour that kept its tag");
+        }
+    }
+
+    /// <summary>#1187: <c>ClusterRef.Set</c> refuses the spatial component, whose writes need <c>WriteSpatial</c>'s bookkeeping (bounds, crossings).</summary>
+    [Test]
+    public void ClusterSet_OnTheSpatialComponent_IsRefused()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f, 7)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        Exception refused = null;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                refused = TrySetPos(cluster, System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits));
+            }
+
+            accessor.Dispose();
+        }
+
+        Assert.That(refused, Is.InstanceOf<InvalidOperationException>().With.Message.Contains("WriteSpatial"));
+    }
+
+    /// <summary>
+    /// #1187: a key-changing WriteSpatial of a SingleVersion spatial component under the Commit discipline is refused (its writes are staged), and a
+    /// batch refuses before it records or marks any of its slots.
+    /// </summary>
+    [Test]
+    public void WriteSpatial_ChangingTheIndexedTag_UnderTheCommitDiscipline_IsRefusedBeforeAnyBookkeeping()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f, 7)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(51f, 51f, 8)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
+        Exception refused = null;
+        Span<ClMigPos> values = stackalloc ClMigPos[64];
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var first = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits);
+                var second = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits & ~(1UL << first));
+                values[first] = PointAt(52f, 52f, cluster.GetReadOnly(ClMigUnit.Pos, first).Tag);   // same tag: no key move
+                values[second] = PointAt(53f, 53f, 99);                                              // a key move
+                refused = TryWriteSpatial(cluster, (1UL << first) | (1UL << second), values);
+            }
+
+            accessor.Dispose();
+        }
+
+        Assert.That(refused, Is.InstanceOf<InvalidOperationException>().With.Message.Contains("Commit discipline"));
+        Assert.That(cs.ClusterDirtyBitmap.HasDirty, Is.False, "no slot of the batch was marked");
+        Assert.That(cs.ClusterShadowBitmap.AnyTestAndSetSinceClear, Is.False, "no key was recorded");
+    }
+
+    // A ClusterRef is a ref struct, which no lambda can capture.
+    private static Exception TryWriteSpatial(ClusterRef<ClMigUnit> cluster, ulong slots, ReadOnlySpan<ClMigPos> values)
+    {
+        try
+        {
+            cluster.WriteSpatial(ClMigUnit.Pos, slots, values);
+            return null;
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+    }
+
+    // A ClusterRef is a ref struct, which no lambda can capture.
+    private static Exception TrySetPos(ClusterRef<ClMigUnit> cluster, int slot)
+    {
+        try
+        {
+            cluster.Set(ClMigUnit.Pos, slot, PointAt(60f, 60f, 7));
+            return null;
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+    }
+
+    /// <summary>
+    /// A WriteSpatial that carries the tag across stays what it was: no key recorded, nothing dirty, and the fence takes its clean branch (#1187 marks
+    /// dirty only for a key move).
+    /// </summary>
+    [Test]
+    [VerifiesRule("IX-07")]
+    public void WriteSpatial_KeepingTheIndexedTag_RecordsNothing()
+    {
+        using var dbe = SetupEngineWithGrid();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f, 7)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
+        var (chunkId, slot) = ReadLocation(dbe, id);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ClMigUnit>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                if (cluster.ChunkId == chunkId)
+                {
+                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(60f, 60f, 7));
+                }
+            }
+
+            accessor.Dispose();
+            tx.Commit();
+        }
+
+        Assert.That(cs.ClusterShadowBitmap.AnyTestAndSetSinceClear, Is.False, "no key recorded");
+        Assert.That(cs.ClusterDirtyBitmap.HasDirty, Is.False, "nothing dirty");
+        dbe.WriteTickFence(2);
+        Assert.That(cs.FenceBranchPath, Is.EqualTo(1), "the clean branch");
+        using var check = dbe.CreateQuickTransaction();
+        Assert.That(check.Query<ClMigUnit>().WhereField<ClMigPos>(p => p.Tag == 7).Execute(), Is.EquivalentTo(new[] { id }));
+    }
+
     /// <summary>Two crossings in one tick: the flag's per-cluster destination is the LAST write's, and the drain must land the entity where it is.</summary>
     [Test]
     [VerifiesRule("CC-02")]

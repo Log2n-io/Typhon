@@ -29,6 +29,23 @@ class PtIdxArch : Archetype<PtIdxArch>
     public static readonly Comp<PtIdxRuntime> Runtime = Register<PtIdxRuntime>();
 }
 
+// A second Transient component, without an index: a tick that writes only it leaves the archetype's written-slot union naming another slot than the
+// indexed one.
+[Component("Typhon.Test.ECS.PTIdx.Note", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential)]
+struct PtIdxNote
+{
+    public int Value;
+    public int Pad;
+}
+
+[Archetype]
+class PtIdxNotedArch : Archetype<PtIdxNotedArch>
+{
+    public static readonly Comp<PtIdxRuntime> Runtime = Register<PtIdxRuntime>();
+    public static readonly Comp<PtIdxNote> Note = Register<PtIdxNote>();
+}
+
 /// <summary>
 /// A pure-Transient archetype with an indexed field is cluster-backed and queryable — the last half of issue #655.
 /// </summary>
@@ -51,6 +68,7 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<PtIdxRuntime>();
+        dbe.RegisterComponentFromAccessor<PtIdxNote>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -65,9 +83,10 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
     /// Every entity the archetype's Transient index reports for <paramref name="bucket"/>, read straight from the tree. The entity-id tail lives in the
     /// TRANSIENT chunk here — there is no other segment to read it from.
     /// </summary>
-    private static unsafe HashSet<EntityId> Indexed(DatabaseEngine dbe, int bucket)
+    private static HashSet<EntityId> Indexed(DatabaseEngine dbe, int bucket) => Indexed(dbe, ClusterState(dbe), bucket);
+
+    private static unsafe HashSet<EntityId> Indexed(DatabaseEngine dbe, ArchetypeClusterState clusterState, int bucket)
     {
-        var clusterState = ClusterState(dbe);
         Assert.That(clusterState.TransientIndexSlots, Is.Not.Null.And.Not.Empty, "fixture must own a Transient index home");
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
@@ -269,6 +288,93 @@ class ClusterPureTransientIndexTests : TestBase<ClusterPureTransientIndexTests>
         {
             Assert.That(remaining, Does.Not.Contain(ids[1]), "the destroyed entity must be gone from the tree");
             Assert.That(remaining, Has.Count.EqualTo(3), "a plain Remove(key) would have wiped the whole buffer and taken all three siblings");
+        });
+    }
+
+    /// <summary>
+    /// #1187: the same move through <see cref="ClusterRef{TArch}.Set{T}"/>. A pure-Transient archetype has one base, the Transient segment's, which the
+    /// capture must read the old key from — an earlier capture passed a null second base through and recorded nothing.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IX-07")]
+    public void ClusterSet_MovesTheKeyInTheTreeAtTheFence()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId moved, sibling;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            moved = Spawn(tx, bucket: 1, tick: 0);
+            sibling = Spawn(tx, bucket: 1, tick: 1);
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            using (var accessor = tx.For<PtIdxArch>())
+            {
+                foreach (var cluster in accessor.GetClusterEnumerator())
+                {
+                    var ids = cluster.EntityIds;
+                    for (var slot = 0; slot < cluster.ClusterSize; slot++)
+                    {
+                        if ((cluster.OccupancyBits & (1UL << slot)) != 0 && ids[slot] == (long)moved.RawValue)
+                        {
+                            cluster.Set(PtIdxArch.Runtime, slot, new PtIdxRuntime(42, 2));
+                        }
+                    }
+                }
+            }
+
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Indexed(dbe, 42), Is.EquivalentTo(new[] { moved }), "the written entity under its new key");
+            Assert.That(Indexed(dbe, 1), Is.EquivalentTo(new[] { sibling }), "and off the old one, without its sibling");
+        });
+    }
+
+    /// <summary>
+    /// The pure-Transient fence drained the shadow buffers BEFORE it took this tick's written-slot union, so the drain's skip of unwritten components read
+    /// the previous tick's union: a tick that wrote only an unindexed component, then a tick that moved the indexed key, and the key's records were
+    /// thrown away as unwritten — the tree kept the old key for good.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IX-07")]
+    public void AKeyMove_AfterATickThatWroteOnlyAnotherComponent_MovesTheKey()
+    {
+        using var dbe = SetupEngine();
+        var clusterState = dbe._archetypeStates[Archetype<PtIdxNotedArch>.Metadata.ArchetypeId].ClusterState;
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<PtIdxNotedArch>(PtIdxNotedArch.Runtime.Set(new PtIdxRuntime(1, 0)), PtIdxNotedArch.Note.Set(new PtIdxNote()));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(PtIdxNotedArch.Note, new PtIdxNote { Value = 5 });   // only the unindexed component
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(PtIdxNotedArch.Runtime, new PtIdxRuntime(42, 1));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(3);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Indexed(dbe, clusterState, 42), Is.EquivalentTo(new[] { id }), "the new key");
+            Assert.That(Indexed(dbe, clusterState, 1), Is.Empty, "the old key");
         });
     }
 }

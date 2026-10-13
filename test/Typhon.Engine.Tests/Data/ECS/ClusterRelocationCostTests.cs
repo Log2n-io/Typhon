@@ -199,9 +199,7 @@ class ClusterRelocationCostTests : TestBase<ClusterRelocationCostTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read to derive the next position from the current one.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 ulong bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
@@ -259,9 +257,7 @@ class ClusterRelocationCostTests : TestBase<ClusterRelocationCostTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read to derive the next position from the current one.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 ulong bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

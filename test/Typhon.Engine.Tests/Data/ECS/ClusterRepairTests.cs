@@ -193,9 +193,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read-only.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {
@@ -814,9 +812,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read-only: the tag is carried across, the position is written through WriteSpatial below.
-                var positions = cluster.GetSpan(ClMigUnit.Pos);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -35,6 +36,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private readonly ArchetypeMetadata _meta;
     private readonly int _chunkId;
     private readonly ArchetypeClusterState _state; // null only on synthetic test refs; carries spatial bookkeeping + grid
+    private readonly EntityAccessor _owner;         // the transaction or system accessor that enumerates; null for an engine-internal walk
 
     // ── Lifetime check (#1199): valid until its enumerator's next MoveNext ──────────────────────────────────────────
     //
@@ -63,8 +65,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private double _cachedOriginZ;
 
     internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state,
-        ClusterStep stepSource = null, int step = 0)
+        ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
     {
+        _owner = owner;
         _stepSource = stepSource;
         _step = step;
         _base = basePtr;
@@ -185,17 +188,27 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// Get a mutable span of the component's data across all N slots (its SoA array). For Versioned components use <see cref="GetReadOnlySpan{T}"/> instead —
     /// writing directly to the cluster slot bypasses the revision chain and breaks MVCC snapshot isolation.
     /// </summary>
+    /// <remarks>
+    /// Refused for a component with an <c>[Index]</c> field the tick fence maintains (SingleVersion or Transient): the index moves an entity's entry from
+    /// the key recorded at its first write, and a write through handed-out memory records nothing, so the index would keep the old key for good (#1187,
+    /// IX-07). Read such a component with <see cref="GetReadOnlySpan{T}"/> and write it with <see cref="Set{T}"/> or <c>OpenMut(...).Set</c>.
+    /// </remarks>
     /// <typeparam name="T">Component value type.</typeparam>
     /// <param name="comp">Handle identifying the component within the archetype.</param>
     /// <returns>A mutable span of length <see cref="ClusterSize"/> over the component's SoA array.</returns>
     /// <exception cref="InvalidOperationException">
-    /// Thrown, when strict checks are enabled (<see cref="CheckConfig.Enabled"/>), if <typeparamref name="T"/> is a Versioned component.
+    /// The component has a fence-maintained indexed field, in every build; or, when strict checks are enabled (<see cref="CheckConfig.Enabled"/>),
+    /// <typeparamref name="T"/> is a Versioned component.
     /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {
         CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
+        if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowWritableIndexedMemory(slot, nameof(GetSpan));
+        }
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
         {
             ThrowHelper.ThrowInvalidOp(
@@ -220,7 +233,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // A PER-ARCHETYPE flag, not a per-cluster process bit, and the difference is the whole design.
         //
         // GetSpan returns a MUTABLE span; it does not observe whether the caller writes through it, and plenty of callers
-        // do not — ClusterRepairTests.ReadAll enumerates every cluster and reads positions through exactly this method.
+        // did not — ClusterRepairTests.ReadAll enumerated every cluster and read positions through exactly this method (it
+        // reads through GetReadOnlySpan since #1187 refused GetSpan on that indexed column).
         // Setting the process bit here therefore marks a cluster "visit and republish" on a pure READ, which takes it past
         // the !boundsMoved skip into the outlier guard and drift detection. Measured: doing that made a read-only helper
         // relocate entities, reddening ARepairIsNeverBegunWithoutTheBudgetToFinishIt with "a refused repair still moved
@@ -306,17 +320,142 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>Get a mutable reference to a single component value at the given slot index.</summary>
+    /// <remarks>Refused, in every build, for a component with a fence-maintained indexed field, as <see cref="GetSpan{T}"/> is (#1187).</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         CheckStep();
         var slot = _meta.GetSlot(comp._componentTypeId);
+        if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowWritableIndexedMemory(slot, nameof(Get));
+        }
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
         {
             ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
         }
         CheckStride<T>(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
+    }
+
+    /// <summary>
+    /// Store one entity's value of a component — the cluster-iteration counterpart of <c>EntityRefMut.Set</c>, and the way to write a component whose
+    /// indexed fields the tick fence maintains, which <see cref="GetSpan{T}"/> and <see cref="Get{T}"/> refuse (#1187).
+    /// </summary>
+    /// <remarks>
+    /// Does the in-place write's bookkeeping in the same call, as <c>EntityRefMut.Set</c> does: on the entity's first write this tick it records the keys
+    /// of its indexed fields for the fence to move them from (IX-07), marks the entity dirty for the written component, and records the page owing a
+    /// write (PS-10). No <see cref="MarkDirty{T}"/> is needed.
+    /// </remarks>
+    /// <typeparam name="T">Component value type.</typeparam>
+    /// <param name="comp">Handle identifying the component within the archetype.</param>
+    /// <param name="slotIndex">The entity's slot: a bit of <see cref="OccupancyBits"/>.</param>
+    /// <param name="value">The value to store.</param>
+    /// <exception cref="InvalidOperationException">
+    /// The component is Versioned or defaults to the Commit discipline (write it with <c>OpenMut</c>), is the spatial component
+    /// (<see cref="WriteSpatial{T}(Comp{T}, int, in T)"/>) or holds the realm key (<c>OpenMut</c>, RM-05), or it is SingleVersion and the enumerating
+    /// transaction runs under the Commit discipline, whose writes are staged.
+    /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="slotIndex"/> holds no entity.</exception>
+    public readonly void Set<T>(Comp<T> comp, int slotIndex, in T value) where T : unmanaged
+    {
+        CheckStep();
+        SystemAccessValidator.AssertWrite<T>();
+        var slot = _meta.GetSlot(comp._componentTypeId);
+        CheckStride<T>(slot);
+        if ((_state.SetRefusedSlotMask & (1 << slot)) != 0)
+        {
+            ThrowSetRefused(slot);
+        }
+
+        if ((uint)slotIndex >= (uint)_layout.ClusterSize || (OccupancyBits & (1UL << slotIndex)) == 0)
+        {
+            ThrowHelper.ThrowArgument($"ClusterRef.Set: slot {slotIndex} of cluster {_chunkId} holds no entity.");
+        }
+
+        if (CheckConfig.Enabled && (EnabledBits(slot) & (1UL << slotIndex)) == 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled for the entity in cluster slot {slotIndex}.");
+        }
+
+        RecordWrite(slot, slotIndex);
+        *(T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T)) = value;
+        NotePageWritten(slot);
+    }
+
+    /// <summary>
+    /// The bookkeeping of an in-place write to <paramref name="slotIndex"/>'s component <paramref name="slot"/>, made before the store: the old keys of
+    /// the entity's fence-maintained indexed fields on its first write this tick, then the dirty mark that makes the fence drain them (IX-07).
+    /// </summary>
+    private readonly void RecordWrite(byte slot, int slotIndex)
+    {
+        var discipline = _owner?.Discipline ?? CommitDiscipline.TickFence;
+        if ((_meta.TransientSlotMask & (1 << slot)) == 0)
+        {
+            // A SingleVersion write under the Commit discipline is staged and its index reconciled at commit (CM-01); an in-place store would be seen by
+            // neither the commit, which reads the staged copy, nor the fence, which records no key for a commit-maintained slot (IX-06).
+            if (discipline == CommitDiscipline.Commit)
+            {
+                ThrowHelper.ThrowInvalidOp($"An in-place cluster write to SingleVersion component slot {slot} under the Commit discipline: "
+                                         + "write it with OpenMut(...).Set, which stages it.");
+            }
+
+            _owner?.NoteSvInPlaceWrite();   // CM-02: blocks a later escalation to Commit
+        }
+
+        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            var skipMask = (ushort)~_meta.FenceMaintainedSlotsUnder(discipline);
+            _state.CaptureFirstWrite(_chunkId, slotIndex, GetEntityId(slotIndex), _base, _transientBase, skipMask);
+        }
+
+        _state.SetDirty(_chunkId, slotIndex, slot);
+    }
+
+    /// <summary>
+    /// <see cref="RecordWrite"/>, for a spatial write that changes an indexed field of the spatial component: WriteSpatial marks nothing dirty unless a
+    /// key moves (#1187).
+    /// </summary>
+    private readonly void RecordSpatialWriteIfKeysChange<T>(byte slot, int slotIndex, in T newValue) where T : unmanaged
+    {
+        if (SpatialWriteChangesKeys(slot, slotIndex, in newValue))
+        {
+            RecordWrite(slot, slotIndex);
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="newValue"/> changes an indexed field of a live entity's spatial component. An empty slot records nothing: its stale
+    /// key would reach the drain's removal branch, which removes a unique key by value — from whichever live entity holds it.
+    /// </summary>
+    private readonly bool SpatialWriteChangesKeys<T>(byte slot, int slotIndex, in T newValue) where T : unmanaged
+    {
+        if ((OccupancyBits & (1UL << slotIndex)) == 0)
+        {
+            return false;
+        }
+
+        var copy = newValue;   // on the stack: newValue may live in a managed array, and a pointer is taken only over the stack
+        var current = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
+        return _state.IndexedKeysDiffer(slot, current, (byte*)&copy);
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowWritableIndexedMemory(byte slot, string api) =>
+        throw new InvalidOperationException(
+            $"{api} hands out writable memory over component slot {slot}, which has an [Index] field the tick fence maintains: a write through it never "
+          + "reaches the index (#1187). Read with GetReadOnlySpan / GetReadOnly; write with ClusterRef.Set, WriteSpatial or OpenMut(...).Set.");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly void ThrowSetRefused(byte slot)
+    {
+        var why = (_meta.VersionedSlotMask & (1 << slot)) != 0 ? "is Versioned: write it with OpenMut(...).Set, which creates its revision"
+            : (_meta.RealmKeySlotMask & (1 << slot)) != 0 ? "holds the realm key: a realm change goes through OpenMut(...).Set (RM-05)"
+            : _state.SpatialSlot.HasSpatialIndex && _state.SpatialSlot.Slot == slot ? "is the spatial component: write it with WriteSpatial"
+            : "defaults to the Commit discipline: write it with OpenMut(...).Set, which stages it";
+        throw new InvalidOperationException($"ClusterRef.Set: component slot {slot} {why}.");
     }
 
     /// <summary>Get a read-only reference to a single component value at the given slot index.</summary>
@@ -443,7 +582,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// <c>ApplySpatialWrite</c>, whose <c>is3D</c> is a call-site constant so the 2D path costs what it always did.
     /// </para>
     /// <para>
-    /// <b>WriteSpatial does NOT mark the slot dirty</b> (via <see cref="ArchetypeClusterState.SetDirty(int, int, int)"/>).
+    /// <b>WriteSpatial does NOT mark the slot dirty</b> (via <see cref="ArchetypeClusterState.SetDirty(int, int, int)"/>), unless the value changes an
+    /// <c>[Index]</c> field of the spatial component: that is a key move, recorded and marked dirty as any write's is, for the fence to move the index
+    /// entry (#1187).
     /// The dirty bitmap drives WAL serialization and change-filtered dispatch — for high-frequency  simulation state (e.g., AntHill's ant positions), marking
     /// every slot dirty floods the WAL writer with one frame per entity per tick → backpressure that stalls TickDriver. The fence-time spatial maintenance does
     /// not need the dirty bit; it consumes <see cref="ArchetypeClusterState.ClusterMigrationPendingSlots"/> /
@@ -473,6 +614,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
 
         CheckStride<T>(slot);
+
+        // An indexed field of the spatial component that this write changes is a key move: recorded and marked dirty like any other write (#1187).
+        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            RecordSpatialWriteIfKeysChange(slot, slotIndex, in newValue);
+        }
 
         // Same claim as the batched overload, for the one-slot form: this path raises no dirty bit either, and the slot is named right here (#205).
         _state.NoteSlotsChanged(_chunkId, 1UL << slotIndex);
@@ -581,6 +728,26 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         {
             ThrowHelper.ThrowArgument(
                 $"WriteSpatial: slot {highest} is beyond the cluster ({_layout.ClusterSize} slots) or beyond the {newValues.Length} values given.");
+        }
+
+        // Before any store, as the single write does (#1187). The key changes are found first, so a refusal (a SingleVersion key move under the Commit
+        // discipline) throws before any slot of the batch is recorded or marked.
+        if ((_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        {
+            var keysChanged = 0UL;
+            for (var rest = slots; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                if (SpatialWriteChangesKeys(slot, i, in newValues[i]))
+                {
+                    keysChanged |= 1UL << i;
+                }
+            }
+
+            for (; keysChanged != 0; keysChanged &= keysChanged - 1)
+            {
+                RecordWrite(slot, BitOperations.TrailingZeroCount(keysChanged));
+            }
         }
 
         var spatialSlot = _state.SpatialSlot;
@@ -1344,12 +1511,16 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private int _index;
     private int _endIndex;
     private ClusterStep _stepCounter;   // strict mode only (#1199): bumped by MoveNext and Dispose; null otherwise
+    private EntityAccessor _owner;      // handed to each ClusterRef: its writes need the discipline (#1187)
 
     [AllowCopy]
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
-        ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null)
+        ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null, EntityAccessor owner = null)
     {
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
+        var result = new ClusterEnumerator<TArch>
+        {
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+        };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1376,9 +1547,12 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     [AllowCopy]
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment,
-        int startIndex, int endIndex)
+        int startIndex, int endIndex, EntityAccessor owner = null)
     {
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
+        var result = new ClusterEnumerator<TArch>
+        {
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+        };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1405,10 +1579,13 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     /// </summary>
     [AllowCopy]
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeClusterState state, ArchetypeMetadata meta, ChunkBasedSegment<PersistentStore> segment, 
-        ChunkBasedSegment<TransientStore> transientSegment, int[] clusterIds, int startIndex, int endIndex)
+        ChunkBasedSegment<TransientStore> transientSegment, int[] clusterIds, int startIndex, int endIndex, EntityAccessor owner = null)
     {
         ArgumentNullException.ThrowIfNull(clusterIds);
-        var result = new ClusterEnumerator<TArch> { _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null };
+        var result = new ClusterEnumerator<TArch>
+        {
+            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner
+        };
         if (segment != null)
         {
             result._accessor = segment.CreateChunkAccessor();
@@ -1427,8 +1604,9 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
 
     /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
     [AllowCopy]
-    internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count) =>
-        CreateScoped(state, meta, state.ClusterSegment, state.TransientSegment, clusterIds, 0, count);
+    internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count,
+        EntityAccessor owner = null) =>
+        CreateScoped(state, meta, state.ClusterSegment, state.TransientSegment, clusterIds, 0, count, owner);
 
     /// <summary>The chunk ID of the current cluster. Available after <see cref="MoveNext"/> returns true.</summary>
     public int CurrentChunkId
@@ -1507,7 +1685,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // TransientStore base for mixed archetypes (null for pure-SV/V and pure-Transient)
             var transientPtr = (_hasTransientAccessor && _hasPersistentAccessor) ? _transientAccessor.GetChunkAddress(chunkId) : null;
-            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _stepCounter, _stepCounter?.Value ?? 0);
+            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _stepCounter, _stepCounter?.Value ?? 0, _owner);
         }
     }
 

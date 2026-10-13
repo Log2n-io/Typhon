@@ -303,9 +303,7 @@ public static class ClusterRepairProfile
         {
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
-#pragma warning disable TYPHON009 // Read-only: the tag is carried across, the position goes through WriteSpatial.
-                var positions = cluster.GetSpan(comp);
-#pragma warning restore TYPHON009
+                var positions = cluster.GetReadOnlySpan(comp);
                 var bits = cluster.OccupancyBits;
                 while (bits != 0)
                 {

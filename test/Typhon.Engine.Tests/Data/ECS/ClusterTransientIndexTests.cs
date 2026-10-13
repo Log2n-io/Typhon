@@ -78,7 +78,7 @@ class ClusterTransientIndexTests : TestBase<ClusterTransientIndexTests>
         => tx.Spawn<TIdxMixedArch>(TIdxMixedArch.State.Set(new TIdxState(hp)), TIdxMixedArch.Runtime.Set(new TIdxRuntime(bucket, tick)));
 
     /// <summary>Every entity the archetype's TRANSIENT index reports for <paramref name="bucket"/>, read straight from the tree.</summary>
-    private static unsafe HashSet<EntityId> TransientIndexed(DatabaseEngine dbe, int bucket)
+    internal static unsafe HashSet<EntityId> TransientIndexed(DatabaseEngine dbe, int bucket)
     {
         var clusterState = ClusterState(dbe);
         Assert.That(clusterState.TransientIndexSlots, Is.Not.Null.And.Not.Empty, "fixture must own a Transient index home");

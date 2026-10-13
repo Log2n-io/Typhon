@@ -156,8 +156,29 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal ulong PendingBits(ulong occupancy, int clusterChunkId) => ClaimedBits(clusterChunkId) & ~occupancy;
 
-    /// <summary>Taken slots — claimed or occupied. The occupancy word is read first, then the claim word.</summary>
-    internal ulong TakenBits(ulong occupancy, int clusterChunkId) => occupancy | ClaimedBits(clusterChunkId);
+    /// <summary>
+    /// Taken slots — claimed, occupied, or owing the fence (<see cref="FenceOwedBits"/>). The occupancy word is read first, then the claim word, then the
+    /// shadow word.
+    /// </summary>
+    internal ulong TakenBits(ulong occupancy, int clusterChunkId)
+    {
+        var taken = occupancy | ClaimedBits(clusterChunkId);
+        return taken | FenceOwedBits(clusterChunkId);
+    }
+
+    /// <summary>
+    /// The slots of <paramref name="clusterChunkId"/> marked in <see cref="ClusterShadowBitmap"/> — an entity written since the fence. For a released slot
+    /// that means its index entries are still in the trees, left for the fence's drain to remove (IX-06), so the slot is not handed out before that fence:
+    /// the drain would take the new occupant for the destroyed entity with changed keys and move the dead entity's entries onto it, and until then the
+    /// stale entries would name the new occupant (#1188). The fence clears the bitmap after the drain.
+    /// </summary>
+    /// <remarks>
+    /// The word itself, never gated on <see cref="DirtyBitmap.AnyTestAndSetSinceClear"/>: <see cref="DirtyBitmap.TestAndSet"/> raises that flag after
+    /// its OR, so a writer preempted between the two leaves a bit a destroy on another thread can see — and defer on — while the flag still reads clear.
+    /// A claimer gated on it would take the slot. The claim word's acquire, after the destroy released the claim, orders this read after the bit.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ulong FenceOwedBits(int clusterChunkId) => ClusterShadowBitmap?.ReadWord(clusterChunkId) ?? 0;
 
     private ref long ClaimWord(int clusterChunkId) => ref BlockWord(clusterChunkId, ClaimWordIndex);
 
@@ -200,7 +221,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Claims one free slot of <paramref name="clusterChunkId"/> by CAS on its claim word; -1 when none is free. Free is clear in both words: the occupancy word
+    /// Claims one free slot of <paramref name="clusterChunkId"/> by CAS on its claim word; -1 when none is free. Free is clear in both words, and not owing the
+    /// fence (<see cref="FenceOwedBits"/>): the occupancy word
     /// is read first, so a slot a load set occupied without a claim is never taken twice. The occupancy bit is NOT set: the slot is claimed and not occupied,
     /// which every reader decides through its record (VIS-08), until its owner publishes it — a spawn at its PUBLISH (<see cref="PublishReservedSlot"/>), any
     /// other claimer at once (<see cref="PublishClaimedSlot"/>). Set here, a snapshot reader past the claimer's TSN passed the cluster gate and counted a slot
@@ -213,7 +235,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             var occupied = Volatile.Read(ref occupancy);
             var claimed = Volatile.Read(ref claims);
-            var available = ~((ulong)claimed | occupied) & fullMask;
+            // After the claim word: a destroy whose release a claimer sees in it had seen its slot's shadow bit (#1188).
+            var available = ~((ulong)claimed | occupied | FenceOwedBits(clusterChunkId)) & fullMask;
             if (available == 0)
             {
                 return -1;
@@ -235,7 +258,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         var bit = 1L << slotIndex;
         var occupied = Volatile.Read(ref occupancy);
         var claimed = Volatile.Read(ref claims);
-        return (((ulong)claimed | occupied) & (ulong)bit) == 0 && Interlocked.CompareExchange(ref claims, claimed | bit, claimed) == claimed;
+        return (((ulong)claimed | occupied | FenceOwedBits(clusterChunkId)) & (ulong)bit) == 0
+               && Interlocked.CompareExchange(ref claims, claimed | bit, claimed) == claimed;
     }
 
     /// <summary>A freshly allocated cluster's slot 0 claimed, and its occupancy word empty, before the cluster is published to any claimer.</summary>
