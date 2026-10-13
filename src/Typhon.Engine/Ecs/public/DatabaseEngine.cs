@@ -2000,8 +2000,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// A clean close runs the cleanups still queued: revision GC entries, destroyed entities, and the chunk frees deferred past the transactions alive
-    /// when they were queued. All of it is due, and none of it may outlive the close — a destroyed entity's chain root still allocated reads back as a live
-    /// entity when its archetype's map reopens empty and is rebuilt from the chain heads (REAP-02).
+    /// when they were queued. All of it is due, and none of it may outlive the close: what is left allocated in no chain stays so until a sweep finds it
+    /// (REAP-02). A destroyed entity's chain still allocated no longer reads back as a live entity — a loaded map is not rebuilt (#1231).
     /// </summary>
     /// <remarks>
     /// The pages it changes keep their writeback debt for the final checkpoint, which follows: no page is written here. A transaction still alive does not
@@ -4608,6 +4608,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     SlotToComponentTable = slotToTable,
                     EntityMap = em,
                     NextEntityKey = persisted.Arch.NextEntityKey,
+                    EntityMapLoaded = true,
                 };
                 isFreshAllocation = false;
             }
@@ -5630,9 +5631,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            // Clean / legacy reopen: skip archetypes that were loaded from a persisted EntityMap segment (O(1) reopen path). BUT: if migration invalidated the
-            // EntityMap (hasMigratedSlot → fresh allocation), the EntityMap will be empty despite persisted SPI > 0. Check EntryCount to distinguish.
-            if (TryGetPersistedArchetype(meta, out var p) && p.Arch.EntityMapSPI > 0 && state.EntityMap.EntryCount > 0)
+            // Clean / legacy reopen: skip archetypes whose EntityMap was loaded from its persisted segment (O(1) reopen path), empty or not. The rebuild below
+            // is for a map this open allocated: a migration's, a legacy database's, or one whose segment would not load. It used to be told apart by the
+            // map being empty, which a map emptied by destroys is too — and every chain still allocated then reopened as a live entity (#1231).
+            if (state.EntityMapLoaded)
             {
                 continue;
             }
@@ -6035,7 +6037,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
+            // A destroyed entity's chain is not a live entity (#1231). Not on a crash open that migrated: its chains are read before the scrub repairs them,
+            // as in BuildFlatEntityMapEntries.
             var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
+            if (!CrashRecoveryAtOpen)
+            {
+                ComponentRevisionManager.DropTombstonedHeads(table, heads);
+            }
+
             chainHeads[slot] = heads;
             foreach (var pk in heads.Keys)
             {
@@ -6222,6 +6231,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Shared two-pass chain-head scan (overflow set → heads), reused by recovery scrub (03-recovery.md §6) so the two never drift. Returns
             // EntityPK → root-chunk-id for this archetype's chains in this Versioned slot.
             slotMaps[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
+            // A destroyed entity's chain is not a live entity (#1231). The clean path only: a crash open reads its chains before the scrub has repaired them,
+            // and the WAL replay that follows re-applies every logged destroy.
+            if (!duringRebuild)
+            {
+                ComponentRevisionManager.DropTombstonedHeads(table, slotMaps[slot]);
+            }
+
             if (slotMaps[slot].Count > 0)
             {
                 anySlotPopulated = true;
@@ -6526,6 +6542,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// verifier rejects it. Per engine. Never set in production.
     /// </summary>
     internal bool RollbackVoidsRecordedIndexForTest { get; set; }
+
+    /// <summary>
+    /// Test-only switch (REAP-02, #1231): when set, a commit keeps the storage of the entities it spawned and destroyed, as it did before #1229 — chains
+    /// allocated in no record — so a test can show a clean reopen does not rebuild them into live entities. Per engine. Never set in production.
+    /// </summary>
+    internal bool KeepSpawnDestroyedStorageForTest { get; set; }
 
     /// <summary>
     /// Test-only mutant switch (CHAIN-02): when set, a first write marks its cache entry written before its revision is appended — what CHAIN-02 forbids —

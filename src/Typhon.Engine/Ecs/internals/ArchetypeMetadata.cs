@@ -231,6 +231,12 @@ internal class ArchetypeEngineState
     /// <summary>Monotonic entity key counter. Use Interlocked.Increment for thread-safe generation.</summary>
     public long NextEntityKey;
 
+    /// <summary>
+    /// The <see cref="EntityMap"/> was opened from its persisted segment, not allocated by this open: the record of the archetype's entities, authoritative
+    /// on a clean reopen even when empty. A map emptied by destroys used to read as one a migration had reallocated, and was rebuilt from chain heads (#1231).
+    /// </summary>
+    public bool EntityMapLoaded;
+
     /// <summary>Cluster storage state. Non-null for cluster-eligible archetypes.</summary>
     public ArchetypeClusterState ClusterState;
 

@@ -4974,6 +4974,84 @@ public unsafe partial class Transaction
         }
     }
 
+    /// <summary>
+    /// Gives back, at commit, the storage of every entity this transaction spawned and then destroyed (#1229): its Versioned content chunks and chain roots,
+    /// and the collection buffers its SingleVersion and Transient payloads hold — what a rollback frees. Both commit paths skip such an entity (no EntityMap
+    /// insert, no committed data to delete), so nothing else ever did: each chain stayed allocated in no record, and a reopen that rebuilt the map from the
+    /// chain heads brought the entity back (#1231). Its cache entries go too, so PREPARE neither publishes nor logs a revision for it.
+    /// </summary>
+    /// <remarks>
+    /// Runs before PREPARE and is final: a commit that fails after it, or a rollback, finds no cache entry and no arena handle to free again. Destroyed, the
+    /// entity is no longer reachable through this transaction (<see cref="ResolveEntity"/> misses it), so nothing reads what is freed here.
+    /// </remarks>
+    private void ReleaseSpawnsDestroyedHere()
+    {
+        if (_spawnedEntities is not { Count: > 0 } || _pendingDestroys is not { Count: > 0 } || _dbe.KeepSpawnDestroyedStorageForTest)
+        {
+            return;
+        }
+
+        // Walks the destroys, not the spawns: a bulk spawn with one unrelated destroy pays one lookup, not one per spawn.
+        using var epochGuard = EpochGuard.Enter(_epochManager);
+        var spawns = CollectionsMarshal.AsSpan(_spawnedEntities);
+        foreach (var destroyed in _pendingDestroys)
+        {
+            var index = SpawnedIndexOf(destroyed);
+            if (index < 0)
+            {
+                continue;
+            }
+
+            ref var entry = ref spawns[index];
+
+            var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
+            var engineState = meta == null ? null : _dbe._archetypeStates[meta.ArchetypeId];
+            if (engineState?.SlotToComponentTable == null)
+            {
+                continue;
+            }
+
+            var pk = (long)entry.Id.RawValue;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = engineState.SlotToComponentTable[slot];
+                if (table.StorageMode == StorageMode.Versioned)
+                {
+                    // RollbackComponent's Created branch: the chain is this transaction's alone, and so is the content chunk its one revision names.
+                    var compType = meta._slotToComponentType[slot];
+                    if (!_componentInfos.TryGetValue(compType, out var info) || !info.SingleCache.Remove(pk, out var cri))
+                    {
+                        continue;
+                    }
+
+                    if (cri.CurCompContentChunkId > 0)
+                    {
+                        DeferredCleanupManager.FreeContentChunk(table, cri.CurCompContentChunkId, neverCommitted: true);
+                    }
+
+                    if (cri.CompRevTableFirstChunkId > 0)
+                    {
+                        table.CompRevTableSegment.FreeChunk(cri.CompRevTableFirstChunkId);
+                    }
+
+                    entry.VerLoc[slot] = 0;
+                }
+                else
+                {
+                    // The arena itself is dropped by the reset; the collection buffers its payload names are not (DC-01).
+                    var stage = entry.Stage[slot];
+                    if (stage != 0 && table.HasCollections)
+                    {
+                        DeferredCleanupManager.ReleaseCollectionBuffers(
+                            table, new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize));
+                    }
+
+                    entry.Stage[slot] = 0;
+                }
+            }
+        }
+    }
+
     /// <summary>Clean up ECS-specific state on transaction reset/dispose. Frees orphaned chunks on rollback.</summary>
     internal void CleanupEcsState()
     {

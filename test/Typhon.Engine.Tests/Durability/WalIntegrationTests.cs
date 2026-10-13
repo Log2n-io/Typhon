@@ -582,6 +582,41 @@ class WalIntegrationTests : TestBase
         }
     }
 
+    /// <summary>
+    /// An entity spawned and destroyed in one transaction, its archetype's only one, stays dead across a clean reopen: the map reopens empty and is the
+    /// record, not a cue to rebuild it from the chain heads (#1229, #1231). <paramref name="keepStorage"/> keeps the storage the commit used to leak — a chain
+    /// allocated in no record — which that rebuild placed as a live entity.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("REAP-02")]
+    public void WAL_SpawnAndDestroyInOneTransaction_StaysDeadAfterReopen(bool keepStorage)
+    {
+        EntityId id;
+        var comp = new CompD(1.0f, 42, 2.0);
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = CreateEngine(scope1);
+            dbe.KeepSpawnDestroyedStorageForTest = keepStorage;
+            using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
+            using var tx = uow.CreateTransaction();
+            id = tx.Spawn<CompDArch>(CompDArch.D.Set(in comp));
+            tx.Destroy(id);
+            tx.Commit();
+            uow.Flush();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = CreateEngine(scope2);
+            using var tx = dbe.CreateQuickTransaction();
+            Assert.That(tx.IsAlive(id), Is.False, "an entity spawned and destroyed in one transaction is alive after a clean reopen");
+            Assert.That(tx.Query<CompDArch>().Count(), Is.Zero, "its archetype counts an entity after a clean reopen");
+            using var enumerator = tx.EnumerateIndex<CompD, int>(dbe.GetIndexRef<CompD, int>(d => d.B), 42, 42);
+            Assert.That(enumerator.MoveNext(), Is.False, "its unique key is indexed after a clean reopen");
+        }
+    }
+
     [Test]
     [CancelAfter(15000)]
     public void WAL_CascadeDestroy_SurvivesReopen()

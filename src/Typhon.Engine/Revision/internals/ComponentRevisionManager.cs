@@ -447,6 +447,64 @@ internal ref struct ComponentRevisionManager
     }
 
     /// <summary>
+    /// Drops from <paramref name="heads"/> (<c>EntityPK → root</c>, from <see cref="EnumerateVersionedChainHeads(ComponentTable, ushort?, bool, HashSet{int})"/>)
+    /// every chain whose newest published revision is a tombstone (<c>ComponentChunkId == 0</c>): a destroyed entity whose chain its cleanup had not
+    /// released yet. A rebuild from chain heads placed it as a live entity (#1231). A chain with no published revision is kept, as before. Returns how many
+    /// were dropped; their chains stay allocated, for the destroyed-entity cleanup or the orphan sweep.
+    /// </summary>
+    internal static int DropTombstonedHeads(ComponentTable table, Dictionary<long, int> heads)
+    {
+        if (heads.Count == 0)
+        {
+            return 0;
+        }
+
+        List<long> dropped = null;
+        var accessor = table.CompRevTableSegment.CreateChunkAccessor();
+        try
+        {
+            foreach (var (pk, root) in heads)
+            {
+                long newest = 0;
+                var tombstone = false;
+                using (var enumerator = new RevisionEnumerator(ref accessor, root, false, true, CleanupLockWc))
+                {
+                    while (enumerator.MoveNext())
+                    {
+                        ref var element = ref enumerator.Current;
+                        if (!element.IsVoid && !element.IsolationFlag && element.TSN > newest)
+                        {
+                            newest = element.TSN;
+                            tombstone = element.ComponentChunkId == 0;
+                        }
+                    }
+                }
+
+                if (tombstone)
+                {
+                    (dropped ??= []).Add(pk);
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        if (dropped == null)
+        {
+            return 0;
+        }
+
+        foreach (var pk in dropped)
+        {
+            heads.Remove(pk);
+        }
+
+        return dropped.Count;
+    }
+
+    /// <summary>
     /// Voids the entry at <paramref name="index"/>, and drops the chain's item count only when it is the chain's last entry: a void elsewhere is a hole —
     /// readers skip it, the next compaction drops it — and dropping the count would drop the chain's last entry instead: another transaction's revision,
     /// appended after this one (#1233). The caller holds the chain's exclusive lock.

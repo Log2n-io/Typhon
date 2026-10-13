@@ -2882,7 +2882,8 @@ public unsafe partial class Transaction : EntityAccessor
     /// can only remove entities, never create one, so no ordering of mixed-discipline transactions can resurrect a destroyed entity. Suppressing Destroy
     /// instead would need proof that the entity is absent from the base — a decision made at emit time that races the checkpoint which actually lands (born
     /// TSN 100, last checkpoint 50, destroy at 150 ⇒ "born after, suppress"; a checkpoint completing at 120 then puts it IN the base, and the crash resurrects
-    /// it silently). Not decidable locally.
+    /// it silently). Not decidable locally. The one exception is decided locally: an entity this transaction spawned and destroyed is never placed, so no
+    /// checkpoint can hold it, and neither its Spawn nor its Destroy is logged (#1229).
     /// </para>
     /// <para>
     /// <b>The three terms.</b> <c>Checkpoint</c> — the archetype opted into the weaker window. Non-<c>Commit</c> discipline — CM-06 <c>[fatal]</c> requires a
@@ -2918,7 +2919,8 @@ public unsafe partial class Transaction : EntityAccessor
             for (int i = 0; i < _spawnedEntities.Count; i++)
             {
                 var s = _spawnedEntities[i];
-                if (SuppressSpawnRecord(s.Id.ArchetypeId))
+                // Spawned and destroyed here: nothing of it is logged, its spawn or its destroy — it never existed past this transaction (#1229).
+                if (SuppressSpawnRecord(s.Id.ArchetypeId) || (_pendingDestroys != null && _pendingDestroys.Contains(s.Id)))
                 {
                     continue;
                 }
@@ -3037,7 +3039,10 @@ public unsafe partial class Transaction : EntityAccessor
         {
             foreach (var id in _pendingDestroys)
             {
-                batch.AddDestroy((long)id.RawValue);
+                if (!SpawnedContains(id))
+                {
+                    batch.AddDestroy((long)id.RawValue);
+                }
             }
         }
 
@@ -3046,6 +3051,12 @@ public unsafe partial class Transaction : EntityAccessor
         {
             foreach (var enableEntry in _pendingEnableDisable)
             {
+                // An own spawn's enable or disable rides its Spawn record; one it also destroyed has none (#1229).
+                if (_pendingDestroys != null && _pendingDestroys.Contains(enableEntry.Key) && SpawnedContains(enableEntry.Key))
+                {
+                    continue;
+                }
+
                 batch.AddEnabledBits((long)enableEntry.Key.RawValue, enableEntry.Value);
             }
         }
@@ -3354,6 +3365,9 @@ public unsafe partial class Transaction : EntityAccessor
             _appendPhaseEnteredThisCommit = false; // AP-01 guard reset (pooled Transaction reuse).
             _publishDrainIndex = 0;
             _pendingUniqueMoves = 0;
+
+            // An entity this transaction spawned and destroyed never exists for anyone else: its storage goes back now, as a rollback's would (#1229).
+            ReleaseSpawnsDestroyedHere();
 
             // Prepare ECS destroy operations: create component-level tombstone revisions in the PREPARE pass so it can handle index removal, WAL, and
             // cleanup. The entity-level destroy visibility (DiedTSN) is applied later, in the PUBLISH pass (FlushEcsPendingOperations).

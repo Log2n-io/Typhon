@@ -790,6 +790,10 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
             and names no chunk (Transaction.DetectAndResolveConflict; the relocation that did the same went with plan 06 step 3.3)
   invariant a rollback frees the chunk it wrote and forgets it (Transaction.RollbackComponent zeroes CurCompContentChunkId); the transaction's reset
             frees a rolled-back spawn's storage only if the rollback has not (Transaction.CleanupEcsState)
+  invariant an entity a transaction spawns and destroys never exists past it: its commit frees what the spawn allocated, before PREPARE — each
+            Versioned content chunk and chain root, and the collection buffers of its other payloads — and drops its cache entries, so PREPARE
+            publishes no revision for it, the log holds nothing of it — spawn, destroy, enabled bits — and a commit that fails after it frees nothing of it
+            again (Transaction.ReleaseSpawnsDestroyedHere, #1229). Both commit paths skip such an entity, so nothing else ever freed it
   invariant the revision GC's compaction frees every overflow chunk of the chain it rewrites — the ChainLength - 1 chunks linked from the root,
             exactly that many — once the root names the new chain, deferred with its content frees past every transaction alive: a rollback or a
             conflict resolution may still write through a handle into the old layout (ComponentRevisionManager.CleanUpUnusedEntriesCore). The chain
@@ -810,8 +814,12 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
   invariant a clean close drains what is queued — revision GC entries, destroyed entities, deferred chunk frees — before its final checkpoint,
             in passes until the queues are empty or four passes have run (DatabaseEngine.DrainCleanupsAtClose): a destroy's frees do not wait for
             a transaction that will never come. A transaction still alive does not hold it off: none outlives the engine's disposal (#1268). A
-            chain root still allocated reads back as a live entity when its archetype's map reopens empty and is rebuilt from the chain heads
-            (#1231). A drain that throws is logged and the close goes on
+            drain that throws is logged and the close goes on
+  invariant a clean reopen trusts an EntityMap it loaded from its persisted segment, empty or not (ArchetypeEngineState.EntityMapLoaded): only a
+            map the open allocated — a migration's, a legacy database's, one whose segment would not load — is rebuilt from the chain heads
+            (DatabaseEngine.RebuildEntityMapsFromPersistedData). That rebuild skips a chain whose newest published revision is a tombstone: a destroyed
+            entity, not a live one (ComponentRevisionManager.DropTombstonedHeads). The rebuild was gated on the map being empty, which a map emptied by
+            destroys is too, and every chain still allocated reopened as a live entity (#1231)
   invariant chunks unlinked from every chain are never left for nothing to find (#1268): a close that leaves chunk frees or destroyed entities
             queued (an entity put off by a chain a live writer still holds), whose drain throws, or a session whose cleanup threw holding frees
             (DeferredCleanupManager.FreesLost) marks the sweep owed (CS-04): the next open recovers, with strict segment loads, and its orphan sweep
@@ -831,7 +839,8 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
          Transaction.CleanupEcsState, ComponentRevisionManager.MakeOwnRevisionTombstone, ComponentRevisionManager.CleanUpUnusedEntriesCore,
          DeferredCleanupManager.CleanupEntityRevisionsBatched, DeferredCleanupManager.ReleaseDestroyedEntityChain,
          DeferredCleanupManager.HasPendingRevisionCleanup, DeferredCleanupManager.FreeDeferred, DatabaseEngine.ProcessEcsCleanups,
-         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, DeferredCleanupManager.ProcessDeferredCleanups,
+         DatabaseEngine.DrainCleanupsAtClose, ChunkBasedSegment.FreeChunk, Transaction.ReleaseSpawnsDestroyedHere,
+         DatabaseEngine.RebuildEntityMapsFromPersistedData, ComponentRevisionManager.DropTombstonedHeads, DeferredCleanupManager.ProcessDeferredCleanups,
          DatabaseEngine.ProcessEcsCleanupEntry, DatabaseEngine.SweepCollectionOrphans, DatabaseEngine.FirstUnloadedCollectionHandleSource
   on_violation: a chunk freed twice is handed out twice. The first free lets a spawn take it; the second takes it from under that new entity; the next
                 spawn gets it as well, and two live entities share one payload — each reads the other's writes, silently. Found by
@@ -841,15 +850,17 @@ live snapshot can reach it — which makes "later" a thing that has to actually 
                 own revision gone (AP-05). A write followed by a destroy left the write's revision isolated, naming its freed chunk; every rollback after
                 a Versioned write freed its chunk twice; a compaction freed none of a chain's overflow chunks when the chain started at its first slot.
                 The last three leak or corrupt silently: ChunkBasedSegment ignores a second free of a free chunk, so only DoubleFreeCount shows it
-  note: an entity spawned AND destroyed in one committed transaction still leaks the storage its spawn allocated — both commit paths skip it (#1229,
-        a leak, no live entity affected); its test is quarantined against that issue
   verified: DestroyRespawnSlotReuseTests [VerifiesRule] — destroy-and-respawn in one transaction, after a read, after a write, in two transactions
             and on 8 threads keeps every live id on its own data; after a full cleanup no chunk was freed twice and the revision and content segments
             hold exactly what the survivors need, for a destroy, a write-then-destroy, both with a replacement, five rollback shapes, a rollback that
             threw part-way and was retried by the dispose (no spawn's root freed twice; a real mutation, the root not cleared once freed, fails), a destroy
             committed after a concurrent write, a component enabled then destroyed, a destroyed entity whose chain overflowed, and a live entity's
             overflowed chain compacted; a compacted chain built from reissued chunks ends where its length says; the last entities destroyed before
-            a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
+            a clean close stay dead after the reopen ([RuleMutant]: a chunk freed twice is reported); an entity spawned and destroyed in one
+            transaction leaves nothing behind, and a commit that freed it and then failed frees nothing twice; a chain ending in a tombstone is no
+            live entity's head; WalIntegrationTests.WAL_SpawnAndDestroyInOneTransaction_StaysDeadAfterReopen — such an entity, its archetype's only
+            one, stays dead across a clean reopen, with its storage freed and with it kept (the old leak). Mutations killed: no release, the cache
+            entries kept, the rebuild gated on an empty map again, tombstoned chains kept; WalIntegrationTests.WAL_Destroy_SecondaryIndexCleanedAfterReopen and WAL_CascadeDestroy_SurvivesReopen (the same
             shape, found by the gate); RevisionChunkRetentionTests — chunks queued at a close with a transaction alive are drained by it (a clean
             reopen), a cleanup batch that fails midway queues the frees it collected before, a close after lost frees marks the sweep owed and the
             next open sweeps strictly, a destroyed-entity cleanup that fails midway queues what it released and requeues the rest;
