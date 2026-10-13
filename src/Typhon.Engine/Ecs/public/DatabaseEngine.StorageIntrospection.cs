@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Typhon.Engine;
@@ -946,6 +947,13 @@ public partial class DatabaseEngine
             if (rootPageIndex != 0)
             {
                 unresolved++;
+
+                // Past the file's end it was never written — a checkpoint that persisted the pointer died before the root landed — yet a durable pointer
+                // names it. Claimed, so a crash open's allocation cannot make it another segment's page that the load then reads as this root (#1163).
+                if (rootPageIndex > 0 && rootPageIndex < ownedLimit)
+                {
+                    owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
+                }
             }
 
             return;
@@ -1015,6 +1023,17 @@ public partial class DatabaseEngine
             // A torn or unreadable directory. Recording it is the point: the caller must not overwrite the persisted bitmap with a reconstruction that is
             // missing a segment it knows exists.
             unresolved++;
+
+            // A durable pointer still names the root, and its first sector the twin (torn-safe, CK-05): both stay claimed. A crash open may replace a root
+            // whose first persist tore (#936), and an allocation made before that load must not have taken either page.
+            owned[rootPageIndex >> 6] |= 1L << (rootPageIndex & 0x3F);
+            var firstSector = new byte[PagedMMF.PageSize];
+            MMF.ReadPageDirect(rootPageIndex, firstSector);
+            var twin = MemoryMarshal.Read<LogicalSegmentHeader>(firstSector.AsSpan(LogicalSegmentHeader.Offset)).TwinPageIndex;
+            if (twin > 0 && twin < ownedLimit)
+            {
+                owned[twin >> 6] |= 1L << (twin & 0x3F);
+            }
         }
     }
 

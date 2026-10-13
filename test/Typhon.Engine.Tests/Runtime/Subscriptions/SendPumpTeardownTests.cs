@@ -31,6 +31,9 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
     private const string Profile = "god-world";
     private const int TickRateHz = 200;
 
+    /// <summary>Both cases' quiesce, in milliseconds: each needs it to time out, and the production 5 s would only make that slower.</summary>
+    private const int QuiesceTimeoutMs = 100;
+
     /// <summary>
     /// A pump still sending when the quiesce deadline passes leaves the assembler's memory allocated, and the pump's late completion is then harmless.
     /// </summary>
@@ -59,11 +62,14 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             // From here every send parks, ignoring cancellation, and the pump that owns it is stuck inside TrySendOneAsync.
             link.StallSends();
             Assert.That(link.WaitForStalledSend(TimeSpan.FromSeconds(5)), Is.True, "no send was parked, so no pump is held across the teardown");
+            var held = link.StalledMessage;
+            var expected = held.ToArray();
 
             var subs = runtime.SubscriptionsContextForTest.Subscriptions;
             var pump = subs.SendPumpForTest;
 
-            // Bounded 5 s quiesce, then the teardown must choose: free what the pump holds, or leak it.
+            // Bounded quiesce, then the teardown must choose: free what the pump holds, or leak it. Shortened from 5 s: it times out either way.
+            pump.SetQuiesceTimeoutForTest(QuiesceTimeoutMs);
             runtime.Dispose();
 
             Assert.That(pump.PumpsStillRunningAtDispose, Is.GreaterThan(0),
@@ -73,12 +79,20 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
             Assert.That(subs.Frames.Pool.SlabsKeptForOutstandingSends, Is.True,
                 "a pump outlived the quiesce, so the frame pool must leave its slabs allocated rather than free them under a send");
 
+            // And the view the link was handed is still the frame: the link owns those bytes until its task ends (ISubscriptionLink.SendAsync), so a kept slab
+            // behind a released view is a send that faults mid-write rather than one that finishes.
+            Assert.That(StillReadable(held), Is.EqualTo(expected),
+                "the parked send's memory was taken away under it: the pump released its view while the send it lent it to was still running");
+
             // Faulting the send resumes that pump into its catch path, where it completes the frame through the assembler's send state. That used to be a
             // write through a freed pointer; the states are a managed array the assembler still references, so it is a write to a live slot nobody reads
-            // again. The link closing is the observable proof the pump ran its catch path to the end instead of taking the process down with it.
+            // again. The pump leaving, with the failure counted, is the proof it ran its catch path to the end instead of taking the process down with it —
+            // and waiting for it here keeps a regression in this fixture rather than in whichever one runs next.
+            var failuresBefore = pump.SendFailures;
             link.FaultStalledSends();
-            Assert.That(WaitFor(() => link.CloseCount > 0, TimeSpan.FromSeconds(10)), Is.True,
+            Assert.That(WaitFor(() => pump.ActivePumps == 0, TimeSpan.FromSeconds(10)), Is.True,
                 "the resumed pump must complete its catch path — a crash here is #1006 back");
+            Assert.That(pump.SendFailures, Is.GreaterThan(failuresBefore), "the pump left without its catch path, so the late completion never ran");
         }
         finally
         {
@@ -86,7 +100,105 @@ class SendPumpTeardownTests : TestBase<SendPumpTeardownTests>
         }
     }
 
+    /// <summary>
+    /// A <c>PONG</c> still on a stalled link when the quiesce deadline passes keeps its buffer: the pump's own native allocation, which a release would free
+    /// under the socket.
+    /// </summary>
+    /// <remarks>
+    /// The frame half of #1006 is the pool's, and the case above covers it; this is the other memory a pump lends a link. No tick runs, so no frame is ever
+    /// claimable and the pump's only send is the <c>PONG</c> — the stall lands there by construction rather than by timing.
+    /// </remarks>
+    [Test]
+    public void APongStillSendingAtDispose_KeepsItsBuffer()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = FrameHarness.Create(dbe, DeclareForHarness, nameof(SendPumpTeardownTests));
+        var session = harness.OpenSessions(1, Profile)[0];
+        var pump = harness.Subscriptions.SendPump;
+        pump.SetQuiesceTimeoutForTest(QuiesceTimeoutMs);
+
+        var link = new InProcessLink();
+        link.StallSends();
+        pump.AttachLink(session, link);
+
+        Assert.That(pump.RequestPong(session, 7), Is.True, "the pump refused the PING");
+        Assert.That(link.WaitForStalledSend(TimeSpan.FromSeconds(5)), Is.True, "no send was parked, so no pump is held across the teardown");
+        var held = link.StalledMessage;
+        var expected = held.ToArray();
+        Assert.That(expected[0], Is.EqualTo(MessageTypes.Pong), "the parked send must be the PONG, or this case is not about the PONG's buffer");
+
+        try
+        {
+            harness.Subscriptions.Dispose();
+
+            Assert.That(pump.PumpsStillRunningAtDispose, Is.EqualTo(1),
+                "the quiesce must have timed out with the pump inside the PONG's send, or this case is not exercising the hazard at all");
+            Assert.That(StillReadable(held), Is.EqualTo(expected),
+                "the PONG's buffer was released under a send that still owned it: on a socket, that is the kernel reading freed memory");
+        }
+        finally
+        {
+            // Resumed into its catch path, the pump must finish rather than leave a pool thread behind for the next fixture.
+            link.FaultStalledSends();
+            Assert.That(WaitFor(() => pump.ActivePumps == 0, TimeSpan.FromSeconds(5)), Is.True, "the resumed pump never finished");
+        }
+    }
+
+    /// <summary>
+    /// A teardown whose quiesce succeeds still releases the pump's buffers: the leak is for a pump that outlived the wait, not for every shutdown.
+    /// </summary>
+    [Test]
+    public void ACleanDispose_StillReleasesThePongBuffer()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = FrameHarness.Create(dbe, DeclareForHarness, nameof(SendPumpTeardownTests));
+        var session = harness.OpenSessions(1, Profile)[0];
+        var pump = harness.Subscriptions.SendPump;
+
+        var link = new InProcessLink();
+        link.StallSends();
+        pump.AttachLink(session, link);
+
+        // The PONG's send is parked only to capture the memory it was lent, then ended, so the pump is gone before the teardown starts.
+        Assert.That(pump.RequestPong(session, 7), Is.True, "the pump refused the PING");
+        Assert.That(link.WaitForStalledSend(TimeSpan.FromSeconds(5)), Is.True, "no send was parked, so the PONG's memory was never captured");
+        var held = link.StalledMessage;
+        link.FaultStalledSends();
+        Assert.That(WaitFor(() => pump.ActivePumps == 0, TimeSpan.FromSeconds(5)), Is.True, "the pump never finished");
+        Assert.That(StillReadable(held), Is.Not.Null, "the buffer is the pump's until the teardown, so it must still be there now");
+
+        harness.Subscriptions.Dispose();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(pump.PumpsStillRunningAtDispose, Is.Zero, "no pump was running, so the quiesce cannot have given up");
+            Assert.That(StillReadable(held), Is.Null, "a teardown with no pump left must release the PONG's buffer, not leak it");
+        });
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A copy of what a link still holds, or <see langword="null"/> when the view behind it has been released under it.</summary>
+    /// <param name="held">The memory a parked send was handed.</param>
+    /// <returns>The bytes.</returns>
+    /// <remarks>A released view drops to zero length before its memory is freed, so this never reads freed bytes: the bounds check throws first.</remarks>
+    private static byte[] StillReadable(ReadOnlyMemory<byte> held)
+    {
+        try
+        {
+            return held.ToArray();
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static void DeclareForHarness(SubscriptionsRegistry subs)
+    {
+        ProjectionTestSchema.DeclareRock(subs);
+        subs.Profile(Profile, p => p.World().Of<ProjRock>());
+    }
 
     private static bool WaitFor(Func<bool> condition, TimeSpan timeout)
     {

@@ -2273,6 +2273,21 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            return RemoveValueUnguarded(key, elementId, value, ref accessor);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private bool RemoveValueUnguarded(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
+    {
         _fenceWindow?.NoteMutation("BTree.RemoveValue");
         var scope = TyphonEvent.BeginBTreeDelete();
 
@@ -2377,7 +2392,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         int obsolete = 0, empty = 0, below = 0, above = 0;
         for (var attempt = 0; ; attempt++)
         {
-            leaf = FindLeaf(key, out _, ref accessor);
+            // #1321: no right-walk. The walk decides "past this leaf" by content (key > last), so for a key ABSENT from its leaf and between that leaf's last
+            // entry and its HighKey it lands one leaf too far right; the bounds check below rejected that leaf on every pass and this loop threw "no progress"
+            // — past the WAL append in a commit, halting the engine. Authority is decided by the bounds check, so the separator-routed leaf is what it needs.
+            leaf = FindLeaf(key, out _, ref accessor, followRightLink: false);
             if (!leaf.IsValid)
             {
                 return false;
@@ -2636,6 +2654,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 PublishWriteLockSpins(spins);
                 return WriteLockOutcome.Obsolete;
             }
+            ThrowIfFaulted();
             spins++;
             spin.SpinOnce(-1);
         }
@@ -2678,6 +2697,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         SpinWait spin = default;
         while (!acquired)
         {
+            ThrowIfFaulted();
             spins++;
             spin.SpinOnce(-1);
             acquired = latch.TryWriteLockOnSmoPath(out wasObsolete);
@@ -2688,6 +2708,60 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         if (wasObsolete)
         {
             Interlocked.Increment(ref _obsoleteSmoSiblingLocks);
+        }
+    }
+
+    /// <summary>
+    /// The exception that escaped a write while it held node latches (#1321): the write may have stopped mid-restructure, and the latches it held stay held.
+    /// From then on every operation on the tree throws — a descent, a latch wait — rather than spin on those latches for good or read a half-modified node.
+    /// </summary>
+    private Exception _fault;
+
+    /// <summary>Whether a write faulted this tree (<see cref="_fault"/>).</summary>
+    internal bool IsFaulted => Volatile.Read(ref _fault) != null;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ThrowIfFaulted()
+    {
+        if (Volatile.Read(ref _fault) != null)
+        {
+            ThrowFaulted();
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowFaulted() =>
+        throw new InvalidOperationException(
+            $"B+Tree index is faulted: a write threw while holding node latches ({_fault.GetType().Name}: {_fault.Message}), so its structure may be "
+            + "half-modified and those latches stay held. Every later operation on this index fails; reopen the database to recover it.", _fault);
+
+    /// <summary>
+    /// A write's catch: the exception faults the tree when it left this thread holding more latches than the write started with. A throw before any latch —
+    /// a reservation that could not grow the segment, a unique key already taken — leaves the tree sound, and the next write proceeds.
+    /// </summary>
+    private void OnWriteException(Exception e, int heldBefore)
+    {
+        if (OlcLatchHeld.Count != heldBefore)
+        {
+            // The latches are abandoned with the tree; this thread no longer holds them as far as any later write's accounting goes.
+            OlcLatchHeld.Count = heldBefore;
+            Interlocked.CompareExchange(ref _fault, e, null);
+        }
+    }
+
+    /// <summary>Faults a path node's siblings into the cache and marks them dirty, before an SMO's first write may need them (#1321).</summary>
+    private static void PreDirtySiblings(NodeRelatives relatives, ref ChunkAccessor<TStore> sibAccessor)
+    {
+        var left = relatives.GetLeftSibling(ref sibAccessor);
+        if (left.IsValid)
+        {
+            left.PreDirtyForWrite(ref sibAccessor);
+        }
+        var right = relatives.GetRightSibling(ref sibAccessor);
+        if (right.IsValid)
+        {
+            right.PreDirtyForWrite(ref sibAccessor);
         }
     }
 
@@ -2744,7 +2818,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// already answers this — it validates the parent's version after reading the child and again after taking the child's version (IXS-07), treats an
     /// invalid child as "restart", and its right-walk is validated too — so this delegates to it rather than growing a second copy of that protocol.
     /// </remarks>
-    private NodeWrapper FindLeaf(TKey key, out int index, ref ChunkAccessor<TStore> accessor)
+    private NodeWrapper FindLeaf(TKey key, out int index, ref ChunkAccessor<TStore> accessor, bool followRightLink = true)
     {
         index = -1;
         if (IsEmpty())
@@ -2755,7 +2829,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         PureSpin spin = default;
         for (var attempt = 0; ; attempt++)
         {
-            var (leafChunkId, _, keyIndex) = OptimisticDescendToLeaf(key, ref accessor);
+            var (leafChunkId, _, keyIndex) = OptimisticDescendToLeaf(key, ref accessor, followRightLink);
             if (leafChunkId != 0)
             {
                 index = keyIndex;
@@ -2805,6 +2879,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         // these four unchanged. Its first measurement is why it exists: DescentFailed alone was 92% of the histogram, which is a black box wearing a
         // name (#738).
         descentExit = InsertRetryExit.Unknown;
+        ThrowIfFaulted();
         var node = Root;
         var parent = default(NodeWrapper);
         int parentVersion = 0;
@@ -2893,6 +2968,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// </summary>
     private (int leafChunkId, int leafVersion, int keyIndex) OptimisticDescendToLeaf(TKey key, ref ChunkAccessor<TStore> accessor, bool followRightLink = true)
     {
+        ThrowIfFaulted();
         var node = Root;
         if (!node.IsValid)
         {

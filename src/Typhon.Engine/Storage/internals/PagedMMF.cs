@@ -149,10 +149,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         return task.Result;
     };
 
-    private static readonly Action<Task, object> SWriteCompletionHandler = static (_, stateObj) =>
+    private static readonly Action<Task, object> SWriteCompletionHandler = static (task, stateObj) =>
     {
         var state = (PageCacheWriteCompletionState)stateObj;
         TyphonEvent.EmitPageCacheDiskWriteCompleted(state.SpanId, state.BeginTs, state.FilePageIndex, Stopwatch.GetTimestamp());
+        task.GetAwaiter().GetResult();   // re-throws the write's fault, as the read handler does, so the wrapper does not report it landed
     };
 
     #endregion
@@ -4000,18 +4001,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
         catch
         {
-            // The writes already issued still read their pages: their captures end when they complete.
-            Task.WhenAll(tasks.AsSpan(0, issued)).ContinueWith(t =>
-            {
-                _ = t.Exception;   // the throw below reports the failure; an issued write's own is read here, not left unobserved
-                EndCaptures(normalPages);
-            });
+            // A write reads its pages from the cache when it RUNS, not when it is issued: on Linux a pool thread runs the pwrite, often after this
+            // method has returned. Abandoned here, an issued write could outlive the page cache and copy whatever then lived at the freed address: a
+            // zeroed page landed over a good one (#978). So the writes already issued are waited for, and their captures ended, before the throw.
+            WaitForIssuedWrites(tasks, issued);
+            EndCaptures(normalPages);
             throw;
         }
 
-        var saveTask = Task.WhenAll(tasks).ContinueWith(_ =>
+        var saveTask = Task.WhenAll(tasks).ContinueWith(t =>
         {
             EndCaptures(normalPages);
+
+            // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never
+            // got. The fault fails the save; the pages keep their debt, so the next checkpoint writes them again.
+            if (t.IsFaulted)
+            {
+                t.GetAwaiter().GetResult();
+            }
 
             // CP-03: fsync data file before decrementing DirtyCounter.
             // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,
@@ -4075,6 +4082,26 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (var i = 0; i < memPageIndices.Length; i++)
         {
             EndCapture(memPageIndices[i]);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the first <paramref name="count"/> writes of a batch whose next write could not be issued, so none of them is still reading the
+    /// page cache once <see cref="SavePages"/> has thrown. Their own faults are observed and dropped: the batch failed already, and its pages keep
+    /// their writeback debt, so the next checkpoint writes them again.
+    /// </summary>
+    private static void WaitForIssuedWrites(Task[] tasks, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                tasks[i].Wait();
+            }
+            catch (AggregateException)
+            {
+                // Observed; the issuing failure is the one the caller reports.
+            }
         }
     }
 

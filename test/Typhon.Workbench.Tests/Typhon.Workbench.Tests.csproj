@@ -17,6 +17,11 @@
     </ItemGroup>
 
     <ItemGroup>
+        <!-- #1170: this process's temp root is its own, so two checkouts running the same fixture do not share files. -->
+        <Compile Include="..\Typhon.Engine.Tests\TestTempRoot.cs" Link="TestTempRoot.cs" />
+    </ItemGroup>
+
+    <ItemGroup>
         <ProjectReference Include="..\..\tools\Typhon.Workbench\Typhon.Workbench.csproj" />
         <!-- Source-generated component schema providers (feature #514, phase 4). Consumer split = ArchetypeAccessorGenerator only (no TraceEvent post-init leak). -->
         <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />

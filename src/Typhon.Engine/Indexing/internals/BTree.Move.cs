@@ -28,6 +28,21 @@ internal abstract partial class BTree<TKey, TStore>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
     public bool Move(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            return MoveUnguarded(oldKey, newKey, value, ref accessor);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private bool MoveUnguarded(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
+    {
         _fenceWindow?.NoteMutation("BTree.Move");
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
         ref var opAccessor = ref _segment.RentWarmAccessor(accessor.ChangeSet);
@@ -279,7 +294,7 @@ internal abstract partial class BTree<TKey, TStore>
             PureSpin authoritySpin = default;
             for (var attempt = 0; ; attempt++)
             {
-                oldLeaf = FindLeaf(oldKey, out oldIndex, ref accessor);
+                oldLeaf = FindLeaf(oldKey, out oldIndex, ref accessor, followRightLink: false);   // #1321: see TryLatchAuthoritativeLeaf
                 if (!oldLeaf.IsValid || oldIndex >= 0 || !KeyOutsideLeafAuthority(oldLeaf, oldKey, Comparer, ref accessor))
                 {
                     break;
@@ -350,6 +365,22 @@ internal abstract partial class BTree<TKey, TStore>
     /// <c>BTreeMoveValueConcurrencyTests</c> is the census that caught it and now guards it.
     /// </remarks>
     public int MoveValue(TKey oldKey, TKey newKey, int elementId, int value,
+        ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
+    {
+        ThrowIfFaulted();
+        var held = OlcLatchHeld.Count;
+        try
+        {
+            return MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
+        }
+        catch (Exception e)
+        {
+            OnWriteException(e, held);   // #1321
+            throw;
+        }
+    }
+
+    private int MoveValueUnguarded(TKey oldKey, TKey newKey, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
         _fenceWindow?.NoteMutation("BTree.MoveValue");
