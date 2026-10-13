@@ -138,14 +138,10 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// (0 None … 3 Standard; 3), <c>TYPHON_MKT_REBUILD</c> (1 forces a new build), <c>TYPHON_MKT_SEED</c> (945), <c>TYPHON_MKT_STALL_SECONDS</c> (120: no
 /// progress for that long fails the run), <c>TYPHON_MKT_SAMPLES</c> (the per-second CSV; default <c>samples-&lt;start time&gt;.csv</c> in the database
 /// directory), <c>TYPHON_MKT_SETTLE</c> (1: drain the storm's writeback debt before the parallel reads; 0 reproduces #1230),
-/// <c>TYPHON_MKT_OWNER_AUDIT</c> (1: audit the owner index during the storm, under each player's lock; 0 skips the auditor — a read concurrent
-/// with splits can miss a key's entries, #1235. The checks after the storm and the reopen always run), <c>TYPHON_MKT_LONG_READERS</c> (0: threads
-/// that each hold one snapshot for <c>TYPHON_MKT_LONG_READ_SECONDS</c>, 20, during the storm — off by default until #1146: an older writer's commit
-/// becomes visible inside a snapshot, so the sweeps fail; and #1253: the sweeping readers can starve a writer of a chain lock until it times out,
-/// whose rollback can then lose a committed update, #1252), <c>TYPHON_MKT_CRASH</c> (0; 1 ends the process at a random point of the storm, 2 at a
-/// random page write after that point — see <i>Crashes</i>. Off by default until #1251: the recovery loses durable transfers and zeroes spawned
-/// entities, even when the database fits the cache. The recovery of a database larger than its cache needs #1183, and the verification at high
-/// contention #1233), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none),
+/// <c>TYPHON_MKT_OWNER_AUDIT</c> (1: audit the owner index during the storm, under each player's lock; 0 skips the auditor. The checks after the
+/// storm and the reopen always run), <c>TYPHON_MKT_LONG_READERS</c> (0: threads that each hold one snapshot for <c>TYPHON_MKT_LONG_READ_SECONDS</c>,
+/// 20, during the storm), <c>TYPHON_MKT_CRASH</c> (0; 1 ends the process at a random point of the storm, 2 at a random page write after that point —
+/// see <i>Crashes</i>), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none),
 /// <c>TYPHON_MKT_RECOVERY_MUTANT</c> (0; 1 replays the recovery verification without one of the last run's surviving transfers, so it must
 /// fail — the proof that it can).</para>
 /// <para><b>Long readers.</b> While the storm writes, each long reader holds one snapshot and sweeps every trader in it, again and again: each sweep

@@ -268,13 +268,30 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         AssertStorageHealthy(reopened);
     }
 
+    /// <summary>The entities the owner index holds under <paramref name="owner"/>, read through the index.</summary>
+    private static List<ulong> OwnerKeyHolds(DatabaseEngine dbe, Transaction tx, long owner)
+    {
+        var holds = new List<ulong>();
+        using var e = tx.EnumerateIndex<MkItem, long>(dbe.GetIndexRef<MkItem, long>(x => x.OwnerNo), owner, owner);
+        while (e.MoveNext())
+        {
+            holds.Add((ulong)e.CurrentEntityPK);
+        }
+
+        return holds;
+    }
+
     /// <summary>
     /// An update committed and durable in the log, then a crash with any subset of the archetype's cluster, revision and content pages on disk as of
     /// after it. With the revision chain on disk and not the content, the chain held the update's committed element over a zeroed content chunk; the
-    /// replay appended the logged value at the same TSN, and the scrub kept the first of the two — the entity read all zeros (#1251).
+    /// replay appended the logged value at the same TSN, and the scrub kept the first of the two — the entity read all zeros (#1251). The cluster
+    /// indexes are rebuilt from the cluster HEAD copy after the replay, so the HEAD must hold the update too: with the update's own element on disk,
+    /// the replay's HEAD copy, refused for a stamp not strictly above the chain's, left the HEAD at the old owner, and the owner index found the item
+    /// there.
     /// </summary>
     [Test]
     [VerifiesRule("AP-12")]
+    [VerifiesRule("VIS-05")]
     [CancelAfter(30_000)]
     public void AnUpdateWhosePagesReachedTheDiskInPart_Recovers([Range(0, 7)] int written)
     {
@@ -339,6 +356,8 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         using var read = reopened.CreateReadOnlyTransaction();
         var item = read.Open(id).Read(MkItemArch.Item);
         Assert.That((item.ItemNo, item.OwnerNo, item.LastTradeSeq), Is.EqualTo((5L, 7L, 42L)), "the updated item");
+        Assert.That(OwnerKeyHolds(reopened, read, 7), Is.EqualTo(new[] { (ulong)id.RawValue }), "the owner index, under the update's owner");
+        Assert.That(OwnerKeyHolds(reopened, read, 1), Does.Not.Contain((ulong)id.RawValue), "the owner index, under the owner before the update");
     }
 
     /// <summary>
