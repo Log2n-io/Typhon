@@ -417,6 +417,8 @@ internal abstract partial class BTree<TKey, TStore>
                             var actualLast = rl.GetCount(ref accessor) > 0 ? rl.GetLast(ref accessor) : default;
                             if (rl.GetCount(ref accessor) == 0 || args.Compare(args.Key, actualLast.Key) != 0)
                             {
+                                // The cache is stale: dropped, or the retry meets it again and again, out to the retry bound.
+                                _hasCachedLastKey = false;
                                 latch.AbortWriteLock();
                                 return OlcInsertResult.Restart;
                             }
@@ -433,6 +435,23 @@ internal abstract partial class BTree<TKey, TStore>
                             latch.WriteUnlock();
                             return OlcInsertResult.Completed;
                         }
+
+                        // Unique: a duplicate only when the leaf's last key, read under the version, is this one. lastKey may be the cache, stale after a
+                        // move or a removal took the key away: thrown on it, an insert of a key nothing held failed — past a commit's append, the engine
+                        // stopped (#1263).
+                        var tailCount = rl.GetCount(ref accessor);
+                        var tailKey = tailCount > 0 ? rl.GetItem(tailCount - 1, ref accessor).Key : default;
+                        if (!latch.ValidateVersion(version))
+                        {
+                            return OlcInsertResult.Restart;
+                        }
+
+                        if (tailCount == 0 || args.Compare(args.Key, tailKey) != 0)
+                        {
+                            _hasCachedLastKey = false;
+                            return OlcInsertResult.Restart;
+                        }
+
                         ThrowHelper.ThrowUniqueConstraintViolation();
                     }
                 }
@@ -728,10 +747,8 @@ internal abstract partial class BTree<TKey, TStore>
                         }
                         // Fall through
                     }
-                    else if (order == 0)
-                    {
-                        ThrowHelper.ThrowUniqueConstraintViolation();
-                    }
+                    // A unique key equal to the cached last key falls through: the general path decides the duplicate on the leaf. The cache can be stale
+                    // (IXW-11), and a throw on it refused a key nothing held.
                 }
             }
 

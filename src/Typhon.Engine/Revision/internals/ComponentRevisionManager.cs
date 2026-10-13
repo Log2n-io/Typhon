@@ -409,9 +409,40 @@ internal ref struct ComponentRevisionManager
     /// The highest stamp among the chain's published revisions, the one at <paramref name="exceptIndex"/> left out; 0 when none. The publish's test for
     /// the cluster HEAD copy (VIS-05): a revision is copied only above every other published one. The caller holds the chain's exclusive lock.
     /// </summary>
-    internal static unsafe long HighestPublishedStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short exceptIndex)
+    internal static long HighestPublishedStamp(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short exceptIndex) =>
+        NewestPublished(ref accessor, firstChunkId, exceptIndex, out _);
+
+    /// <summary>
+    /// <see cref="NewestPublished"/> for a caller that holds no lock on the chain — PREPARE without a conflict handler: read under the chain's shared lock,
+    /// which the enumerator takes on <paramref name="budgetOwner"/>'s wait budget (CX-06), and throws on its timeout. Unpublished entries, this
+    /// transaction's own among them, are left out.
+    /// </summary>
+    internal static long NewestPublishedUnlocked(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, Transaction budgetOwner, out int contentChunkId)
     {
         long highest = 0;
+        contentChunkId = 0;
+        using var enumerator = new RevisionEnumerator(ref accessor, firstChunkId, false, true, CleanupLockWc, budgetOwner);
+        while (enumerator.MoveNext())
+        {
+            ref var element = ref enumerator.Current;
+            if (!element.IsVoid && !element.IsolationFlag && element.TSN > highest)
+            {
+                highest = element.TSN;
+                contentChunkId = element.ComponentChunkId;
+            }
+        }
+
+        return highest;
+    }
+
+    /// <summary>
+    /// <see cref="HighestPublishedStamp"/>, with the content chunk that revision names (0 for a tombstone, or when there is none): the value a publish
+    /// moves the entity's index entries from (#1263). The caller holds the chain's exclusive lock.
+    /// </summary>
+    internal static unsafe long NewestPublished(ref ChunkAccessor<PersistentStore> accessor, int firstChunkId, short exceptIndex, out int contentChunkId)
+    {
+        long highest = 0;
+        contentChunkId = 0;
 
         // The chain in its root alone — the steady state, cleanup keeping a chain to its root (#1298): its elements read in place, no enumerator.
         ref var header = ref accessor.GetChunk<CompRevStorageHeader>(firstChunkId);
@@ -426,6 +457,7 @@ internal ref struct ComponentRevisionManager
                 if (revisionIndex != exceptIndex && !element.IsVoid && !element.IsolationFlag && element.TSN > highest)
                 {
                     highest = element.TSN;
+                    contentChunkId = element.ComponentChunkId;
                 }
             }
 
@@ -440,6 +472,7 @@ internal ref struct ComponentRevisionManager
                 && (short)(enumerator.Header.FirstItemIndex + enumerator.RevisionIndex) != exceptIndex)
             {
                 highest = element.TSN;
+                contentChunkId = element.ComponentChunkId;
             }
         }
 

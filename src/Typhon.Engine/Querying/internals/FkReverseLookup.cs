@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -203,31 +204,46 @@ internal static unsafe class FkReverseLookup
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
         try
         {
+            // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
+            // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
+            var values = Array.Empty<int>();
+            // A SingleVersion slot is re-checked against the target, as IndexEntityEnumerator does: its destroy releases the slot at once, and a spawn may
+            // have taken it after the copy. A Versioned slot is released only by the entity cleanup, past every snapshot the destroy could hide from.
+            var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;
+            var fkOffset = layout.ComponentOffset(componentSlot) + ixSlot.Fields[fkFieldOrdinal].FieldOffset;
+            var fkStride = layout.ComponentSize(componentSlot);
             var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
             try
             {
                 while (enumerator.MoveNextKey())
                 {
-                    do
+                    var count = enumerator.DrainCurrentKey(ref values);
+                    for (var j = 0; j < count; j++)
                     {
-                        var values = enumerator.CurrentValues;
-                        for (var j = 0; j < values.Length; j++)
+                        var clusterLocation = values[j];
+                        var slot = clusterLocation & 0x3F;
+                        var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
+                        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
+                        if ((*(ulong*)clusterBase & (1UL << slot)) == 0 || sourcePK == 0
+                            || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
                         {
-                            var clusterLocation = values[j];
-                            var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
-                            var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + (clusterLocation & 0x3F) * 8);
-                            if (!action.Process(sourcePK, meta))
-                            {
-                                return false;
-                            }
+                            continue;   // released since the copy, or another entity's now
+                        }
+
+                        if (!action.Process(sourcePK, meta))
+                        {
+                            return false;
                         }
                     }
-                    while (enumerator.NextChunk());
                 }
             }
             finally
             {
                 enumerator.Dispose();
+                if (values.Length > 0)
+                {
+                    System.Buffers.ArrayPool<int>.Shared.Return(values);
+                }
             }
         }
         finally

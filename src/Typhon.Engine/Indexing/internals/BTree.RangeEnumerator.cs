@@ -504,6 +504,47 @@ internal abstract partial class BTree<TKey, TStore>
         public bool NextChunk() => _currentBuffer.NextChunk();
 
         /// <summary>
+        /// Copies every value of the current key into <paramref name="values"/>, grown from <see cref="System.Buffers.ArrayPool{T}.Shared"/> as needed
+        /// (the old array returned to it), and releases the key's buffer: its count. <see cref="CurrentValues"/> and <see cref="NextChunk"/> are spent.
+        /// </summary>
+        /// <remarks>
+        /// For a caller that resolves each value through a revision chain (IXS-10). The buffer's shared lock, held across a chain walk, closed a cycle with
+        /// a publish that holds the chain and moves the entity off this key, which takes the buffer exclusively: each waited the other out, and the
+        /// publish's leaf latch, held across its buffer wait, sent every other writer of the key into its retry bound (IXW-01).
+        /// </remarks>
+        public int DrainCurrentKey(ref int[] values)
+        {
+            var count = 0;
+            if (!_hasCurrentBuffer)
+            {
+                return 0;
+            }
+
+            do
+            {
+                var chunk = _currentBuffer.ReadOnlyElements;
+                if (count + chunk.Length > values.Length)
+                {
+                    var grown = System.Buffers.ArrayPool<int>.Shared.Rent(Math.Max(values.Length * 2, count + chunk.Length));
+                    values.AsSpan(0, count).CopyTo(grown);
+                    if (values.Length > 0)
+                    {
+                        System.Buffers.ArrayPool<int>.Shared.Return(values);
+                    }
+
+                    values = grown;
+                }
+
+                chunk.CopyTo(values.AsSpan(count));
+                count += chunk.Length;
+            } while (_currentBuffer.NextChunk());
+
+            _currentBuffer.Dispose();
+            _hasCurrentBuffer = false;
+            return count;
+        }
+
+        /// <summary>
         /// Advances to the next key in iteration order, opening its VSBS buffer.
         /// After this returns true, read <see cref="CurrentValues"/> (+ <see cref="NextChunk"/>) to get the values.
         /// </summary>

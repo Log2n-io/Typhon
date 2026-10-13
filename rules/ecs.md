@@ -940,8 +940,9 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
             (`DrainBufferAfterRefreshFull`)
   invariant a navigation view's full refresh re-populates its set from the entity maps (`PopulateFromEntityMaps`)
   invariant the ring's consumer publishes its advanced head with a release store, after clearing the slot's written flag (`Advance`)
-  never take "was in view" from the BeforeKey: it is the writer's read value, and two last-writer-wins writers of one entity both read the same
-        one — the second's delta says "was in" for an entity the first just took out, and the view keeps the wrong side for good
+  never take "was in view" from the BeforeKey: it is the value the publish moved the entity's entries from — the newest published revision's
+        since #1263 (AP-06), the writer's read value before — and the view may not have applied the delta that made it so. Read from the writer's
+        value, two last-writer-wins writers of one entity both said "was in", and the view kept the wrong side for good
   never discard, at a full refresh, an entry the re-scan may not have covered: a commit's delta reaches the ring (Phase A of its publish, AP-07)
         before its value reaches the cluster slot the re-scan reads (Phase B). Discarded, the change is in neither. (The ring's Reset did that, and
         re-anchored its base TSN under live producers; it is gone)
@@ -952,11 +953,10 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
           - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
             view read the other fields' old values (#1266);
           - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
-          - two last-writer-wins writers publishing out of revision order (AP-06) leave the view on the older value, as the index (#1263);
           - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
             single-field drain measures at parity);
           - the owed re-scan covers a dropped commit, or one whose entry came before a drop, only once its value is published: one still between
-            its delta and its value at that re-scan too is lost (the chain-lock wait between them is unbounded under readers). The builders' owed
+            its delta and its value at that re-scan too is lost (both are written in one hold of the chain lock since #1263). The builders' owed
             first refresh has the same limit for a commit straddling the view's registration;
           - a membership resync drains, so a spawn between its delta and its publication at that re-query is not covered
   on_violation: a view silently misses entities whose committed value passes, or keeps ones that fail; an overflowed navigation view empties

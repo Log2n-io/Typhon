@@ -140,9 +140,15 @@ public unsafe partial class Transaction : EntityAccessor
         // ClusterCopyPending == true ⇒ a committed HEAD value must be copied into (ArchId, ClusterChunkId, SlotIndex)'s CompSlot.
         public bool ClusterCopyPending;
 
-        // Phase A (#1262): IndexPending == true ⇒ the publish reconciles the archetype's indexes and views for CompSlot, moving the entity (Pk) from the
-        // value of the revision it read (ReadCompChunkId, 0 for none) to the committing one's.
+        // Phase A (#1262): IndexPending == true ⇒ this write moves one of CompSlot's index keys from the revision it read (ReadCompChunkId, 0 for none).
+        // SlotIndexed ⇒ an index covers CompSlot: the publish reconciles from the newest published revision, which is not the read one when another commit
+        // landed in between, so a write that left the keys as it read them still owes the move (#1263).
         public bool IndexPending;
+        public bool SlotIndexed;
+
+        // The newest committed revision PREPARE saw (ReadCompChunkId when it was the read one): what IndexPending and the unique-key check before the append
+        // compare against, so a commit that landed after the read is accounted for there rather than only at the publish (#1263).
+        public int BaseCompChunkId;
         public long Pk;
         public int ReadCompChunkId;
         public ushort ArchId;
@@ -758,6 +764,7 @@ public unsafe partial class Transaction : EntityAccessor
                 RecordSize = meta._entityRecordSize,
                 CompOffset = layout.ComponentOffset(compSlot),
                 CompSize = layout.ComponentSize(compSlot),
+                FieldOffset = field.FieldOffset,
                 VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
             });
 
@@ -910,6 +917,9 @@ public unsafe partial class Transaction : EntityAccessor
         public int CompOffset;
         public int CompSize;
 
+        /// <summary>The indexed field's offset in the component: a SingleVersion slot's key is re-checked there (IXS-10).</summary>
+        public int FieldOffset;
+
         /// <summary>Position among the archetype's Versioned slots, or -1 when this component is SingleVersion here.</summary>
         public int VersionedIndex;
     }
@@ -939,7 +949,13 @@ public unsafe partial class Transaction : EntityAccessor
         private BTree<TKey, PersistentStore>.RangeMultipleEnumerator _innerMultiple;
         private ReadOnlySpan<int> _currentValues;
         private int _currentValueIndex;
-        private bool _multipleStarted;
+
+        // The current key's values, copied out of its buffer before any of them is resolved (IXS-10). Pooled; returned by Dispose.
+        private int[] _keyValues;
+
+        /// <summary>Test seam (IXS-10): runs after a key's values are copied and its buffer released, before any is resolved. Null in production.</summary>
+        [ThreadStatic]
+        internal static Action KeyCopiedProbe;
 
         private ChunkAccessor<PersistentStore> _compRevAccessor;
         private ChunkAccessor<PersistentStore> _compContentAccessor;
@@ -979,7 +995,7 @@ public unsafe partial class Transaction : EntityAccessor
             _innerMultiple = default;
             _currentValues = default;
             _currentValueIndex = 0;
-            _multipleStarted = false;
+            _keyValues = [];
 
             _clusterAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
             _mapAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
@@ -1000,8 +1016,10 @@ public unsafe partial class Transaction : EntityAccessor
 
             _maxRecordSize = maxRecord;
 
-            _compRevAccessor = ct.CompRevTableSegment.CreateChunkAccessor(changeSet);
-            _compContentAccessor = ct.ComponentSegment.CreateChunkAccessor(changeSet);
+            // A SingleVersion component has no revision chains and no content segment: its bytes are the cluster slot. The accessors stay default,
+            // which MoveNext never touches for it and Dispose skips; created unconditionally, an index read of such a component threw here.
+            _compRevAccessor = ct.CompRevTableSegment != null ? ct.CompRevTableSegment.CreateChunkAccessor(changeSet) : default;
+            _compContentAccessor = ct.ComponentSegment != null ? ct.ComponentSegment.CreateChunkAccessor(changeSet) : default;
             _tx = tx;
             _transactionTSN = tx.TSN;
             _componentOverhead = ct.ComponentOverhead;
@@ -1069,8 +1087,14 @@ public unsafe partial class Transaction : EntityAccessor
 
                 if (src.VersionedIndex < 0)
                 {
-                    // SingleVersion in this archetype: the cluster slot IS the component.
+                    // SingleVersion in this archetype: the cluster slot IS the component. Its key is re-checked: the key's values were copied out of
+                    // their buffer before this (IXS-10), and a SingleVersion destroy releases its slot at once — a spawn can have taken it since, another
+                    // entity under another key. The buffer's lock used to hold the destroy's index removal, and so the release, off until the read was done.
                     _currentComponentSpan = new ReadOnlySpan<byte>(clusterBase + src.CompOffset + slotIndex * src.CompSize, src.CompSize);
+                    if (!_currentComponentSpan.Slice(src.FieldOffset, sizeof(TKey)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<TKey>(ref key))))
+                    {
+                        continue;
+                    }
                 }
                 else
                 {
@@ -1161,15 +1185,6 @@ public unsafe partial class Transaction : EntityAccessor
                     return true;
                 }
 
-                // Remaining chunks of the current key's buffer before advancing the key. The guard mirrors the pre-#666 enumerator: NextChunk must not be
-                // called before the first MoveNextKey, when no buffer is open yet.
-                if (_multipleStarted && _innerMultiple.NextChunk())
-                {
-                    _currentValues = _innerMultiple.CurrentValues;
-                    _currentValueIndex = 0;
-                    continue;
-                }
-
                 if (!_innerMultiple.MoveNextKey())
                 {
                     key = default;
@@ -1177,10 +1192,13 @@ public unsafe partial class Transaction : EntityAccessor
                     return false;
                 }
 
-                _multipleStarted = true;
+                // The whole key, copied and its buffer released, before MoveNext resolves any entity through its chain: a chain walk under the buffer's
+                // lock waited on a publish that held the chain and waited on the buffer (IXS-10).
                 _currentKey = _innerMultiple.CurrentKey;
-                _currentValues = _innerMultiple.CurrentValues;
+                var count = _innerMultiple.DrainCurrentKey(ref _keyValues);
+                _currentValues = new ReadOnlySpan<int>(_keyValues, 0, count);
                 _currentValueIndex = 0;
+                KeyCopiedProbe?.Invoke();
             }
         }
 
@@ -1205,6 +1223,12 @@ public unsafe partial class Transaction : EntityAccessor
                 if (_isAllowMultiple)
                 {
                     _innerMultiple.Dispose();
+                    if (_keyValues.Length > 0)
+                    {
+                        System.Buffers.ArrayPool<int>.Shared.Return(_keyValues);
+                    }
+
+                    _keyValues = [];
                 }
                 else
                 {
@@ -1892,7 +1916,8 @@ public unsafe partial class Transaction : EntityAccessor
             // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
             bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
-                out clusterCopyPending, out var indexPending, out clusterChunkId, out slotIndex, out compSlot);
+                ref compRevTableAccessor, firstChunkId, lockHeld, out clusterCopyPending, out var indexPending, out var slotIndexed, out var baseCompChunkId,
+                out clusterChunkId, out slotIndex, out compSlot);
             if (indexPending && (_dbe._stateByRouting[archId].ClusterState.UniqueIndexedSlots & (1 << compSlot)) != 0)
             {
                 _pendingUniqueMoves++;
@@ -1905,8 +1930,9 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     Info = info, CurCompContentChunkId = compRevInfo.CurCompContentChunkId, ArchId = archId, ClusterChunkId = clusterChunkId,
                     SlotIndex = slotIndex, CompSlot = compSlot, Pk = pk, ReadCompChunkId = readCompChunkId,
-                });
+                }, readCompChunkId);
                 indexPending = false;
+                slotIndexed = false;
             }
 
             // Periodic flush: bound dirty counter inflation for large transactions
@@ -1942,6 +1968,8 @@ public unsafe partial class Transaction : EntityAccessor
                 ElementIndexInChunk = elementHandle.ElementIndex,
                 ClusterCopyPending = clusterCopyPending,
                 IndexPending = indexPending,
+                SlotIndexed = slotIndexed,
+                BaseCompChunkId = baseCompChunkId,
                 Pk = pk,
                 ReadCompChunkId = readCompChunkId,
                 ArchId = archId,
@@ -1990,14 +2018,6 @@ public unsafe partial class Transaction : EntityAccessor
 
         ref var header = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(e.FirstChunkId, true);
 
-        // Phase A (#1262): the indexes and views, before the stamp — and before taking the chain lock, which readers of this entity then do not wait out
-        // through an index update (a page-cache back-pressure wait included). PREPARE did it unlocked too; a conflict-handler commit still holds the lock.
-        if (e.IndexPending)
-        {
-            PublishClusterIndexes(in e);
-            _dbe.PublishAfterIndexesProbe?.Invoke();
-        }
-
         // The chain's exclusive lock, for the publication (AP-05, #1158). Without a conflict handler PREPARE does not hold it, and between PREPARE and here
         // a cleanup on another thread can compact this chain: CleanUpUnusedEntries rewrites every kept entry from index 0, the still-isolated one included.
         // Stamping the coordinates PREPARE recorded then cleared IsolationFlag on whatever had moved there — often the previous committed entry, re-stamped
@@ -2036,8 +2056,8 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     // Compaction keeps isolated entries, so this means something else removed the entry — a damaged chain, or an unlocked writer. Stamping
                     // the recorded slot anyway would publish another transaction's entry under this TSN, so nothing more is published: no stamp, no CommitSequence,
-                    // no cluster copy. (Phase A, run above, has moved the index for it, as it did from PREPARE before #1262.) The commit is lost either way;
-                    // this keeps it from taking a neighbour down with it, and says so.
+                    // no cluster copy, no index move (Phase A runs below since #1263). The commit is lost either way; this keeps it from taking a neighbour down
+                    // with it, and says so.
                     Debug.Fail("AP-05: the committing entry vanished from its chain between PREPARE and PUBLISH");
                     _dbe.LogPublishEntryNotFound(info.ComponentTable.Definition.Name, e.FirstChunkId, TSN);
                     completed = true;
@@ -2049,6 +2069,29 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             Debug.Assert(_commitStamp != 0, "VIS-04: a revision published before its commit stamp was drawn");
+
+            // The newest revision published before this one, by stamp (VIS-05). This publish makes the entity's newest committed value only if its stamp is
+            // above it: two last-writer-wins updates publish in either order of their stamps.
+            long newestStamp = 0;
+            var newestChunkId = 0;
+            if (e.SlotIndexed || e.ClusterCopyPending)
+            {
+                newestStamp = ComponentRevisionManager.NewestPublished(ref compRevTableAccessor, e.FirstChunkId, revisionIndex, out newestChunkId);
+            }
+
+            var becomesNewest = _commitStamp > newestStamp;
+
+            // Phase A (#1262, #1263): the indexes and views, under the chain lock and before the stamp, so the index never lags a visible revision. They
+            // move from the newest published value, not the one this transaction read: another update may have committed in between, and its publish moved
+            // the entry off the read key — moving from it then found nothing and changed nothing, and the index kept the other writer's key for good. A
+            // publish below the newest moves nothing, as Phase B copies nothing (AP-06); one over a tombstone neither — the destroy owns the entity's entries.
+            // Readers of this entity wait out the index update, which the conflict-handler path already paid.
+            if (e.SlotIndexed && becomesNewest && (e.IndexPending || newestChunkId != e.BaseCompChunkId) && (newestStamp == 0 || newestChunkId != 0))
+            {
+                PublishClusterIndexes(in e, newestChunkId);
+                _dbe.PublishAfterIndexesProbe?.Invoke();
+            }
+
             elementHandle.Publish(_commitStamp);   // THE publication act: the commit stamp replaces the owner's TSN, IsolationFlag cleared (VIS-04)
             _dbe.PublishUnderLockProbe?.Invoke();
 
@@ -2061,7 +2104,7 @@ public unsafe partial class Transaction : EntityAccessor
             // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
             // is the newest published one by stamp (VIS-05). Two transactions updating one entity publish in either order of their stamps: the later
             // publish of the older stamp must not land in the slot. A writer still unpublished copies at its own publish if its stamp is the higher.
-            if (e.ClusterCopyPending && _commitStamp > ComponentRevisionManager.HighestPublishedStamp(ref compRevTableAccessor, e.FirstChunkId, revisionIndex))
+            if (e.ClusterCopyPending && becomesNewest)
             {
                 PublishClusterVersionedSlot(e);
             }
@@ -2169,11 +2212,14 @@ public unsafe partial class Transaction : EntityAccessor
     /// cluster copy for those).
     /// </summary>
     private void PrepareClusterVersionedSlot(long pk, ArchetypeMetadata meta, ComponentInfo.CompRevInfo compRevInfo, int readCompChunkId, ComponentTable table,
-        int componentTypeId, bool copyToCluster, out bool clusterCopyPending, out bool indexPending, out int outClusterChunkId, out byte outSlotIndex,
+        int componentTypeId, bool copyToCluster, ref ChunkAccessor<PersistentStore> compRevAccessor, int firstChunkId, bool lockHeld,
+        out bool clusterCopyPending, out bool indexPending, out bool slotIndexed, out int baseCompChunkId, out int outClusterChunkId, out byte outSlotIndex,
         out byte outCompSlot)
     {
         clusterCopyPending = false;
         indexPending = false;
+        slotIndexed = false;
+        baseCompChunkId = readCompChunkId;
         outClusterChunkId = 0;
         outSlotIndex = 0;
         outCompSlot = 0;
@@ -2223,7 +2269,24 @@ public unsafe partial class Transaction : EntityAccessor
         // that leaves every indexed field alone costs the publish nothing.
         if (hasIndexes && (clusterState.IndexedSlots & (1 << compSlot)) != 0)
         {
-            if (compRevInfo.CurCompContentChunkId == 0 || readCompChunkId == 0)
+            slotIndexed = true;
+
+            // The keys move from the newest committed revision, which a last-writer-wins commit landing after this transaction's read made another one
+            // (#1263): measured against it, the write owes the move, and the unique-key check before the append covers the key it moves to. The publish
+            // re-reads it under the chain's lock for a commit landing after this one. Committed revisions newer than the read stay allocated while this
+            // transaction lives: cleanup keeps every revision from the one its snapshot sees.
+            if (readCompChunkId != 0)
+            {
+                var newestStamp = lockHeld
+                    ? ComponentRevisionManager.NewestPublished(ref compRevAccessor, firstChunkId, -1, out var newestChunkId)
+                    : ComponentRevisionManager.NewestPublishedUnlocked(ref compRevAccessor, firstChunkId, this, out newestChunkId);
+                if (newestStamp != 0 && newestChunkId != 0)
+                {
+                    baseCompChunkId = newestChunkId;
+                }
+            }
+
+            if (compRevInfo.CurCompContentChunkId == 0 || baseCompChunkId == 0)
             {
                 indexPending = true;
             }
@@ -2231,7 +2294,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 var overhead = table.ComponentOverhead;
                 indexPending = AnyIndexedFieldChanged(clusterState, compSlot,
-                    _clusterCommitContentAccessor.GetChunkAddress(readCompChunkId) + overhead,
+                    _clusterCommitContentAccessor.GetChunkAddress(baseCompChunkId) + overhead,
                     _clusterCommitContentAccessor.GetChunkAddress(compRevInfo.CurCompContentChunkId) + overhead);
             }
         }
@@ -2268,16 +2331,17 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>
-    /// Phase A of the cluster commit, in its publish (#1262): moves the entity's entries in the archetype's B+Tree indexes from the value of the revision
-    /// the transaction read to the committing one's, and appends the matching view deltas. Values come from the content chunks — the cluster slot is
-    /// Phase B's, and not copied yet. Runs before the revision is stamped, as it did in PREPARE, so the index never lags a visible revision.
+    /// Phase A of the cluster commit, in its publish (#1262): moves the entity's entries in the archetype's B+Tree indexes from the value in
+    /// <paramref name="oldChunkId"/> (0 for none) — the newest published revision's (#1263) — to the committing one's, and appends the matching view
+    /// deltas. Values come from the content chunks — the cluster slot is Phase B's, and not copied yet. Runs before the revision is stamped, so the index
+    /// never lags a visible revision.
     /// </summary>
     /// <remarks>
     /// In PREPARE this survived an abort before the append — the rollback reverts revisions only — leaving the index on a key no commit made and the
     /// views with a delta no commit made. A unique key it would collide on is rejected before the append (<c>ValidatePublishBeforeAppend</c>);
     /// <see cref="RejectUniqueIndexCollision"/> here is the backstop for a concurrent commit that took the key in between (#1258).
     /// </remarks>
-    private void PublishClusterIndexes(in PublishEntry e)
+    private void PublishClusterIndexes(in PublishEntry e, int oldChunkId)
     {
         var es = _dbe._stateByRouting[e.ArchId];
         var clusterState = es.ClusterState;
@@ -2287,7 +2351,7 @@ public unsafe partial class Transaction : EntityAccessor
         byte* newComp = e.CurCompContentChunkId != 0
             ? _clusterCommitContentAccessor.GetChunkAddress(e.CurCompContentChunkId) + table.ComponentOverhead
             : null;
-        byte* oldComp = e.ReadCompChunkId != 0 ? _clusterCommitContentAccessor.GetChunkAddress(e.ReadCompChunkId) + table.ComponentOverhead : null;
+        byte* oldComp = oldChunkId != 0 ? _clusterCommitContentAccessor.GetChunkAddress(oldChunkId) + table.ComponentOverhead : null;
         ReconcileClusterIndexAndViews(es, clusterState, e.CompSlot, e.ClusterChunkId, e.ClusterChunkId * 64 + e.SlotIndex, EntityId.FromRaw(e.Pk), oldComp,
             newComp);
     }
