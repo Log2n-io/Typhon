@@ -14,7 +14,7 @@ namespace Typhon.Engine.Internals;
 /// proves it: <c>DrainPendingClusterFinalizations</c> is reached either from <c>PrepareArchetypeFinalizeHeads</c> on the driver thread or from
 /// <c>FinalizeArchetypeFence</c> as a dispatched work item on an arbitrary pool worker, and which one an archetype takes is decided per tick by
 /// <c>FinalizeSliceable</c>. A guard that adopted the first caller and rejected every later one therefore threw on perfectly correct code the first time an
-/// archetype changed path — and, worse, threw from inside a drain loop that has no try/finally, leaking the chunk id it was about to free.
+/// archetype changed path — and, worse, threw from inside the drain loop, leaking the chunk id it was about to free.
 /// </para>
 /// <para>
 /// What must never happen is two callers <i>inside at the same time</i>: the directory's backing map publishes its array, capacity and mask as separate

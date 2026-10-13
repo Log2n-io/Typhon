@@ -278,7 +278,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// An aborted spawn gives its slot back (AP-07): the slot's entity id and enabled bits cleared, the claim released, the cell's count decremented, and a
-    /// cluster left with nothing occupied or claimed finalised and freed as a drained one is.
+    /// cluster left with nothing occupied or claimed recorded for the fence's reclamation, as a drained one is.
     /// </summary>
     internal void UnreserveSlot(byte* clusterBase, int clusterChunkId, int slotIndex, SpatialGrid grid)
     {
@@ -314,7 +314,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// The cleanup's half of a hidden destroy (VIS-09): the slot's collection buffers released, its metadata cleared, its claim released — the slot claimable
-    /// again — and a cluster left with nothing occupied or claimed finalised and freed.
+    /// again — and a cluster left with nothing occupied or claimed recorded for the fence's reclamation.
     /// </summary>
     internal void ReleaseHiddenSlot(byte* clusterBase, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid)
     {
@@ -331,10 +331,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal bool IsHidden(byte* clusterBase, int clusterChunkId, int slotIndex) =>
         (PendingBits(Volatile.Read(ref *(ulong*)clusterBase), clusterChunkId) & (1UL << slotIndex)) != 0;
 
-    /// <summary>The vacated slot's claim released, and a cluster left with nothing occupied or claimed finalised and freed.</summary>
+    /// <summary>The vacated slot's claim released, and a cluster left with nothing occupied or claimed recorded for the fence's reclamation.</summary>
     /// <remarks>
-    /// The free is inline, as <c>ReleaseSlot</c>'s non-deferred path's is: a claimer that read this cluster as the free head before the drain can still CAS into
-    /// it (#1315). The callers here are an abort and the cleanup.
+    /// The callers are an abort (<see cref="UnreserveSlot"/>) and the cleanup of a hidden destroy (<see cref="ReleaseHiddenSlot"/>), which run on any thread —
+    /// the cleanup when a transaction is disposed, mid-dispatch included — so the cluster is never finalized here (#582, CLUSTERWALK-03). A claimer that read
+    /// it as the free head before the drain can still CAS into it; the reclamation's seal then keeps it (#1315).
     /// </remarks>
     private void FinishVacatedSlot(byte* clusterBase, int clusterChunkId, int slotIndex, SpatialGrid grid)
     {
@@ -342,11 +343,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var drained = claimsLeft == 0 && (Volatile.Read(ref *(ulong*)clusterBase) & Layout.FullMask) == 0;
         if (drained)
         {
-            FinaliseEmptyClusterCellState(grid, clusterChunkId);
-            RemoveFromActiveList(clusterChunkId);
-            RetireClusterId(clusterChunkId);
-            ClusterSegment?.FreeChunk(clusterChunkId);
-            TransientSegment?.FreeChunk(clusterChunkId);
+            RecordClusterDrain(clusterChunkId);
         }
         else if (FreeClusterHead < 0)
         {

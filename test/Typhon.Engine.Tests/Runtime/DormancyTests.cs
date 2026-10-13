@@ -545,14 +545,21 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.Sleeping));
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(1));
 
-        // Destroy the entity — cluster empties → RemoveFromActiveList
+        // Destroy the entity — the cluster empties and is recorded for the fence (#582, CLUSTERWALK-03)
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Destroy(entityId);
             tx.Commit();
         }
 
-        // After destroy + release, the sleeping cluster should have been removed
+        Assert.That(cs.SleepingClusterCount, Is.EqualTo(1), "a drained cluster stays listed, and counted, until the fence");
+
+        // The reclamation itself, not a whole fence: a fence wakes the cluster first and would mask the decrement under test.
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            cs.DrainPendingClusterFinalizations();
+        }
+
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(0));
     }
 
@@ -573,11 +580,17 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(1)); // Still counted
 
-        // Destroy — should decrement SleepingClusterCount for WakePending too
+        // Destroy — the reclamation should decrement SleepingClusterCount for WakePending too
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Destroy(entityId);
             tx.Commit();
+        }
+
+        Assert.That(cs.SleepingClusterCount, Is.EqualTo(1), "a drained cluster stays listed, and counted, until the fence");
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            cs.DrainPendingClusterFinalizations();
         }
 
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(0));

@@ -2112,6 +2112,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
 
                 freesLostAtClose |= DeferredCleanupManager?.FreesLost == true;
+
+                // The clusters emptied since the last fence — the close drain above records more — reclaimed before the free quarantine ends and the final
+                // cycle runs (#582, CLUSTERWALK-03), so the close records a summary with no empty cluster listed. Left pending, the next open would scan.
+                try
+                {
+                    DrainAllPendingClusterFinalizations();
+                }
+                catch (Exception e)
+                {
+                    // Chunks left allocated and named by nothing: the close marks the sweep owed rather than a clean shutdown, as the drain above does.
+                    LogCloseDrainFailed(e);
+                    freesLostAtClose = true;
+                }
             }
 
             // The held frees (CK-17), freed before the final cycle so it writes them freed — on this thread, as the checkpoint thread still writes what their pages
@@ -5090,6 +5103,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
         RunWalV2Recovery();
+
+        // The clusters the replay's destroys emptied, and the empty ones the open's scan found allocated — a drain pending when the engine stopped — are only
+        // recorded (#582, CLUSTERWALK-03): reclaimed here, with the open still single-threaded, so the engine starts with no empty cluster listed. HERE and
+        // not inside the replay, which returns early when the WAL window is empty, the case a scan's empty clusters come from.
+        DrainAllPendingClusterFinalizations();
 
         // Realms D5: a realm closing when the engine last stopped is retired now when nothing names it, live again otherwise (RLM-06). Then the
         // primary realm is fixed for the session: a run-time registration of a lower id must not move the archetype-level knobs.

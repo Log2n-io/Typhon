@@ -412,7 +412,17 @@ descends from this one property.
     TyphonHost.RunTickFence). For such a host this is a DOCUMENTED CALLER OBLIGATION, not an enforced one, and it
     is stated on the method's own XML doc. Trivially satisfied single-threaded; unchecked for a host that runs its
     own worker threads. Enforcing it would require the engine to track every application thread, which it does not
-    and should not.
+    and should not. The fence is also where emptied clusters are reclaimed (CLUSTERWALK-03, #582): a runtime-less host
+    that never calls WriteTickFence never frees one until the database is closed or reopened.
+  readers: the window excludes concurrent WRITERS; nothing excludes a reader, and the licences above make the structures it maintains unsafe to
+    read while it runs. A read from a thread no tick bounds (a user thread, not a system) of an archetype's active-cluster list, its per-cell spatial
+    index or cluster lists, its B+Trees or its cluster data can overlap the fence and see them mid-change: the active list compacted in place by the
+    reclamation (CLUSTERWALK-03), a cell index's swap-with-last, a batch of index values half applied, a chunk freed and reissued. This is a
+    DOCUMENTED CALLER OBLIGATION, like host_mode: an off-tick reader does not read during the fence. Not enforced, and deliberately not made safe
+    one structure at a time — a copy-and-publish of the active list was rejected (#582): it removes the duplicate and the skip but not the read of a
+    freed chunk, costs an allocation per reclaiming fence (on the large object heap past ~21 000 clusters), and would leave the other structures as
+    exposed. The one engine reader on such a thread is StatisticsRebuilder, an accepted exception (CLUSTERWALK-01's note): its throw is swallowed, its
+    pages stay mapped under its EpochGuard, and the cost is a stale estimate.
   on_violation: silent. A concurrent writer racing a fence that has taken the licences above corrupts index
     structure with no exception at the point of damage — the B+Tree's own validators find it later, or a query
     returns a wrong answer and nothing finds it at all.

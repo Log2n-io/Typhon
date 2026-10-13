@@ -1314,10 +1314,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The drain loop it is called from has no <c>try/finally</c>: an exception raised here skips the <c>FreeChunk</c> two lines later — orphaning a chunk
-    /// id permanently, since the cluster is already off the active list and detached from its cell — and skips the <c>_drainedCount = 0</c> reset, so every
-    /// id already processed in that pass is reprocessed next tick against a segment that has moved on. The inline release sites are worse still: they
-    /// propagate out through <c>Transaction.Commit</c>.
+    /// It is called from the fence's cluster reclamation (<c>DrainPendingClusterFinalizations</c>, the only site since #582): an exception raised here skips
+    /// the <c>FreeChunk</c> that follows — orphaning a chunk id permanently, since the cluster is already off the active list and detached from its cell.
     /// </para>
     /// <para>
     /// Swallowing is therefore the lesser failure, but it must not be silent: a refusal is counted in <see cref="DrainFaults"/> and the exception kept in

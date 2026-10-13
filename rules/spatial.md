@@ -1188,13 +1188,10 @@
     it over-reports the database for the width of a tick
   invariant every fresh destination is recorded via RecordClusterDrain at allocation. If every request targeting
     it is skipped it stays empty, and nothing else would ever schedule it for freeing — a release is the only
-    event that normally does. The existing Finalize pass re-reads occupancy and frees only what is still empty
-  invariant 🔴 the planner must top up _drainedClusterIds after it emits. PreSizeMigrationBuffers sizes that list
-    from PendingMigrationCount, on the premise that one migration releases at most one source slot, and it runs in
-    Prep's CORE — before the planner, which then files `count` more migrations AND consumes `destinationCount`
-    drain entries of its own. Without the top-up the Migrate phase overflows into RecordClusterDrain's fallback
-    grow, which parallel workers reach and which writes its entry AFTER releasing the lock, re-reading the field:
-    an entry can be discarded by a concurrent resize, and a discarded drain record is this rule's leaked chunk id
+    event that normally does. The fence's reclamation seals and frees only what is still empty (CLUSTERWALK-03)
+  invariant the planner pre-allocates drain blocks after it emits (PreSizeDrainedClusterIds) — a performance hint
+    since #582: the drain list's blocks never move, so a record can no longer be discarded by a concurrent grow
+    (the leak the old top-up closed), and the pre-allocation only keeps Migrate's parallel workers off the grow lock
   invariant destinations are allocated BEFORE any request is emitted. Interleaving lets an allocation fail partway
     and leave the unit half re-packed — the state RP-01 calls strictly worse than untouched — where allocating up
     front makes the failure atomic: nothing emitted, and the clusters already taken are freed by Finalize because
@@ -1819,17 +1816,18 @@
       publishes it with Volatile.Write. Promotion is decided per CELL and slices are cell-disjoint, so two
       workers can promote two cells at once; two unsynchronised creators each build a segment, the later
       store wins, and every tree the loser's cells built is left reading an orphaned structure
-    cluster-fully-drains path (popcount(prev & ~mask) == 0) does NOT finalize in the worker:
-      it records the chunkId via RecordClusterDrain (Interlocked.Increment slot reservation)
-      and returns. CellClusterPool.RemoveCluster, RemoveClusterFromPerCellIndex,
-      RemoveFromActiveList and ClusterSegment.FreeChunk run later, in
-      DrainPendingClusterFinalizations, which re-checks occupancy and skips refilled clusters
-  invariant DrainPendingClusterFinalizations runs exactly once per archetype per fence, from
-    FinalizeArchetypeFence, AFTER the Migrate and AabbRefresh phase barriers. It takes no lock,
-    and must not: its safety is that the barriers exclude every concurrent ClaimSlotInCell and
-    ReleaseSlot for this archetype, so the occupancy re-check and the free are single-threaded.
-    A lock here would not substitute for the barrier — finalizing while a claimer holds a
-    CAS-won slot frees a live chunk no matter who holds what
+    cluster-drains path (no slot claimed or occupied once the release's claim is released) does NOT
+      finalize in the worker: it records the chunkId via RecordClusterDrain (a lock-free append into
+      blocks that never move) and returns — as every release path does since #582 (CLUSTERWALK-03).
+      CellClusterPool.RemoveCluster, RemoveClusterFromPerCellIndex, the active-list eviction and
+      ClusterSegment.FreeChunk run later, in DrainPendingClusterFinalizations, which seals each
+      recorded cluster and keeps any a claim reached
+  invariant DrainPendingClusterFinalizations runs once per archetype per fence, at the top of
+    FinalizeArchetypeFenceHead (before its branch-0 return), AFTER the Migrate and AabbRefresh phase barriers.
+    It takes no lock, and must not: the barriers and EW-01's window exclude every concurrent ClaimSlotInCell and
+    ReleaseSlot for this archetype, and the seal — a CAS on the claim word every claim CASes — makes the
+    keep-or-free decision atomic against a claim made before it: it never frees a chunk a claim holds. A claim
+    after the free is excluded by the window alone. A lock would not substitute for either
   invariant FenceDirtyBits is pre-sized in PrepareArchetypeFence's tail BEFORE any Migrate-phase worker
     observes it. The bound is a deliberate over-estimate (max(PrimarySegmentCapacity, existingLen) +
     2*PendingMigrationCount + 64), NOT the strict PrimarySegmentCapacity + PendingMigrationCount this rule

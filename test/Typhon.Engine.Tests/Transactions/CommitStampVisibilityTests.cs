@@ -604,6 +604,8 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
             }
 
             Assert.That(opened, Is.EqualTo(1), "premise: the placement opened a cluster for the spawn");
+            Assert.That(ActiveClusters(), Is.EqualTo(1), "the abort only records the emptied cluster (#582, CLUSTERWALK-03)");
+            dbe.WriteTickFence(1);
             Assert.That(ActiveClusters(), Is.Zero, $"{Marker}: the aborted spawn's cluster was not given back");
         }
 
