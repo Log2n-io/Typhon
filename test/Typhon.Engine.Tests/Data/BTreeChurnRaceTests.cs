@@ -95,61 +95,86 @@ class BTreeChurnRaceTests
     }
 
     /// <summary>
-    /// #1321: a write that throws while it holds a node latch faults the tree. A new AllowMultiple key allocates its value buffer under the leaf's latch;
-    /// failing that allocation left the latch held, and the next write into the leaf spun on it for good — UltimateStress's hang. Now that write throws.
+    /// #1321: a write that throws while it holds a node latch faults the tree, so the next write throws instead of spinning on the latch it left held. The
+    /// throw comes from the root collapse's probe, which runs with the root's write latch held (IXW-10). It used to come from a new AllowMultiple key's buffer
+    /// allocation under the leaf latch, the one allocation #1190 moved out of every latch.
     /// </summary>
     [Test]
     [VerifiesRule("IXW-09")]
     [CancelAfter(20_000)]
-    public unsafe void AFaultUnderALeafLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning()
+    public unsafe void AFaultUnderANodeLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning()
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
-        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 40, sizeof(Index64Chunk));
-        var tree = new DoubleMultipleBTree<PersistentStore>(segment);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 40, sizeof(Index32Chunk));
+        var tree = new IntSingleBTree<PersistentStore>(segment);
 
-        void Add(double key)
-        {
-            var scope = epochManager.EnterScope();
-            var accessor = segment.CreateChunkAccessor();
-            try
-            {
-                tree.Add(key, (int)key, ref accessor);
-            }
-            finally
-            {
-                accessor.Dispose();
-                epochManager.ExitScope(scope);
-            }
-        }
-
-        for (var k = 1; k <= 5; k++)
-        {
-            Add(k);
-        }
-
-        var faultingThread = Environment.CurrentManagedThreadId;
-        ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = _ =>
-        {
-            if (Environment.CurrentManagedThreadId == faultingThread)
-            {
-                throw new System.IO.IOException("injected allocation fault");
-            }
-        };
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        var top = 0;
         try
         {
-            Assert.That(() => Add(10), Throws.TypeOf<System.IO.IOException>(), "premise: the new key's buffer allocation fails");
+            while (tree.Height < 2)
+            {
+                top++;
+                tree.Add(top, top, ref accessor);
+            }
         }
         finally
         {
-            ChunkBasedSegment<PersistentStore>.AllocateFaultForTest = null;
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
         }
 
-        var later = Task.Run(() => Add(11));
+        void Remove(int key)
+        {
+            var s = epochManager.EnterScope();
+            var a = segment.CreateChunkAccessor();
+            try
+            {
+                tree.Remove(key, out _, ref a);
+            }
+            finally
+            {
+                a.Dispose();
+                epochManager.ExitScope(s);
+            }
+        }
+
+        var faultingThread = Environment.CurrentManagedThreadId;
+        OlcDescentTrace.OnRootCollapse = () =>
+        {
+            if (Environment.CurrentManagedThreadId == faultingThread)
+            {
+                throw new System.IO.IOException("injected fault under the root latch");
+            }
+        };
+        var thrown = false;
+        try
+        {
+            for (var k = top; k > 0 && !thrown; k--)
+            {
+                try
+                {
+                    Remove(k);
+                }
+                catch (System.IO.IOException)
+                {
+                    thrown = true;
+                }
+            }
+        }
+        finally
+        {
+            OlcDescentTrace.OnRootCollapse = null;
+        }
+
+        Assert.That(thrown, Is.True, "premise: the removals reached the root collapse");
+        Assert.That(tree.IsFaulted, Is.True);
+        var later = Task.Run(() => Remove(1));
         Assert.That(() => later.Wait(TimeSpan.FromSeconds(5)), Throws.InstanceOf<AggregateException>()
             .With.InnerException.TypeOf<InvalidOperationException>().And.InnerException.Message.Contains("faulted"),
-            "the next write into the leaf throws instead of spinning on the abandoned latch");
-        Assert.That(tree.IsFaulted, Is.True);
+            "the next write throws instead of spinning on the abandoned latch");
     }
 
     [TestCase(2, 2, 0, 0, 500)]

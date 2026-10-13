@@ -586,18 +586,25 @@ written for the read path; these are the write-path obligations that went unwrit
             `ChunkReservation.AllocateUnderLatch` hands out reserved chunks — anything else is counted (`UnreservedAllocations`). A bucket split's
             new bucket is its own address (EMAP-01): claimed before any latch, and an overflow chunk moved out of it lands in a chunk reserved
             before its owner is latched
+  invariant a multi-value index's value-buffer chunks are reserved the same way (#1190): a new key's root chunk, and the chunk an append into a full buffer
+            takes, come from the writer's reservation through `ChunkReservation.AllocateForBuffer`. The need is read under the leaf latch before the
+            first write — `NewKeyBufferChunks`, `VariableSizedBufferSegmentBase.ChunksNeededToAppend`, or folded into the append itself
+            (`TryAddElementReserved`, which refuses having written nothing) — and a writer short of it releases the latch, reserves holding nothing, and
+            retries. A new key the optimistic descent saw is reserved for before the latch, so the common insert does not retry; an append into a buffer
+            with room never opens a reservation
   invariant a writer that finds its reservation short under its latches releases every one and reserves before it latches again; a fault under an
             entity-map bucket lock releases the lock — with a version bump once anything may have been written (an upsert's in-place update, an
             append, a bulk run's entries, a split's rewrite), without one only when nothing was
   never `AllocateChunk`, a segment grow, or a page fault for a chunk being written, between a latch's acquisition and its release
   scope: ChunkReservation, BTree.AllocNode, BTree.InsertIterative, BTree.AddOrUpdateCorePessimistic, RawValuePagedHashMap.AppendUnderBucketLock,
-         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.ClaimBucketChunk
+         RawValuePagedHashMap.AppendEntry, RawValuePagedHashMap.ExecuteSplit, RawValuePagedHashMap.InsertBucketRun, PagedHashMapBase.ClaimBucketChunk,
+         ChunkReservation.AllocateForBuffer, ChunkReservation.HasReserved, VariableSizedBufferSegmentBase.ChunksNeededToAppend,
+         VariableSizedBufferSegment.TryAddElementReserved, BTree.MoveValue
   on_violation: an allocation can grow the segment — up to 1 024 pages — and wait seconds on page-cache back-pressure, or throw. Waiting, it holds
                 every writer of the node or bucket: the B+Tree's waiters exhaust their bounded retries and report a liveness defect (IXW-01), two workers
                 in one MarketHardeningTests storm. Throwing, it leaves the latch held for good: an entity-map bucket nobody would unlock froze a storm at
                 175 623 operations, and the test's teardown then freed the engine under the spinning writer (AccessViolationException)
-  note: an `AllowMultiple` index still allocates its VSBS buffers under the leaf latch, which IXW-06 makes the only place the buffer may be touched;
-        not covered here. Nor is the generic `PagedHashMap<TKey, TValue, TStore>`, used only by tests and benchmarks, which still allocates under its
+  note: not covered: the generic `PagedHashMap<TKey, TValue, TStore>`, used only by tests and benchmarks, which still allocates under its
         bucket latches
   verified: LatchFreeAllocationTests [VerifiesRule] — 20 000 inserts that split a B+Tree, and chain and split an entity map, allocate nothing under
             a latch (713 and 6 467 allocations when the reservation is ignored); after an injected allocation fault a scan and further writes
@@ -605,6 +612,12 @@ written for the read path; these are the write-path obligations that went unwrit
             ("made no progress in 10000 pessimistic retries") — the hardening signature, reproduced. A split of a chain longer than the initial
             reservation allocates nothing under its lock (with the reservation capped at 64 it did); a fault in a bulk insert's write phase leaves no
             bucket locked and the map's count equal to what its buckets hold (without the release, the scan spins until the 15 s guard)
+  verified: ValueBufferReservationTests.AMultiValueIndex_NeverAllocatesAValueBufferChunkUnderALatch [VerifiesRule] — new keys, buffers grown to ten
+            chunks, moves to new and full keys, removals and reuse: no allocation of the tree's segment while the thread holds a latch, asked at the
+            segment's own allocation seam; with the reservation check bypassed, 1 943 of 9 529 were. AnAllocationFault_ForAValueBuffer_LeavesTheTreeWritable
+            [VerifiesRule] — a failed buffer allocation leaves the tree unfaulted and writable; bypassed, it faults the tree (IXW-09)
+  measured: about 20-35 ns per multi-value write, +3-8 % pinned to 4 CPUs (a new key pays its reserved chunk's pin and clear; an append into a full
+            buffer retries once), for a leaf latch that no longer waits on the allocator (#1190)
   requires IXW-01 (the bounded retry that turned a latch held across a slow allocation into that report)
 
 ### IXW-08: A value buffer's append cursor stays in its chain `[fatal]` `[silent]`
@@ -635,9 +648,10 @@ written for the read path; these are the write-path obligations that went unwrit
                 reclaim and reissued — a chain pointer to someone else's chunk, read as a node id (65536, 589824 in #739)
   rationale: #1321. Releasing the latches instead would hand a half-done SMO to every other writer; a B+Tree write runs in the commit's publish, past
              the append, where AP-03 stops the engine anyway — failing its index fast is what stops the halt from hanging
-  verified: BTreeChurnRaceTests.AFaultUnderALeafLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning [VerifiesRule] — a new AllowMultiple key
-            whose buffer allocation fails under the leaf latch; the next write throws "faulted" (without the fault: it spins, and the host dies with
-            an AccessViolationException at teardown). LatchFreeAllocationTests.AnAllocationFault_DuringABTreeSplit_LeavesNoNodeLatched: a fault
+  verified: BTreeChurnRaceTests.AFaultUnderANodeLatch_FaultsTheTree_SoLaterWritesThrowInsteadOfSpinning [VerifiesRule] — a throw under the root's
+            latch, from the collapse's probe (`OlcDescentTrace.OnRootCollapse`); the next write throws "faulted" (without the fault: it spins, and the host
+            dies with an AccessViolationException at teardown). It used a new AllowMultiple key's buffer allocation under the leaf latch until #1190
+            moved that allocation out of every latch. LatchFreeAllocationTests.AnAllocationFault_DuringABTreeSplit_LeavesNoNodeLatched: a fault
             before any latch leaves the tree writable. Not covered by a test: the pre-write page faults (a miss cannot be injected after the
             first write without a seam in the SMO)
 

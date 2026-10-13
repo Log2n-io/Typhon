@@ -389,6 +389,9 @@ internal abstract partial class BTree<TKey, TStore>
         // Separate CA for VSBS buffer operations — prevents VSBS page loads from evicting
         // B+Tree leaf node slots in the primary CA's 16-slot cache.
         ref var sibAccessor = ref _segment.RentWarmSiblingAccessor(accessor.ChangeSet);
+        // #1190: the new key's value-buffer chunk is reserved in this scope, holding nothing, and taken under the leaf latch. Opened only when a chunk must be.
+        var reservation = ChunkReservation<TStore>.Current;
+        var reservationOpen = false;
         try
         {
             for (int attempt = 0; attempt < MaxOptimisticRestarts; attempt++)
@@ -483,6 +486,24 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         latch.AbortWriteLock();
                         break; // fall to pessimistic
+                    }
+
+                    // #1190, also before the first storage write: the new key's buffer chunk (a new key's root, or an append into a full buffer) comes from
+                    // the reservation. Short of it, release with nothing written, reserve holding nothing, and retry.
+                    var moveNeed = newKeyPresent
+                        ? _storage.BufferChunksNeededToAppend(leaf.GetItem(leaf.Find(newKey, Comparer, ref opAccessor), ref opAccessor).Value, ref sibAccessor)
+                        : 1;
+                    if (!ChunkReservation<TStore>.HasReserved(_segment, moveNeed))
+                    {
+                        latch.AbortWriteLock();
+                        if (!reservationOpen)
+                        {
+                            reservation.Begin(_segment);
+                            reservationOpen = true;
+                        }
+
+                        reservation.Fill(moveNeed, opAccessor.ChangeSet, ref opAccessor);
+                        continue;
                     }
 
                     var res = _storage.RemoveFromBuffer(oldBufferId, elementId, value, ref sibAccessor);
@@ -632,6 +653,25 @@ internal abstract partial class BTree<TKey, TStore>
                         break; // fall to pessimistic
                     }
 
+                    // #1190: as the same-leaf path — the new key's buffer chunk is reserved before the first storage write.
+                    var newIndexBefore = newLeaf.Find(newKey, Comparer, ref opAccessor);
+                    var moveNeed = newIndexBefore >= 0
+                        ? _storage.BufferChunksNeededToAppend(newLeaf.GetItem(newIndexBefore, ref opAccessor).Value, ref sibAccessor)
+                        : 1;
+                    if (!ChunkReservation<TStore>.HasReserved(_segment, moveNeed))
+                    {
+                        secondLatch.AbortWriteLock();
+                        firstLatch.AbortWriteLock();
+                        if (!reservationOpen)
+                        {
+                            reservation.Begin(_segment);
+                            reservationOpen = true;
+                        }
+
+                        reservation.Fill(moveNeed, opAccessor.ChangeSet, ref opAccessor);
+                        continue;
+                    }
+
                     var res = _storage.RemoveFromBuffer(oldBufferId, elementId, value, ref sibAccessor);
                     oldHeadBufferId = oldBufferId;
 
@@ -687,8 +727,18 @@ internal abstract partial class BTree<TKey, TStore>
         }
         finally
         {
-            _segment.ReturnWarmSiblingAccessor();
-            _segment.ReturnWarmAccessor();
+            try
+            {
+                if (reservationOpen)
+                {
+                    reservation.End();
+                }
+            }
+            finally
+            {
+                _segment.ReturnWarmSiblingAccessor();
+                _segment.ReturnWarmAccessor();
+            }
         }
     }
 

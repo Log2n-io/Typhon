@@ -246,6 +246,16 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         /// <summary>Set by a pass that reached its split without the nodes reserved: the next pass reserves whatever the leaf looks like (IXW-07).</summary>
         public bool ReserveForSplit;
 
+        /// <summary>
+        /// Value-buffer chunks a pass found unreserved under its latch (#1190): 1 for a new key's buffer, or for an append into a full buffer. The next pass
+        /// reserves them before it latches.
+        /// </summary>
+        public int ReserveForBuffer;
+
+        /// <summary>The insert opened a chunk reservation for its value buffer (#1190), closed when it returns. Opened only when a chunk must be
+        /// reserved.</summary>
+        public bool ReservationOpen;
+
         public ref ChunkAccessor<TStore> Accessor;
         /// <summary>Dedicated accessor for horizontal (sibling) navigation — prevents sibling page loads from evicting parent path pages in the primary accessor.</summary>
         public ref ChunkAccessor<TStore> SiblingAccessor;

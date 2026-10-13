@@ -144,6 +144,38 @@ internal sealed class ChunkReservation<TStore> where TStore : struct, IPageStore
     }
 
     /// <summary>
+    /// True when the calling thread's open reservation on <paramref name="segment"/> holds at least <paramref name="count"/> chunks: what a latched value-
+    /// buffer
+    /// write asks before it runs (#1190). A writer that gets <c>false</c> releases its latch, with nothing written, and reserves before it latches again.
+    /// </summary>
+    internal static bool HasReserved(ChunkBasedSegment<TStore> segment, int count)
+    {
+        if (count <= 0)
+        {
+            return true;
+        }
+
+        var r = t_instance;
+        return r != null && r._depth > 0 && r._chunkCount >= count && ReferenceEquals(r._segment, segment);
+    }
+
+    /// <summary>
+    /// A value-buffer chunk (#1190). With a reservation open on <paramref name="segment"/>, the caller is an index writer under its leaf latch: the chunk comes
+    /// from the reservation, as <see cref="AllocateUnderLatch"/> hands it out, a shortfall counted. With none, the caller holds no latch — a component
+    /// collection's buffer, on its own segment — and allocates plainly.
+    /// </summary>
+    internal static int AllocateForBuffer(ChunkBasedSegment<TStore> segment, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
+        var r = t_instance;
+        if (r != null && r._depth > 0 && ReferenceEquals(r._segment, segment))
+        {
+            return AllocateUnderLatch(segment, changeSet, ref accessor);
+        }
+
+        return segment.AllocateChunk(false, changeSet);
+    }
+
+    /// <summary>
     /// Takes chunk <paramref name="chunkId"/> out of the calling thread's reservation on <paramref name="segment"/>, if the reservation holds it unused: for
     /// a structure that needs that very chunk (a linear hash map's next bucket, #1205), which another allocation of the same thread may have reserved.
     /// </summary>

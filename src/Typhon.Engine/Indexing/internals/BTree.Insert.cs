@@ -20,6 +20,11 @@ internal abstract partial class BTree<TKey, TStore>
         Restart,
         /// <summary>Target leaf is full — needs pessimistic path for split/spill.</summary>
         LeafFull,
+        /// <summary>
+        /// The value buffer needs a chunk the calling thread has not reserved (#1190). Released with nothing written; the caller reserves
+        /// <see cref="InsertArguments.ReserveForBuffer"/> chunks, holding nothing, and retries.
+        /// </summary>
+        BufferReservationShort,
     }
     
     /// <summary>
@@ -107,6 +112,67 @@ internal abstract partial class BTree<TKey, TStore>
     private static bool KeyOutsideLeafAuthority(NodeWrapper leaf, TKey key, IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor)
         => KeyAboveLeafUpperBound(leaf, key, comparer, ref accessor) || KeyBelowLeafLowerBound(leaf, key, comparer, ref accessor);
 
+    /// <summary>
+    /// IXW-07 for value buffers (#1190): true when the chunks a latched buffer write needs — <paramref name="need"/>, <see cref="NewKeyBufferChunks"/> for
+    /// a new
+    /// key, <see cref="BaseNodeStorage.BufferChunksNeededToAppend"/> for an append — are reserved. Otherwise records the need in
+    /// <see cref="InsertArguments.ReserveForBuffer"/>, and the caller releases its latch with nothing written and reserves before it latches again. Checked
+    /// before the first write, so the release is an abort: a buffer chunk allocated under the leaf latch can grow the segment and wait on back-pressure,
+    /// holding every writer of the leaf, or throw and fault the tree.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool BufferChunksReserved(int need, ref InsertArguments args)
+    {
+        if (ChunkReservation<TStore>.HasReserved(_segment, need))
+        {
+            return true;
+        }
+
+        args.ReserveForBuffer = need;
+        return false;
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="need"/> value-buffer chunks while the insert holds no latch (#1190), opening the insert's reservation the first time: an insert
+    /// that needs no chunk — an append into a buffer with room — never touches the reservation at all.
+    /// </summary>
+    private void EnsureBufferReserved(int need, ref InsertArguments args)
+    {
+        if (ChunkReservation<TStore>.HasReserved(_segment, need))
+        {
+            return;
+        }
+
+        var reservation = ChunkReservation<TStore>.Current;
+        if (!args.ReservationOpen)
+        {
+            reservation.Begin(_segment);
+            args.ReservationOpen = true;
+        }
+
+        reservation.Fill(need, args.Accessor.ChangeSet, ref args.Accessor);
+    }
+
+    /// <summary>Chunks a new key's value buffer takes: its root chunk, which also holds the first element. None for a unique index.</summary>
+    private int NewKeyBufferChunks => AllowMultiple ? 1 : 0;
+
+    /// <summary>Chunks appending to an existing key's buffer takes (0 or 1). Read under the leaf's latch.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int AppendBufferChunks(int bufferId, ref InsertArguments args) => _storage.BufferChunksNeededToAppend(bufferId, ref args.SiblingAccessor);
+
+    /// <summary>The buffer chunks inserting <c>args.Key</c> into <paramref name="leaf"/> takes, read under its latch: a new key's root, or an
+    /// append's.</summary>
+    private int BufferChunksForLeafInsert(NodeWrapper leaf, ref InsertArguments args, ref ChunkAccessor<TStore> accessor)
+    {
+        if (!AllowMultiple)
+        {
+            return 0;
+        }
+
+        var index = leaf.Find(args.Key, args.KeyComparer, ref accessor);
+        return index < 0 ? 1 : AppendBufferChunks(leaf.GetItem(index, ref accessor).Value, ref args);
+    }
+
     /// <summary>Creates the insert value, handling AllowMultiple buffer creation.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int CreateInsertValue(ref InsertArguments args)
@@ -146,6 +212,14 @@ internal abstract partial class BTree<TKey, TStore>
             OnWriteException(e, held);   // #1321
             throw;
         }
+        finally
+        {
+            if (args.ReservationOpen)
+            {
+                args.ReservationOpen = false;
+                ChunkReservation<TStore>.Current.End();   // frees a reserved buffer chunk the insert did not take (#1190)
+            }
+        }
     }
 
     private void AddOrUpdateCoreUnguarded(ref InsertArguments args)
@@ -164,6 +238,11 @@ internal abstract partial class BTree<TKey, TStore>
         {
             var newRoot = AllocNode(NodeStates.IsLeaf, ref accessor);
             newRoot.PreDirtyForWrite(ref accessor);
+            if (AllowMultiple)
+            {
+                // The first key's buffer, taken under the latch below (#1190). Reserved after the root: AllocNode takes from the same reservation.
+                EnsureBufferReserved(NewKeyBufferChunks, ref args);
+            }
             var newRootLatch = newRoot.GetLatch(ref accessor);
             // Freshly allocated and not yet published: no other thread can have marked it obsolete, so Obsolete is unreachable here (asserted, not handled —
             // a silent skip would leave the initialisation below unprotected, which is the very race this lock exists for).
@@ -201,6 +280,12 @@ internal abstract partial class BTree<TKey, TStore>
             if (result == OlcInsertResult.Completed)
             {
                 return;
+            }
+            if (result == OlcInsertResult.BufferReservationShort)
+            {
+                // #1190: nothing was written. Reserve the buffer's chunk holding nothing, then retry with it.
+                EnsureBufferReserved(args.ReserveForBuffer, ref args);
+                continue;
             }
             if (result == OlcInsertResult.LeafFull)
             {
@@ -266,6 +351,11 @@ internal abstract partial class BTree<TKey, TStore>
                     var order = args.Compare(args.Key, lastKey);
                     if (order > 0)
                     {
+                        if (AllowMultiple)
+                        {
+                            EnsureBufferReserved(NewKeyBufferChunks, ref args);   // #1190: a new key's buffer, reserved before the latch
+                        }
+
                         rl.PreDirtyForWrite(ref accessor);
                         if (!latch.TryWriteLock())
                         {
@@ -293,6 +383,11 @@ internal abstract partial class BTree<TKey, TStore>
                         {
                             latch.AbortWriteLock();
                             return OlcInsertResult.Restart;
+                        }
+                        if (!BufferChunksReserved(NewKeyBufferChunks, ref args))
+                        {
+                            latch.AbortWriteLock();
+                            return OlcInsertResult.BufferReservationShort;
                         }
                         var value = CreateInsertValue(ref args);
                         rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
@@ -326,7 +421,14 @@ internal abstract partial class BTree<TKey, TStore>
                                 return OlcInsertResult.Restart;
                             }
                             var bufferRootId = actualLast.Value;
-                            args.ElementId = _storage.Append(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
+                            var appended = _storage.TryAppendReserved(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
+                            if (appended < 0)
+                            {
+                                args.ReserveForBuffer = 1;   // #1190: the buffer is full and nothing is reserved; nothing was written
+                                latch.AbortWriteLock();
+                                return OlcInsertResult.BufferReservationShort;
+                            }
+                            args.ElementId = appended;
                             args.BufferRootId = bufferRootId;
                             latch.WriteUnlock();
                             return OlcInsertResult.Completed;
@@ -357,6 +459,11 @@ internal abstract partial class BTree<TKey, TStore>
                     var order = args.Compare(args.Key, firstKey);
                     if (order < 0)
                     {
+                        if (AllowMultiple)
+                        {
+                            EnsureBufferReserved(NewKeyBufferChunks, ref args);   // #1190, as the append path
+                        }
+
                         ll.PreDirtyForWrite(ref accessor);
                         if (!llLatch.TryWriteLock())
                         {
@@ -378,6 +485,11 @@ internal abstract partial class BTree<TKey, TStore>
                         {
                             llLatch.AbortWriteLock();
                             return OlcInsertResult.Restart;
+                        }
+                        if (!BufferChunksReserved(NewKeyBufferChunks, ref args))
+                        {
+                            llLatch.AbortWriteLock();
+                            return OlcInsertResult.BufferReservationShort;
                         }
                         var value = CreateInsertValue(ref args);
                         ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
@@ -401,7 +513,14 @@ internal abstract partial class BTree<TKey, TStore>
                                 return OlcInsertResult.Restart;
                             }
                             var bufferRootId = ll.GetFirst(ref accessor).Value;
-                            args.ElementId = _storage.Append(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
+                            var appended = _storage.TryAppendReserved(bufferRootId, args.ValueForExistingKey, ref args.SiblingAccessor);
+                            if (appended < 0)
+                            {
+                                args.ReserveForBuffer = 1;   // #1190: the buffer is full and nothing is reserved; nothing was written
+                                llLatch.AbortWriteLock();
+                                return OlcInsertResult.BufferReservationShort;
+                            }
+                            args.ElementId = appended;
                             args.BufferRootId = bufferRootId;
                             llLatch.WriteUnlock();
                             return OlcInsertResult.Completed;
@@ -415,10 +534,15 @@ internal abstract partial class BTree<TKey, TStore>
         // --- General path: optimistic descent to leaf, non-full insert ---
         // followRightLink: false — inserts must not follow B-link because inserting into the right sibling bypasses the spill/split path that updates parent
         // separators. If the leaf was split concurrently, version validation will trigger a restart.
-        var (leafChunkId, leafVersion, _) = OptimisticDescendToLeaf(args.Key, ref accessor, false);
+        var (leafChunkId, leafVersion, keyIndexSeen) = OptimisticDescendToLeaf(args.Key, ref accessor, false);
         if (leafChunkId == 0)
         {
             return OlcInsertResult.Restart;
+        }
+
+        if (AllowMultiple && keyIndexSeen < 0)
+        {
+            EnsureBufferReserved(NewKeyBufferChunks, ref args);   // #1190: the descent saw a new key; its buffer is reserved before the latch
         }
 
         var leaf = new NodeWrapper(_storage, leafChunkId);
@@ -447,17 +571,26 @@ internal abstract partial class BTree<TKey, TStore>
             leafLatch.AbortWriteLock();
             return OlcInsertResult.Restart;
         }
-        if (leaf.GetIsFull(ref accessor))
+        // Re-search under lock (key positions may have shifted since optimistic read)
+        var keyIndex = leaf.Find(args.Key, args.KeyComparer, ref accessor);
+
+        // Only a NEW key needs room. Tested before the search, this sent every append to an existing key of a full leaf — the steady state of a
+        // low-cardinality multi-value index — down the pessimistic path, and since #1190 to a reservation it did not need. Nothing is written yet: abort, no
+        // version bump (it used WriteUnlock, restarting the leaf's readers for nothing).
+        if (keyIndex < 0 && leaf.GetIsFull(ref accessor))
         {
-            leafLatch.WriteUnlock();
+            leafLatch.AbortWriteLock();
             return OlcInsertResult.LeafFull;
         }
 
-        // Re-search under lock (key positions may have shifted since optimistic read)
-        var keyIndex = leaf.Find(args.Key, args.KeyComparer, ref accessor);
         if (keyIndex < 0)
         {
             keyIndex = ~keyIndex;
+            if (!BufferChunksReserved(NewKeyBufferChunks, ref args))
+            {
+                leafLatch.AbortWriteLock();
+                return OlcInsertResult.BufferReservationShort;
+            }
             var value = CreateInsertValue(ref args);
             leaf.Insert(keyIndex, new KeyValueItem(args.Key, value), ref accessor);
             leafLatch.WriteUnlock();
@@ -469,7 +602,14 @@ internal abstract partial class BTree<TKey, TStore>
         if (AllowMultiple)
         {
             var curItem = leaf.GetItem(keyIndex, ref accessor);
-            args.ElementId = _storage.Append(curItem.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
+            var appended = _storage.TryAppendReserved(curItem.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
+            if (appended < 0)
+            {
+                args.ReserveForBuffer = 1;   // #1190: the buffer is full and nothing is reserved; nothing was written
+                leafLatch.AbortWriteLock();
+                return OlcInsertResult.BufferReservationShort;
+            }
+            args.ElementId = appended;
             args.BufferRootId = curItem.Value;
             leafLatch.WriteUnlock();
             return OlcInsertResult.Completed;
@@ -548,7 +688,9 @@ internal abstract partial class BTree<TKey, TStore>
                         {
                             // Re-validate under lock: leaf may now be full, another writer inserted a larger key,
                             // or a concurrent split made this leaf no longer the rightmost (GetNext becomes valid).
-                            if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0)
+                            // #1190: short of the new key's buffer chunk, fall through — the general path reserves it before it latches.
+                            if (!rl.GetIsFull(ref accessor) && !rl.GetNext(ref accessor).IsValid && args.Compare(args.Key, rl.GetLast(ref accessor).Key) > 0
+                                && BufferChunksReserved(NewKeyBufferChunks, ref args))
                             {
                                 var value = CreateInsertValue(ref args);
                                 rl.PushLast(new KeyValueItem(args.Key, value), ref accessor);
@@ -573,9 +715,11 @@ internal abstract partial class BTree<TKey, TStore>
                         else
                         {
                             var lastEntry = rl.GetLast(ref accessor);
-                            if (args.Compare(args.Key, lastEntry.Key) == 0)
+                            int appended;
+                            if (args.Compare(args.Key, lastEntry.Key) == 0
+                                && (appended = _storage.TryAppendReserved(lastEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor)) >= 0)
                             {
-                                args.ElementId = _storage.Append(lastEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
+                                args.ElementId = appended;
                                 args.BufferRootId = lastEntry.Value;
                                 rlLatch.WriteUnlock();
                                 return;
@@ -621,7 +765,8 @@ internal abstract partial class BTree<TKey, TStore>
                             // The other three cached-pointer fast paths already guard this: the append path re-checks `!rl.GetNext().IsValid`, and both Remove
                             // fast paths bail on a valid Previous/Next. The Remove BEGIN path's comment even names this exact hazard. Only this one was left.
                             if (!ll.GetIsFull(ref accessor) && !ll.GetPrevious(ref accessor).IsValid
-                                                            && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0)
+                                                            && args.Compare(args.Key, ll.GetFirst(ref accessor).Key) < 0
+                                                            && BufferChunksReserved(NewKeyBufferChunks, ref args))   // #1190, as the append path
                             {
                                 var value = CreateInsertValue(ref args);
                                 ll.PushFirst(new KeyValueItem(args.Key, value), ref accessor);
@@ -644,9 +789,11 @@ internal abstract partial class BTree<TKey, TStore>
                         else
                         {
                             var firstEntry = ll.GetFirst(ref accessor);
-                            if (args.Compare(args.Key, firstEntry.Key) == 0)
+                            int appended;
+                            if (args.Compare(args.Key, firstEntry.Key) == 0
+                                && (appended = _storage.TryAppendReserved(firstEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor)) >= 0)
                             {
-                                args.ElementId = _storage.Append(firstEntry.Value, args.ValueForExistingKey, ref args.SiblingAccessor);
+                                args.ElementId = appended;
                                 args.BufferRootId = firstEntry.Value;
                                 llLatch.WriteUnlock();
                                 return;
@@ -802,13 +949,13 @@ internal abstract partial class BTree<TKey, TStore>
         {
             var leafFull = node.GetIsFull(ref accessor);
             var assumeSplit = args.ReserveForSplit || (!leafFull && node.GetContentionHint(ref accessor) >= ContentionSplitThreshold);
-            if (leafFull || assumeSplit)
+            var predicted = leafFull || assumeSplit ? SplitNodesFor(node, assumeSplit, ref relatives, ref ctx, ref accessor, ref sibAccessor) : 0;
+            // #1190: and the value buffer's chunk. Not read here — the leaf's items are unlatched, so a buffer id read from them could be garbage — but
+            // assumed: a multi-value insert reserves one (a new key's root, or an append into a full buffer), freed at the end if the buffer had room.
+            predicted += AllowMultiple ? Math.Max(1, args.ReserveForBuffer) : 0;
+            if (reservation.Available < predicted)
             {
-                var predicted = SplitNodesFor(node, assumeSplit, ref relatives, ref ctx, ref accessor, ref sibAccessor);
-                if (reservation.Available < predicted)
-                {
-                    reservation.Fill(predicted, accessor.ChangeSet, ref accessor);
-                }
+                reservation.Fill(predicted, accessor.ChangeSet, ref accessor);
             }
         }
 
@@ -1104,7 +1251,11 @@ internal abstract partial class BTree<TKey, TStore>
         // IXW-07: nothing below may allocate with these latches held. Every node the split can touch is latched now, so this count is exact; short of it
         // — the leaf or an ancestor filled after the descent looked — release everything and let the next pass reserve first. A contention split is
         // optional: its item is in, so it just completes.
-        if (reservation.Available < SplitNodesFor(node, itemAlreadyInserted, ref relatives, ref ctx, ref accessor, ref sibAccessor))
+        // #1190: the value buffer's chunk comes from the same reservation (InsertLeaf: a new key's root, or an append into a full buffer). A contention split
+        // has its item in already.
+        var splitNeed = SplitNodesFor(node, itemAlreadyInserted, ref relatives, ref ctx, ref accessor, ref sibAccessor);
+        var bufferNeed = itemAlreadyInserted ? 0 : BufferChunksForLeafInsert(node, ref args, ref accessor);
+        if (reservation.Available < splitNeed + bufferNeed)
         {
             for (var j = 0; j < ctx.Depth; j++)
             {
@@ -1119,7 +1270,8 @@ internal abstract partial class BTree<TKey, TStore>
                 leafPrev.GetLatch(ref sibAccessor).AbortWriteLock();
             }
 
-            args.ReserveForSplit = true;
+            args.ReserveForSplit |= reservation.Available < splitNeed;
+            args.ReserveForBuffer = bufferNeed;
             if (itemAlreadyInserted)
             {
                 node.GetLatch(ref accessor).WriteUnlock();

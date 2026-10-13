@@ -116,7 +116,7 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     {
         // Allocate and initialize the first chunk of the Buffer
         var segment = accessor.Segment;
-        var chunkId = segment.AllocateChunk(false, accessor.ChangeSet);
+        var chunkId = ChunkReservation<TStore>.AllocateForBuffer(segment, accessor.ChangeSet, ref accessor);   // an index writer's reserved chunk (#1190)
         var addr = accessor.GetChunkAddress(chunkId, true);
         ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(addr);
         rh.Lock.Reset();
@@ -245,6 +245,28 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
     //
     // Working in bytes costs nothing: every operation below is a memcpy at ElementSize stride, which the base already knows, and the elements are unmanaged
     // by constraint. The generic subclass keeps typed forwarders for callers that do have T.
+
+    /// <summary>
+    /// The segment chunks <c>AddElement</c> would allocate for one more element: 1 when the append cursor's chunk is full and the buffer's free list is
+    /// empty, else 0 — the condition of its allocating branch. An index writer reads it under its leaf latch, which every appender of the buffer holds
+    /// (IXW-06),
+    /// and reserves that many before it writes (#1190, IXW-07). A concurrent reader can only lower it: its walk parks empty chunks on the free list and never
+    /// moves the append cursor (IXW-08).
+    /// </summary>
+    internal int ChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> accessor)
+    {
+        ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false);
+        var curChunkId = rh.FirstStoredChunkId;
+        var firstFreeChunkId = rh.FirstFreeChunkId;
+        if ((uint)curChunkId >= (uint)accessor.Segment.ChunkCapacity)
+        {
+            return 1;   // AddElement throws on this header; reserving is harmless
+        }
+
+        var capacity = curChunkId == bufferId ? ElementCountRootChunk : ElementCountPerChunk;
+        var count = accessor.GetChunk<VariableSizedBufferChunkHeader>(curChunkId, false).ElementCount;
+        return count == capacity && firstFreeChunkId == 0 ? 1 : 0;
+    }
 
     /// <summary>Total number of elements currently stored in <paramref name="bufferId"/>; <c>0</c> for the null buffer.</summary>
     internal int GetElementCount(int bufferId, ref ChunkAccessor<TStore> accessor)
@@ -584,7 +606,15 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     {
     }
 
-    unsafe public int AddElement(int bufferId, T value, ref ChunkAccessor<TStore> accessor)
+    unsafe public int AddElement(int bufferId, T value, ref ChunkAccessor<TStore> accessor) => AddElementCore(bufferId, value, ref accessor, false);
+
+    /// <summary>
+    /// <see cref="AddElement"/> for an index writer under its leaf latch (#1190, IXW-07): when the element needs a new chunk and the calling thread's
+    /// reservation holds none, returns -1 having written nothing, and the writer releases its latch and reserves before it latches again.
+    /// </summary>
+    public int TryAddElementReserved(int bufferId, T value, ref ChunkAccessor<TStore> accessor) => AddElementCore(bufferId, value, ref accessor, true);
+
+    private unsafe int AddElementCore(int bufferId, T value, ref ChunkAccessor<TStore> accessor, bool reservedOnly)
     {
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
@@ -647,7 +677,14 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
                 }
                 else
                 {
-                    curChunkId = accessor.Segment.AllocateChunk(false, accessor.ChangeSet);
+                    // An index writer's reserved chunk (#1190): it holds its leaf's latch here. ChunksNeededToAppend is this branch's condition. Refused
+                    // before the first write when the writer has none reserved: only locals have been touched.
+                    if (reservedOnly && !ChunkReservation<TStore>.HasReserved(accessor.Segment, 1))
+                    {
+                        return -1;
+                    }
+
+                    curChunkId = ChunkReservation<TStore>.AllocateForBuffer(accessor.Segment, accessor.ChangeSet, ref accessor);
                     nextFreeChunkId = 0;
                 }
 
