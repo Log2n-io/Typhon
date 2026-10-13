@@ -332,25 +332,91 @@ class BTreeChurnRaceTests
         Assert.That(errors, Is.Empty, $"{errors.Count} errors after {nextValue} inserts / {removed.Count} removes; first: "
             + string.Join(" | ", new List<string>(errors).GetRange(0, Math.Min(5, errors.Count))));
 
-        // Census: every inserted-and-not-removed value is present exactly once under its key; nothing removed is still there.
+        // Census: every inserted-and-not-removed value is present exactly once under its key; nothing removed is still there. Inside an epoch scope, as
+        // every reader of the tree: outside one, Debug builds fail CreateScanAccessor's assert — the Release gate does not see it.
         var seen = new HashSet<int>();
-        using (var en = tree.EnumerateRangeMultiple(double.MinValue, double.MaxValue))
+        var censusScope = epochManager.EnterScope();
+        try
         {
-            while (en.MoveNextKey())
+            using (var en = tree.EnumerateRangeMultiple(double.MinValue, double.MaxValue))
             {
-                do
+                while (en.MoveNextKey())
                 {
-                    var values = en.CurrentValues;
-                    for (var i = 0; i < values.Length; i++)
+                    do
                     {
-                        Assert.That(seen.Add(values[i]), Is.True, $"value {values[i]} listed twice");
-                        Assert.That(removed.ContainsKey(values[i]), Is.False, $"removed value {values[i]} still listed");
+                        var values = en.CurrentValues;
+                        for (var i = 0; i < values.Length; i++)
+                        {
+                            Assert.That(seen.Add(values[i]), Is.True, $"value {values[i]} listed twice");
+                            Assert.That(removed.ContainsKey(values[i]), Is.False, $"removed value {values[i]} still listed");
+                        }
                     }
+                    while (en.NextChunk());
                 }
-                while (en.NextChunk());
             }
+        }
+        finally
+        {
+            epochManager.ExitScope(censusScope);
         }
 
         Assert.That(seen.Count, Is.EqualTo(inserted.Count - removed.Count), "live values in the tree");
+    }
+
+    /// <summary>
+    /// IXS-09: a range cursor's position is the key's index in the leaf it then reads, taken under that read's version. A removal below the key landing
+    /// between the descent and the read shifts the key left, and the descent's own index then names the entry above it — past the bound, so a single-key
+    /// read answered empty for a key the tree holds (#1235).
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXS-09")]
+    public unsafe void ARemovalBetweenTheSeekAndTheLeafRead_LosesNoKey()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var tree = new IntSingleBTree<PersistentStore>(segment);
+        var scope = epochManager.EnterScope();
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            for (var k = 0; k < 12; k++)
+            {
+                tree.Add(k, 1_000 + k, ref accessor);
+            }
+
+            var fired = false;
+            BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = () =>
+            {
+                if (!fired)
+                {
+                    fired = true;
+                    tree.Remove(9, out _, ref accessor);
+                }
+            };
+            try
+            {
+                var found = new List<int>();
+                using (var e = tree.EnumerateRange(10, 10))
+                {
+                    while (e.MoveNext())
+                    {
+                        found.Add(e.Current.Key);
+                    }
+                }
+
+                Assert.That(fired, Is.True, "premise: the removal ran between the descent and the leaf read");
+                Assert.That(found, Is.EqualTo(new[] { 10 }), "a read of key 10 after a removal below it shifted the leaf");
+            }
+            finally
+            {
+                BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = null;
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+            epochManager.ExitScope(scope);
+        }
     }
 }

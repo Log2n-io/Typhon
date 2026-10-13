@@ -16,8 +16,10 @@ internal abstract partial class BTree<TKey, TStore>
     /// <see cref="EnumerateRangeDescending"/>.
     /// </summary>
     /// <remarks>
-    /// <para>Uses per-leaf OLC validation: reads a leaf's version before reading its entries, then validates after. If the leaf was concurrently modified,
-    /// the enumerator re-reads that leaf from the beginning/end (not the whole tree).</para>
+    /// <para>OLC per row (IXS-09): the cursor's position and every row it hands out are read under ONE validated version of the leaf they come from. The
+    /// seek takes the leaf's version, then finds the key in it, then validates; a row is validated before it is emitted. A version change re-descends from
+    /// the last key emitted. A position computed under an older version — the descent's own index, taken before a split, a merge or a borrow moved the
+    /// key — answered a single-key read empty, or with another key's entries (#1235).</para>
     /// <para>The caller must be inside an epoch scope (e.g., via a Transaction).</para>
     /// <para>Supports <c>foreach</c> via duck-typing (GetEnumerator/MoveNext/Current/Dispose).</para>
     /// </remarks>
@@ -26,12 +28,17 @@ internal abstract partial class BTree<TKey, TStore>
         /// <summary>How long to spin on a write-locked leaf before treating it as "go around again" rather than "wait".</summary>
         private const int LockSpinLimit = 64;
 
+        /// <summary>Test seam: runs in <see cref="Position"/> between the descent and the read of the leaf it found. Null in production.</summary>
+        [ThreadStatic]
+        internal static Action SeekProbe;
+
         private readonly BTree<TKey, TStore> _tree;
         private ChunkAccessor<TStore> _accessor;
         private NodeWrapper _currentNode;
         private int _currentIndex;
         private int _nodeItemCount;
         private int _leafVersion;
+        private KeyValueItem _current;   // the row last emitted, read under a validated version — Current never re-reads the leaf
         private bool _disposed;
         private readonly bool _countedLive;   // counted in EntityAccessor.LiveIndexCursors: holds a node across calls, so no per-operation epoch refresh (#1199)
         private readonly IComparer<TKey> _comparer;
@@ -73,11 +80,18 @@ internal abstract partial class BTree<TKey, TStore>
 
             try
             {
-                if (!_currentNode.IsValid || !TryReadLeafState())
+                // The head leaf write-locked past the spin limit, or replaced: read the head again rather than answer for an empty leaf.
+                for (var attempt = 0; _currentNode.IsValid && !TryReadLeafState(); attempt++)
+                {
+                    CountRestartOrThrow(attempt, default, "the first leaf");
+                    _currentNode = tree._linkList;
+                }
+
+                if (!_currentNode.IsValid)
                 {
                     _nodeItemCount = 0;
                     _leafVersion = 0;
-                    _finished = !_currentNode.IsValid;
+                    _finished = true;
                 }
             }
             catch
@@ -125,35 +139,10 @@ internal abstract partial class BTree<TKey, TStore>
             // A fault while positioning never reaches the caller's Dispose: the window's pins are slot references, released here or never (EP-02).
             try
             {
-                // Seek to the leaf containing the start key (pessimistic descent)
-                _currentNode = tree.FindLeaf(_seekKey, out int index, ref _accessor);
-                if (!_currentNode.IsValid)
+                if (!Position(_seekKey, false))
                 {
-                    _finished = true;
+                    _finished = true;   // the tree is empty
                     return;
-                }
-
-                if (reverse)
-                {
-                    InitReverse(index);
-                }
-                else
-                {
-                    InitForward(index);
-                }
-
-                if (_currentNode.IsValid)
-                {
-                    if (!TryReadLeafState())
-                    {
-                        _finished = true;
-                    }
-
-                    // Fix sentinel: if reverse moved to previous leaf, start from its last item
-                    if (_reverse && _currentIndex == -2)
-                    {
-                        _currentIndex = _nodeItemCount;
-                    }
                 }
             }
             catch
@@ -167,57 +156,77 @@ internal abstract partial class BTree<TKey, TStore>
             EntityAccessor.LiveIndexCursors++;
         }
 
-        /// <summary>Positions the cursor for forward iteration starting at the leaf containing minKey.</summary>
-        private void InitForward(int index)
+        /// <summary>
+        /// Positions the cursor at <paramref name="key"/> in the leaf the tree routes it to NOW, under one validated version of that leaf: the leaf's version,
+        /// then the key's index in it, then the validation. <paramref name="after"/> parks exactly on the key, so the next step leaves it behind (a resume);
+        /// otherwise the next step lands on it (a seek). Returns false only when the tree is empty.
+        /// </summary>
+        /// <remarks>
+        /// The descent's own index is not used: it was taken under the version the descent saw, and a split, a merge or a borrow landing before this reads
+        /// the leaf moves the key — the cursor then stood at a stale position and answered past the key, or before it (#1235). A leaf that cannot be read —
+        /// replaced, or write-locked past the spin limit — sends the cursor down again; it never ends the scan, which answered empty for a key the tree holds.
+        /// </remarks>
+        private bool Position(TKey key, bool after)
         {
-            if (index >= 0)
+            for (var attempt = 0; ; attempt++)
             {
-                // Exact match — position one before so MoveNext() lands on it
-                _currentIndex = index - 1;
-            }
-            else
-            {
-                int insertionPoint = ~index;
-                int count = _currentNode.GetCount(ref _accessor);
-                if (insertionPoint >= count)
+                _currentNode = _tree.FindLeaf(key, out _, ref _accessor);
+                if (!_currentNode.IsValid)
                 {
-                    // All keys in this leaf < minKey — advance to next leaf
-                    _currentNode = _currentNode.GetNext(ref _accessor);
-                    // _currentIndex stays -1; MoveNext will increment to 0
+                    return false;
                 }
-                else
+
+                SeekProbe?.Invoke();
+                if (TryReadLeafState())
                 {
-                    // First key >= minKey is at insertionPoint
-                    _currentIndex = insertionPoint - 1;
+                    var index = _currentNode.Find(key, _comparer, ref _accessor);
+                    if (_currentNode.GetLatch(ref _accessor).ValidateVersion(_leafVersion))
+                    {
+                        ParkAt(index, after);
+                        return true;
+                    }
                 }
+
+                CountRestartOrThrow(attempt, key, "the leaf its key routes to");
             }
         }
 
-        /// <summary>Positions the cursor for reverse iteration starting at the leaf containing maxKey.</summary>
-        private void InitReverse(int index)
+        /// <summary>
+        /// The cursor's index from <c>Find</c>'s answer in the current leaf. A key past the leaf's last entry (or before its first, in reverse) parks at the
+        /// leaf's edge: the next step leaves the leaf through the validated link-follow in <see cref="MoveNext"/>, never through an unvalidated neighbour read.
+        /// </summary>
+        private void ParkAt(int index, bool after)
         {
-            if (index >= 0)
+            var insertionPoint = index >= 0 ? index : ~index;
+            if (_reverse)
             {
-                // Exact match — position one after so MoveNext() (which decrements) lands on it
-                _currentIndex = index + 1;
+                // Reverse steps down: the next step lands on the key itself (seek), or below it (resume, or a key the leaf does not hold).
+                _currentIndex = index >= 0 && !after ? index + 1 : insertionPoint;
             }
             else
             {
-                // ~index is the insertion point (first key > maxKey)
-                int startAt = ~index - 1; // last key <= maxKey
-                if (startAt < 0)
-                {
-                    // All keys in this leaf > maxKey — go to previous leaf
-                    _currentNode = _currentNode.GetPrevious(ref _accessor);
-                    // Sentinel -2: ReadLeafState will set _nodeItemCount, then constructor fixes to _nodeItemCount
-                    _currentIndex = -2;
-                }
-                else
-                {
-                    // Position one after so MoveNext() lands on startAt
-                    _currentIndex = startAt + 1;
-                }
+                // Forward steps up: the next step lands on the key or the first entry above it (seek), or above it (resume).
+                _currentIndex = index >= 0 && after ? index : insertionPoint - 1;
             }
+        }
+
+        /// <summary>A re-descent counted; past the tree's restart budget, a liveness defect named by key rather than an endless loop (IXW-01).</summary>
+        private void CountRestartOrThrow(int attempt, TKey key, string what)
+        {
+            if (TelemetryConfig.DataIndexBTreeRangeScanActive && _span.RestartCount < byte.MaxValue)
+            {
+                _span.RestartCount++;
+            }
+
+            Interlocked.Increment(ref _tree._pessimisticRestarts);
+            if (attempt >= MaxPessimisticRestarts)
+            {
+                ThrowHelper.ThrowInvalidOp(
+                    $"B+Tree range scan from key {key} could not read {what} under one version in {MaxPessimisticRestarts} attempts: it is modified, replaced or "
+                    + "locked on every pass. This is a liveness defect in the tree, not contention (IXW-01).");
+            }
+
+            Thread.SpinWait(1 << Math.Min(attempt, 6));
         }
 
         /// <summary>
@@ -260,8 +269,8 @@ internal abstract partial class BTree<TKey, TStore>
         /// <summary>Returns this enumerator (required for foreach pattern).</summary>
         public RangeEnumerator GetEnumerator() => this;
 
-        /// <summary>Gets the current key-value item.</summary>
-        public KeyValueItem Current => _currentNode.GetItem(_currentIndex, ref _accessor);
+        /// <summary>Gets the current key-value item: the row <see cref="MoveNext"/> validated, not a re-read of the leaf.</summary>
+        public KeyValueItem Current => _current;
 
         /// <summary>Advances to the next entry in iteration order, traversing leaf nodes as needed.</summary>
         /// <remarks>
@@ -297,8 +306,18 @@ internal abstract partial class BTree<TKey, TStore>
                         // inserting or removing an entry BEHIND the cursor inside the leaf it is standing on. No version check runs on this path — validation
                         // happens when the cursor steps off a leaf — so a shift of the entry array silently re-presented an entry that had already been
                         // emitted. One comparison per row, next to the bound comparison already here.
-                        if (_hasLastKey && _comparer.Compare(item.Key, _lastKey) >= 0)
+                        if (_hasLastKey ? _comparer.Compare(item.Key, _lastKey) >= 0 : _comparer.Compare(item.Key, _seekKey) > 0)
                         {
+                            continue;
+                        }
+
+                        if (!RowStillValid())
+                        {
+                            if (!RestartAfterLastKey())
+                            {
+                                return false;
+                            }
+
                             continue;
                         }
 
@@ -308,7 +327,7 @@ internal abstract partial class BTree<TKey, TStore>
                             return false;
                         }
 
-                        return Emit(item.Key);
+                        return Emit(item);
                     }
                 }
                 else
@@ -318,8 +337,18 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         var item = _currentNode.GetItem(_currentIndex, ref _accessor);
 
-                        if (_hasLastKey && _comparer.Compare(item.Key, _lastKey) <= 0)
+                        if (_hasLastKey ? _comparer.Compare(item.Key, _lastKey) <= 0 : _bounded && _comparer.Compare(item.Key, _seekKey) < 0)
                         {
+                            continue;
+                        }
+
+                        if (!RowStillValid())
+                        {
+                            if (!RestartAfterLastKey())
+                            {
+                                return false;
+                            }
+
                             continue;
                         }
 
@@ -329,7 +358,7 @@ internal abstract partial class BTree<TKey, TStore>
                             return false;
                         }
 
-                        return Emit(item.Key);
+                        return Emit(item);
                     }
                 }
 
@@ -370,10 +399,17 @@ internal abstract partial class BTree<TKey, TStore>
             }
         }
 
-        /// <summary>Records the key being handed out, so an invalidated leaf can be resumed from it, and counts the row.</summary>
-        private bool Emit(TKey key)
+        /// <summary>
+        /// Whether the leaf still holds the version the row just read was read under. A row read while a writer shifted the leaf's entries can pair one
+        /// entry's key with another's value, or be an entry the shift has moved away; validated, it is one the leaf held whole at that version.
+        /// </summary>
+        private bool RowStillValid() => _currentNode.GetLatch(ref _accessor).ValidateVersion(_leafVersion);
+
+        /// <summary>Records the row being handed out, so an invalidated leaf can be resumed from its key, and counts it.</summary>
+        private bool Emit(KeyValueItem item)
         {
-            _lastKey = key;
+            _current = item;
+            _lastKey = item.Key;
             _hasLastKey = true;
 
             if (TelemetryConfig.DataIndexBTreeRangeScanActive)
@@ -395,38 +431,13 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             // Asking the tree where the key lives NOW is what makes this correct under a split, a merge or a reclaim alike — the cursor's own leaf may no
-            // longer answer for it, or may no longer exist.
-            var resume = _hasLastKey ? _lastKey : _seekKey;
-            _currentNode = _tree.FindLeaf(resume, out var index, ref _accessor);
-            if (!_currentNode.IsValid || !TryReadLeafState())
+            // longer answer for it, or may no longer exist. Nothing emitted yet: resume AT the seek key; otherwise strictly past the last key emitted.
+            if (!Position(_hasLastKey ? _lastKey : _seekKey, _hasLastKey))
             {
                 _finished = true;
                 return false;
             }
 
-            if (!_hasLastKey)
-            {
-                // Nothing was emitted yet, so resume AT the seek key rather than after it.
-                if (_reverse)
-                {
-                    InitReverse(index);
-                    if (_currentIndex == -2)
-                    {
-                        _currentIndex = _nodeItemCount;
-                    }
-                }
-                else
-                {
-                    InitForward(index);
-                }
-
-                return _currentNode.IsValid;
-            }
-
-            // MoveNext steps off _currentIndex, so park exactly ON the resume key (or on the entry adjacent to where it would be inserted, if a writer has
-            // since removed it).
-            var insertionPoint = index >= 0 ? index : ~index;
-            _currentIndex = index >= 0 ? index : (_reverse ? insertionPoint : insertionPoint - 1);
             return true;
         }
 

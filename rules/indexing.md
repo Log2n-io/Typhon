@@ -275,8 +275,8 @@ keys.
   never restating this per write path. The loop existed twice verbatim, and three of the six defects in PR #737 were a guard one
         copy had and its twin had lost
   scope: BTree.cs (`OptimisticDescendToLeaf`, `DescendRecordingPath`)
-  gap `FindLeaf` is a FOURTH descent and performs NO version validation at all. Reached from the range-scan cursors,
-      `RangeEnumerator`, `MovePessimistic` and `RemoveCorePessimistic`. Not covered by this rule and not yet assessed
+  note `FindLeaf`, once a fourth descent with no version validation, delegates to `OptimisticDescendToLeaf` (#887) and so
+       holds this rule. What its callers then read of the leaf is theirs to validate: the range cursor's half is IXS-09
   rationale: this is the OLC paper's `readUnlockOrRestart`, and the descent shipped without it. With only the first check, a
              modification completing between it and the child's `ReadVersion()` is invisible to BOTH neighbours: the parent test
              has already passed, and the child version is sampled after the modification, so the child's own later validation
@@ -315,6 +315,28 @@ keys.
             ZoneMapUnseenClusterTests.AfterAReopen_UpdatingOneIndexedField_KeepsEveryClusterMateFindable (engine, Path B forced),
             ZoneMapUnseenClusterRecoveryTests.AfterACrashRecovery_UpdatingOneIndexedField_KeepsEveryClusterMateFindable [VerifiesRule];
             mutant ZoneMapUnseenClusterTests.Widen_OnAnUnseenClusterLeftUnmarked_PrunesTheValuesItHolds [RuleMutant]
+
+### IXS-09: A range cursor reads its position and every row it emits under one validated version of the leaf `[silent]`
+  invariant the cursor's position is the key's index in the leaf it reads, taken after the leaf's version and validated against it
+            (`RangeEnumerator.Position`): the version, then `Find`, then the validation, else down again. The descent's own index
+            was taken under the version the descent saw; a split, a merge or a borrow landing before the read moves the key, and
+            the cursor stood at a stale position
+  invariant a leaf the cursor cannot read — replaced (obsolete), or write-locked past its spin limit — sends it down again from the
+            key, bounded by the tree's restart budget (IXW-01's shape); it never ends the scan, which then answered empty for a key
+            the tree holds
+  invariant a row is emitted only after the leaf's version is validated again (`RangeEnumerator.RowStillValid`), and `Current` is
+            that row, never a re-read: a row read while a writer shifts the leaf's entries is otherwise a key and a value from two
+            moments; before the first row, keys outside the seek bound are skipped
+  rationale: a single-key read of a multi-value index (the market's owner index, one key per player) answered empty, or with entries
+             of another key, while other threads split leaves, and the same read a moment later found every entry (#1235). The
+             in-storm owner auditor failed 5 of 9 market runs on it
+  scope: BTree.RangeEnumerator.Position, BTree.RangeEnumerator.ParkAt, BTree.RangeEnumerator.MoveNext, BTree.RangeEnumerator.RowStillValid,
+    BTree.RangeEnumerator.RestartAfterLastKey
+  on_violation: an index range read — `Transaction.EnumerateIndex`, the selective query path — misses a key's entries, or returns
+    another key's, with the B+Tree itself intact; the same read again finds them
+  verified: BTreeChurnRaceTests.ARemovalBetweenTheSeekAndTheLeafRead_LosesNoKey (the stale position, deterministic),
+            OwnerIndexChurnTests.AnOwnerIndex_ChurnedOnSeveralThreads_HoldsExactlyEachOwnersItems (the unreadable leaf, under churn);
+            the row validation has no test that kills its removal — it is the OLC read discipline, not a measured defect
 
 ---
 
