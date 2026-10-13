@@ -13,6 +13,12 @@ internal sealed class DurabilityLog : IDurabilityLog
 {
     private readonly WalManager _wal;
 
+    // LsnsAppendedBy, one counter per WalSource. One Interlocked.Add per published batch, not per record.
+    private readonly long[] _lsnsBySource = new long[4];
+
+    /// <inheritdoc/>
+    public long LsnsAppendedBy(WalSource source) => Interlocked.Read(ref _lsnsBySource[(int)source]);
+
     public DurabilityLog(WalManager wal)
     {
         ArgumentNullException.ThrowIfNull(wal);
@@ -58,7 +64,7 @@ internal sealed class DurabilityLog : IDurabilityLog
     public long LastPublishedLsn => _wal.LastPublishedLsn;
 
     /// <summary>
-    /// Appends a run of columnar tick-fence blocks (#559). Unlike <see cref="Append(ref CommitBatchBuilder, ref WaitContext)"/>
+    /// Appends a run of columnar tick-fence blocks (#559). Unlike <see cref="Append(ref CommitBatchBuilder, ref WaitContext, WalSource)"/>
     /// this path never stages payload: the size is a pure function of the descriptors, so it measures, claims, and has the codec
     /// copy each cluster's SoA columns straight into the claim. Returns the highest LSN published, or 0 for an empty run.
     /// </summary>
@@ -101,6 +107,7 @@ internal sealed class DurabilityLog : IDurabilityLog
             }
 
             _wal.CommitBuffer.Publish(ref claim);
+            Interlocked.Add(ref _lsnsBySource[(int)WalSource.ClusterFence], blocks.Length);
             return claim.FirstLSN + blocks.Length - 1;
         }
         catch
@@ -110,10 +117,10 @@ internal sealed class DurabilityLog : IDurabilityLog
         }
     }
 
-    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx)
+    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, WalSource source = WalSource.TableFence)
     {
         long unused = 0;
-        return Append(ref batch, ref ctx, ref unused, null, -1);
+        return Append(ref batch, ref ctx, ref unused, null, -1, source);
     }
 
     /// <summary>
@@ -122,7 +129,10 @@ internal sealed class DurabilityLog : IDurabilityLog
     /// (<see cref="CommitBatchBuilder.CommitStamp"/>). Nothing between that and the frame's publish can fail. Without, the batch carries no stamp (fence and
     /// bulk-load batches, whose effects are never staged).
     /// </summary>
-    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot)
+    public long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot) =>
+        Append(ref batch, ref ctx, ref inFlightFloor, cards, cardSlot, WalSource.Transaction);
+
+    private long Append(ref CommitBatchBuilder batch, ref WaitContext ctx, ref long inFlightFloor, CommitCardTable cards, int cardSlot, WalSource source)
     {
         if (batch.IsEmpty)
         {
@@ -163,6 +173,7 @@ internal sealed class DurabilityLog : IDurabilityLog
             }
 
             _wal.CommitBuffer.Publish(ref claim);
+            Interlocked.Add(ref _lsnsBySource[(int)source], recordCount);
             return claim.FirstLSN + recordCount - 1;
         }
         catch

@@ -159,8 +159,9 @@ public sealed class CausalityLoopTests
             Assert.That(writes, Is.GreaterThan(0), "precondition: something was looted or rewarded");
             Assert.That(_sim.WalAdvances, Is.GreaterThan(0), "no tick advanced the durable LSN, so nothing was made durable at all");
             Assert.That(_sim.WalAdvances, Is.LessThanOrEqualTo(writes),
-                "the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing");
-            Assert.That(_sim.WalLsnGained, Is.EqualTo(_sim.WalAdvances), "one WAL record per advancing tick: more would mean an unexpected second writer");
+                $"the durable LSN moved on more ticks than wrote Inventory, so something other than loot and rewards is writing — {_sim.WalWriterBreakdown}");
+            Assert.That(_sim.WalLsnGained, Is.EqualTo(_sim.WalAdvances),
+                $"one WAL record per advancing tick: more would mean an unexpected second writer — {_sim.WalWriterBreakdown}");
             Assert.That(Causality.TotalCredits(_sim), Is.GreaterThan(_creditsBefore), "credits did not grow, so nothing was actually written");
         });
     }
