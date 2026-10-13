@@ -89,6 +89,18 @@ internal abstract partial class BTree<TKey, TStore>
         public abstract int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor);
 
         /// <summary>
+        /// Chunks one more <see cref="Append"/> to <paramref name="bufferId"/> would allocate (0 or 1); 0 for a unique index, which has no buffers. Read
+        /// under the
+        /// leaf's latch and reserved before the append (#1190, IXW-07).
+        /// </summary>
+        public virtual int BufferChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => 0;
+
+        /// <summary>
+        /// <see cref="Append"/> under the leaf latch (#1190): -1, with nothing written, when the append needs a chunk the calling thread has not reserved.
+        /// </summary>
+        public virtual int TryAppendReserved(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor) => Append(bufferId, value, ref bufferAccessor);
+
+        /// <summary>
         /// Replace one element's value inside an AllowMultiple key's buffer, in place. Returns <c>false</c> for a unique index, which has no buffers.
         /// </summary>
         /// <remarks>
