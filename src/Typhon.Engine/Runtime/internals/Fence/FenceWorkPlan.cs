@@ -444,7 +444,8 @@ internal sealed class FenceWorkPlan
             // The DRAIN PREFIX, not the whole queue — the two are different quantities since #872 step 10 and slicing the wrong one desynchronises Migrate
             // from Finalize (CR-01).
             //
-            // Finalize is skipped for an archetype whose Prep returned false (FenceBranchPath == 0, see EmitArchetypeFinalizeItems), while this loop gated
+            // Finalize is skipped for an archetype whose Prep returned false (FenceBranchPath == 0, see EmitArchetypeFinalizeItems — unless drains are
+            // pending, when only its head runs, to reclaim them: #582), while this loop gated
             // on PendingMigrationCount, which survives across ticks. An archetype that queued drift requests on one tick and then went quiet — its
             // clusters drained, or it stopped being spatial — therefore had its whole tail EXECUTED here with no Finalize to compact it away, so the same
             // requests re-executed on every subsequent tick.
@@ -640,8 +641,9 @@ internal sealed class FenceWorkPlan
                 continue;
             }
 
-            // Skip archetypes whose Prep returned false (FenceBranchPath stayed 0).
-            if (state.FenceBranchPath == 0)
+            // Skip archetypes whose Prep returned false (FenceBranchPath stayed 0) — unless releases emptied clusters since the last fence: those are reclaimed
+            // in the head on every fence (#582, CLUSTERWALK-03), and a destroy-only tick or a pure-Transient archetype is branch 0.
+            if (state.FenceBranchPath == 0 && !state.HasPendingClusterFinalizations)
             {
                 continue;
             }

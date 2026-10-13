@@ -26,25 +26,48 @@ partial class ClusterWalkUnit : Archetype<ClusterWalkUnit>
 }
 
 /// <summary>
-/// Issue #582 face 1 — a destroy that drains a cluster removes it from <c>ActiveClusterIds</c> inside <c>Commit()</c>, by swap-with-last, with no
-/// protocol against a walker holding the list and no lock against another remover (CLUSTERWALK-01).
+/// Issue #582 face 1 — a destroy that drained a cluster used to remove it from <c>ActiveClusterIds</c> inside <c>Commit()</c>, by swap-with-last, under a
+/// walker holding the list. Drained clusters are now reclaimed by the tick fence alone (CLUSTERWALK-01, CLUSTERWALK-03).
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 class ClusterWalkDestroyTests : TestBase<ClusterWalkDestroyTests>
 {
+    private const string WalkMarker = "CLUSTERWALK-01";
+
     /// <summary>
     /// The first chunk of a parallel QuerySystem empties the first cluster of the second chunk's range and commits — through a side transaction on the
     /// accessor path, through the chunk's own transaction on the per-chunk Transaction path. One worker runs the chunks in order, so that commit lands
-    /// between Prepare (which captured the list) and the second chunk's walk: the interleaving a second worker produces by luck. The swap-with-last puts
-    /// the list's tail into the hole and leaves the old copy where it was, so the second chunk, walking the range Prepare gave it with the documented
-    /// <c>GetClusterEnumerator(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)</c> idiom, meets the tail cluster twice.
+    /// between Prepare (which captured the list) and the second chunk's walk: the interleaving a second worker produces by luck. The drained cluster must
+    /// stay listed until the fence, so the walk, using the documented <c>GetClusterEnumerator(ctx.ClusterIds, ctx.StartClusterIndex,
+    /// ctx.EndClusterIndex)</c> idiom, meets every live cluster exactly once and skips the empty one. Inline, the swap-with-last showed it the list's tail
+    /// twice.
     /// </summary>
-    /// <remarks>Quarantined against #582 face 1: red until a drained cluster's removal is deferred to the fence. Acceptance criterion for that fix.</remarks>
     [TestCase(false)]
     [TestCase(true)]
-    [Category("Quarantine")]
+    [VerifiesRule("CLUSTERWALK-01")]
+    [VerifiesRule("CLUSTERWALK-03")]
     public void ADestroyCommittedDuringADispatch_DoesNotShowTheWalkAClusterTwice(bool writesVersioned)
+    {
+        var run = RunWalkScenario(writesVersioned, reclaimInTick: false);
+        AssertTheWalkMetEachLiveClusterOnce(run);
+    }
+
+    /// <summary>
+    /// The mutant: the drained cluster reclaimed in the middle of the dispatch, right after the destroy's commit — what the inline finalize did. The walk
+    /// must then fail the verifier.
+    /// </summary>
+    [Test]
+    [RuleMutant("CLUSTERWALK-01")]
+    public void Mutant_ADrainReclaimedInTheTick_ShowsTheWalkAClusterTwice()
+    {
+        var run = RunWalkScenario(writesVersioned: false, reclaimInTick: true);
+        RuleMutants.AssertDetects("CLUSTERWALK-01", WalkMarker, () => AssertTheWalkMetEachLiveClusterOnce(run));
+    }
+
+    private sealed record WalkRun(int Clusters, long DestroyTick, int DrainedChunk, List<(long Tick, int ChunkId)> Visits);
+
+    private WalkRun RunWalkScenario(bool writesVersioned, bool reclaimInTick)
     {
         using var dbe = SetupEngine(2000);
         var state = StateOf(dbe);
@@ -115,6 +138,10 @@ class ClusterWalkDestroyTests : TestBase<ClusterWalkDestroyTests>
                     }
 
                     side.Commit();
+                    if (reclaimInTick)
+                    {
+                        state.DrainPendingClusterFinalizations();   // the mutant: what the inline finalize did, mid-dispatch
+                    }
                 }
             }, input: () => view, parallel: true, writesVersioned: writesVersioned, chunksPerWorker: 2f, after: "Tick");
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 100, CostBasedChunking = false }))
@@ -126,22 +153,31 @@ class ClusterWalkDestroyTests : TestBase<ClusterWalkDestroyTests>
 
         view.Dispose();
         Assert.That(destroyTick, Is.GreaterThanOrEqualTo(0), "precondition: no dispatch ran two chunks, so the destroy never met a split");
-        Assert.That(state.ActiveClusterCount, Is.EqualTo(clusters - 1), "precondition: the destroy did not drain its cluster");
+        Assert.That(state.ActiveClusterCount, Is.EqualTo(clusters - 1), "the drained cluster was not reclaimed by a later fence");
+        Assert.That(state.ClusterSegment.IsChunkLive(drainedChunk), Is.False, "the drained cluster's chunk was not freed by a later fence");
+        return new WalkRun(clusters, destroyTick, drainedChunk, visits);
+    }
 
-        var walk = visits.Where(v => v.Tick == destroyTick).Select(v => v.ChunkId).ToList();
+    // Plain asserts: the mutant runs this through RuleMutants.AssertDetects, which recognises the verifier's own failure by its marker.
+    private static void AssertTheWalkMetEachLiveClusterOnce(WalkRun run)
+    {
+        var walk = run.Visits.Where(v => v.Tick == run.DestroyTick).Select(v => v.ChunkId).ToList();
         var twice = walk.GroupBy(c => c).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
         Assert.That(twice, Is.Empty,
-            $"CLUSTERWALK-01: tick {destroyTick}'s walk met cluster(s) [{string.Join(",", twice)}] twice after a destroy drained cluster {drainedChunk}");
+            $"{WalkMarker}: tick {run.DestroyTick}'s walk met cluster(s) [{string.Join(",", twice)}] twice after a destroy drained cluster {run.DrainedChunk}");
+        Assert.That(walk, Does.Not.Contain(run.DrainedChunk), $"{WalkMarker}: the walk yielded the drained, empty cluster {run.DrainedChunk}");
+        Assert.That(walk, Has.Count.EqualTo(run.Clusters - 1), $"{WalkMarker}: the walk did not meet every live cluster once");
     }
 
     /// <summary>
     /// Two threads, each committing its own transactions, every destroy draining a cluster — the concurrency <c>EcsConcurrencyTests</c> already treats as
-    /// supported. Thread A drains the tail clusters last-first, so each of its targets is the list's tail; thread B drains from the head. When B's
-    /// swap-with-last moves A's target below the index A's scan has reached, A's scan ends without finding it, A frees the chunk anyway, and the freed id
-    /// stays listed. No walker is involved: the two removers corrupt the list between them, because <c>RemoveFromActiveList</c> takes no lock.
+    /// supported. Thread A drains the tail clusters last-first, so each of its targets is the list's tail; thread B drains from the head. Inline, two
+    /// removers' swap-with-last corrupted the list between them. Now a commit only records its drain: the list is untouched until the fence, every drain is
+    /// recorded exactly once (no record lost to a concurrent grow of the list), and the fence leaves exactly the survivors, freeing each chunk once.
     /// </summary>
     [Test]
     [CancelAfter(15000)]
+    [VerifiesRule("CLUSTERWALK-03")]
     public void ConcurrentDestroysThatDrainClusters_LeaveTheActiveListExact()
     {
         using var dbe = SetupEngine(StressEntities);
@@ -163,7 +199,8 @@ class ClusterWalkDestroyTests : TestBase<ClusterWalkDestroyTests>
             tx.Commit();
         }
 
-        Assert.That(state.ActiveClusterCount, Is.EqualTo(order.Count), "precondition: thinning drained a cluster");
+        Assert.That(state.ActiveClusterCount, Is.EqualTo(order.Count), "precondition: thinning must drain no cluster");
+        Assert.That(state.HasPendingClusterFinalizations, Is.False, "precondition: thinning must record no drain");
 
         var share = order.Count / 4;
         var head = order.Take(share).ToArray();
@@ -197,14 +234,29 @@ class ClusterWalkDestroyTests : TestBase<ClusterWalkDestroyTests>
         threadB.Join();
         Assert.That(failure, Is.Null, $"a destroy thread threw: {failure}");
 
+        Assert.That(SortedList(state), Is.EqualTo(order.OrderBy(c => c).ToArray()), "a commit changed the active list: drained clusters wait for the fence");
+        Assert.That(state.PendingClusterFinalizationCount, Is.EqualTo(2 * share), "every drain is recorded exactly once");
+
+        var doubleFreesBefore = state.ClusterSegment.DoubleFreeCount;
+        dbe.WriteTickFence(2);
+
         var expected = order.Except(head).Except(tail).OrderBy(c => c).ToArray();
+        var listed = SortedList(state);
+        Assert.That(listed, Is.EqualTo(expected),
+            $"{WalkMarker}: after {2 * share} concurrent draining destroys and a fence the active list holds {listed.Length} entries, expected "
+            + $"{expected.Length}; stale or duplicated: [{string.Join(",", listed.Except(expected).Concat(listed.GroupBy(c => c).Where(g => g.Count() > 1).Select(g => g.Key)))}]"
+            + $", missing: [{string.Join(",", expected.Except(listed))}]");
+        Assert.That(head.Concat(tail).Count(state.ClusterSegment.IsChunkLive), Is.Zero, "a drained cluster's chunk is still live after the fence");
+        Assert.That(state.ClusterSegment.DoubleFreeCount, Is.EqualTo(doubleFreesBefore), "the fence freed a chunk twice");
+        Assert.That(state.HasPendingClusterFinalizations, Is.False);
+    }
+
+    private static int[] SortedList(ArchetypeClusterState state)
+    {
         var ids = state.ReadActiveClusterList(out var count);
         var listed = ids.AsSpan(0, count).ToArray();
         Array.Sort(listed);
-        Assert.That(listed, Is.EqualTo(expected),
-            $"CLUSTERWALK-01: after {2 * share} concurrent draining destroys the active list holds {count} entries, expected {expected.Length}; "
-            + $"stale or duplicated: [{string.Join(",", listed.Except(expected).Concat(listed.GroupBy(c => c).Where(g => g.Count() > 1).Select(g => g.Key)))}]"
-            + $", missing: [{string.Join(",", expected.Except(listed))}]");
+        return listed;
     }
 
     /// <summary>

@@ -317,8 +317,9 @@
     migration counters because a netId that is unchanged is also what a LIFO allocator handing back what it just released would produce, so
     the outcome alone does not discriminate; MigrationIdentityTests.TheSlotTheEntityLeftHoldsNoEntryAfterwards, which keeps a second occupant
     in the source cluster so its block survives the move and the cleared slot can actually be read. The drain half keeps its earlier coverage:
-    `ReplicationDrainHookTests` reaches the INLINE persistent site (a destroy commit passes no `deferFinalize`, so it finalizes at commit) and
-    `ReplicationDrainHookParallelFenceTests` reaches the DEFERRED site through the dispatched `ArchetypeFinalize` item.
+    since #582 there is ONE site, the fence's reclamation (CLUSTERWALK-03): `ReplicationDrainHookTests` reaches it through a runtime-less
+    `WriteTickFence` (a destroy commit only records the drain) and `ReplicationDrainHookParallelFenceTests` through the dispatched
+    `ArchetypeFinalize` item.
   note the pure-Transient `ReleaseSlot` overload's site cannot fire for any replication scenario that exists:
     `[SpatialIndex]` is rejected on a Transient component (`DatabaseDefinitions.cs:369-372`), so a pure-Transient
     archetype is never spatial and never holds a watched cluster. The hook is kept as one null test, defensive

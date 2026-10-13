@@ -1384,11 +1384,11 @@ public partial class DatabaseEngine
                 }
                 if (hasClusterAccessor)
                 {
-                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, true);
+                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, isMove: true);
                 }
                 else
                 {
-                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, srcGrid, true);
+                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, srcGrid, isMove: true);
                 }
 
                 // 10b. The source cluster just lost an entity, so its AABB may be too large — flag a full recompute for this tick's refresh pass (#872

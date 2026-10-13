@@ -342,8 +342,10 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         ref var cellAfter = ref dbe.Realm0Grid.GetCell(cellKey);
-        Assert.That(cellAfter.ClusterCount, Is.EqualTo(0), "empty cluster must detach from its cell");
         Assert.That(cellAfter.EntityCount, Is.EqualTo(0));
+        Assert.That(cellAfter.ClusterCount, Is.EqualTo(1), "a drained cluster stays in its cell until the fence (#582)");
+        dbe.WriteTickFence(1);
+        Assert.That(cellAfter.ClusterCount, Is.EqualTo(0), "empty cluster must detach from its cell at the fence");
     }
 
     [Test]
@@ -536,6 +538,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
 
         ref var cellAfter = ref dbe.Realm0Grid.GetCell(cellKey);
         Assert.That(cellAfter.EntityCount, Is.EqualTo(1), "Destroying one entity decrements the global count");
+        Assert.That(cellAfter.ClusterCount, Is.EqualTo(2), "archetype 1's emptied cluster stays in the cell until the fence (#582)");
+        dbe.WriteTickFence(1);
         Assert.That(cellAfter.ClusterCount, Is.EqualTo(1), "Archetype 1's cluster emptied and detached; archetype 2's cluster remains");
         Assert.That(cs1.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(0), "Archetype 1 pool is now empty for this cell");
         Assert.That(cs2.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool is untouched by the unrelated destroy");

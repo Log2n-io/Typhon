@@ -612,24 +612,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             totalMoved += RepairQueuedCandidate(_repairCellScratch[i], ref accessor, tickNumber, estimateNsPerEntity, false, ref remainingNs);
         }
 
-        // ── Top up the deferred-drain list for everything the plan added ────────────────────────────────────────────
+        // ── Pre-allocate drain blocks for everything the plan added ─────────────────────────────────────────────────
         //
-        // PreSizeMigrationBuffers sizes _drainedClusterIds from PendingMigrationCount, on the premise that one migration
-        // releases at most one source slot — and it runs in Prep's CORE, before this. A repair breaks the premise from
-        // both ends: it files more migrations, and it has already consumed one drain entry per fresh destination. The
-        // Migrate phase would then overflow into RecordClusterDrain's fallback grow, which parallel workers reach and
-        // which writes its entry AFTER releasing the lock, re-reading the field — so an entry can be discarded by a
-        // concurrent resize, and a discarded drain record is RP-03's cluster that never received an entity and leaks its
-        // chunk id.
-        //
-        // Once, here, over the WHOLE queue rather than per unit. Per unit it would have been `_drainedCount + count`,
-        // which under-counts twice over: it ignores the requests other units filed, and it ignores whatever the
-        // cell-crossing detectors queued before the planner ran. _drainedCount is every destination this plan allocated
-        // (it was zeroed at the top of Prep) and PendingMigrationCount is every request Migrate will drain, so their sum
-        // is the true ceiling on drain records for the tick.
+        // A performance hint since #582: the drain list's blocks never move, so a record can no longer be lost to a concurrent grow (RP-03's leak), and
+        // the append grows its own blocks. Pre-allocating them here keeps Migrate's parallel workers off the grow lock. The pending records (earlier
+        // drains and this plan's fresh destinations) plus every request Migrate will drain bound the records the tick can add.
         if (totalMoved > 0)
         {
-            PreSizeDrainedClusterIds(_drainedCount + PendingMigrationCount);
+            PreSizeDrainedClusterIds(PendingClusterFinalizationCount + PendingMigrationCount);
         }
 
         LastTickRepairedEntityCount = totalMoved;

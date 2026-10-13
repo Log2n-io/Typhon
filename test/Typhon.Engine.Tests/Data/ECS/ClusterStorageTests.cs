@@ -592,7 +592,7 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
     }
 
     [Test]
-    public void Destroy_AllInCluster_ClusterFreed()
+    public void Destroy_AllInCluster_ClusterFreedAtTheFence()
     {
         using var dbe = SetupClusterEngine();
         using var tx = dbe.CreateQuickTransaction();
@@ -606,6 +606,8 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         dtx.Commit();
 
         var es = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<ClAnt>().ArchetypeId];
+        Assert.That(es.ClusterState.ActiveClusterCount, Is.EqualTo(1), "a drained cluster stays listed until the fence (#582)");
+        dbe.WriteTickFence(1);
         Assert.That(es.ClusterState.ActiveClusterCount, Is.EqualTo(0));
     }
 

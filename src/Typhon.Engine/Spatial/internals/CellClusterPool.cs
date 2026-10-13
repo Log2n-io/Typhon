@@ -29,9 +29,8 @@ namespace Typhon.Engine.Internals;
 /// to a cell have no stable index inside the pool; callers must not cache positions.</para>
 /// <para><b>Single-writer contract.</b> <see cref="AddCluster"/> and <see cref="RemoveCluster"/> must never run concurrently with each other on one pool
 /// instance. That is the caller's job and it already does it: both <c>ClaimSlotInCell</c> overloads call <see cref="AddCluster"/> under
-/// <c>_finalizeLock</c>'s exclusive access, the startup rebuild calls it from its serial reduce, and both <see cref="RemoveCluster"/> callers are serial for
-/// the archetype (<c>DrainPendingClusterFinalizations</c> runs after the fence phase barriers; the inline <c>ReleaseSlot</c> path has a single-threaded
-/// caller). The pool holds no lock of its own, and one over the side arrays would be theatre: <see cref="AddCluster"/> goes on to write <c>_pool</c>, bump
+/// <c>_finalizeLock</c>'s exclusive access, the startup rebuild calls it from its serial reduce, and <see cref="RemoveCluster"/>'s only caller is serial for
+/// the archetype (<c>DrainPendingClusterFinalizations</c>, the fence's reclamation, after the phase barriers — #582 removed the inline release path). The pool holds no lock of its own, and one over the side arrays would be theatre: <see cref="AddCluster"/> goes on to write <c>_pool</c>, bump
 /// <c>_tail</c> and <c>Array.Resize</c> the pool array, none of which such a lock would cover — two genuinely racing writers would corrupt the pool with it
 /// held. Rather than a comment asserting the contract, <see cref="EnterWriter"/> DETECTS a breach; see its remarks.</para>
 /// <para><b>Readers are a different matter and are genuinely concurrent.</b> <c>ClaimSlotInCell</c>'s hot path calls <see cref="GetClusters"/>,

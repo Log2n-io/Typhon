@@ -29,7 +29,8 @@ public partial class DatabaseEngine
     /// committed and before the next tick begins. See the embedding guide (<c>doc/guide/embedding-without-the-runtime.md</c>).</para>
     /// <para><b>What happens if it is never called.</b> Nothing throws and nothing is corrupted — the database silently stops maintaining itself:
     /// <c>SingleVersion</c> components degrade to <c>Transient</c>-like durability (no crash recovery), queued cluster migrations never execute, and
-    /// spatial AABBs and zone maps go stale, so spatial queries return results computed against old positions.</para>
+    /// spatial AABBs and zone maps go stale, so spatial queries return results computed against old positions, and a cluster a destroy empties is never
+    /// reclaimed — its chunk stays allocated until the database is closed or reopened (#582, CLUSTERWALK-03).</para>
     /// <para><b>Threading — a caller obligation, not an enforced one</b> (rule <c>EW-01</c>). No other thread may mutate the database while this runs: the
     /// fence rewrites cluster B+Trees, the EntityMap, the per-cell spatial index and the cluster-to-cell map, and a concurrent writer corrupts them silently.
     /// Under <see cref="TyphonRuntime"/> it holds by construction — the fence runs from the scheduler's tick-end callback, after every system has completed,
@@ -548,6 +549,13 @@ public partial class DatabaseEngine
     {
         if (!PrepareArchetypeFence(meta, tickNumber, changeSet))
         {
+            // No fence work this tick — but clusters emptied since the last fence are reclaimed on every fence (#582, CLUSTERWALK-03), and a destroy-only
+            // tick, or a pure-Transient archetype, never reaches Finalize by the branch selection. A runtime-less host's WriteTickFence comes through here.
+            if (_archetypeStates[meta.ArchetypeId]?.ClusterState?.HasPendingClusterFinalizations == true)
+            {
+                FinalizeArchetypeFenceHead(meta, tickNumber);
+            }
+
             return 0;
         }
         var clusterState = _archetypeStates[meta.ArchetypeId].ClusterState;
@@ -979,7 +987,6 @@ public partial class DatabaseEngine
         clusterState.LastTickRepairedEntityCount = 0;
         clusterState.LastTickRepairUnitCount = 0;
         clusterState.LastTickRepairUnitsRefused = 0;
-        clusterState._drainedCount = 0; // deferred-drain list reset (review C-1 fix)
     }
 
     /// <summary>Step ⑧: the pre-size and the process-bitmap memo, run once per archetype from the tail of <see cref="FinishArchetypeFencePrep"/>.</summary>
@@ -1756,6 +1763,19 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// Reclaims, on this thread, the clusters releases emptied in every archetype since the last fence (#582, CLUSTERWALK-03): a clean close, before its
+    /// final checkpoint, and the end of a crash replay. The caller holds the engine quiescent — no walker, claimer or releaser in flight.
+    /// </summary>
+    internal void DrainAllPendingClusterFinalizations()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        foreach (var state in _archetypeStates)
+        {
+            state?.ClusterState?.DrainPendingClusterFinalizations();
+        }
+    }
+
+    /// <summary>
     /// Phase 4 of the parallel cluster tick fence for one archetype, end to end: the head (<see cref="FinalizeArchetypeFenceHead"/> — bookkeeping clear,
     /// dormancy sweep, dirty-ring archive, ComponentTable flag propagation, column narrowing) and then the WAL emit over every dirty word
     /// (<see cref="EmitArchetypeFenceRange"/>). Safe to call concurrently across DISTINCT archetypes. Returns the highest LSN published by this archetype's
@@ -2196,6 +2216,12 @@ public partial class DatabaseEngine
             return false;
         }
 
+        // Reclaim the clusters releases emptied since the last fence (#582, CLUSTERWALK-03): a destroy's commit, a migration, an aborted spawn and the
+        // cleanup of a hidden destroy only record them. HERE, before the branch-0 return — a destroy-only tick and a pure-Transient archetype are branch 0
+        // — and before the publishes below, so this tick's retirements are stamped on this tick. Walkers are quiesced (the Migrate and AabbRefresh barriers,
+        // EW-01's window), which is what lets the active list shrink.
+        clusterState.DrainPendingClusterFinalizations();
+
         if (clusterState.FenceBranchPath == 0)
         {
             // No fence work on this path — a pure-Transient archetype, or a Static one nobody wrote — but its queries still ran and the budget controller
@@ -2225,10 +2251,6 @@ public partial class DatabaseEngine
         // 10's drift detection). Both are documented as executing "next tick"; neither ever did.
         clusterState.CompactPendingMigrations();
 
-        // Drain pending cluster finalizations (review C-1 fix): ReleaseSlot during Migrate only records the chunkId; actual finalize + FreeChunk happens here,
-        // after the Migrate/AabbRefresh phase barriers. By this point no concurrent ClaimSlotInCell can race with us — safe to free clean clusters.
-        clusterState.DrainPendingClusterFinalizations();
-
         // AABB recompute moved out of Finalize into the parallel AabbRefresh phase (FenceAabbRefreshExecSystem). Finalize is now responsible only for
         // the post-AABB bookkeeping clear + dormancy sweep + WAL emit. The serial WriteTickFence wrapper (no-WAL path) calls RecomputeDirtyClusterAabbs
         // directly before reaching FinalizeArchetypeFence, so it works equivalently.
@@ -2248,7 +2270,7 @@ public partial class DatabaseEngine
         // adjacent is what stops a later edit from separating one of them from the barrier it depends on.
         clusterState.PublishAabbMovedClusters(tickNumber);
 
-        // AFTER DrainPendingClusterFinalizations above, which is where a cluster emptied this tick is actually retired — publishing before it would stamp
+        // AFTER DrainPendingClusterFinalizations at the top, which is where a cluster emptied this tick is actually retired — publishing before it would stamp
         // the retirement onto the NEXT tick, and a consumer on this tick would read the retired cluster as merely unchanged.
         clusterState.PublishRetirements(tickNumber);
 
