@@ -3765,9 +3765,8 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Loading the array first — which three call sites used to do — admits a plain interleaving that needs no reordering to fault: read the old
     /// length-16 array, a concurrent spawn resizes and bumps the count, read the count as 17, index 16 of the old array.
     /// <para>
-    /// This makes the pair CONSISTENT. It does not make the walk safe against a concurrent destroy: `RemoveFromActiveList` swaps with the last element, so
-    /// a walker holding a count from before it can still visit one cluster twice and skip the removed one, whose chunk may then be freed under it. That is
-    /// #582 face 1 and needs a snapshot or epoch protocol, not an ordering fix.
+    /// This makes the pair CONSISTENT. The walk is safe against a concurrent destroy for another reason: within a tick nothing removes from the list — a
+    /// cluster a destroy empties is reclaimed at the fence (#582 face 1, CLUSTERWALK-01).
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

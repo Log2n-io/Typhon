@@ -2584,7 +2584,7 @@ public unsafe partial class Transaction : EntityAccessor
                 for (int v = 0; v < views.Length; v++)
                 {
                     var reg = views[v];
-                    if (reg.View.IsDisposed)
+                    if (reg.DeltaBuffer.IsClosed)
                     {
                         continue;
                     }

@@ -211,7 +211,7 @@ entry may be used for. Both are silent when broken, which is why they are rules 
 
 ### MEMB-04: A disposed view's delta buffer is retired, never freed under a publisher `[fatal][silent]`
   invariant ∀ append into a view's delta buffer: the pinned block behind it is still MAPPED, whether or not that view has been disposed
-  never freeing the block inside `ViewBase.Dispose`. The publisher reads `IsDisposed` and then writes 24 bytes through raw pointers; those are two
+  never freeing the block inside `ViewBase.Dispose`. The publisher reads `DeltaBuffer.IsClosed` then writes 24 bytes through raw pointers; those are two
         steps with nothing sequencing them, and `Thread.SpinWait(100)` — ~200 ns — is not a happens-before edge. Reasoning about the DURATION of an
         append against the duration of a spin is not reasoning about ordering
   never nulling the buffer's pointers on the retire path. A null base in unsafe pointer arithmetic is an access violation, not a catchable
@@ -274,29 +274,77 @@ entry may be used for. Both are silent when broken, which is why they are rules 
 ## Module: CLUSTERWALK — Concurrent cluster enumeration vs structural mutation
 
 Cluster *topology* changes (migration, AABB refresh) and spatial-index updates are **fence-deferred**: `WriteSpatial` only flags, and the post-track parallel
-fence drains. That makes a concurrent read-walk of an archetype's clusters structurally safe for those operations. Entity **destroy** is the exception — it is
-applied synchronously inside `Commit()`, not at the fence.
+fence drains. Since #582 a cluster's **reclamation** is too: a destroy releases its slot on the committing thread, but a cluster that release empties stays
+listed, in its cell and allocated until the fence reclaims it. A concurrent read-walk of an archetype's clusters is therefore structurally safe against every
+structural mutation.
 
-### CLUSTERWALK-01: Destroy mutates the active-cluster list inside Commit, not at the fence `[fatal][silent]`
-  invariant ∀ walk over `ActiveClusterIds[0 .. ActiveClusterCount)`: no concurrent `Transaction.Destroy` + `Commit` may target the same archetype
-  scope: `Transactions/public/Transaction.ECS.cs` (`FlushEcsPendingOperations` → `FlushPendingDestroys`, :1297/:2219),
-         `Ecs/internals/ArchetypeClusterState.cs` (`ReleaseSlot` :2493/:2544 → `RemoveFromActiveList` :2406),
-         `Runtime/public/TyphonRuntime.cs` (`ExecuteChunkWithAccessor` :1507/:1564, `ExecuteChunkWithTransaction` :1724, `OnParallelQueryPrepare` :1193),
-         `Querying/internals/StatisticsRebuilder.cs` (`RebuildClusterAll` :118-127) reached from `Querying/internals/StatisticsWorker.cs` :154-172
-  requires `RemoveFromActiveList` performs a swap-with-last followed by a separate decrement —
-           `ActiveClusterIds[i] = ActiveClusterIds[ActiveClusterCount - 1]; ActiveClusterCount--;` (:2424-2425) — two non-atomic steps with no version gate
-           on the reader side beyond `ClusterSetVersion++` (:2434), which is bumped *after* the mutation
-  on_violation: a walker interleaving between the swap and the decrement either visits the moved cluster twice or misses the tail cluster entirely →
-                silently skipped or double-processed entities, with no error surfaced
-  rationale: unlike migration/AABB (fence-drained behind a phase barrier), destroy releases the slot on the committing thread. Systems that enumerate clusters
-             while another system destroys entities in the same archetype are therefore unsafe today. The AntHill decomposition resolved this by removing all
-             entity destroys (respawn-as-larva) rather than by fencing — i.e. the hazard was avoided, not fixed.
-  note: the `StatisticsRebuilder` reader is the widest exposure and the newest (#629 review M3, added in `cf476099`). Every other reader is a DAG worker, so a
-        tick phase bounds when it can overlap a destroy; this one runs on the `Typhon-Statistics` BACKGROUND thread on a timer, so nothing bounds it at all —
-        it reads `ActiveClusterIds` / `ActiveClusterCount` with plain loads and dereferences the chunks they name. Its blast radius is narrower than the
-        others' in exchange: the throw is swallowed (`StatisticsWorker.cs:174-177`) so the cost is stale statistics, a garbage sample yields a bad plan rather
-        than wrong rows, and `EpochGuard` keeps the pages mapped so the freed-chunk read cannot fault.
-  verified: NOT COVERED — no test exercises concurrent walk vs destroy on one archetype
+### CLUSTERWALK-01: Within a tick the active-cluster list only grows; a walker skips an empty cluster by its occupancy `[fatal][silent]`
+  invariant between two fences, no release removes a cluster from `ActiveClusterIds[0 .. ActiveClusterCount)` or frees its chunk: a release that empties a
+            cluster records it (`ArchetypeClusterState.RecordClusterDrain`) for the next fence's reclamation (CLUSTERWALK-03). A walker holding a range of
+            the list therefore meets every cluster of it exactly once, and a cluster emptied under it reads as empty and is skipped
+            (`ClusterEnumerator.MoveNext` tests its occupancy word)
+  never `RemoveFromActiveList`, a `FreeChunk` of a cluster chunk, or a cluster detach from its cell, reached from a commit, an abort or a cleanup — only
+        from the reclamation
+  scope: ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.FinishVacatedSlot, ArchetypeClusterState.RecordClusterDrain,
+         Transaction.FlushPendingDestroys, ClusterEnumerator.MoveNext
+  on_violation: a walker whose range a removal shifts meets one cluster twice and skips another, and reads the removed cluster's chunk after it is freed and
+                possibly reissued — silently double-processed or skipped entities, and a use-after-free. Measured before #582: a destroy committed in the
+                first chunk of a dispatch showed the second chunk's walk the list's tail twice, 10 runs in 10 on 4 CPUs
+  rationale: #582 face 1. Commits run concurrently with dispatch: a system's side transaction, or the per-chunk transactions the runtime commits from its
+             workers, and since D1 structural mutation outside the tick is legal too. The inline finalize assumed a serial caller per archetype that the engine
+             never had. A snapshot or epoch protocol over the list was the alternative; deferral costs walkers nothing (the empty-cluster skip already existed)
+             and makes the commit-path destroy cheaper (one Interlocked.Increment and one store instead of an O(N) sweep of a list the workers read).
+  note: the `StatisticsRebuilder` reader runs on the `Typhon-Statistics` background thread, which no tick bounds, so it can still overlap a fence's
+        reclamation. Its blast radius is narrow: the throw is swallowed (`StatisticsWorker`) so the cost is stale statistics, and `EpochGuard` keeps the pages
+        mapped so a freed-chunk read cannot fault. A user thread reading the list during a fence is outside the contract (EW-01's readers clause).
+  verified: ClusterWalkDestroyTests.ADestroyCommittedDuringADispatch_DoesNotShowTheWalkAClusterTwice [VerifiesRule] — deterministic, one worker, both the
+            accessor and the per-chunk-Transaction paths: the walk meets each live cluster once and never the drained one;
+            Mutant_ADrainReclaimedInTheTick_ShowsTheWalkAClusterTwice [RuleMutant] — a removal in the middle of the dispatch (the reclamation run there:
+            an in-order compaction, where the inline finalize swapped with the last entry — the same class of shift) is rejected by the same assertion
+
+### CLUSTERWALK-03: Only the fence reclaims an emptied cluster, and only one its seal proves empty `[fatal][silent]`
+  invariant every release that leaves a cluster with no occupied and no claimed slot records it — a destroy's commit, a migration (`isMove`), an aborted
+            spawn (`UnreserveSlot`), the cleanup of a hidden destroy (`ReleaseHiddenSlot`), an orphaned migrant's rollback (`ClearSlotBits`), the crash
+            replay — and the drain is decided after the release's claim release, on a fresh occupancy read, so of two concurrent last releases the later one
+            records. The open's scan records an allocated cluster it finds empty (a drain pending when the engine stopped). `DrainPendingClusterFinalizations` reclaims
+            the records at the tick fence's Finalize head (before the branch-0 return, so a destroy-only tick and a pure-Transient archetype reclaim too), at
+            a runtime-less host's `WriteTickFence`, at a clean close before its final checkpoint, and at the end of the open (after the crash replay)
+  invariant the reclamation SEALS each recorded cluster before freeing it: a CAS of its in-memory claim word from 0 to the layout's full mask, which every
+            claim path (`ClaimFirstFree`, `ClaimExact`, the `TakenBits` pre-checks) reads as full with no change of its own. The CAS loses to any claim —
+            a pending spawn, a hidden destroy, a refill since the drain — and the cluster is kept; a slot occupied without a claim (a load, a recovery)
+            unseals it. A sealed cluster is evicted in one pass over the list, then detached, retired (which zeroes the claim word) and freed. Only an id
+            the pass found listed is freed, so a duplicate or stale record can never free a chunk twice
+  invariant the drain list's blocks never move: an append reserves an index by `Interlocked.Increment` and release-stores into a block a grow copies by
+            reference only, so no record is lost to a concurrent grow; the reclamation exchanges the count to zero before it reads
+  invariant a throw in the middle of a reclamation leaves no cluster sealed: every sealed id it had not retired is unsealed, put back on the list if the
+            eviction pass took it off, and recorded again. Only the id the throw interrupted is left alone — a leak, never a double free
+  never seal the occupancy word: it is persisted, popcounted by the count fast path and scanned by the open's rebuild; the claim word is in memory only, so
+        a seal is never written to a page
+  scope: ArchetypeClusterState.RecordClusterDrain, ArchetypeClusterState.DrainPendingClusterFinalizations, ArchetypeClusterState.SealedClaims,
+         ArchetypeClusterState.HasPendingClusterFinalizations, ArchetypeClusterState.ReleaseSlot, ArchetypeClusterState.FinishVacatedSlot,
+         DatabaseEngine.FinalizeArchetypeFenceHead, DatabaseEngine.ProcessArchetypeFence, DatabaseEngine.DrainAllPendingClusterFinalizations,
+         FenceWorkPlan.EmitArchetypeFinalizeItems
+  on_violation: a cluster freed under a claim — a spawn's entity written into a chunk the segment reissues; a cluster never reclaimed — its chunk id leaked
+                for the engine's life; a chunk freed twice
+  rationale: #582. A spawn can claim a slot in a drained cluster between the drain and the fence, because the cluster stays in its cell's claim list and
+             claims are lock-free. Forbidding that (a "draining" reservation every claim scan tests) would put a check on the spawn fast path; the seal puts the
+             whole cost on the fence. Under EW-01 a seal cannot lose to an in-tick claim — every claim needs an EntityMap or B+Tree write the window refuses —
+             so the CAS decides refills made before the fence. It never frees a chunk a claim holds; it does NOT make an EW-01 violation safe: a claimer still
+             holding the id from its cell's list after the free can CAS into the reissued chunk, which only the window excludes.
+  note: a runtime-less host that never calls `WriteTickFence` never reclaims an emptied cluster (D3): its chunk stays allocated, and the active list keeps it
+        until the database is closed or reopened; its drain records accumulate too (four bytes per drain, the same cluster again after each refill). The
+        obligation is the host's, as EW-01's host_mode quiescence is.
+  verified: ClusterWalkDestroyTests.ConcurrentDestroysThatDrainClusters_LeaveTheActiveListExact [VerifiesRule] — two threads' draining destroys: the list is
+            untouched before the fence, every drain recorded exactly once, and the fence leaves exactly the survivors with no chunk freed twice;
+            ClusterDeferredReclamationTests [VerifiesRule] — SingleVersion, pure-Transient and Versioned (the cleanup's drain) reclaimed at a runtime-less
+            fence and not before; a drain between ticks reclaimed by the runtime's parallel and serial fences; a cluster refilled before the fence kept; a
+            claim landing just before the seal keeping the cluster; a claim just after the seal landing in another cluster while the sealed one is freed;
+            a mixed persistent + Transient archetype freeing both lockstep chunks; pure-Transient under the runtime's parallel fence; a clean close with a
+            drain pending reopening from its summary without the cluster; a crash after the drained page was checkpointed reclaiming the cluster at the next
+            open (red before the scan recorded it); the last two releases of 200 clusters on two threads all recorded; a cluster drained twice before one
+            fence freed once; a throw mid-reclamation leaving nothing sealed (red without the unseal).
+            NOT covered: the unseal of a cluster occupied without a claim (a load or a recovery sets such a slot; no fixture stages one at a fence), and an
+            orphaned migrant's rollback emptying its destination
 
 ### CLUSTERWALK-02: The active-cluster list is one value, read count-first `[fatal]`
   invariant `(ActiveClusterIds, ActiveClusterCount)` is a PAIR. A reader acquires them in the order
@@ -345,9 +393,8 @@ applied synchronously inside `Commit()`, not at the fence.
          StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
-  rationale: #582 face 2. Note what this rule does NOT give: it makes the pair CONSISTENT, not the walk SAFE. A walker
-             racing `RemoveFromActiveList` can still see one cluster twice and skip the destroyed one, whose chunk is freed
-             two lines later — CLUSTERWALK-01, which needs a snapshot or epoch protocol and is unfixed.
+  rationale: #582 face 2. It makes the pair CONSISTENT, not the walk SAFE: what makes the walk safe is CLUSTERWALK-01, which keeps
+             every removal out of the tick.
   requires CLUSTERWALK-01 (same pair, the other hazard on it)
   verified: ActiveClusterListPublicationTests [VerifiesRule] — four DETERMINISTIC cases, not a stress loop. Racing for this
             does not work: a 40 000-add spin, about twelve resizes, landed inside the two-instruction window zero times in

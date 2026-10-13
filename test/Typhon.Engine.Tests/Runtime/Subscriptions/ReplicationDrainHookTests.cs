@@ -20,11 +20,10 @@ namespace Typhon.Engine.Tests;
 /// client being told about a live entity and being told about a dead one wearing its address.
 /// </para>
 /// <para>
-/// <b>Which site this reaches.</b> The INLINE one — <c>ReleaseSlot(ref ChunkAccessor&lt;PersistentStore&gt;, …)</c>. A destroy commit passes no
-/// <c>deferFinalize</c> (<c>Transaction.ECS.cs:2991</c>), so it defaults false and the cluster finalizes at commit rather than on the deferred path. The
-/// deferred site is covered by <c>ReplicationDrainHookParallelFenceTests</c>, which provably takes the dispatched <c>ArchetypeFinalize</c> item; the
-/// pure-Transient site cannot be reached at all, because <c>[SpatialIndex]</c> is rejected on Transient components. Between the two fixtures every
-/// reachable site is exercised — stated explicitly because an earlier version of this comment claimed the deferred path and was simply wrong.
+/// <b>Which site this reaches.</b> Since #582 there is one: the fence's reclamation (<c>DrainPendingClusterFinalizations</c>, CLUSTERWALK-03) — a destroy
+/// commit only records the drain. This fixture reaches it through a runtime-less <c>WriteTickFence</c>; <c>ReplicationDrainHookParallelFenceTests</c>
+/// through the dispatched <c>ArchetypeFinalize</c> item. The pure-Transient release cannot be reached at all, because <c>[SpatialIndex]</c> is rejected on
+/// Transient components.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -107,9 +106,8 @@ unsafe class ReplicationDrainHookTests : TestBase<ReplicationDrainHookTests>
                 tx.Commit();
             }
 
-            // The release has already happened — the destroy above finalized inline at commit (no deferFinalize), so this fence is not what drains it.
-            // Kept as one tick so the assertions below read a settled engine rather than one mid-commit; it is deliberately NOT four, because four implied
-            // the drain needed them and it does not.
+            // The destroy only recorded the drains (#582): the clusters, and their blocks, are still there until the fence reclaims them.
+            Assert.That(replication.WatchedClusterCount, Is.EqualTo(watchedAtPeak), "a drained cluster keeps its block until the fence");
             dbe.WriteTickFence(tick++);
 
             cs.ReadActiveClusterList(out var liveAfter);

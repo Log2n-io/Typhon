@@ -65,6 +65,9 @@ Nothing throws. Nothing is corrupted. The failure is **silent**, which is what m
   progressively more clusters for the same answer.
 - **Spatial AABBs and zone maps go stale.** Spatial queries answer against *old positions* — not an error, just
   wrong results.
+- **Emptied clusters are never reclaimed.** A destroy that empties a cluster only records it; the fence frees it. Without
+  fences, every emptied cluster keeps its chunk until the database is closed or reopened, and spawn/destroy churn grows the
+  file.
 
 If you are only using `Versioned` components and no spatial queries, the consequences are smaller — but the fence is
 still where SV data reaches the WAL, so "I don't need it" is rarely true for long.

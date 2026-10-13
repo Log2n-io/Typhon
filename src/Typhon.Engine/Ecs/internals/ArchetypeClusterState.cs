@@ -37,9 +37,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     public ArchetypeClusterInfo Layout;
 
     /// <summary>
-    /// Compact array of chunk IDs for active clusters. Occupancy &gt; 0 for every entry <b>except</b> inside the deferred-drain window: a Migrate-phase worker
-    /// that clears a cluster's last bit does not remove it here, so a drained-but-not-yet-finalized cluster stays listed until
-    /// <see cref="DrainPendingClusterFinalizations"/> runs in Finalize. Readers that need "occupancy &gt; 0" must check the occupancy word, not membership.
+    /// Compact array of chunk IDs for active clusters. Occupancy &gt; 0 for every entry <b>except</b> inside the deferred-drain window: a release that clears a
+    /// cluster's last bit does not remove it here (CLUSTERWALK-01), so a drained cluster stays listed until the fence's
+    /// <see cref="DrainPendingClusterFinalizations"/> reclaims it. Readers that need "occupancy &gt; 0" must check the occupancy word, not membership.
     /// </summary>
     public int[] ActiveClusterIds;
 
@@ -51,14 +51,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Per-archetype structural-mutation latch. It serializes the paths that GROW or APPEND to shared per-archetype state while sibling Migrate-phase workers
-    // or concurrent commits run, and the one inline finalize below. The fence's deferred drain does NOT take it (see the deferred-drain banner below for how
-    // that is made safe). Every acquisition, exhaustively:
-    //   FinalizeDrainedClusterLatched  — a destroy's commit that drained a cluster finalizes it inline (#582): cell detach, RemoveFromActiveList, retire, free.
-    //                                    Concurrent commits put two removers, or a remover and a latched appender, on the list at once; this orders them.
-    //                                    It does NOT order walkers (CLUSTERWALK-01, #582 face 1).
+    // or concurrent commits run. The fence's reclamation does NOT take it (see the deferred-drain banner below for how that is made safe). Every acquisition,
+    // exhaustively:
     //   ApplyDirtyBitDeltas            — batch-apply a worker's local dirty-bit deltas into FenceDirtyBits
     //   GrowFenceDirtyBitsForChunkId   — Array.Resize of FenceDirtyBits
-    //   RecordClusterDrain             — fallback grow of _drainedClusterIds ONLY; the normal append is lock-free
     //   TryClaimSlotInCluster (x2)     — new-cluster slow path: lockstep dual-segment AllocateChunk, AddToActiveList, CellClusterPool.AddCluster,
     //                                    ClusterCellMap back-pointer. The hot path (CAS into an existing cluster) does not take it.
     //   EnqueueMigrationsBulk          — bulk append to PendingMigrations
@@ -81,10 +77,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     // added with a wrong line. EnsureClusterVisibilityCapacity's entry (#722) went with it on 2026-10-12, its watermarks moved into fixed blocks that never
     // grow by copy; the five capacity growers, the three bulk appends, AllocateNewClusterLatched and TryEnsureCellTreeSegment were added later and the list
     // had drifted behind them.
-    // Writers of the active list: AddToActiveList runs under the latch, and so does RemoveFromActiveList from a commit; the fence's drain removes without
-    // it, serial by the phase barriers and EW-01. A destroy commit is NOT a serial context — two user transactions, or one dispatch's per-chunk
-    // transactions, commit concurrently, which is what #582 measured corrupting the list (a freed id left listed, a live cluster dropped). No reader takes
-    // the latch, so it orders writers against writers, not readers.
+    // Writers of the active list: AddToActiveList runs under the latch; the only remover is the fence's reclamation, without it, serial by the phase
+    // barriers and EW-01 (CLUSTERWALK-03). A commit never removes (CLUSTERWALK-01) — two user transactions, or one dispatch's per-chunk transactions,
+    // commit concurrently, which is what #582 measured corrupting the list when they did. No reader takes the latch, so it orders writers against
+    // writers, not readers.
     // Padded to 64 bytes so the latch field owns a full cache line and uncontended acquisitions don't ping-pong with adjacent hot fields like
     // ActiveClusterCount / MigrationHint / LastTickMigrationCount. See rule MD-03 in rules/spatial.md. The acquisition counter shares that line on purpose:
     // it is written only by the thread already holding the latch, so it rides a line that thread owns exclusively and costs nothing (#912).
@@ -129,19 +125,58 @@ internal sealed unsafe partial class ArchetypeClusterState
     private PaddedFinalizeLock _finalizeLock;
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-    // Deferred-drain list. Migrate-phase workers atomically clear slot bits — when a clear flips the LAST bit of a cluster, the worker DOES NOT immediately
-    // finalize-and-free the chunk (would race with concurrent ClaimSlotInCell on the same cluster: the claimant could CAS-set a fresh bit between the AND
-    // and any subsequent lock, then we'd free a chunk that has live data). Instead, the worker records the chunkId here. FinalizeArchetypeFence walks the
-    // list serially (one atomic work item per archetype, dispatched after the Migrate and AabbRefresh phase barriers), re-checks occupancy, and frees only
-    // clusters that are still empty. The re-check needs NO lock: the barriers mean no ClaimSlotInCell or ReleaseSlot can be in flight for this archetype by
-    // then. Deferral plus the barrier is what makes the finalize safe — not mutual exclusion. See review C-1.
+    // Deferred-drain list (#582, CLUSTERWALK-03). A release that empties a cluster never finalizes it: it records the id here and the tick fence reclaims it —
+    // seal, detach from its cell, evict from the active list, free. A walker holding the list mid-dispatch therefore never sees it shrink or a chunk freed
+    // under it, which the inline finalize did (#582 face 1). Every release path records: a destroy's commit, a migration (Migrate workers), an aborted spawn,
+    // the cleanup of a hidden destroy (VIS-09), the crash replay. They run on any thread, at any time — D1: structural mutation outside the tick is legal —
+    // so the list takes concurrent appends from arbitrary threads, not only from fence phases behind a barrier.
     //
-    // Slot reservation is lock-free: Interlocked.Increment on _drainedCount, then write into _drainedClusterIds[slot].
-    // Capacity is pre-sized by PreSizeMigrationBuffers to PendingMigrationCount (one migration releases at most one source slot, so cluster-drain
-    // count ≤ migration count).
+    // Blocks never move, as the claim words' (ArchetypeClusterState.Reservation.cs): an append reserves an index with one Interlocked.Increment, ensures its
+    // block (grown under a leaf lock that copies block REFERENCES only) and release-stores the id into it. No element is ever abandoned by a grow, so an
+    // appender holding an old table still writes into a live block. The count is padded onto its own line (MD-03): appenders from every committing thread
+    // increment it. The serial consumer (DrainPendingClusterFinalizations) exchanges it to zero first, then reads each slot by acquire and clears it.
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-    internal int[] _drainedClusterIds;
-    internal int _drainedCount;
+    private const int DrainBlockShift = 8;
+    private const int DrainBlockSize = 1 << DrainBlockShift;
+    private int[][] _drainBlocks = [];
+    private readonly Lock _drainGrowLock = new();
+
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    private struct PaddedDrainCount
+    {
+        [FieldOffset(0)] public int Value;
+    }
+
+    private PaddedDrainCount _drainCount;
+
+    /// <summary>Drains recorded and not yet reclaimed by a fence (or a close, or a recovery). See <see cref="DrainPendingClusterFinalizations"/>.</summary>
+    internal bool HasPendingClusterFinalizations => Volatile.Read(ref _drainCount.Value) != 0;
+
+    /// <summary>The number of drain records waiting for the next reclamation — duplicates included.</summary>
+    internal int PendingClusterFinalizationCount => Volatile.Read(ref _drainCount.Value);
+
+    // Reclamation scratch, serial (the consumer runs on one thread per archetype): a bitmap over chunk ids for dedupe and for the one eviction pass, and the
+    // sealed ids. Grown, never shrunk; every bit set by a pass is cleared by it.
+    private ulong[] _drainMarks = [];
+    private int[] _drainSealed = [];
+
+    /// <summary>Test seam: called with each drained id before its seal CAS, on the reclaiming thread. Null in production.</summary>
+    internal Action<int> DrainBeforeSealProbe;
+
+    /// <summary>Test seam: called with each drained id its seal CAS took, before the eviction pass. Null in production.</summary>
+    internal Action<int> DrainAfterSealProbe;
+
+    /// <summary>Clusters the last reclamation freed.</summary>
+    internal int LastTickClustersReclaimed;
+
+    /// <summary>Drain records the last reclamation kept: refilled, claimed, duplicated, or not yet written.</summary>
+    internal int LastTickDrainsKept;
+
+    /// <summary>Sealed ids the last reclamation did not find on the active list (expected 0): unsealed and left alone, never freed.</summary>
+    internal int LastTickDrainsUnlisted;
+
+    /// <summary>Stopwatch ticks the last reclamation took — the fence Finalize's reclamation cost.</summary>
+    internal long LastTickDrainFinalizeTicks;
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Shadow-drain ordering scratch (#882). See BuildShadowDrainOrder.
@@ -763,13 +798,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         PreSizeDestinationRealms();
 
-        // Deferred-drain list sized to PendingMigrationCount (each migration drains at most one source slot, so the cluster-drain count cannot exceed migration
-        // count). _drainedCount is zeroed by Prep.
-        var drainCap = Math.Max(16, PendingMigrationCount);
-        if (_drainedClusterIds == null || _drainedClusterIds.Length < drainCap)
-        {
-            _drainedClusterIds = new int[Math.Max(drainCap, (_drainedClusterIds?.Length ?? 0) * 2)];
-        }
+        // Pre-allocate the drain blocks the Migrate phase can fill (one migration drains at most one source cluster), so its workers do not take the grow lock.
+        // A hint only: the append grows its own blocks (CLUSTERWALK-03).
+        PreSizeDrainedClusterIds(PendingClusterFinalizationCount + PendingMigrationCount);
     }
 
     /// <summary>
@@ -1033,96 +1064,280 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Record a cluster that's been drained to empty by ReleaseSlot. Lock-free append via <see cref="Interlocked.Increment(ref int)"/>. Capacity is guaranteed
-    /// by <see cref="PreSizeMigrationBuffers"/>. Same cluster may legitimately be recorded twice if a previous tick's drain wasn't followed by a finalize and
-    /// this tick re-empties it after a refill+drain cycle — <see cref="DrainPendingClusterFinalizations"/> re-checks occupancy after the phase barrier and
-    /// skips non-empty entries. The <see cref="_finalizeLock"/> acquisition below covers only the fallback grow, never the append or the later re-check.
+    /// Record a cluster a release has emptied, for the next reclamation (<see cref="DrainPendingClusterFinalizations"/>). Lock-free and safe from any thread
+    /// at any time (the block grow takes a leaf lock). A cluster may be recorded twice, or recorded and refilled before the reclamation: the reclamation
+    /// dedupes and frees only a cluster its seal proves empty.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void RecordClusterDrain(int clusterChunkId)
     {
-        var idx = Interlocked.Increment(ref _drainedCount) - 1;
-        if (_drainedClusterIds == null || idx >= _drainedClusterIds.Length)
-        {
-            // PreSizeMigrationBuffers should have covered this — fall back to a synchronized grow.
-            ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-            _finalizeLock.Enter(ref nullCtx);
-            try
-            {
-                if (_drainedClusterIds == null)
-                {
-                    _drainedClusterIds = new int[Math.Max(16, idx + 1)];
-                }
-                else if (_drainedClusterIds.Length <= idx)
-                {
-                    var newLen = _drainedClusterIds.Length * 2;
-                    while (newLen <= idx)
-                    {
-                        newLen *= 2;
-                    }
-
-                    Array.Resize(ref _drainedClusterIds, newLen);
-                }
-            }
-            finally
-            {
-                _finalizeLock.Exit();
-            }
-        }
-        _drainedClusterIds[idx] = clusterChunkId;
+        var idx = Interlocked.Increment(ref _drainCount.Value) - 1;
+        var block = DrainBlock(idx >> DrainBlockShift);
+        Volatile.Write(ref block[idx & (DrainBlockSize - 1)], clusterChunkId);
     }
 
+    /// <summary>The drain block <paramref name="b"/>, created if absent. A grow copies block references only, so a block's address never changes.</summary>
+    private int[] DrainBlock(int b)
+    {
+        var table = Volatile.Read(ref _drainBlocks);
+        if ((uint)b < (uint)table.Length)
+        {
+            var block = Volatile.Read(ref table[b]);
+            if (block != null)
+            {
+                return block;
+            }
+        }
+
+        lock (_drainGrowLock)
+        {
+            table = _drainBlocks;
+            if ((uint)b >= (uint)table.Length)
+            {
+                var grown = new int[Math.Max(b + 1, table.Length * 2)][];
+                table.CopyTo(grown, 0);
+                table = grown;
+            }
+
+            if (table[b] == null)
+            {
+                Volatile.Write(ref table[b], new int[DrainBlockSize]);
+            }
+
+            Volatile.Write(ref _drainBlocks, table);
+            return table[b];
+        }
+    }
+
+    /// <summary>The claim word a sealed cluster holds: every slot of the layout claimed, so every claim path reads the cluster as full (CLUSTERWALK-03).</summary>
+    /// <remarks>
+    /// The layout's full mask, not <c>-1</c>: a snapshot scan derives pending slots as <c>claims &amp; ~occupancy</c>, and a <c>-1</c> on a cluster of fewer
+    /// than 64 slots would send it to slots that do not exist.
+    /// </remarks>
+    private long SealedClaims => unchecked((long)Layout.FullMask);
+
     /// <summary>
-    /// Walk the deferred-drain list serially (called once per archetype from <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all Migrate-phase slices
-    /// have completed). For each drained cluster, re-check occupancy: if still empty, run finalize + free; if a concurrent Claim re-filled it during Migrate,
-    /// leave it alone. Resets <see cref="_drainedCount"/> to zero.
-    /// <para>
-    /// <b>Concurrency invariant:</b> Finalize-for-one-archetype runs on exactly one worker (one work item per archetype, dispatched atomically). By the time
-    /// this method runs, the Migrate and AabbRefresh phase barriers have both passed — no concurrent ClaimSlotInCell or ReleaseSlot can mutate this archetype's
-    /// clusters. The occupancy re-read is therefore single-threaded and the per-archetype lock is unnecessary here.
-    /// </para>
-    /// <para>
-    /// Note: a cluster can appear in the drain list AND have non-zero occupancy if a Migrate-phase Claim refilled it after the drain was recorded. That's a
-    /// Migrate-phase Claim arriving AFTER a Migrate-phase Release: legal because the cluster was still in the cell's claim list, and the Claim correctly
-    /// re-occupied it. Skip the finalize.
-    /// </para>
+    /// Reclaim the clusters releases have emptied since the last call (#582, CLUSTERWALK-03): the tick fence's Finalize, a runtime-less host's
+    /// <c>WriteTickFence</c>, a clean close and the end of a crash replay. One thread per archetype, with no walker, claimer or releaser of this archetype in
+    /// flight (EW-01's window, or a runtime-less host's own quiescence).
     /// </summary>
-    /// <remarks>Each cluster is finalised in its own realm's cell state (<see cref="SpatialOfCluster"/>).</remarks>
+    /// <remarks>
+    /// <para>
+    /// <b>The seal.</b> A drained cluster stays listed and in its cell until here, so a spawn may claim a slot in it in between — claims are lock-free CASes on
+    /// the claim word. Each recorded cluster is sealed by a CAS of its claim word from 0 to <see cref="SealedClaims"/>, which every claim path reads as full
+    /// with no change to it. The CAS wins only if no slot is claimed: a pending spawn, a hidden destroy and a refill all hold a claim bit, and keep the cluster.
+    /// Releases clear occupancy before the claim, so once the CAS wins the occupancy re-read is authoritative; a slot occupied without a claim (a load, a
+    /// recovery) unseals and keeps the cluster. A sealed cluster is retired in this same pass — <see cref="RetireClusterId"/> zeroes the claim word before the
+    /// free — and the claim word is never on a page, so a seal is never persisted.
+    /// </para>
+    /// <para>
+    /// <b>One eviction pass.</b> The sealed ids are marked in a bitmap over chunk ids, and one pass over the active list drops them, keeping the survivors in
+    /// order (the allocator's order — #886 lead B measured it above any re-sort): O(active + drained), where a removal per drain was O(active) each. The count
+    /// only shrinks and the array object stays, then the cluster-set version moves once. Only an id the pass FOUND listed is freed, so a duplicate or a stale
+    /// record can never free a chunk twice.
+    /// </para>
+    /// <para>
+    /// <b>On a throw</b> the count was already exchanged to zero, so nothing replays: an id can be leaked, never freed twice.
+    /// </para>
+    /// </remarks>
     internal void DrainPendingClusterFinalizations()
     {
-        var count = _drainedCount;
-        if (count == 0)
+        if (Volatile.Read(ref _drainCount.Value) == 0)
         {
+            LastTickClustersReclaimed = 0;
+            LastTickDrainsKept = 0;
+            LastTickDrainsUnlisted = 0;
+            LastTickDrainFinalizeTicks = 0;
             return;
         }
 
-        var ids = _drainedClusterIds;
+        var started = Stopwatch.GetTimestamp();
+        var count = Interlocked.Exchange(ref _drainCount.Value, 0);
+        var table = Volatile.Read(ref _drainBlocks);
         var hasCluster = ClusterSegment != null;
-        // `using`, because GetChunkAddress(chunkId, dirty: true) below registers an ActiveChunkWriter on each
-        // chunk's page and only Dispose -> CommitChanges releases it (CP-13). Without it every drained cluster left
-        // one ACW on its page forever, so CP-11 skipped that page in EVERY checkpoint cycle: CK-03's coverage gate
-        // never opened, CheckpointLSN never advanced, no WAL segment was ever recycled, and the log grew at the
-        // full write rate until the writer stalled and the process died with WalBackPressureTimeout (#817).
-        // Disposing a `default` accessor is safe — Dispose returns immediately when _segment is null.
-        using var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
-        using var transientAccessor = TransientSegment?.CreateChunkAccessor() ?? default;
-
-        for (var i = 0; i < count; i++)
+        var capacity = hasCluster ? ClusterSegment.ChunkCapacity : TransientSegment.ChunkCapacity;
+        var markWords = (capacity + 63) >> 6;
+        if (_drainMarks.Length < markWords)
         {
-            var chunkId = ids[i];
-            var clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId, true) : transientAccessor.GetChunkAddress(chunkId, true);
-            if (TakenBits(Volatile.Read(ref *(ulong*)clusterBase), chunkId) != 0)
+            _drainMarks = new ulong[Math.Max(markWords, _drainMarks.Length * 2)];
+        }
+
+        if (_drainSealed.Length < count)
+        {
+            _drainSealed = new int[Math.Max(count, _drainSealed.Length * 2)];
+        }
+
+        var marks = _drainMarks;
+        var sealedIds = _drainSealed;
+        var sealedCount = 0;
+        var kept = 0;
+        var unlisted = 0;
+        var reclaimed = 0;
+
+        // `using`: an accessor left undisposed keeps an ActiveChunkWriter on every page it dirtied, and CP-11 then skips that page in every checkpoint for good
+        // (#817, CP-13). The reads here do not dirty: a page about to be freed has nothing to write.
+        using var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
+        using var transientAccessor = hasCluster ? default : TransientSegment.CreateChunkAccessor();
+        var evicted = false;
+        var retiring = -1;   // index in sealedIds of the id the final loop is working on
+        var completed = false;
+        try
+        {
+            var fullMask = Layout.FullMask;
+            var sealedClaims = SealedClaims;
+            for (var i = 0; i < count; i++)
             {
-                continue; // Claim re-filled this cluster after the drain — keep alive (a reserved slot counts: VIS-08)
+                // An appender increments the count before it ensures its block, so under an EW-01 violation a reserved index can name a block the table read
+                // above does not hold yet: that record is lost (a leak), never a throw.
+                var b = i >> DrainBlockShift;
+                var block = b < table.Length ? Volatile.Read(ref table[b]) : null;
+                if (block == null)
+                {
+                    kept++;
+                    continue;
+                }
+
+                ref var entry = ref block[i & (DrainBlockSize - 1)];
+                var chunkId = Volatile.Read(ref entry);
+                entry = 0;
+                if (chunkId <= 0 || chunkId >= capacity)
+                {
+                    kept++;   // reserved and not written yet (only under an EW-01 violation), or out of range
+                    continue;
+                }
+
+                ref var markWord = ref marks[chunkId >> 6];
+                var markBit = 1UL << (chunkId & 63);
+                if ((markWord & markBit) != 0)
+                {
+                    kept++;   // a duplicate record in this pass
+                    continue;
+                }
+
+                var clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+                ref var occupancy = ref *(ulong*)clusterBase;
+                if ((Volatile.Read(ref occupancy) & fullMask) != 0)
+                {
+                    kept++;   // refilled since the drain
+                    continue;
+                }
+
+                DrainBeforeSealProbe?.Invoke(chunkId);
+                ref var claims = ref ClaimWord(chunkId);
+                if (Interlocked.CompareExchange(ref claims, sealedClaims, 0) != 0)
+                {
+                    kept++;   // a slot is claimed: a pending spawn, a hidden destroy, a refill
+                    continue;
+                }
+
+                if ((Volatile.Read(ref occupancy) & fullMask) != 0)
+                {
+                    Volatile.Write(ref claims, 0);   // occupied without a claim — a load or a recovery set it — so unseal and keep
+                    kept++;
+                    continue;
+                }
+
+                markWord |= markBit;
+                sealedIds[sealedCount++] = chunkId;
+                DrainAfterSealProbe?.Invoke(chunkId);
             }
 
-            FinaliseEmptyClusterCellState(SpatialOfCluster(chunkId).Grid, chunkId);
-            RemoveFromActiveList(chunkId);
-            RetireClusterId(chunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
-            ClusterSegment?.FreeChunk(chunkId);
-            TransientSegment?.FreeChunk(chunkId);
+            if (sealedCount > 0)
+            {
+                // The eviction pass. A found id's mark is cleared, so a mark still set after it names a sealed id the list does not hold.
+                var ids = ActiveClusterIds;
+                var n = ActiveClusterCount;
+                var w = 0;
+                for (var r = 0; r < n; r++)
+                {
+                    var id = ids[r];
+                    if (id < capacity && (marks[id >> 6] & (1UL << (id & 63))) != 0)
+                    {
+                        marks[id >> 6] &= ~(1UL << (id & 63));
+                        // Issue #233: a sleeping or wake-pending cluster stays counted in SleepingClusterCount until WakePending→Active completes.
+                        if (SleepStates != null && id < SleepStates.Length)
+                        {
+                            var sleepState = SleepStates[id];
+                            if (sleepState == ClusterSleepState.Sleeping || sleepState == ClusterSleepState.WakePending)
+                            {
+                                SleepingClusterCount--;
+                            }
+                        }
+
+                        if (FreeClusterHead == id)
+                        {
+                            FreeClusterHead = -1;
+                        }
+
+                        continue;
+                    }
+
+                    ids[w++] = id;
+                }
+
+                if (w != n)
+                {
+                    // Released, to pair with the acquiring readers (CLUSTERWALK-02); shrinking is the benign direction. One version bump for the whole pass.
+                    Volatile.Write(ref ActiveClusterCount, w);
+                    Interlocked.Increment(ref _clusterSetVersion);
+                }
+
+                evicted = true;
+
+                // Detach and evict before retire: ReplicationState.ReleaseBlockForDrain expects the cluster off the list and out of its cell.
+                for (var i = 0; i < sealedCount; i++)
+                {
+                    retiring = i;
+                    var id = sealedIds[i];
+                    if ((marks[id >> 6] & (1UL << (id & 63))) != 0)
+                    {
+                        marks[id >> 6] &= ~(1UL << (id & 63));
+                        Volatile.Write(ref ClaimWord(id), 0);
+                        unlisted++;
+                        Debug.Assert(false, $"sealed drained cluster {id} is not on the active list (CLUSTERWALK-03)");
+                        continue;
+                    }
+
+                    FinaliseEmptyClusterCellState(SpatialOfCluster(id).Grid, id);
+                    RetireClusterId(id);   // the id is about to be recyclable — clears every side table that must not outlive it, the seal included
+                    ClusterSegment?.FreeChunk(id);
+                    TransientSegment?.FreeChunk(id);
+                    reclaimed++;
+                }
+            }
+
+            completed = true;
         }
-        _drainedCount = 0;
+        finally
+        {
+            for (var i = 0; i < sealedCount; i++)
+            {
+                var id = sealedIds[i];
+                marks[id >> 6] &= ~(1UL << (id & 63));
+            }
+
+            if (!completed)
+            {
+                // A throw left sealed ids behind. Sealed, every claim reads them as full and no release ever records them again, so they would be lost for
+                // good: unseal each one not yet reached, put it back on the list if the eviction pass took it off, and record it for the next reclamation.
+                // The id the final loop was inside is in an unknown state and is left alone — a leak, never a double free.
+                for (var i = evicted ? retiring + 1 : 0; i < sealedCount; i++)
+                {
+                    var id = sealedIds[i];
+                    Volatile.Write(ref ClaimWord(id), 0);
+                    if (evicted)
+                    {
+                        AddToActiveList(id);
+                    }
+
+                    RecordClusterDrain(id);
+                }
+            }
+
+            LastTickClustersReclaimed = reclaimed;
+            LastTickDrainsKept = kept;
+            LastTickDrainsUnlisted = unlisted;
+            LastTickDrainFinalizeTicks = Stopwatch.GetTimestamp() - started;
+        }
     }
 
     /// <summary>
@@ -1206,21 +1421,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     /// <remarks>
     /// <para>
-    /// One place, called from all three sites that free a cluster id. The failure this shape prevents is the one that is easy to cause and hard to see: a
-    /// new side table added at two of the three sites and silently stale at the third, found later as a block or an index entry describing a cluster that no
-    /// longer exists. Anything added here is added everywhere by construction.
+    /// One place, called from the one site that frees a cluster id since #582 (the reclamation, CLUSTERWALK-03). It was three, and the failure this shape
+    /// prevents is the one that is easy to cause and hard to see: a new side table added at some sites and silently stale at another, found later as a block
+    /// or an index entry describing a cluster that no longer exists. Anything added here is added everywhere by construction.
     /// </para>
     /// <para>
-    /// <b>Nothing called from here may throw.</b> The deferred drain loop has no <c>try</c>/<c>finally</c>, so an exception would skip the
-    /// <c>FreeChunk</c> that follows — orphaning the id permanently, since the cluster is by then off the active list — and would skip the drain-count reset,
-    /// replaying ids already processed. The inline callers are worse: they propagate out through <c>Transaction.Commit</c>.
+    /// <b>Nothing called from here may throw.</b> An exception would skip the <c>FreeChunk</c> that follows in the reclamation, orphaning the id for good,
+    /// since the cluster is by then off the active list (the reclamation exchanged its count first, so nothing replays).
     /// </para>
     /// </remarks>
     private void RetireClusterId(int clusterChunkId)
     {
         // Recorded for the stamp above, and only while the structure signal is read: an engine that never fences would otherwise grow the list without
-        // bound. RetireClusterId runs single-threaded per archetype — under the fence (Migrate records, the Finalize drain acts), or from a destroy's commit
-        // under _finalizeLock (FinalizeDrainedClusterLatched, #582).
+        // bound. RetireClusterId runs single-threaded per archetype: only the reclamation calls it (DrainPendingClusterFinalizations, CLUSTERWALK-03).
         if (TrackStructureChanges)
         {
             if (_retiredPendingCount == _retiredPending.Length)
@@ -1587,7 +1800,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// entity that was written for component T and then destroyed relies on that walk to take its indexed component S out of the tree — and S is exactly what
     /// the written-slot test would skip.</para>
     /// <para>A count of releases settles it without guessing: <b>zero releases ⟹ that case cannot exist</b>, and the gate is exact. A tick with destroys pays
-    /// the full drain exactly as before. Migration releases are excluded (<c>deferFinalize</c>) because a move is not a destroy — the entity is still indexed,
+    /// the full drain exactly as before. Migration releases are excluded (<c>isMove</c>) because a move is not a destroy — the entity is still indexed,
     /// at its new location.</para>
     /// </remarks>
     public int SlotReleasesThisTick;
@@ -1794,11 +2007,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     private void ClearSlotBits(byte* clusterBase, int dstSlot, int dstChunkId)
     {
         Interlocked.And(ref *(long*)clusterBase, ~(1L << dstSlot));
-        ReleaseClaim(dstChunkId, dstSlot);
+        var claimsLeft = ReleaseClaim(dstChunkId, dstSlot);
         *(long*)(clusterBase + Layout.EntityIdsOffset + dstSlot * 8) = 0;
         for (var s = 0; s < Layout.ComponentCount; s++)
         {
             Interlocked.And(ref *(long*)(clusterBase + Layout.EnabledBitsOffset(s)), ~(1L << dstSlot));
+        }
+
+        // A release like any other (CLUSTERWALK-03): a destination this rollback empties is recorded, or it would stay listed and empty for good.
+        if (claimsLeft == 0 && (Volatile.Read(ref *(ulong*)clusterBase) & Layout.FullMask) == 0)
+        {
+            RecordClusterDrain(dstChunkId);
         }
     }
 
@@ -1915,8 +2134,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// runtime's alone — <c>EcsQuery.TryCountViaOccupancy</c> needs it too, and reproducing the four lines at that call site is what the rule forbids.
     /// </para>
     /// <para>
-    /// This makes the pair CONSISTENT; it does not make the walk SAFE. A walker racing <see cref="RemoveFromActiveList"/> can still see one cluster twice and
-    /// skip another, whose chunk is freed two lines later — CLUSTERWALK-01, which needs a snapshot or epoch protocol and is unfixed.
+    /// This makes the pair CONSISTENT. The walk is safe for another reason: within a tick nothing removes from the list (CLUSTERWALK-01, #582) — only the
+    /// fence's reclamation does, with walkers quiesced.
     /// </para>
     /// </remarks>
     internal int[] ReadActiveClusterList(out int count)
@@ -3520,13 +3739,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     // The index itself is allocated lazily on the first tier-filtered dispatch.
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Monotonic counter, incremented by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>.
+    /// <summary>Monotonic counter, incremented by <see cref="AddToActiveList"/> and by the reclamation's eviction pass.
     /// Consumed by <see cref="TierClusterIndex.RebuildIfStale"/> to short-circuit when no cluster has been added or removed since the last rebuild. Issue #231.
     /// </summary>
     private int _clusterSetVersion;
 
     /// <summary>
-    /// Bumped by <see cref="AddToActiveList"/> and <see cref="RemoveFromActiveList"/>; read by <c>TierClusterIndex.RebuildIfStale</c> as a staleness hint.
+    /// Bumped by <see cref="AddToActiveList"/> and by the reclamation's eviction pass; read by <c>TierClusterIndex.RebuildIfStale</c> as a staleness hint.
     /// </summary>
     /// <remarks>
     /// <b>Interlocked, because a lost update is silent and permanent.</b> It was a plain <c>++</c> on both writers. Two spawns racing there lose one
@@ -3885,7 +4104,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ClusterListSummary CaptureClusterSummary()
     {
         var segment = ClusterSegment;
-        if (segment == null || _drainedCount != 0)
+        if (segment == null || HasPendingClusterFinalizations)
         {
             return null;
         }
@@ -3959,12 +4178,15 @@ internal sealed unsafe partial class ArchetypeClusterState
             var clusterBase = accessor.GetChunkAddress(chunkId);
             var occupancy = *(ulong*)clusterBase;
 
+            AddToActiveList(chunkId);
             if (occupancy == 0)
             {
+                // An allocated cluster with nothing in it: a drain that was pending when the engine stopped — reclamation is fence-deferred (#582,
+                // CLUSTERWALK-03), and a crash can land after the drain's page is checkpointed and before the fence. Skipped, its chunk stayed allocated for
+                // good; listed and recorded, the next reclamation (the end of a crash replay, or the first fence) seals and frees it.
+                RecordClusterDrain(chunkId);
                 continue;
             }
-
-            AddToActiveList(chunkId);
 
             if (FreeClusterHead < 0 && (~occupancy & Layout.FullMask) != 0)
             {
@@ -3985,12 +4207,15 @@ internal sealed unsafe partial class ArchetypeClusterState
             var clusterBase = accessor.GetChunkAddress(chunkId);
             var occupancy = *(ulong*)clusterBase;
 
+            AddToActiveList(chunkId);
             if (occupancy == 0)
             {
+                // An allocated cluster with nothing in it: a drain that was pending when the engine stopped — reclamation is fence-deferred (#582,
+                // CLUSTERWALK-03), and a crash can land after the drain's page is checkpointed and before the fence. Skipped, its chunk stayed allocated for
+                // good; listed and recorded, the next reclamation (the end of a crash replay, or the first fence) seals and frees it.
+                RecordClusterDrain(chunkId);
                 continue;
             }
-
-            AddToActiveList(chunkId);
 
             if (FreeClusterHead < 0 && (~occupancy & Layout.FullMask) != 0)
             {
@@ -9685,40 +9910,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Grow <see cref="_drainedClusterIds"/> so that <paramref name="required"/> entries fit, on a single thread.
+    /// Pre-allocate the drain blocks that <paramref name="required"/> records need, on a single thread, so parallel appenders do not take the grow lock.
     /// </summary>
     /// <remarks>
-    /// <see cref="PreSizeMigrationBuffers"/> sizes this list from <see cref="PendingMigrationCount"/>, on the premise that one migration releases at most
-    /// one source slot. The #872 step-12 repair planner runs AFTER that pre-size and breaks the premise from both ends — it files more migrations, and it
-    /// consumes drain entries of its own for the empty destinations it allocates. Without a top-up the Migrate phase overflows into
-    /// <see cref="RecordClusterDrain"/>'s fallback, which is reached from parallel workers and writes its entry after releasing the grow lock: an entry can
-    /// be dropped by a concurrent resize, and a dropped drain record is a cluster nothing will ever free.
+    /// A performance hint since #582: the append grows its own blocks, which never move, so a record can no longer be lost to a concurrent grow (the hazard
+    /// the #872 step-12 repair planner's top-up used to close).
     /// </remarks>
     internal void PreSizeDrainedClusterIds(int required)
     {
-        if (required <= 0)
+        for (var b = 0; required > 0 && b <= (required - 1) >> DrainBlockShift; b++)
         {
-            return;
+            DrainBlock(b);
         }
-
-        if (_drainedClusterIds == null)
-        {
-            _drainedClusterIds = new int[Math.Max(16, required)];
-            return;
-        }
-
-        if (_drainedClusterIds.Length >= required)
-        {
-            return;
-        }
-
-        var capacity = _drainedClusterIds.Length;
-        while (capacity < required)
-        {
-            capacity *= 2;
-        }
-
-        Array.Resize(ref _drainedClusterIds, capacity);
     }
 
     /// <summary>
@@ -9871,8 +10074,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// must be `Volatile.Read` (see `TyphonRuntime.ReadActiveClusterList`). Loading the array first admits a plain interleaving that needs no reordering at
     /// all to fault: old array of length 16, concurrent resize, count read as 17, index 16 of the old array.
     /// <para>
-    /// This orders the GROWTH of the list. It does not make the list safe to walk against a concurrent <see cref="RemoveFromActiveList"/>, whose
-    /// swap-with-last can still show a walker one cluster twice and skip another — #582 face 1, which needs a real snapshot protocol, not an ordering fix.
+    /// This orders the GROWTH of the list. What makes the list safe to walk is that nothing removes from it within a tick: a drained cluster is reclaimed
+    /// at the fence (CLUSTERWALK-01, CLUSTERWALK-03).
     /// </para>
     /// </remarks>
     public void AddToActiveList(int chunkId)
@@ -9920,6 +10123,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Remove a cluster chunk ID from the active list (swap-with-last, O(1)).</summary>
     /// <remarks>
+    /// <para>
+    /// <b>No production caller since #582.</b> A swap-with-last under a walker is the face-1 hazard (CLUSTERWALK-01); the only remover is the fence's
+    /// reclamation (<see cref="DrainPendingClusterFinalizations"/>), which evicts in one pass. Kept for the fixtures that drive the list's publication
+    /// directly (CLUSTERWALK-02). Do not call it from a commit, an abort or a cleanup.
+    /// </para>
     /// <b>Re-sorting the list in Prep was built, measured and REFUTED (#886 lead B) — do not re-add it without a new measurement.</b> The reasoning was
     /// sound on its face: every swap-with-last displaces one id to a random earlier index, nothing ever puts it back, the AabbRefresh walk slices this list by
     /// index range through a 32-page accessor window, and a fresh world (ascending by construction) is the only world a 40-tick benchmark ever sees. The
@@ -9967,66 +10175,48 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Release one occupied slot of a Versioned/Transient mixed cluster on the persistent segment. Atomically clears the slot's OccupancyBit + EnabledBits + EntityKey
-    /// via <see cref="ClearSlotMetadata"/>, maintains the per-cell entity counter when the slot was actually occupied, and — if the slot was the cluster's last occupant —
-    /// either finalises the cluster immediately or defers finalisation to the per-tick fence depending on <paramref name="deferFinalize"/>.
+    /// Release one occupied slot of a cluster on the persistent segment: clear its occupancy bit, enabled bits and entity key (<see cref="ClearSlotMetadata"/>),
+    /// release its claim, maintain the cell's entity count, and — when the release leaves the cluster empty — record the cluster for the next reclamation.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Slot-level work.</b> <see cref="ClearSlotMetadata"/> returns the occupancy bitmap as it was BEFORE the clear, so the method can tell (a) whether the
-    /// slot was actually occupied (no-op release on a free slot is silently absorbed — no cell-count decrement, no drain handling) and (b) whether clearing
-    /// this single bit transitioned the cluster from non-empty to empty in one observation. Cell-entity bookkeeping
-    /// (<see cref="DecrementCellEntityCountOnRelease"/>) fires only on the genuinely-was-occupied path to keep <see cref="CellState.EntityCount"/>
-    /// consistent with the occupancy bitmaps under repeated-release idempotence.
+    /// <b>A drained cluster is never finalized here (#582, CLUSTERWALK-03).</b> It stays listed and in its cell, its chunk allocated, until the tick fence's
+    /// <see cref="DrainPendingClusterFinalizations"/> seals and reclaims it. Finalizing inline let a walker holding the active list mid-dispatch see one cluster
+    /// twice, skip another and read a freed chunk. Walkers skip an empty cluster on its occupancy word, so a drained one costs them nothing.
     /// </para>
     /// <para>
-    /// <b>Drain branches.</b> When this release drains the cluster (last bit cleared), the cluster must exit the active set, get removed from its cell's pool
-    /// segment, and have its chunks returned to both <see cref="ClusterSegment"/> and <see cref="TransientSegment"/>. Two paths:
-    /// <list type="bullet">
-    ///   <item><b><paramref name="deferFinalize"/> = false</b> (default — single-threaded callers like <c>Transaction.Destroy</c>): finalise immediately.
-    ///     Safe because no concurrent claimer can CAS a slot back in between our last-bit-clear and the segment free.</item>
-    ///   <item><b><paramref name="deferFinalize"/> = true</b> (parallel-fence migration path, review C-1): record the drained cluster via
-    ///     <see cref="RecordClusterDrain"/> and let <c>FinalizeArchetypeFence</c> do the finalize+free pass after all workers have quiesced. Skipping immediate
-    ///     free closes the race where another worker mid-<c>ClaimSlotInCell</c> has already CAS-claimed a slot in this cluster between our last-bit-clear and
-    ///     any subsequent lock — finalising now would free a chunk the claimer is about to write into.</item>
-    /// </list>
+    /// <b>Drain detection.</b> The cluster counts as drained when, after this release's claim is released, no slot is claimed and the occupancy word is empty.
+    /// The occupancy word is re-read after the claim release, so of two releases of a cluster's last two slots on different threads, the later one records:
+    /// testing the pre-clear occupancy instead let both see the other's bit and neither record, leaving an empty cluster nothing would ever free. A record
+    /// that turns out to be a duplicate, or a cluster refilled before the fence, is harmless: the reclamation dedupes and its seal keeps a refilled cluster.
     /// </para>
     /// <para>
-    /// <b>Free-list hint.</b> On a release that does NOT drain the cluster, the cluster still has free capacity and is a good candidate for the next claim. If
-    /// <see cref="FreeClusterHead"/> is currently unset (-1), it's biased to this cluster so the next <c>ClaimSlotInCell</c> hits an O(1) lookup. This is a
-    /// hint only — the claim path validates the head still has a free bit before using it.
+    /// <b>Free-list hint.</b> A release that leaves the cluster non-empty biases <see cref="FreeClusterHead"/> to it when unset (a hint; the claim path
+    /// re-validates the head).
     /// </para>
     /// <para>
-    /// <b>Threading.</b> There is no mutex on either path. When <paramref name="deferFinalize"/> = false the caller is single-threaded for this
-    /// <see cref="ArchetypeClusterState"/> (<c>Transaction.Destroy</c> and friends) — that, not a lock, is what makes the inline finalize-and-free safe, so a
-    /// concurrent caller on this path would be a defect no lock currently prevents. When deferred, the caller is the parallel fence path where workers operate
-    /// on disjoint clusters; <see cref="RecordClusterDrain"/> uses <see cref="System.Threading.Interlocked.Increment(ref int)"/> to reserve a slot in the
-    /// per-archetype drain list, so concurrent drain records are safe.
+    /// <b>Threading.</b> No lock. Concurrent releases of different slots compose through the Interlocked clears; the drain record is a lock-free append.
     /// </para>
     /// </remarks>
-    /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment — provides the in-memory address of the cluster chunk for
-    /// direct metadata mutation.</param>
+    /// <param name="accessor">Chunk accessor bound to the <see cref="PersistentStore"/> segment.</param>
     /// <param name="clusterChunkId">Chunk id of the cluster containing the slot to release.</param>
-    /// <param name="slotIndex">Zero-based index of the slot within the cluster (0..<see cref="ArchetypeClusterInfo.ClusterSize"/>-1). The slot's occupancy bit,
-    /// enabled bits, and entity key are all cleared.</param>
-    /// <param name="changeSet">Change set threaded through for WAL / dirty-page bookkeeping on the persistent segment writes performed
-    /// by <see cref="ClearSlotMetadata"/>.</param>
+    /// <param name="slotIndex">Zero-based index of the slot within the cluster.</param>
+    /// <param name="changeSet">Change set threaded through for WAL / dirty-page bookkeeping on the persistent segment writes.</param>
     /// <param name="grid">
-    /// Optional spatial grid. When non-null <em>and</em> <see cref="ClusterCellMap"/> is populated for the released cluster, this method maintains the cell
-    /// descriptor: <see cref="CellState.EntityCount"/> always decrements (only on genuinely-was-occupied releases), and a going-empty cluster is removed
-    /// from its cell's pool segment at finalise time. Pass <c>null</c> when the archetype has no spatial slot — the cell bookkeeping is then a no-op.
+    /// Optional spatial grid. When non-null and <see cref="ClusterCellMap"/> maps the cluster, the cell's <see cref="CellState.EntityCount"/> is decremented
+    /// on a release of an occupied slot. Pass <c>null</c> when the archetype has no spatial slot.
     /// </param>
-    /// <param name="deferFinalize">
-    /// When <c>true</c>, postpones the drain finalisation (cell removal + active-list eviction + segment free) so the per-tick fence can run it after the
-    /// parallel migration pass completes. Set by the cluster-migration / parallel-fence call sites; default <c>false</c> for single-threaded callers
-    /// (<c>Transaction.Destroy</c>, etc.) that can safely finalise inline.
+    /// <param name="isMove">
+    /// <c>true</c> for a migration's release of its SOURCE slot — a move, not a destroy: the slot's SingleVersion collection buffers moved with the bytes and
+    /// are not released, the cell's scan cursor is left alone (Migrate workers release into cells other workers are claiming into), and the migration path
+    /// flags the shrink and counts the release itself.
     /// </param>
     /// <param name="releaseCollections">
     /// When <c>false</c>, a true destroy does not release the slot's SingleVersion collection buffers: the crash replay, whose slot may come from a
     /// torn page naming buffers that are not its own, leaks them instead (#1251).
     /// </param>
     public void ReleaseSlot(ref ChunkAccessor<PersistentStore> accessor, int clusterChunkId, int slotIndex, ChangeSet changeSet, SpatialGrid grid = null,
-        bool deferFinalize = false, bool releaseCollections = true)
+        bool isMove = false, bool releaseCollections = true)
     {
         // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
         // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
@@ -10036,9 +10226,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
         // Release SV ComponentCollection buffers held in this slot BEFORE clearing it — but only on a true destroy.
-        // Migration passes deferFinalize:true and is a MOVE: the handle was byte-copied to the destination slot, so the
+        // A migration (isMove) is a MOVE: the handle was byte-copied to the destination slot, so the
         // buffer must NOT be freed here. SV CC has no revision chain; the cluster slot is the buffer's sole owner.
-        if (!deferFinalize && releaseCollections && CollectionSlots != null)
+        if (!isMove && releaseCollections && CollectionSlots != null)
         {
             ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
         }
@@ -10047,12 +10237,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
         var claimsLeft = ReleaseClaim(clusterChunkId, slotIndex);
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && claimsLeft == 0;
+        // Re-read AFTER the claim release (see the method doc): the later of two concurrent last releases sees both clears and records. Whether THIS slot
+        // was occupied does not enter: a release that drops a cluster's last claim drains it either way, and an extra record costs nothing under the seal.
+        var clusterDrained = claimsLeft == 0 && (Volatile.Read(ref *(ulong*)clusterBase) & Layout.FullMask) == 0;
 
         if (wasOccupied)
         {
-            // resetCursor: !deferFinalize — serial releases reset the cursor for immediate reuse; parallel-migration releases skip it (see the method doc).
-            DecrementCellEntityCountOnRelease(grid, clusterChunkId, !deferFinalize);
+            // resetCursor: !isMove — a destroy resets the cursor for immediate reuse; a migration's release skips it (see the method doc).
+            DecrementCellEntityCountOnRelease(grid, clusterChunkId, !isMove);
         }
 
         // ── A vacated slot needs an AABB shrink, and NOTHING else records that ──────────────────────────────────────
@@ -10069,35 +10261,25 @@ internal sealed unsafe partial class ArchetypeClusterState
         // arm on its own terms — that arm has always visited only ClusterProcessBitmap and has therefore always missed
         // this, the same gap FlagClusterForShrinkRefresh's own remarks describe for migration sources.
         //
-        // `!clusterDrained`: a cluster that just lost its LAST entity is being freed or queued for finalisation, so there
+        // `!clusterDrained`: a cluster that just lost its LAST entity is queued for reclamation at the fence, so there
         // is no bound left to tighten and flagging one would point the refresh at a chunk id about to be recycled.
-        // `!deferFinalize`: the migration path already flags its source unconditionally two statements after its own
+        // `!isMove`: the migration path already flags its source unconditionally two statements after its own
         // ReleaseSlot call (DatabaseEngine.ClusterMigration.cs), so flagging here would be a second CAS per migration.
-        if (wasOccupied && !deferFinalize)
+        if (wasOccupied && !isMove)
         {
             // Counted even when the cluster drains: the entity is gone either way, and the shadow drain's gate asks "could a destroy have happened", not
             // "did a cluster survive one".
             Interlocked.Increment(ref SlotReleasesThisTick);
         }
 
-        if (wasOccupied && !clusterDrained && !deferFinalize)
+        if (wasOccupied && !clusterDrained && !isMove)
         {
             FlagClusterShrinkAxesOnly(clusterChunkId);
         }
 
         if (clusterDrained)
         {
-            if (deferFinalize)
-            {
-                // Parallel-fence migration path (review C-1). Defer finalize-and-free to FinalizeArchetypeFence — freeing here would race with a concurrent
-                // ClaimSlotInCell that may have just CAS-claimed a slot in this cluster between our last-bit-clear and any lock acquire. The deferred list is
-                // per-archetype, slot reservation lock-free via Interlocked.Increment.
-                RecordClusterDrain(clusterChunkId);
-            }
-            else
-            {
-                FinalizeDrainedClusterLatched(grid, clusterChunkId);
-            }
+            RecordClusterDrain(clusterChunkId);   // reclaimed at the fence, never here (CLUSTERWALK-03)
         }
         else if (FreeClusterHead < 0)
         {
@@ -10106,9 +10288,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Release a slot for pure-Transient archetypes (no PersistentStore segment).
+    /// Release a slot for pure-Transient archetypes (no PersistentStore segment). Same contract as the persistent overload: a drained cluster is recorded for
+    /// the fence's reclamation, never finalized here.
     /// </summary>
-    public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null, bool deferFinalize = false)
+    public void ReleaseSlot(ref ChunkAccessor<TransientStore> accessor, int clusterChunkId, int slotIndex, SpatialGrid grid = null, bool isMove = false)
     {
         // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
         // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
@@ -10121,72 +10304,37 @@ internal sealed unsafe partial class ArchetypeClusterState
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
         var claimsLeft = ReleaseClaim(clusterChunkId, slotIndex);
-        var clusterDrained = wasOccupied && (prevOccupancy & ~slotMask) == 0 && claimsLeft == 0;
+        // Re-read AFTER the claim release (see the method doc): the later of two concurrent last releases sees both clears and records. Whether THIS slot
+        // was occupied does not enter: a release that drops a cluster's last claim drains it either way, and an extra record costs nothing under the seal.
+        var clusterDrained = claimsLeft == 0 && (Volatile.Read(ref *(ulong*)clusterBase) & Layout.FullMask) == 0;
 
         if (wasOccupied)
         {
-            // resetCursor: !deferFinalize — serial releases reset the cursor for immediate reuse; parallel-migration releases skip it (see the method doc).
-            DecrementCellEntityCountOnRelease(grid, clusterChunkId, !deferFinalize);
+            // resetCursor: !isMove — a destroy resets the cursor for immediate reuse; a migration's release skips it (see the method doc).
+            DecrementCellEntityCountOnRelease(grid, clusterChunkId, !isMove);
         }
 
         // Same reasoning as the PersistentStore overload above — see the block there. A pure-Transient archetype can carry a Dynamic spatial slot, so it
         // reaches the same refresh pass and needs the same signal; FlagClusterForShrinkRefresh null-checks both arrays, so this is free for the rest.
-        if (wasOccupied && !deferFinalize)
+        if (wasOccupied && !isMove)
         {
             // Counted even when the cluster drains: the entity is gone either way, and the shadow drain's gate asks "could a destroy have happened", not
             // "did a cluster survive one".
             Interlocked.Increment(ref SlotReleasesThisTick);
         }
 
-        if (wasOccupied && !clusterDrained && !deferFinalize)
+        if (wasOccupied && !clusterDrained && !isMove)
         {
             FlagClusterShrinkAxesOnly(clusterChunkId);
         }
 
         if (clusterDrained)
         {
-            if (deferFinalize)
-            {
-                RecordClusterDrain(clusterChunkId);
-            }
-            else
-            {
-                FinalizeDrainedClusterLatched(grid, clusterChunkId);
-            }
+            RecordClusterDrain(clusterChunkId);   // reclaimed at the fence, never here (CLUSTERWALK-03)
         }
         else if (FreeClusterHead < 0)
         {
             FreeClusterHead = clusterChunkId;
-        }
-    }
-
-    /// <summary>
-    /// Finalize, inline and under the per-archetype latch, a cluster that a destroy's commit has just drained: detach it from its cell, take it off the
-    /// active list, retire its id and free its chunks.
-    /// </summary>
-    /// <remarks>
-    /// #582, writer-versus-writer only. Commits run concurrently — two user threads' transactions, or the per-chunk transactions of one parallel dispatch —
-    /// so two drains of one archetype reach here at once, and <see cref="RemoveFromActiveList"/>'s swap-with-last is an unguarded read-modify-write of the
-    /// (array, count) pair: one remover's scan misses a target the other just swapped below it, frees the chunk anyway and leaves the freed id listed, or
-    /// copies a tail the other already moved and drops a live cluster. The latch serialises removers against each other and against the latched appenders
-    /// (<see cref="AllocateNewClusterLatched"/>, the new-cluster paths of the cell claims). It does NOT protect a walker holding the list
-    /// (CLUSTERWALK-01, #582 face 1 — that needs the fence deferral), nor a claim that CASes into this cluster between the last-bit clear and the free.
-    /// </remarks>
-    private void FinalizeDrainedClusterLatched(SpatialGrid grid, int clusterChunkId)
-    {
-        ref var nullCtx = ref Unsafe.NullRef<WaitContext>();
-        _finalizeLock.Enter(ref nullCtx);
-        try
-        {
-            FinaliseEmptyClusterCellState(grid, clusterChunkId);
-            RemoveFromActiveList(clusterChunkId);
-            RetireClusterId(clusterChunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
-            ClusterSegment?.FreeChunk(clusterChunkId);
-            TransientSegment?.FreeChunk(clusterChunkId);
-        }
-        finally
-        {
-            _finalizeLock.Exit();
         }
     }
 
@@ -10239,8 +10387,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// Decrement the cell's entity count when a slot is released. No-op if cluster is unmapped.
-    /// <para><paramref name="resetCursor"/> controls the scan-cursor reset: on the serial release path (<c>Transaction.Destroy</c>, <c>deferFinalize</c>
-    /// false) we reset to 0 so the freed slot is immediately reusable by the next claim. On the parallel-fence migration path (<c>deferFinalize</c> true)
+    /// <para><paramref name="resetCursor"/> controls the scan-cursor reset: on a destroy's release (<c>isMove</c>
+    /// false) we reset to 0 so the freed slot is immediately reusable by the next claim. On a migration's release (<c>isMove</c> true)
     /// the reset is SKIPPED — releases there touch arbitrary, non-worker-exclusive source cells, so resetting would zero the cursors of destination cells
     /// other workers are actively claiming into (cursor thrash) and pound a shared array (false sharing). Phase-2 of
     /// <see cref="ClaimSlotInCell(int, ref ChunkAccessor{PersistentStore}, ChangeSet, SpatialGrid, long)"/> recovers any slot freed behind the cursor, so
@@ -10282,8 +10430,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
         // Issue #229 Q10: per-archetype pool removal. Only decrements the global CellState.ClusterCount if the pool actually owned this cluster id.
-        // Both callers are serial for this archetype — DrainPendingClusterFinalizations runs once per archetype after the fence phase barriers, and the
-        // inline ReleaseSlot path runs under _finalizeLock (FinalizeDrainedClusterLatched, #582) — so the CellClusterPool mutation needs no lock of its own.
+        // The only caller is DrainPendingClusterFinalizations, serial for this archetype (the fence's Finalize, a close, a recovery), so the CellClusterPool
+        // mutation needs no lock of its own.
         // The cell descriptor counter is shared ACROSS archetypes, which are not serialized against each other, so that one still needs Interlocked.
         if (rs.CellClusterPool.RemoveCluster(cellKey, clusterChunkId))
         {
@@ -10303,9 +10451,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// Atomically clear EnabledBits, OccupancyBit, and EntityId for a slot (store-agnostic pointer math). Returns the PRE-AND occupancy word so the caller
-    /// can detect "this clear flipped the last bit" via <c>(prev &amp; slotMask) != 0 &amp;&amp; (prev &amp; ~slotMask) == 0</c>. The parallel-fence migration
-    /// path uses this last-bit-wins signal to decide which worker <see cref="RecordClusterDrain">records the drain</see>; no worker finalizes anything, and
-    /// no lock is entered on the strength of it.
+    /// can tell whether the slot was occupied. Whether the cluster drained is decided after the claim release, on a fresh occupancy read (see
+    /// <c>ReleaseSlot</c>); no release finalizes anything, and no lock is entered on the strength of it.
     /// </summary>
     /// <remarks>
     /// All bit mutations use <see cref="Interlocked.And(ref long, long)"/> so concurrent releases of different slots in the same cluster (parallel workers

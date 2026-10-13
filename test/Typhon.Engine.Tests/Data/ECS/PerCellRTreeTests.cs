@@ -239,8 +239,12 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
             tx.Commit();
         }
 
-        // After the last entity is destroyed, the cluster is freed and ReleaseSlot →
-        // FinaliseEmptyClusterCellState removes it from the per-cell index. The per-cell
+        // The emptied cluster stays indexed until the fence reclaims it (#582, CLUSTERWALK-03); the query already finds nothing, by occupancy.
+        Assert.That(cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex.ClusterCount, Is.EqualTo(1), "a drained cluster waits for the fence");
+        Assert.That(CollectQueryResults(dbe, 0f, 0f, 100f, 100f), Is.Empty);
+        dbe.WriteTickFence(1);
+
+        // The fence's reclamation → FinaliseEmptyClusterCellState removes it from the per-cell index. The per-cell
         // slot's DynamicIndex now has zero clusters (or the slot itself may still exist
         // with an empty index — either is acceptable for Phase 1).
         var slot = cs.Realm0Spatial.PerCellIndex[cellKey];

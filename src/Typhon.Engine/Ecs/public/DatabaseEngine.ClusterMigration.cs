@@ -1384,11 +1384,11 @@ public partial class DatabaseEngine
                 }
                 if (hasClusterAccessor)
                 {
-                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, true);
+                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, isMove: true);
                 }
                 else
                 {
-                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, srcGrid, true);
+                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, srcGrid, isMove: true);
                 }
 
                 // 10b. The source cluster just lost an entity, so its AABB may be too large — flag a full recompute for this tick's refresh pass (#872
@@ -1758,7 +1758,7 @@ public partial class DatabaseEngine
                                 for (var v = 0; v < delViews.Length; v++)
                                 {
                                     var reg = delViews[v];
-                                    if (reg.View.IsDisposed)
+                                    if (reg.DeltaBuffer.IsClosed)
                                     {
                                         continue;
                                     }
@@ -1840,7 +1840,7 @@ public partial class DatabaseEngine
                                 for (var v = 0; v < views.Length; v++)
                                 {
                                     var reg = views[v];
-                                    if (reg.View.IsDisposed)
+                                    if (reg.DeltaBuffer.IsClosed)
                                     {
                                         continue;
                                     }
@@ -1905,7 +1905,7 @@ public partial class DatabaseEngine
                 for (var v = 0; v < delViews.Length; v++)
                 {
                     var reg = delViews[v];
-                    if (reg.View.IsDisposed)
+                    if (reg.DeltaBuffer.IsClosed)
                     {
                         continue;
                     }
@@ -1948,7 +1948,7 @@ public partial class DatabaseEngine
             for (var v = 0; v < views.Length; v++)
             {
                 var reg = views[v];
-                if (reg.View.IsDisposed)
+                if (reg.DeltaBuffer.IsClosed)
                 {
                     continue;
                 }
