@@ -33,7 +33,8 @@ class HlFatArchB : Archetype<HlFatArchB>
 [StructLayout(LayoutKind.Sequential)]
 struct HlTrans
 {
-    public int Value;
+    // Indexed (#1344): a write records the entity's index keys only when it changes a key of an indexed component, so the Set below must be one.
+    [Index(AllowMultiple = true)] public int Value;
     public int Padding;
 }
 
@@ -421,9 +422,9 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     }
 
     /// <summary>
-    /// A Set on the Transient component of a mixed archetype writes into the transient store, whose pages never move. Being the entity's first write
-    /// this tick, it also captures the SingleVersion index key for the fence — from the page-cache cluster, through the handle's other base. That base
-    /// has to be re-resolved there too: the key captured is the one the fence moves the index entry away from.
+    /// A Set on the Transient component of a mixed archetype writes into the transient store, whose pages never move. Being the entity's first
+    /// key-changing write this tick, it also captures the SingleVersion index key for the fence — from the page-cache cluster, through the handle's
+    /// other base. That base has to be re-resolved there too: the key captured is the one the fence moves the index entry away from.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
@@ -443,11 +444,11 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
         EvictUnder(dbe, memPage, filePage);
 
         var before = shadow.Count;
-        m.Set(HlFatArchC.Trans, new HlTrans { Value = 7 });
-        Assert.That(shadow.Count, Is.EqualTo(before + 1), "premise: the Set is the entity's first write this tick, so it captures its index key");
+        m.Set(HlFatArchC.Trans, new HlTrans { Value = 1_000_007 });   // a key change: spawned with Value = its index
+        Assert.That(shadow.Count, Is.EqualTo(before + 1), "premise: the Set is the entity's first key-changing write this tick, so it captures its index keys");
         Assert.That(shadow[before].EntityPK, Is.EqualTo(_fatC[X]));
         Assert.That(shadow[before].OldKey.RawValue, Is.EqualTo(200_000 + X), "the capture read another entity's key");
-        Assert.That(m.Read(HlFatArchC.Trans).Value, Is.EqualTo(7));
+        Assert.That(m.Read(HlFatArchC.Trans).Value, Is.EqualTo(1_000_007));
     }
 
     /// <summary>

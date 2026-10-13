@@ -91,6 +91,28 @@ internal sealed class FieldShadowBuffer
         block[index & BlockMask] = new ShadowEntry { ChunkId = chunkId, EntityPK = entityPK, OldKey = oldKey };
     }
 
+    /// <summary>
+    /// Reserves <paramref name="count"/> consecutive entries in one interlocked operation and returns the first one's index: the batched capture's append
+    /// (#1346). Each is written through <see cref="WriteAt"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int Reserve(int count) => Interlocked.Add(ref _count, count) - count;
+
+    /// <summary>Writes the entry at <paramref name="index"/>, an index <see cref="Reserve"/> handed out, allocating its block on first use.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void WriteAt(int index, int chunkId, EntityId entityPK, KeyBytes8 oldKey)
+    {
+        var blockIndex = index >> BlockShift;
+        var blocks = _blocks;
+        var block = blockIndex < blocks.Length ? blocks[blockIndex] : null;
+        if (block == null)
+        {
+            block = EnsureBlock(blockIndex);
+        }
+
+        block[index & BlockMask] = new ShadowEntry { ChunkId = chunkId, EntityPK = entityPK, OldKey = oldKey };
+    }
+
     /// <summary>Allocates the block for <paramref name="blockIndex"/>, growing the block table if needed. Off the hot path — reached only the first time a
     /// tick's appends cross into a new block.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -136,7 +158,126 @@ internal sealed class FieldShadowBuffer
     /// <summary>Reset count to zero for next tick. Not thread-safe — call only at tick boundary. Allocated blocks are retained, so a steady-state tick
     /// allocates nothing.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void Reset() => _count = 0;
+    internal void Reset()
+    {
+        _count = 0;
+        _moveCount = 0;
+        MoveRangeCount = 0;
+        MoveRangeFailure = null;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Staged moves (#1346). The drain no longer moves an index entry per changed key: it stages the move here, and the whole field's moves are applied in
+    // one batch (BTreeBase.ApplyMoves) — at the end of the field's drain on the atomic path; after the Prep slices, in key ranges on the workers (the
+    // IndexMoves phase), finished by the serial tail. At most one move per entry, so the entry count bounds them.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    private IndexMove[] _moves = [];
+    private int _moveCount;
+
+    /// <summary>
+    /// The staged moves' batch as the parallel fence's IndexMoves phase prepared it — the tree's leaf-disjoint key ranges, one work item each — or
+    /// <see cref="MoveRangeCount"/> zero when no phase did (the serial and atomic paths apply the batch whole). The tail finishes a prepared batch.
+    /// </summary>
+    internal IndexMoveRange[] MoveRanges = [];
+    internal int MoveRangeCount;
+
+    /// <summary>The first exception a range's work item raised. One that faulted the tree is raised again by the tree itself; one that did not left the
+    /// range unapplied, and the tail applies it and raises this once the batch is finished, so the fence fails loudly without a batch half applied.</summary>
+    internal Exception MoveRangeFailure;
+
+    /// <summary>Empties the staged moves once their batch is applied, keeping the staging's size for the next tick (<see cref="PrepareMoves"/> sizes it,
+    /// and gives a burst's back, at the drain's start).</summary>
+    internal void ClearStagedMoves()
+    {
+        _moveCount = 0;
+        _stagedAtCount = 0;
+        MoveRangeCount = 0;
+        MoveRangeFailure = null;
+    }
+
+    private bool[] _stagedAt = [];
+    private int _stagedAtCount;   // > 0 while the slices' staging awaits its compaction
+
+    /// <summary>Sizes the staging for <paramref name="count"/> entries and empties it. Single-threaded: the atomic drain's field start.</summary>
+    internal void PrepareMoves(int count)
+    {
+        if (_moves.Length < count)
+        {
+            _moves = new IndexMove[Math.Max(count, Math.Max(256, _moves.Length * 2))];
+        }
+        else if (_moves.Length > 65_536 && _moves.Length > 8L * count)
+        {
+            _moves = new IndexMove[Math.Max(count, 256)];   // a burst passed: give its staging back rather than hold it for good
+        }
+
+        _moveCount = 0;
+        _stagedAtCount = 0;
+        MoveRangeCount = 0;
+        MoveRangeFailure = null;
+    }
+
+    /// <summary>
+    /// Sizes the slices' staging for the plan's <paramref name="count"/> entries: a slice stages a move at its entry's plan position, which only it owns, so
+    /// no write is shared and the moves stay in cluster order. <see cref="CompactStagedMoves"/> packs them for the tail. Single-threaded: the Prep head.
+    /// </summary>
+    internal void PrepareMovesAtPlanPositions(int count)
+    {
+        PrepareMoves(count);
+        if (_stagedAt.Length < count)
+        {
+            _stagedAt = new bool[Math.Max(count, Math.Max(256, _stagedAt.Length * 2))];   // geometric: a growing population reallocates it rarely
+        }
+        else if (_stagedAt.Length > 65_536 && _stagedAt.Length > 8L * count)
+        {
+            _stagedAt = new bool[Math.Max(count, 256)];
+        }
+        else
+        {
+            Array.Clear(_stagedAt, 0, count);
+        }
+
+        _stagedAtCount = count;
+    }
+
+    /// <summary>Stages a move, from the one thread draining this buffer (the atomic path).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void StageMove(in IndexMove move) => _moves[_moveCount++] = move;
+
+    /// <summary>Stages a move from a Prep slice at its entry's plan position (see <see cref="PrepareMovesAtPlanPositions"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void StageMoveAt(int planPosition, in IndexMove move)
+    {
+        _moves[planPosition] = move;
+        _stagedAt[planPosition] = true;
+    }
+
+    /// <summary>The plan position of cluster <paramref name="firstCluster"/>'s first entry: where a slice starting there stages.</summary>
+    internal int PlanPositionOf(int firstCluster) => _planSpan == 0 ? 0 : StartOf(firstCluster);
+
+    /// <summary>Packs the moves the slices staged at their plan positions, in plan order, once every slice retired (the phase join). Once: a second call
+    /// finds nothing left to pack and keeps the packed moves.</summary>
+    internal void CompactStagedMoves()
+    {
+        if (_stagedAtCount == 0)
+        {
+            return;
+        }
+
+        var n = 0;
+        for (var i = 0; i < _stagedAtCount; i++)
+        {
+            if (_stagedAt[i])
+            {
+                _moves[n++] = _moves[i];
+            }
+        }
+
+        _moveCount = n;
+        _stagedAtCount = 0;
+    }
+
+    /// <summary>The moves staged this tick. Read once every stager has retired (and, on the sliced path, after <see cref="CompactStagedMoves"/>).</summary>
+    internal Span<IndexMove> StagedMoves => _moves.AsSpan(0, _moveCount);
 
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Per-tick drain plan (#886 lead D). Built ONCE by the Prep head, read by every Prep slice, cleared by the tail.
@@ -156,11 +297,12 @@ internal sealed class FieldShadowBuffer
     /// <c>ArchetypeClusterState.BuildDrainOrder</c>; the difference is what is retained.</summary>
     internal void BuildDrainPlan()
     {
-        // The histogram must start clean. The tail clears it (ClearDrainPlan), but a throw between head and tail — a unique collision, a non-finite
-        // position — skips the tail, and a build on top of last tick's end offsets scatters past the order array. Clearing here is the same memset and
-        // makes the build idempotent.
+        // The histogram must start clean. The tail clears it (ClearDrainPlan), but a throw between head and tail — a non-finite position, a fault —
+        // skips the tail, and a build on top of last tick's end offsets scatters past the order array. Clearing here is the same memset and makes the
+        // build idempotent.
         ClearDrainPlan();
         var count = _count;
+        PrepareMovesAtPlanPositions(count);   // the slices stage this tick's moves at their plan positions, in a staging sized from the same count
         _planCount = count;
         if (count <= 0)
         {

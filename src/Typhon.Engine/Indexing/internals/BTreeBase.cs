@@ -2,6 +2,7 @@
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -44,6 +45,52 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// </summary>
     public abstract unsafe int MoveValue(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore>accessor, 
         out int oldHeadBufferId, out int newHeadBufferId);
+
+    /// <summary>
+    /// <see cref="MoveValue"/> for a caller that stores the returned element id in the entity's cluster tail: never returns -1 (#1345).
+    /// </summary>
+    /// <remarks>
+    /// -1 means the old key or the element was not where the caller's id said: the index already disagrees with the data. Storing -1 made every later
+    /// move, removal or Migrate location update of the entity address chunk -1. Instead the entity is indexed under its new key, so it is reachable again,
+    /// and the miss is counted in <see cref="MoveValueMisses"/>.
+    /// </remarks>
+    public unsafe int MoveValueOrReindex(void* oldKeyAddr, void* newKeyAddr, int elementId, int value, ref ChunkAccessor<TStore> accessor)
+    {
+        var newElementId = MoveValue(oldKeyAddr, newKeyAddr, elementId, value, ref accessor, out _, out _);
+        if (newElementId >= 0)
+        {
+            return newElementId;
+        }
+
+        Interlocked.Increment(ref BTreeMoveValueMisses.Count);
+        return Add(newKeyAddr, value, ref accessor);
+    }
+
+    /// <summary>
+    /// <b>Callable only inside the exclusive tick-fence window</b> (<c>EW-01</c>), with no other writer of this tree running. Applies a whole batch of
+    /// key moves (#1346): sorted once, then applied per key and per leaf rather than per move.
+    /// </summary>
+    /// <param name="moves">The moves, any order; at most one per entity. On return an AllowMultiple move's <see cref="IndexMove.ElementId"/> names the
+    /// entity's element under its new key.</param>
+    /// <param name="accessor">Caller's chunk accessor; supplies the ChangeSet.</param>
+    public abstract IndexMoveOutcome ApplyMoves(Span<IndexMove> moves, ref ChunkAccessor<TStore> accessor);
+
+    // ApplyMoves in three steps, for the parallel tick fence (#1346): cut into leaf-disjoint key ranges once, each range gathered, sorted and applied on its
+    // own worker, the structural remainder finished on one thread. ApplyMoves is the three in a row with one range. Same window as ApplyMoves (EW-01).
+
+    /// <summary>Cuts the batch <paramref name="moves"/> into at most <paramref name="desiredParts"/> key ranges whose leaves are disjoint, held until
+    /// <see cref="FinishMoveBatch"/>; returns how many it wrote. The moves must not change until then.</summary>
+    public abstract int PrepareMoveBatch(Span<IndexMove> moves, int desiredParts, Span<IndexMoveRange> ranges, ref ChunkAccessor<TStore> accessor);
+
+    /// <summary>Gathers, sorts and applies one range's in-place part. Concurrently with the batch's other ranges, never with anything else that writes the
+    /// tree.</summary>
+    public abstract void ApplyMoveRange(Span<IndexMove> moves, ref IndexMoveRange range, ref ChunkAccessor<TStore> accessor);
+
+    /// <summary>Once every range is applied (one that was not is applied here): the structural remainder, serially, and the batch's outcome.</summary>
+    public abstract IndexMoveOutcome FinishMoveBatch(Span<IndexMove> moves, Span<IndexMoveRange> ranges, ref ChunkAccessor<TStore> accessor);
+
+    /// <summary>The moves <see cref="MoveValueOrReindex"/> found no element to move, process-wide: each one an index that disagreed with its data.</summary>
+    internal static long MoveValueMisses => Volatile.Read(ref BTreeMoveValueMisses.Count);
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Bulk value update — the key-erased surface the tick fence's IndexMassUpdate phase drives K heterogeneous trees through (#872 step 6, §5.5).
@@ -199,4 +246,10 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
             accessor.Dispose();
         }
     }
+}
+
+/// <summary>The process-wide count behind <see cref="BTreeBase{TStore}.MoveValueMisses"/>: outside the generic class, so both stores share it.</summary>
+internal static class BTreeMoveValueMisses
+{
+    internal static long Count;
 }

@@ -2587,8 +2587,8 @@ public unsafe partial class Transaction : EntityAccessor
                             clusterBase = _clusterCommitClusterAccessor.GetChunkAddress(clusterChunkId, true);
                         }
                         int* elementIdPtr = (int*)(clusterBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
-                        *elementIdPtr = field.Index.MoveValue(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr, clusterLocation,
-                            ref idxAccessor, out _, out _);
+                        *elementIdPtr = field.Index.MoveValueOrReindex(oldComp + field.FieldOffset, newComp + field.FieldOffset, *elementIdPtr,
+                            clusterLocation, ref idxAccessor);
                     }
                     else
                     {

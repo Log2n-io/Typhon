@@ -36,6 +36,7 @@ public sealed partial class TyphonRuntime : IDisposable
     // Engine-internal fence executors (parallel WriteTickFence — chained Prep→Migrate→Finalize phases). Null when EnableParallelFence is false —
     // OnTickEndInternal then falls back to the legacy single-threaded WriteTickFence path. Each phase has its own FenceWorkPlan instance (rebuilt every tick).
     private readonly FencePrepExecSystem _fencePrepExec;
+    private readonly FenceIndexMovesExecSystem _fenceIndexMovesExec;
     private readonly FenceMigrateExecSystem _fenceMigrateExec;
     private readonly FenceIndexMassUpdateExecSystem _fenceIndexMassUpdateExec;
     private readonly FenceEntityMapUpdateExecSystem _fenceEntityMapUpdateExec;
@@ -312,6 +313,7 @@ public sealed partial class TyphonRuntime : IDisposable
         if (fenceBundle.HasValue)
         {
             _fencePrepExec = fenceBundle.Value.Prep;
+            _fenceIndexMovesExec = fenceBundle.Value.IndexMoves;
             _fenceMigrateExec = fenceBundle.Value.Migrate;
             _fenceIndexMassUpdateExec = fenceBundle.Value.IndexMassUpdate;
             _fenceEntityMapUpdateExec = fenceBundle.Value.EntityMapUpdate;
@@ -3579,6 +3581,16 @@ public sealed partial class TyphonRuntime : IDisposable
             ? (0, 0, 0, 0)
             : (_fencePrepExec.PhaseSpanTicks, _fencePrepExec.TotalWallTicks, _fencePrepExec.TotalUnitCount, _fencePrepExec.PlanForTest.ChunkCount);
 
+    /// <summary>Last tick's IndexMoves phase (#1346): span, chunk CPU, events applied, chunks — the shadow drain's index moves on the workers.</summary>
+    internal (long SpanTicks, long CpuTicks, long Units, int Chunks) LastIndexMovesStats
+        => _fenceIndexMovesExec == null
+            ? default
+            : (_fenceIndexMovesExec.PhaseSpanTicks, _fenceIndexMovesExec.TotalWallTicks, _fenceIndexMovesExec.TotalUnitCount,
+               _fenceIndexMovesExec.PlanForTest.ChunkCount);
+
+    /// <summary>Last tick's IndexMoves Prepare — the batches' sort and cut, serial — in <see cref="Stopwatch"/> ticks; part of its span.</summary>
+    internal long LastIndexMovesSerialTicks => _fenceIndexMovesExec?.LastSerialPrepareTicks ?? 0;
+
     /// <summary>Last tick's AabbRefresh phase — cluster bound recompute, drift detection and the outlier guard.</summary>
     /// <inheritdoc cref="LastPrepStats" path="/remarks"/>
     internal (long SpanTicks, long CpuTicks, long Units, int Chunks) LastAabbRefreshStats
@@ -3646,7 +3658,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
             var start = _fencePrepExec.PhaseStartTicks;
             var end = Math.Max(
-                Math.Max(_fenceFinalizeExec.PhaseEndTicks, _fenceAabbRefreshExec.PhaseEndTicks),
+                Math.Max(Math.Max(_fenceFinalizeExec.PhaseEndTicks, _fenceAabbRefreshExec.PhaseEndTicks), _fenceIndexMovesExec.PhaseEndTicks),
                 Math.Max(Math.Max(_fenceEntityMapUpdateExec.PhaseEndTicks, _fenceIndexMassUpdateExec.PhaseEndTicks),
                     Math.Max(_fenceMigrateExec.PhaseEndTicks, _fencePrepExec.PhaseEndTicks)));
             return start > 0 && end > start ? end - start : 0;

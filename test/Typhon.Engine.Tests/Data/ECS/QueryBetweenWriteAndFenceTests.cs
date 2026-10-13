@@ -363,9 +363,10 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
     }
 
     /// <summary>
-    /// A write to ANOTHER component still makes a later destroy leave this component's index entries for the fence — the destroy sees a pending shadow
-    /// capture, which records every indexed slot. Neither the destroyed entity nor a spawn that follows may come back at the stale key. The spawn does
-    /// not take the freed slot before the fence (#1188, IX-06); <see cref="ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt"/> is that case.
+    /// A write to ANOTHER component records no index key (#1344), so a later destroy removes this component's index entries itself and the freed slot owes
+    /// the fence nothing: a spawn may take it at once. Neither the destroyed entity nor the spawn may come back at the stale key. Before #1344 the write
+    /// recorded every indexed key, the destroy left its removal to the fence, and the slot was held until it (#1188) —
+    /// <see cref="ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt"/> is that case.
     /// </summary>
     [Test]
     [VerifiesRule("QFENCE-01")]
@@ -382,19 +383,22 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
             tx.Commit();
         }
 
+        var cs = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<QfUnit>().ArchetypeId].ClusterState;
+        var (deadChunk, deadSlot) = LocationOf(dbe, ids[5]);
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Destroy(ids[5]);
             tx.Commit();
         }
 
+        Assert.That(cs.FenceOwedBits(deadChunk) & (1UL << deadSlot), Is.Zero, "the freed slot owes the fence nothing: the destroy removed its entries");
         using (var tx = dbe.CreateQuickTransaction())
         {
             var ordered = tx.Query<QfUnit>().WhereField<QfData>(d => d.Key >= 0 && d.Key < 20).OrderByField<QfData, int>(d => d.Key).ExecuteOrdered();
             Assert.That(ordered, Has.Count.EqualTo(9).And.Not.Contain(default(EntityId)).And.Not.Contain(ids[5]), "ordered, after the destroy");
         }
 
-        // Every cluster is full, and the freed slot — where the tree still holds the destroyed entity's keys (10, group 5) — is held until the fence.
+        // Every cluster is full, so the spawn takes the freed slot (asserted below: it is the case that matters).
         EntityId reborn;
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -404,6 +408,7 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
             tx.Commit();
         }
 
+        Assert.That(LocationOf(dbe, reborn), Is.EqualTo((deadChunk, deadSlot)), "premise: the spawn took the freed slot");
         OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Key == 10).Execute(),
             (name, rows, _) => Assert.That(rows, Is.Empty, $"{name}: the reborn entity holds 999 999, not the dead one's key"));
         OnEveryPath(dbe, tx => tx.Query<QfUnit>().WhereField<QfData>(d => d.Group == 5).Execute(),
@@ -423,8 +428,8 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
     /// took the spawn for the destroyed entity with changed keys — it moved the dead entity's entries onto the newcomer instead of removing them, and the
     /// index answered keys no entity held — and before the fence an ordered query returned the newcomer twice, once at the dead entity's key.
     /// </summary>
-    [TestCase(false, TestName = "AfterAWriteToAnotherComponent")]
-    [TestCase(true, TestName = "AfterAKeyMove")]
+    [TestCase(false, TestName = "AfterAMultiValueKeyMove")]
+    [TestCase(true, TestName = "AfterAUniqueKeyMove")]
     [VerifiesRule("IX-06")]
     public void ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt(bool moveTheKey)
     {
@@ -443,9 +448,9 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
             }
             else
             {
-                var o = target.Read(QfUnit.Other);
-                o.Hp = 1;
-                target.Set(QfUnit.Other, o);
+                var d = target.Read(QfUnit.Data);
+                d.Group = 6;   // 5 → 6: the tree keeps the entity under group 5 until the fence
+                target.Set(QfUnit.Data, d);
             }
 
             tx.Commit();

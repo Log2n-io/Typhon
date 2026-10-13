@@ -81,10 +81,23 @@ internal struct KeyBytes8  // 8 bytes
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double AsDouble() => Unsafe.As<long, double>(ref _value);
 
-    // Unsafe factory
+    // Unsafe factory. The low <paramref name="size"/> bytes, zero-extended: a fixed-width load for the four key widths, which a variable-length copy
+    // turned into a call per key on every capture and every drain compare (#1346).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe KeyBytes8 FromPointer(byte* ptr, int size)
     {
+        switch (size)
+        {
+            case 8:
+                return new KeyBytes8 { _value = Unsafe.ReadUnaligned<long>(ptr) };
+            case 4:
+                return new KeyBytes8 { _value = Unsafe.ReadUnaligned<uint>(ptr) };
+            case 2:
+                return new KeyBytes8 { _value = Unsafe.ReadUnaligned<ushort>(ptr) };
+            case 1:
+                return new KeyBytes8 { _value = *ptr };
+        }
+
         var result = new KeyBytes8();
         Unsafe.CopyBlockUnaligned(ref Unsafe.As<long, byte>(ref result._value), ref *ptr, (uint)size);
         return result;

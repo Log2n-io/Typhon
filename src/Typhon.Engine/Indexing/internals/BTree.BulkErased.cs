@@ -107,7 +107,7 @@ internal abstract partial class BTree<TKey, TStore>
     private static bool RadixSortableKey
         => typeof(TKey) == typeof(int) || typeof(TKey) == typeof(long) || typeof(TKey) == typeof(short) || typeof(TKey) == typeof(sbyte)
             || typeof(TKey) == typeof(uint) || typeof(TKey) == typeof(ulong) || typeof(TKey) == typeof(ushort) || typeof(TKey) == typeof(byte)
-            || typeof(TKey) == typeof(float) || typeof(TKey) == typeof(double);
+            || typeof(TKey) == typeof(float) || typeof(TKey) == typeof(double) || typeof(TKey) == typeof(char);
 
     /// <summary>
     /// The unsigned 64-bit radix key with <typeparamref name="TKey"/>'s own order — the order <see cref="CompareKeys"/> defines, since the partitioning
@@ -151,6 +151,11 @@ internal abstract partial class BTree<TKey, TStore>
         if (typeof(TKey) == typeof(ushort))
         {
             return Unsafe.As<TKey, ushort>(ref key);
+        }
+
+        if (typeof(TKey) == typeof(char))
+        {
+            return Unsafe.As<TKey, char>(ref key);   // char compares as its UTF-16 code unit
         }
 
         if (typeof(TKey) == typeof(byte))

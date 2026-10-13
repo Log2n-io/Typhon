@@ -73,13 +73,12 @@ class ClusterUniqueIndexDrainTests : TestBase<ClusterUniqueIndexDrainTests>
         var ex = Assert.Throws<InvalidOperationException>(() => dbe.WriteTickFence(2), "a unique index cannot hold two entities under one key");
         Assert.That(ex.Message, Does.Contain("unique index collision"), "#675's message, unchanged");
 
-        // The tree: the key is held exactly once, the winner's old key is gone, the loser's old key is untouched — whichever of the two won.
+        // The tree: the key is held exactly once, and neither old key survives — the winner moved off its own, and the loser leaves the key its data
+        // left without taking the one the winner holds (#1346: the fence's batch decides on the final state; an index naming the loser under its old key
+        // would answer a query with a row its value fails).
         var (hasColliding, hasOld0, hasOld64) = ProbeAlphaCode(dbe, CollidingKey, AlphaBase, AlphaBase + 64);
-        Assert.That(hasColliding, Is.True, "the first entity to reach the tree holds the key");
-        // The optimistic arms of Move refuse without touching the tree, so the loser keeps its old key. The pessimistic arm removes the old key before
-        // its insert throws (BTree.Move.cs MovePessimistic); it needs MaxOptimisticRestarts failures first, unreachable single-threaded, so this pins the
-        // optimistic outcome only.
-        Assert.That(hasOld0 ^ hasOld64, Is.True, $"exactly one old key must survive: old0={hasOld0} old64={hasOld64}");
+        Assert.That(hasColliding, Is.True, "one of the two holds the key");
+        Assert.That(hasOld0 || hasOld64, Is.False, $"neither old key survives: old0={hasOld0} old64={hasOld64}");
     }
 
     /// <summary>Two entities in two clusters moving to two DIFFERENT keys in one tick is the ordinary case and must not be mistaken for a collision.</summary>

@@ -355,6 +355,52 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
 }
 
 /// <summary>
+/// Phase 1.5 — applies the shadow drain's index moves on the workers (#1346). The Prep slices stage each indexed field's moves; this phase's Prepare cuts
+/// each field's batch into leaf-disjoint key intervals from a sample of its keys, one work item each, which gathers, sorts and applies its interval's
+/// events; the Prep tail, in Migrate's Prepare, finishes each batch's structural remainder serially. Before this phase the tail applied every batch alone,
+/// which at W = 16 took twice as long as the per-move path it replaced, spread over the slices, had taken (measured, #1346).
+/// </summary>
+internal sealed class FenceIndexMovesExecSystem : FencePhaseExecSystemBase
+{
+    public const string SystemName = "FenceIndexMoves";
+
+    public FenceIndexMovesExecSystem(DatabaseEngine engine) : base(engine) { }
+
+    protected override FencePhase Phase => FencePhase.IndexMoves;
+
+    protected override void Configure(SystemBuilder<FenceContext> b) => b
+        .Name(SystemName)
+        .ChunkedParallel(1)
+        .After(FencePrepExecSystem.SystemName);
+
+    protected override ChangeSet CreateChunkChangeSet() => Engine.MMF.RentChangeSet();
+
+    protected override int Prepare(FenceContext ctx)
+    {
+        // The cut — a sample sorted, a descent per cut — is this phase's serial half, timed with it.
+        PendingPhaseStart = Stopwatch.GetTimestamp();
+        using (Engine.EpochManager.FenceWindow.EnterWorker())
+        using (EpochGuard.Enter(Engine.EpochManager))
+        {
+            Engine.PrepareStagedIndexMoveBatches(Math.Max(1, ctx.WorkerCount));
+        }
+
+        PendingSerialTicks = Stopwatch.GetTimestamp() - PendingPhaseStart;
+        return base.Prepare(ctx);
+    }
+
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
+    {
+        if (item.Kind == FenceWorkKind.IndexMoveSlice)
+        {
+            Engine.ApplyIndexMoveRange(item.TargetId, item.FieldId, item.SliceStart, changeSet);
+        }
+
+        return 0;
+    }
+}
+
+/// <summary>
 /// Phase 2 — applies a contiguous slice of one archetype's <c>PendingMigrations</c> per <see cref="FenceWorkKind.MigrationApply"/> item. Multiple slices per
 /// fat archetype enable parallel apply. The local ChangeSet is threaded into the cluster / transient / idx / EntityMap accessors and the <c>AllocateChunk</c>
 /// growth path inside <c>ClaimSlotInCell</c>.
@@ -370,7 +416,7 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
     protected override void Configure(SystemBuilder<FenceContext> b) => b
         .Name(SystemName)
         .ChunkedParallel(1)
-        .After(FencePrepExecSystem.SystemName);
+        .After(FenceIndexMovesExecSystem.SystemName);
 
     protected override ChangeSet CreateChunkChangeSet() => Engine.MMF.RentChangeSet();
 

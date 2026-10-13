@@ -1641,6 +1641,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// </summary>
     internal static void EnterBatchMode()
     {
+        // Not re-entrant: an inner exit would end the outer batch early and commit its slots through the inner renter's ChangeSet.
+        Debug.Assert(!WarmAccessorCache.Instance.SuppressCommitChanges, "EnterBatchMode inside a batch");
         WarmAccessorCache.Instance.SuppressCommitChanges = true;
         WarmSiblingAccessorCache.Instance.SuppressCommitChanges = true;
     }

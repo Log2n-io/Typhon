@@ -101,11 +101,12 @@ scoped.
             fence's shadow capture actually recorded for that entity:
             `deferred(entity) == ArchetypeMetadata.FenceMaintainedSlotsUnder(tx.Discipline)`, and the destroy removes the
             complement inline
-  never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set by an
-        `EntityRefMut` write to ANY component (and by `ClusterRef.Set` or a key-changing `WriteSpatial` on an indexed one); the shadow BUFFERS hold only
+  never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set per entity, by a
+        write that changes a key of a fence-indexed component (`EntityRefMut.Set`, `ClusterRef.Set`, a key-changing `WriteSpatial`; a write through
+        a returned ref captures unconditionally) and records every fence-maintained indexed slot of the entity; the shadow BUFFERS hold only
         the indexed non-Versioned slots that `ShadowClusterIndexedFields`
         captured, and under `CommitDiscipline.Commit` not even those - the SingleVersion members are reconciled by the commit
-        publish instead
+        publish instead. Before #1344 / #1346 a write to ANY component set the bit
   invariant a slot so released is not claimed again before that fence: its index entries are still in the trees, and the drain matches a shadow
             entry to its slot, not to its entity (#1188)
   enforce both sides read the split from ONE method (`ArchetypeMetadata.FenceMaintainedSlotsUnder`) rather than each computing it
@@ -129,18 +130,23 @@ scoped.
   verified: ClusterIndexMatrixTests.MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing,
             DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing (the sharper half - no key move anywhere),
             DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing (the control, green before the fix) [VerifiesRule];
-            QueryBetweenWriteAndFenceTests.ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt [VerifiesRule] — a write (to another component, or a key
-            move), a destroy, a spawn into a full archetype, a write to the newcomer, the fence: the newcomer is returned once before the fence and the
-            index agrees with the data after it; both cases red with the hold removed
+            QueryBetweenWriteAndFenceTests.ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt [VerifiesRule] — a key move (unique, or multi-value), a
+            destroy, a spawn into a full archetype, a write to the newcomer, the fence: the newcomer is returned once before the fence and the
+            index agrees with the data after it; both cases red with the hold removed. ADestroyAfterAWriteToAnotherComponent_LeavesNoStaleRow_… and
+            IndexWriteRecordingTests.AWriteKeepingTheKeys_ThenADestroy_RemovesTheEntriesAtOnce: a write that changes no key records nothing, so the
+            destroy removes inline and the slot owes the fence nothing
 
 ### IX-07: No writable memory over a fence-maintained indexed field; every write to one records the old keys first `[silent]`
   invariant cluster iteration hands out no writable memory (`ClusterRef.GetSpan`, `ClusterRef.Get`) over a component slot with an `[Index]`
             field the tick fence maintains — SingleVersion or Transient (`ArchetypeClusterState.FenceIndexedSlotMask`, independent of the
             discipline). It throws, in every build
-  invariant every write to such a slot goes through a path that, on the entity's first write this tick, records the keys of ALL its
-            fence-maintained indexed fields before the store (`ArchetypeClusterState.CaptureFirstWrite`): `EntityRefMut.Set`, `ClusterRef.Set`,
-            and `ClusterRef.WriteSpatial` when the value changes an indexed field of the spatial component
-  invariant the keys are recorded before the entity's shadow bit is set, and kept only by the call that sets it
+  invariant every write to such a slot goes through a path that, on the entity's first KEY-CHANGING write this tick, records the keys of ALL
+            its fence-maintained indexed fields before the store (`ArchetypeClusterState.CaptureFirstWrite`, batched
+            `ArchetypeClusterState.CaptureFirstWrites`): `EntityRefMut.Set`, `ClusterRef.Set` (single and batched), and `ClusterRef.WriteSpatial`. A
+            write whose value keeps every indexed key of the component records nothing (#1346): the tree's keys are still the entity's, so an entity
+            whose stored keys differ from its tree keys is always marked. A write through a returned ref (the value unknown) records unconditionally
+  invariant the keys are recorded before the entity's shadow bit is set, and kept only by the call that sets it (per bit, for the batched
+            `DirtyBitmap.TestAndSetWord`)
   invariant the same call marks the entity dirty, so the fence drains the records on its dirty branch; a fence that finds records with nothing
             dirty drains them too, every indexed column counted as written, and re-derives those clusters' zone maps — no record outlives its
             fence. No write path reaches that backstop by design
@@ -151,9 +157,10 @@ scoped.
   enforce the mask test in `GetSpan` / `Get` (one load and one bit test per call); `ClusterRef.Set` refuses what an in-place store cannot do —
           a Versioned slot, a Commit-default component, the spatial slot, the realm key, a SingleVersion slot under the Commit discipline, an
           empty slot
-  scope: ArchetypeClusterState.FenceIndexedSlotMask, ArchetypeClusterState.CaptureFirstWrite, ArchetypeClusterState.IndexedKeysDiffer,
-         ClusterRef.GetSpan, ClusterRef.Get, ClusterRef.Set, ClusterRef.WriteSpatial, EntityRefMut.ShadowClusterIndexedFields,
-         DatabaseEngine.PrepareArchetypeFenceCore, ArchetypeClusterState.FenceWrittenSlots
+  scope: ArchetypeClusterState.FenceIndexedSlotMask, ArchetypeClusterState.CaptureFirstWrite, ArchetypeClusterState.CaptureFirstWrites,
+         ArchetypeClusterState.IndexedKeysDiffer, DirtyBitmap.TestAndSetWord, ClusterRef.GetSpan, ClusterRef.Get, ClusterRef.Set,
+         ClusterRef.WriteSpatial, EntityRefMut.ShadowClusterIndexedFields, EntityRefMut.WriteSlotRef, DatabaseEngine.PrepareArchetypeFenceCore,
+         ArchetypeClusterState.FenceWrittenSlots
   on_violation: the index keeps the key the entity held before the write, for good: an index-path query returns the entity for a value it
                 no longer holds and misses it for the one it does, while a scan answers correctly — which one a caller gets depends on the
                 planner's estimate
@@ -168,7 +175,62 @@ scoped.
             WriteSpatial_KeepingTheIndexedTag_RecordsNothing [VerifiesRule]. ClusterPureTransientIndexTests.ClusterSet_MovesTheKeyInTheTreeAtTheFence
             (the one-base capture) and AKeyMove_AfterATickThatWroteOnlyAnotherComponent_MovesTheKey (the pure-Transient fence read the previous
             tick's union; red before) [VerifiesRule]. Without the capture in `ClusterRef.RecordWrite` (Set's and WriteSpatial's), nine cases fail;
-            the others — the throws, OpenMut first, an unchanged tag, the refusals, the OpenMut-only two-tick case — do not depend on it
+            the others — the throws, OpenMut first, an unchanged tag, the refusals, the OpenMut-only two-tick case — do not depend on it.
+            IndexWriteRecordingTests [VerifiesRule] — a write keeping every key records nothing (both APIs; red with the skip disabled in each), then a
+            key change or a destroy in the same tick stays exact; a write to an unindexed component records nothing (#1344); the batched Set records
+            exactly the entities whose keys it changes (red with its capture disabled), also through the per-entity fallback
+
+### IX-08: The fence applies a field's index moves as one batch, decided on the tick's final state `[silent]`
+  invariant the shadow drain stages the moves of changed keys (`FieldShadowBuffer.StageMove`) and applies a field's moves in one
+            `BTreeBase.ApplyMoves` before Migrate reads the trees and the elementId tails, and before the buffers are reset: at the end of the field's
+            drain on the atomic path; on the parallel fence, after the Prep slices, the IndexMoves phase applies the batch's in-place part in key
+            ranges on the workers (`BTreeBase.ApplyMoveRange`) and the serial tail (`DatabaseEngine.ApplyStagedIndexMoves`) finishes it
+            (`BTreeBase.FinishMoveBatch`: any range not applied, then the structural remainder)
+  invariant the ranges of one batch are key intervals cut at leaf edges (`BTreeBase.PrepareMoveBatch`: sampled quantiles snapped up to their leaf's
+            HighKey): every event of one key, and every key one leaf owns, fall in one range, so no two ranges reach the same leaf and each decides
+            its unique collisions alone; a range that reaches a leaf beyond its cut throws. Each range gathers its events from the batch (departures
+            before arrivals, in move order) and sorts them itself; an AllowMultiple arrival's new element id goes to the tree's per-move array, copied
+            into the moves by the finish — the moves are where a concurrently gathering range reads departures' element ids
+  invariant a unique move collides only when its new key is taken twice in the batch or held by an entity that stays; departures sort before
+            arrivals for one key, so swaps, cycles and chains within a tick are legal (#1342). Only the departure of the key's holder vacates it. A
+            collided move still leaves its old key — its data no longer holds it — and is not indexed under the new one, which the holder keeps; the
+            collision is raised (#675's message) once the drain or every tail has finished, never mid-drain, and the entity is indexed again by its next
+            key-changing write
+  invariant an AllowMultiple arrival takes a departure's element in place under its key (`UpdateInBuffer`), and the entity's elementId tail is
+            written with the element the batch returns, recorded per cluster run after its last store (PS-10)
+  invariant the bulk path changes no tree structure: a leaf is rewritten in place only while it stays between half full and full (its departures
+            before its arrivals); a new key, an emptied key and any other leaf go through the latched single-entry path
+  enforce `ApplyMoves` runs only with no other writer of the tree (EW-01: the atomic drain's thread, or the tail after every slice retired; the
+          ranges of one batch only with each other, between the Prep slices and the tail), and
+          licensed by it touches AllowMultiple buffers without their leaf's latch; it latches each leaf it rewrites (and bumps the version of each leaf
+          whose buffers it changed, after the change), for readers that revalidate. A throw after it starts faults the tree (IXW-09); a range that
+          throws on a worker is not rethrown there — that would fail every later fence phase and leave other trees' batches unfinished — but by the
+          tail, once every batch is finished. The tail finishes every archetype's batches first, then runs every archetype's tail, whatever throws,
+          and raises the first failure at the end: a finished batch is always reset, never replayed; an unfinished one has faulted its tree
+  scope: BTreeBase.ApplyMoves, BTree.ApplyMoves, BTree.DecideUniqueCollisions, BTree.MergeLeaf, FieldShadowBuffer.StageMove,
+         FieldShadowBuffer.StageMoveAt, DatabaseEngine.ApplyStagedMoves, DatabaseEngine.ApplyStagedIndexMoves,
+         DatabaseEngine.PrepareArchetypeFenceTails, ArchetypeClusterState.PendingIndexCollision, BTreeBase.PrepareMoveBatch,
+         BTreeBase.ApplyMoveRange, BTreeBase.FinishMoveBatch, DatabaseEngine.PrepareStagedIndexMoveBatches,
+         DatabaseEngine.ApplyIndexMoveRange, FenceIndexMovesExecSystem
+  on_violation: a move applied against an intermediate state rejects a legal swap and aborts the fence half drained; a batch applied twice or never
+                leaves the index on keys the data does not hold; an element id not written back sends Migrate's location update to the wrong chunk
+  rationale: #1346. One `Move` / `MoveValue` per changed key cost ~350–450 ns, nearly all of it per call (descent, latch, accessor rent and return):
+             1M AllowMultiple moves took ~650 ms of fence, 1M unique ~470 ms. Sorted and applied per key and per leaf, ~100 ms and ~130 ms. Applied
+             whole in the parallel fence's serial tail, the unique batch took twice the per-move path's span at W = 16 (~130 against ~65 ms, which
+             spread its moves over the slices); in ranges on the workers, ~50 ms, and ~35 ms once each range sorts its own events (the serial sort
+             of the whole batch had been 17–28 ms of the phase)
+  requires IX-07 (the records the batch is built from), EW-01 (the licence to apply it)
+  verified: BTreeApplyMovesTests [VerifiesRule] — every key shifted (unique, multi), swaps / cycles / chains, collisions and their cascade, moves that
+            split or merge leaves (single-entry fallback), misses, unbalanced multi-value moves creating and emptying keys, element ids that remove
+            each value exactly; IndexWriteRecordingTests.UniqueKeysSwappedOrRotatedInOneTick_MoveAtTheFence [VerifiesRule] (#1342: threw before);
+            ClusterUniqueIndexDrainTests.TwoClustersWrittenToOneUniqueKeyInOneTick_RejectExactlyOne_AndTheTreeHoldsTheKeyOnce and
+            IndexWriteRecordingTests.AUniqueCollision_LeavesTheLoserOutOfTheIndex_UntilItsNextWrite (the loser leaves its old key; raised once).
+            BTreeApplyMovesTests.Unique_APartitionedBatch_AppliedConcurrently_ReachesTheWholeBatchState (ranges on threads at once, one left for the
+            finish; red with the leaf-edge snap removed: a split key run collides) and Multi_APartitionedBatch_… (element ids handed back move every
+            value back with no miss), Unique_APartitionedBatch_MatchesTheWholeBatch_OnRandomMoves (same outcome, first collision and tree as the
+            whole batch); IndexMovesParallelFenceTests [VerifiesRule] — moves applied in ranges by the runtime's IndexMoves phase keep the
+            index in agreement with the data, with no element-id miss on later ticks; a range that fails on a worker is applied by the tail, the
+            failure raised, and the next ticks' moves kept (red with the failed archetype's tail skipped: its shadow bits outlived its buffers)
 
 ## Module: IXS — Ordered index reads
 
