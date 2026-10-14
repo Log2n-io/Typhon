@@ -380,9 +380,28 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
 
         var copy = value;   // on the stack: value may live in a managed array, and a pointer is taken only over the stack
+        var stored = (T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T));
+        if ((_meta.CollectionSlotMask & (1 << slot)) != 0)
+        {
+            CollectionHandles.Keep(CollectionFieldsOf(slot), (byte*)&copy, (byte*)stored, false, typeof(T).Name);   // as EntityRefMut.Set (#1362)
+        }
         RecordWrite(slot, slotIndex, (byte*)&copy);
-        *(T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T)) = copy;
+        *stored = copy;
         NotePageWritten(slot);
+    }
+
+    /// <summary>The collection fields of SingleVersion component <paramref name="slot"/> — the only kind a <c>Set</c> here writes.</summary>
+    private readonly ComponentTable.CollectionFieldInfo[] CollectionFieldsOf(byte slot)
+    {
+        foreach (var s in _state.CollectionSlots)
+        {
+            if (s.Slot == slot)
+            {
+                return s.Fields;
+            }
+        }
+
+        return [];
     }
 
     /// <summary>
@@ -429,12 +448,45 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled for an entity of cluster slots {slots & ~EnabledBits(slot):X}.");
         }
 
-        RecordWrites(slot, slots, values);
         var column = (T*)(ResolveBase(slot) + _layout.ComponentOffset(slot));
+        if ((_meta.CollectionSlotMask & (1 << slot)) != 0)
+        {
+            SetKeepingCollections(slot, slots, values, column);
+            return;
+        }
+
+        RecordWrites(slot, slots, values);
         for (var rest = slots; rest != 0; rest &= rest - 1)
         {
             var i = BitOperations.TrailingZeroCount(rest);
             column[i] = values[i];
+        }
+
+        NotePageWritten(slot);
+    }
+
+    /// <summary>
+    /// The batched <see cref="Set{T}(Comp{T}, ulong, ReadOnlySpan{T})"/> of a component with a collection: every value is checked against the stored
+    /// handles before anything is recorded or stored, then stored with them (#1362).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly void SetKeepingCollections<T>(byte slot, ulong slots, scoped ReadOnlySpan<T> values, T* column) where T : unmanaged
+    {
+        var fields = CollectionFieldsOf(slot);
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var copy = values[i];   // on the stack
+            CollectionHandles.Keep(fields, (byte*)&copy, (byte*)(column + i), false, typeof(T).Name);
+        }
+
+        RecordWrites(slot, slots, values);
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var copy = values[i];
+            CollectionHandles.Keep(fields, (byte*)&copy, (byte*)(column + i), false, typeof(T).Name);
+            column[i] = copy;
         }
 
         NotePageWritten(slot);

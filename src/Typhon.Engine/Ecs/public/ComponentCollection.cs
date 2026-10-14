@@ -6,8 +6,8 @@ namespace Typhon.Engine;
 
 /// <summary>
 /// Mutable accessor for a collection-typed component field — the variable-sized element list backing a <see cref="ComponentCollection{T}"/> value. Appends
-/// reach the owning field by <c>ref</c>, transparently performing copy-on-write when the buffer is shared across MVCC revisions. Must be disposed; disposal
-/// commits the pending buffer writes.
+/// and replacements reach the owning field by <c>ref</c>, transparently performing copy-on-write when the buffer is shared across MVCC revisions. Must be
+/// disposed; disposal commits the pending buffer writes.
 /// </summary>
 /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
 [PublicAPI]
@@ -19,9 +19,11 @@ public unsafe ref struct ComponentCollectionAccessor<T> : IDisposable where T : 
     private readonly int _initialBufferId;
     private readonly ChangeSet _changeSet;
 
-    // Write-back (#1199): an accessor made by EntityRefMut.CreateComponentCollectionAccessor edits a COPY of a stored component, so on Dispose it stores the
-    // buffer it ended on into the component itself. Without it the stored revision would keep the original buffer id — whose extra reference a clone has
-    // already released — until the caller remembered to Set the copy. Null for an accessor on a value not stored yet.
+    // Write-back (#1199): an accessor made by EntityRefMut.CreateComponentCollectionAccessor edits a COPY of a stored component, so it stores the buffer it
+    // moves to into the component itself, at the moment it moves (#1362) — not at Dispose. An exception between a move and the Dispose (the accessor is a
+    // ref struct, disposed by a `using` the exception skips past) rolled the transaction back with the stored value naming a buffer the move had released,
+    // and a Versioned rollback releases what the new revision names: the committed revision's buffer. Dispose remains mandatory — it gives the page holds
+    // back. Null for an accessor on a value not stored yet.
     private readonly EntityAccessor _writeBackOwner;
     private readonly EntityId _writeBackEntity;
     private readonly int _writeBackComponentTypeId;
@@ -41,7 +43,7 @@ public unsafe ref struct ComponentCollectionAccessor<T> : IDisposable where T : 
         _initialBufferId = field._bufferId;
     }
 
-    /// <summary>An accessor on a copy of a stored component, which writes its final buffer id back into that component on dispose (#1199).</summary>
+    /// <summary>An accessor on a copy of a stored component, which writes every buffer id it moves to back into that component (#1199, #1362).</summary>
     internal ComponentCollectionAccessor(ChangeSet changeSet, VariableSizedBufferSegment<T, PersistentStore> vsbs, ref ComponentCollection<T> field,
         EntityAccessor owner, EntityId entity, int componentTypeId, int fieldOffset, delegate*<EntityAccessor, EntityId, int, int, int, void> writeBack)
         : this(changeSet, vsbs, ref field)
@@ -53,46 +55,91 @@ public unsafe ref struct ComponentCollectionAccessor<T> : IDisposable where T : 
         _writeBack = writeBack;
     }
 
-    /// <summary>
-    /// Commits the pending buffer writes and releases the underlying chunk accessor. An accessor made through an entity handle then stores the buffer it
-    /// ended on (a clone, or one allocated for an empty collection) into the stored component.
-    /// </summary>
+    /// <summary>Commits the pending buffer writes and releases the underlying chunk accessor.</summary>
     public void Dispose()
     {
         _ca.CommitChanges();
         _ca.Dispose();
-        if (_writeBack != null && _field._bufferId != _initialBufferId)
-        {
-            _writeBack(_writeBackOwner, _writeBackEntity, _writeBackComponentTypeId, _writeBackOffset, _field._bufferId);
-        }
     }
 
     /// <summary>
-    /// Appends <paramref name="value"/> to the collection, allocating the backing buffer on first use. Under <see cref="StorageMode.Versioned"/> storage, a
-    /// buffer shared with another revision (copy-on-write) is cloned before mutation; a solely-owned buffer is appended in place.
+    /// Appends <paramref name="value"/> to the collection, allocating the backing buffer on first use. A buffer shared with another revision (Versioned
+    /// copy-on-write) or with the committed value (a SingleVersion write staged under the Commit discipline) is cloned before mutation; a solely-owned buffer
+    /// is appended in place.
     /// </summary>
     /// <param name="value">Element to append.</param>
     public void Add(T value)
     {
+        var bufferId = _field._bufferId;
+
         // First time adding an item?
-        if (_field._bufferId == 0)
+        if (bufferId == 0)
         {
-            _field._bufferId = _vsbs.AllocateBuffer(ref _ca);
+            MoveTo(_vsbs.AllocateBuffer(ref _ca));
         }
 
-        // Clone before mutating only if the buffer is SHARED with another revision — i.e. Versioned copy-on-write, where EcsVersionedCopyOnWrite's AddRef made
-        // RefCounter > 1. When the buffer is solely owned (SingleVersion: no MVCC, no COW; or a buffer freshly built this transaction), mutate it in
-        // place: cloning would orphan the original, which non-Versioned storage has no revision cleanup to release — a leak.
-        else if (_initialBufferId == _field._bufferId && _vsbs.GetRefCounter(_initialBufferId, ref _ca) > 1)
+        // Clone before mutating only if the buffer is SHARED — RefCounter > 1: Versioned copy-on-write, where EcsVersionedCopyOnWrite's AddRef shares it with
+        // the committed revision, or a Commit-discipline staged value, whose staging AddRef shares it with HEAD (#1362). When the buffer is solely owned
+        // (SingleVersion in place; or a buffer freshly built this transaction), mutate it in place: cloning would orphan the original, which non-Versioned
+        // storage has no revision cleanup to release — a leak.
+        else if (bufferId == _initialBufferId && _vsbs.GetRefCounter(bufferId, ref _ca) > 1)
         {
-            _field._bufferId = _vsbs.CloneBuffer(_initialBufferId, ref _ca);
+            MoveTo(_vsbs.CloneBuffer(bufferId, ref _ca));
 
             // This revision now references the clone, not the shared original. Release the AddRef that EcsVersionedCopyOnWrite took on the original — otherwise
             // its RefCounter stays inflated and it leaks once the old revision is cleaned up (Bug #1).
-            _vsbs.BufferRelease(_initialBufferId, ref _ca);
+            _vsbs.BufferRelease(bufferId, ref _ca);
         }
 
         _vsbs.AddElement(_field._bufferId, value, ref _ca);
+    }
+
+    /// <summary>
+    /// Replaces the collection's whole content with <paramref name="elements"/>, in order; an empty span is <see cref="Clear"/>. The previous buffer is never
+    /// written, only given back one reference: one shared with an older revision or with the committed value stays theirs, so a snapshot reading it still
+    /// sees the old elements; a solely-owned one is freed.
+    /// </summary>
+    /// <remarks>
+    /// O(<paramref name="elements"/>.Length): the content goes into a fresh buffer. Through an entity handle the stored component names the new buffer as soon
+    /// as this returns, and the write is recorded as a <c>Set</c>'s is. On a SingleVersion component outside the Commit discipline the previous buffer is freed
+    /// at once and a rollback does not bring it back — TickFence writes are not undone.
+    /// </remarks>
+    /// <param name="elements">The new content.</param>
+    /// <exception cref="InvalidOperationException">An accessor made by <c>Transaction.CreateComponentCollectionAccessor</c>, over a collection it did not
+    /// build: that accessor cannot tell a value being built from a copy of a stored one, whose buffer the release would free under it.</exception>
+    public void Replace(ReadOnlySpan<T> elements)
+    {
+        var bufferId = _field._bufferId;
+        if (_writeBack == null && bufferId != 0 && bufferId == _initialBufferId)
+        {
+            ThrowHelper.ThrowInvalidOp("Replace or Clear on a collection this accessor did not build: change a stored component's collection through "
+                + "EntityRefMut.CreateComponentCollectionAccessor, which knows who holds the buffer.");
+        }
+
+        // The new buffer first, stored; the old one released last. A write-back that throws then leaves a leak rather than a stored value naming a buffer
+        // this accessor gave back.
+        var newBufferId = _vsbs.SetElements(0, elements, ref _ca);
+        MoveTo(newBufferId);
+        if (bufferId != 0)
+        {
+            _vsbs.BufferRelease(bufferId, ref _ca);
+        }
+    }
+
+    /// <summary>Removes every element: the collection ends with no buffer. The previous buffer is released as <see cref="Replace"/> releases it.</summary>
+    public void Clear() => Replace(ReadOnlySpan<T>.Empty);
+
+    /// <summary>
+    /// Points the field at <paramref name="bufferId"/> and, for an accessor made through an entity handle, the stored component too — at once, so no exit
+    /// leaves the stored value naming a buffer this accessor has released (#1362).
+    /// </summary>
+    private void MoveTo(int bufferId)
+    {
+        _field._bufferId = bufferId;
+        if (_writeBack != null)
+        {
+            _writeBack(_writeBackOwner, _writeBackEntity, _writeBackComponentTypeId, _writeBackOffset, bufferId);
+        }
     }
 
     /// <summary>Total number of elements currently in the collection.</summary>

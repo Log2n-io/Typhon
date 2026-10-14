@@ -56,9 +56,11 @@ internal static class CollectionContentEmitter
 
             var bufferId = BinaryPrimitives.ReadInt32LittleEndian(valueBytes[f.OffsetInComponentStorage..]);
 
-            // A null handle needs no record. The Slot payload's zeroed handle already says "no buffer", and apply writes exactly that, so an emitted Clear
-            // would restate what the row already encodes. Every NON-null handle does emit, including one whose buffer happens to be empty, because there the
-            // row and the fold can disagree and the fold has to win.
+            // A null handle emits its Clear too (#1362). Recovery folds an entity's collection records across the whole window, so an earlier commit's
+            // Clear + Append × N is still in the fold when the record that cleared the collection is applied: with nothing emitted behind it, the flush gave
+            // the old content back. Cost: one 44-byte record per empty collection field per emission.
+            batch.AddCollectionDelta(entityId, slot, f.FieldId, CollectionOp.Clear, 0, default);
+            wireBytes += RecordWireSize(0);
             if (bufferId == 0)
             {
                 continue;
@@ -69,8 +71,6 @@ internal static class CollectionContentEmitter
             try
             {
                 var count = vsbs.GetElementCount(bufferId, ref accessor);
-                batch.AddCollectionDelta(entityId, slot, f.FieldId, CollectionOp.Clear, 0, default);
-                wireBytes += RecordWireSize(0);
                 if (count == 0)
                 {
                     continue;

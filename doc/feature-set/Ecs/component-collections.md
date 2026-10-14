@@ -23,14 +23,19 @@ common short case.
 A `ComponentCollection<T>` field is 4 bytes — a buffer id, nothing else. The elements live in a separate pool, shared
 by every `ComponentCollection<T>` field across every archetype that uses that element type `T`. A stored component's
 collection is changed through `EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy, ref copy.Field)` on a copy
-read from the handle; on dispose the accessor stores the buffer it ended on into the component, so no `Set` is needed for
-the collection. A value not stored yet (one being built for a spawn) and bulk reads go
-through `Transaction.CreateComponentCollectionAccessor` (append-only `Add`, plus `ElementCount`/`GetAllElements`).
-Read-only iteration goes through `Transaction.GetReadOnlyCollectionEnumerator` (cheap `foreach`, no write intent). On a `SingleVersion` component the buffer is owned in place by the one committed slot, mutated directly. On
-a `Versioned` component an overwrite duplicates the buffer id into the new revision and bumps a reference count; the
-first mutation through that still-shared buffer clones it (copy-on-write), so an older MVCC snapshot keeps observing
-the contents it originally read. The handle's accessor creates the new revision before it hands out the accessor:
-that is what makes the buffer shared, so the clone happens (#1199). `T` must be `unmanaged` — the same blittability constraint as a component field.
+read from the handle — `Add`, `Replace(span)`, `Clear()`. Opening it records the write as a `Set` would, and whenever the
+accessor moves to another buffer it stores that buffer into the component at once, so no `Set` is needed for the
+collection — and `Set` never changes one: a value's collection handle is ignored when empty and refused when it names a
+buffer the entity does not hold. A value not stored yet (one being built for a spawn) and bulk reads go through
+`Transaction.CreateComponentCollectionAccessor`. Read-only iteration goes through `Transaction.GetReadOnlyCollectionEnumerator`
+(cheap `foreach`, no write intent). On a `SingleVersion` component the buffer is owned in place by the one committed
+slot, mutated directly — except under the `Commit` discipline, where the write is staged: the buffer the committed value
+names is cloned or replaced, never edited, and released when the commit publishes. On a `Versioned` component an
+overwrite duplicates the buffer id into the new revision and bumps a reference count; the first mutation through that
+still-shared buffer clones it (copy-on-write), so an older MVCC snapshot keeps observing the contents it originally
+read. The handle's accessor creates the new revision before it hands out the accessor: that is what makes the buffer
+shared, so the clone happens (#1199). `Replace` writes a fresh buffer and releases the previous one — one reference when
+it is shared, so older snapshots keep it. `T` must be `unmanaged` — the same blittability constraint as a component field.
 
 ## 💻 Usage
 
@@ -72,6 +77,14 @@ using (var cca = path.CreateComponentCollectionAccessor(Path.Data, ref data, ref
 data.TotalLength += Vector3.Distance(p0, p1);
 path.Set(Path.Data, data);
 
+// Remove or reorder: read, edit, replace the whole content (an empty span clears it)
+data = path.Read(Path.Data);
+using (var cca = path.CreateComponentCollectionAccessor(Path.Data, ref data, ref data.Waypoints))
+{
+    var kept = Array.FindAll(cca.GetAllElements(), w => w.Speed > 0);
+    cca.Replace(kept);
+}
+
 // Bulk read
 var read = tx.Open(pathId).Read(Path.Data);
 using var cca2 = tx.CreateComponentCollectionAccessor(ref read.Waypoints);
@@ -96,8 +109,20 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
 - **Not supported on `Transient` components** — registering one with a `ComponentCollection<T>` field throws at
   startup (`InvalidOperationException`). A Transient component doesn't survive restart; its collection buffer would,
   leaving an orphaned buffer with nothing to reference it.
-- Public API is append-and-bulk-read (`Add`, `GetAllElements`, the read-only enumerator) — no per-element
-  remove/replace through `ComponentCollectionAccessor<T>`.
+- Public API is append, whole-content replace and bulk read (`Add`, `Replace`, `Clear`, `GetAllElements`, the read-only
+  enumerator). There is no per-element remove: removing is read → filter → `Replace`, O(n) — as a per-element remove
+  would be, since elements are stored in insertion order across chained chunks.
+- A cleared collection holds no buffer (handle 0).
+- `SingleVersion` under the `TickFence` discipline: `Replace`/`Clear` free the previous buffer at once, and a rollback
+  does not bring it back — TickFence writes are not undone. Under the `Commit` discipline they are, like any staged write.
+- `Set` (and `ClusterRef.Set`, `Teleport`) keeps the stored collection: an empty handle in the value is ignored, a
+  handle naming a buffer the entity does not hold (a copy read before the collection changed) throws
+  `InvalidOperationException`. `Enable(comp, value)` adopts the value's collection into a component that had none.
+  `ClusterRef.Get`/`GetSpan` are raw memory: never write a collection handle through them.
+- Opening an accessor on a stale copy throws: read the component again after its collection changed. The
+  transaction's own accessor (`Transaction.CreateComponentCollectionAccessor`) refuses `Replace`/`Clear` over a
+  collection it did not build.
+- Dispose every accessor (`using`): it holds pages until disposed.
 - Change a stored component's collection through the handle, never through `Transaction.CreateComponentCollectionAccessor`
   on a copy: on a `Versioned` component the transaction's accessor would edit, in place, the buffer the committed
   revision still points to, and an older snapshot would see the change.
@@ -113,6 +138,8 @@ foreach (ref readonly Waypoint wp in tx.GetReadOnlyCollectionEnumerator(ref read
 - [ComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ComponentCollectionTests.cs) — `Versioned` create/read/update, reference-count bump, copy-on-write clone on shared-buffer mutation, an older snapshot unaffected by a handle-made change, destroy frees the buffer
 - [SvComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SvComponentCollectionTests.cs) — `SingleVersion` in-place update (no new buffer), migrate/rollback buffer lifecycle, registering one on `Transient` throws
 - [ClusterComponentCollectionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterComponentCollectionTests.cs) — collection field on a clustered `Versioned` archetype: spawn/update/migrate/destroy
+- [ComponentCollectionReplaceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ComponentCollectionReplaceTests.cs) — `Replace`/`Clear` in every storage mode and discipline: an older snapshot keeps its content, rollback with or without dispose, publish/rollback/destroy under the `Commit` discipline, `Set` keeping the stored collection
+- [CollectionDurabilityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CollectionDurabilityTests.cs) — content across a hard crash, including a replaced and a cleared collection, and a `SingleVersion` append through the handle with no `Set`
 
 ## 🔗 Related
 

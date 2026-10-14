@@ -115,6 +115,12 @@ internal class ArchetypeMetadata
     internal byte TransientSlotCount;
 
     /// <summary>
+    /// Bitmask of component slots whose component declares a <c>ComponentCollection</c> field. <c>EntityRefMut.Set</c> tests it to keep the stored
+    /// collection handles (#1362).
+    /// </summary>
+    internal ushort CollectionSlotMask;
+
+    /// <summary>
     /// The slot of the component carrying the archetype's <c>[RealmKey]</c>, as a bit; 0 for an archetype without one. Set once its spatial state has
     /// resolved the key. <c>EntityRefMut.Set</c> tests it to validate a realm change at the call (RM-05).
     /// </summary>

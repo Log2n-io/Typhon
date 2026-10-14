@@ -2886,8 +2886,8 @@ public unsafe partial class Transaction : EntityAccessor
     /// for all modes (decision #31). No-op when nothing was staged. Commit discipline currently targets cluster-eligible archetypes only.
     /// </summary>
     /// <summary>Benchmark-only hook (#392 AC-5): runs just the staged-commit PUBLISH pass on an already-staged, not-yet-committed transaction, so the
-    /// per-component publish cost can be measured in isolation from BUILD/APPEND/WAIT. Idempotent for non-indexed components (re-memcpy +
-    /// re-SetDirty).</summary>
+    /// per-component publish cost can be measured in isolation from BUILD/APPEND/WAIT. Idempotent for non-indexed components without collections
+    /// (re-memcpy + re-SetDirty); a second publish of a collection gives HEAD's reference back twice.</summary>
     internal void PublishStagedForBenchmark() => PublishStagedCommitWrites();
 
     private void PublishStagedCommitWrites()
@@ -2971,8 +2971,22 @@ public unsafe partial class Transaction : EntityAccessor
             ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
         }
 
+        // HEAD's collection handles, read before the memcpy replaces them: HEAD's references are given back once the staged value — which holds its own
+        // (ShareStagedCollections) — has taken HEAD's place (#1362). Never before: HEAD would name a buffer freed under it.
+        var table = info.ComponentTable;
+        var collectionFields = table.HasCollections ? table.CollectionFields : null;
+        var replacedHandles = collectionFields != null ? stackalloc int[collectionFields.Length] : default;
+        for (var i = 0; i < replacedHandles.Length; i++)
+        {
+            replacedHandles[i] = Unsafe.ReadUnaligned<int>(headPtr + collectionFields[i].OffsetInComponentStorage);
+        }
+
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
+        for (var i = 0; i < replacedHandles.Length; i++)
+        {
+            ReleaseCollectionBuffer(collectionFields[i], replacedHandles[i]);
+        }
         // Same as the Versioned publish above: compSlot is the component being published, so name it rather than falling back to "emit everything" (M31).
         clusterState.SetDirty(clusterChunkId, slotIndex, compSlot);
 
@@ -2983,6 +2997,65 @@ public unsafe partial class Transaction : EntityAccessor
             && (compSlot == spatial.Slot || (spatial.HasRealmKey && compSlot == spatial.RealmKeySlot)))
         {
             clusterState.FlagOutOfBarrierSpatialWrite(clusterChunkId, slotIndex);
+        }
+    }
+
+    /// <summary>Gives back one reference on collection buffer <paramref name="bufferId"/> of field <paramref name="field"/>; 0 is no buffer.</summary>
+    private static void ReleaseCollectionBuffer(in ComponentTable.CollectionFieldInfo field, int bufferId)
+    {
+        if (bufferId == 0)
+        {
+            return;
+        }
+
+        var accessor = field.Vsbs.Segment.CreateChunkAccessor();
+        try
+        {
+            field.Vsbs.BufferRelease(bufferId, ref accessor);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Gives back the references the Commit-discipline staged values hold on their collection buffers (#1362), which no committed value will take over:
+    /// every staged write's on a rollback, or only those of the entities this commit destroys — their staged value is never published, and the destroy
+    /// releases HEAD's own. A buffer the staged value shares with HEAD loses the staging's reference only; one an accessor moved it to is freed. Each handle
+    /// is zeroed once released, so a second pass — a rollback after a failed commit — releases nothing twice.
+    /// </summary>
+    /// <param name="destroyedOnly">Only the staged writes of entities in this transaction's pending destroys.</param>
+    private void ReleaseStagedCollections(bool destroyedOnly)
+    {
+        if (_commitStagingBuffer == null || (destroyedOnly && _pendingDestroys is not { Count: > 0 }))
+        {
+            return;
+        }
+
+        foreach (var info in _componentInfos.Values)
+        {
+            var table = info.ComponentTable;
+            if (info.CommitStaged is not { Count: > 0 } || table.StorageMode != StorageMode.SingleVersion || !table.HasCollections)
+            {
+                continue;
+            }
+
+            foreach (var staged in info.CommitStaged)
+            {
+                if (destroyedOnly && !_pendingDestroys.Contains(EntityId.FromRaw(staged.Key)))
+                {
+                    continue;
+                }
+
+                var value = _commitStagingBuffer + staged.Value.Offset;
+                foreach (var f in table.CollectionFields)
+                {
+                    var bufferId = Unsafe.ReadUnaligned<int>(value + f.OffsetInComponentStorage);
+                    Unsafe.WriteUnaligned(value + f.OffsetInComponentStorage, 0);
+                    ReleaseCollectionBuffer(f, bufferId);
+                }
+            }
         }
     }
 
@@ -3033,7 +3106,6 @@ public unsafe partial class Transaction : EntityAccessor
         _dbe.TransactionChain.IncrementRollbackTotal();
         try
         {
-
             var context = new CommitContext();
 #pragma warning disable CS9093 // ref-assign is safe: CommitContext is a ref struct that never escapes this method
             context.Ctx = ref ctx;
@@ -3078,6 +3150,9 @@ public unsafe partial class Transaction : EntityAccessor
                     _deletedComponentCount++;
                 }
             }
+
+            // The Commit-discipline staged writes are dropped with the transaction, and the references their collection handles hold with them (#1362).
+            ReleaseStagedCollections(destroyedOnly: false);
 
             // Flush batched deferred enqueue entries (non-tail path: single lock acquire for all entities)
             if (_deferredEnqueueBatch is { Count: > 0 })
@@ -3629,6 +3704,9 @@ public unsafe partial class Transaction : EntityAccessor
 
             // An entity this transaction spawned and destroyed never exists for anyone else: its storage goes back now, as a rollback's would (#1229).
             ReleaseSpawnsDestroyedHere();
+
+            // Likewise the references a destroyed entity's staged collections hold: that value is never published, the destroy releases HEAD's (#1362).
+            ReleaseStagedCollections(destroyedOnly: true);
 
             // Prepare ECS destroy operations: create component-level tombstone revisions in the PREPARE pass so it can handle index removal, WAL, and
             // cleanup. The entity-level destroy visibility (DiedTSN) is applied later, in the PUBLISH pass (FlushEcsPendingOperations).

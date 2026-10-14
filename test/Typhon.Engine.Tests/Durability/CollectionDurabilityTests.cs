@@ -1182,6 +1182,146 @@ internal sealed class CollectionDurabilityTests
         }
     }
 
+    /// <summary>
+    /// A collection replaced or cleared through the handle (#1362) is recovered as replaced or cleared, in both storage homes: the commit logs the full
+    /// content behind the Slot record, and a cleared collection comes back holding no buffer.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void ReplacedAndClearedCollections_SurviveAHardCrash()
+    {
+        EntityId[] versioned;
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (versioned, single) = SeedBoth(dbe);
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < EntityCount; i++)
+                    {
+                        var versionedEntity = tx.OpenMut(versioned[i]);
+                        var v = versionedEntity.Read(CcVersionedArch.C);
+                        using (var cca = versionedEntity.CreateComponentCollectionAccessor(CcVersionedArch.C, ref v, ref v.Items))
+                        {
+                            cca.Replace(ReplacedContent(i));
+                        }
+
+                        var singleEntity = tx.OpenMut(single[i]);
+                        var s = singleEntity.Read(CcSingleArch.C);
+                        using (var cca = singleEntity.CreateComponentCollectionAccessor(CcSingleArch.C, ref s, ref s.Items))
+                        {
+                            cca.Replace(ReplacedContent(i));
+                        }
+                    }
+
+                    Assert.That(tx.Commit(), Is.True);
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < EntityCount; i++)
+            {
+                var v = tx.Open(versioned[i]).Read(CcVersionedArch.C);
+                var s = tx.Open(single[i]).Read(CcSingleArch.C);
+                using (var cca = tx.CreateComponentCollectionAccessor(ref v.Items))
+                {
+                    Assert.That(cca.GetAllElements(), Is.EqualTo(ReplacedContent(i)), $"Versioned {versioned[i]}: recovered content");
+                }
+                using (var cca = tx.CreateComponentCollectionAccessor(ref s.Items))
+                {
+                    Assert.That(cca.GetAllElements(), Is.EqualTo(ReplacedContent(i)), $"SingleVersion {single[i]}: recovered content");
+                }
+                if (ReplacedContent(i).Length == 0)
+                {
+                    Assert.That(v.Items._bufferId, Is.Zero, "a cleared Versioned collection recovers holding no buffer");
+                    Assert.That(s.Items._bufferId, Is.Zero, "a cleared SingleVersion collection recovers holding no buffer");
+                }
+            }
+        }
+    }
+
+    /// <summary>Entity <paramref name="i"/>'s content after the replace: empty for every third entity (a clear), else a reversed run of a new length.</summary>
+    private static int[] ReplacedContent(int i)
+    {
+        if (i % 3 == 0)
+        {
+            return [];
+        }
+
+        var content = new int[ElementCountOf(i) + 3];
+        for (var el = 0; el < content.Length; el++)
+        {
+            content[el] = -((i * 100) + content.Length - el);
+        }
+        return content;
+    }
+
+    /// <summary>
+    /// A SingleVersion collection appended to through the handle under the TickFence discipline, with no <c>Set</c>, survives a hard crash (#1362). The
+    /// append is in place; only the dirty bit the accessor now records makes the fence log the collection's content. Without it the fence emitted nothing
+    /// for the entity, and recovery returned the content from before the append.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void SingleVersionAppend_ThroughTheHandle_WithoutASet_SurvivesAHardCrash()
+    {
+        EntityId[] single;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (_, single) = SeedBoth(dbe);
+            dbe.WriteTickFence(1);
+
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                foreach (var id in single)
+                {
+                    var entity = tx.OpenMut(id);
+                    var s = entity.Read(CcSingleArch.C);
+                    using var cca = entity.CreateComponentCollectionAccessor(CcSingleArch.C, ref s, ref s.Items);
+                    cca.Add(-1);
+                }
+
+                Assert.That(tx.Commit(), Is.True);
+            }
+
+            dbe.WriteTickFence(2);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < single.Length; i++)
+            {
+                var s = tx.Open(single[i]).Read(CcSingleArch.C);
+                using var cca = tx.CreateComponentCollectionAccessor(ref s.Items);
+                var elements = cca.GetAllElements();
+                Assert.That(elements.Length, Is.EqualTo(ElementCountOf(i) + 1), $"SingleVersion {single[i]}: the append was lost");
+                Assert.That(elements[^1], Is.EqualTo(-1));
+            }
+        }
+    }
+
     /// <summary>Spawns both archetypes through a bulk session and closes it with its durability barrier.</summary>
     private static (EntityId[] Versioned, EntityId[] Single) BulkSpawnBoth(DatabaseEngine dbe)
     {

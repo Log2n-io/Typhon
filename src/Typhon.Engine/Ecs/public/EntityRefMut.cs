@@ -102,8 +102,12 @@ public unsafe ref struct EntityRefMut
     /// <para>On the component carrying the archetype's <c>[RealmKey]</c>, a value whose key differs from the stored one is a realm change, validated
     /// here as <see cref="EntityAccessor.Teleport{T}"/> validates it (RM-05): an unregistered, closing or incompatible realm, a Static archetype, or a
     /// non-finite position throws, and nothing is stored.</para>
+    /// <para>A <see cref="ComponentCollection{T}"/> field is not set: the component keeps its collection, which changes through
+    /// <see cref="CreateComponentCollectionAccessor{T, TElem}"/> alone. An empty handle in <paramref name="value"/> is ignored; one naming another buffer
+    /// throws.</para>
     /// </summary>
-    /// <exception cref="InvalidOperationException">A realm change the entity cannot make.</exception>
+    /// <exception cref="InvalidOperationException">A realm change the entity cannot make, or a value naming a collection buffer the entity does not
+    /// hold.</exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Set<T>(Comp<T> comp, in T value) where T : unmanaged
     {
@@ -117,12 +121,43 @@ public unsafe ref struct EntityRefMut
 
     /// <summary>
     /// The store of every <c>Set</c>: the value goes down with the write, so a value that keeps every fence-maintained indexed key of the component records
-    /// none (#1346).
+    /// none (#1346). A collection field keeps the buffer the stored component names (<see cref="CollectionHandles.Keep"/>, #1362).
     /// </summary>
-    private void Store<T>(Comp<T> comp, in T value) where T : unmanaged
+    /// <param name="comp">The component.</param>
+    /// <param name="value">The value.</param>
+    /// <param name="adoptIntoEmpty">The store supplies a component that had no value: a collection the stored one lacks is adopted.</param>
+    private void Store<T>(Comp<T> comp, in T value, bool adoptIntoEmpty = false) where T : unmanaged
     {
         var copy = value;   // on the stack: value may live in a managed array, and a pointer is taken only over the stack
-        WriteRef(comp, (byte*)&copy) = copy;
+        byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        ref var stored = ref WriteSlot<T>(slot, comp._componentTypeId, (byte*)&copy);
+        if ((_ref._archetype.CollectionSlotMask & (1 << slot)) != 0)
+        {
+            // Out of line: inlined, the rule's body cost every Set ~1.7 ns on a SingleVersion component, collection or not (#1362, measured).
+            KeepCollectionHandlesCold(slot, (byte*)&copy, (byte*)Unsafe.AsPointer(ref stored), adoptIntoEmpty);
+        }
+        stored = copy;
+    }
+
+    /// <summary>
+    /// A whole-value store's collection rule (<see cref="CollectionHandles.Keep"/>): <paramref name="value"/>, about to be stored over
+    /// <paramref name="stored"/> at <paramref name="slot"/>, gets the stored collection handles. Nothing on a component without a collection.
+    /// </summary>
+    internal void KeepCollectionHandles<T>(byte slot, byte* value, ref T stored, bool adoptIntoEmpty) where T : unmanaged
+    {
+        if ((_ref._archetype.CollectionSlotMask & (1 << slot)) != 0)
+        {
+            KeepCollectionHandlesCold(slot, value, (byte*)Unsafe.AsPointer(ref stored), adoptIntoEmpty);
+        }
+    }
+
+    /// <summary>The body of <see cref="KeepCollectionHandles{T}"/>. <paramref name="stored"/> is engine-owned memory (a page, the staging buffer, the spawn
+    /// arena), so a pointer over it is allowed.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void KeepCollectionHandlesCold(byte slot, byte* value, byte* stored, bool adoptIntoEmpty)
+    {
+        var table = _ref._engineState.SlotToComponentTable[slot];
+        CollectionHandles.Keep(table.CollectionFields, value, stored, adoptIntoEmpty, table.Name);
     }
 
     /// <summary>Set a component by type: as <see cref="Set{T}(Comp{T}, in T)"/>, resolving the slot via archetype metadata.</summary>
@@ -201,10 +236,15 @@ public unsafe ref struct EntityRefMut
     internal ref T WriteRef<T>(Comp<T> comp) where T : unmanaged => ref WriteRef(comp, null);
 
     /// <summary><see cref="WriteRef{T}(Comp{T})"/> for a store of <paramref name="newValue"/> (on the stack), or of an unknown value when null.</summary>
-    private ref T WriteRef<T>(Comp<T> comp, byte* newValue) where T : unmanaged
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref T WriteRef<T>(Comp<T> comp, byte* newValue) where T : unmanaged =>
+        ref WriteSlot<T>(_ref._archetype.GetSlot(comp._componentTypeId), comp._componentTypeId, newValue);
+
+    /// <summary><see cref="WriteRef{T}(Comp{T}, byte*)"/> for a slot the caller has resolved.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref T WriteSlot<T>(byte slot, int componentTypeId, byte* newValue) where T : unmanaged
     {
         SystemAccessValidator.AssertWrite<T>();
-        byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
         // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
         // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
@@ -216,7 +256,7 @@ public unsafe ref struct EntityRefMut
             ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
         }
 
-        return ref WriteSlotRef<T>(slot, comp._componentTypeId, newValue);
+        return ref WriteSlotRef<T>(slot, componentTypeId, newValue);
     }
 
     /// <summary>
@@ -227,10 +267,13 @@ public unsafe ref struct EntityRefMut
     /// <para>For a Versioned component the new revision is created here, before the accessor exists. That is what makes the buffer shared, so the
     /// accessor clones it before changing it. Mutating a copy read before the revision existed would otherwise edit, in place, the buffer the committed
     /// revision still points to, and readers of that revision would see the change (#1199).</para>
-    /// <para>On dispose the accessor stores the buffer it ended on into the component, and into <paramref name="field"/>: the collection needs no
-    /// <see cref="Set{T}(Comp{T}, in T)"/>. Set the copy only for its other fields — it then carries the same buffer.</para>
+    /// <para>Every buffer the accessor moves to — the first allocation, a clone, a <c>Replace</c> — is stored into the component at once, and into
+    /// <paramref name="field"/>: the collection needs no <see cref="Set{T}(Comp{T}, in T)"/>. Set the copy only for its other fields — it then carries the
+    /// same buffer.</para>
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="field"/> is not a field of <paramref name="copy"/>.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="copy"/> names another collection than the stored component: read before the collection
+    /// last changed.</exception>
     public ComponentCollectionAccessor<TElem> CreateComponentCollectionAccessor<T, TElem>(Comp<T> comp, ref T copy, ref ComponentCollection<TElem> field)
         where T : unmanaged where TElem : unmanaged
     {
@@ -240,11 +283,22 @@ public unsafe ref struct EntityRefMut
             throw new ArgumentException("The collection must be a field of the copy passed with it.", nameof(field));
         }
 
+        // The write is recorded here, before the accessor exists, in every storage mode (#1362). Versioned: the copy-on-write, which adds a reference to every
+        // buffer the new revision shares with the committed one. SingleVersion: the dirty bit and the page owed to disk the fence logs from, or under the
+        // Commit discipline the staged slot, whose staging adds a reference to every buffer it shares with HEAD. Only Versioned used to get it, so an in-place
+        // SingleVersion append was never logged, and under the Commit discipline edited the committed buffer itself. Idempotent within a transaction. The
+        // current value goes down with it: its keys are the stored ones, so a fence-indexed component records none (#1346).
+        var current = Read(comp);
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
-        if (_ref._engineState.SlotToComponentTable[slot].StorageMode == StorageMode.Versioned)
+        ref var stored = ref WriteSlot<T>(slot, comp._componentTypeId, (byte*)&current);
+
+        // The copy must name the stored collection. A stale one — read before an accessor moved it — names a buffer whose reference is no longer this
+        // value's: appended to, it edits a buffer an older revision owns; replaced, it releases a reference this value does not hold.
+        var storedBufferId = Unsafe.ReadUnaligned<int>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), offset));
+        if (field._bufferId != storedBufferId)
         {
-            // The copy-on-write alone: it adds a reference to every buffer the new revision shares with the committed one. Idempotent within a transaction.
-            WriteRef(comp);
+            ThrowHelper.ThrowInvalidOp($"The copy of '{typeof(T).Name}' names collection buffer {field._bufferId}, the entity holds {storedBufferId}: read the "
+                + "component again before opening its collection.");
         }
 
         return _ref._accessor.CreateComponentCollectionAccessorCore(ref field, _ref._id, comp._componentTypeId, offset, &StoreCollectionBufferId<T>);
@@ -259,7 +313,9 @@ public unsafe ref struct EntityRefMut
         where T : unmanaged
     {
         var handle = owner.OpenMut(entity);
-        ref var stored = ref handle.WriteRef(new Comp<T>(componentTypeId));
+        var comp = new Comp<T>(componentTypeId);
+        var current = handle.Read(comp);   // a handle moves no indexed key: the write records none (#1346)
+        ref var stored = ref handle.WriteRef(comp, (byte*)&current);
         Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), fieldOffset), bufferId);
     }
 
@@ -449,14 +505,15 @@ public unsafe ref struct EntityRefMut
         }
 
         // Enable AFTER the content exists: the bit is what makes the slot readable, so publishing it earlier would briefly expose a slot with no value.
-        // Staged only — the cluster copy is written at commit (see Disable).
+        // Staged only — the cluster copy is written at commit (see Disable), and after the store: a store that refuses the value stages nothing (#1362).
+        // The value supplies the component, so a collection the slot lacks is adopted, as a spawn's is.
         _ref._enabledBits |= (ushort)(1 << slot);
-        _ref._accessor.StageEnableDisable(_ref._id, _ref._enabledBits);
-
         if (!needsContent)
         {
-            WriteRef(comp) = value;
+            Store(comp, in value, adoptIntoEmpty: true);
         }
+
+        _ref._accessor.StageEnableDisable(_ref._id, _ref._enabledBits);
     }
 
     /// <summary>Enable a component by handle. Stages the change for commit.</summary>

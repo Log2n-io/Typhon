@@ -401,12 +401,25 @@ lock ordering and deadlock prevention are still to come.
             epoch and cluster cache hold is bounded by the system's run
   invariant a stored component's collection is changed through EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy,
             ref copy.Field), which creates a Versioned component's new revision before the accessor exists, so a buffer the committed
-            revision still points to is cloned, never edited in place; on dispose the accessor stores the buffer it ended on into the
-            stored component, so no Set is needed for the collection
+            revision still points to is cloned, never edited in place. Opening it records the write in every storage mode — the
+            copy-on-write, the SingleVersion dirty bit the fence logs from, or the Commit-discipline staged slot — and refuses a copy whose
+            handle is not the stored one. Every buffer the accessor moves to (first allocation, clone, Replace, Clear) is stored into the
+            component at that moment, not at dispose, so no Set is needed and no exit leaves the stored value naming a buffer the accessor
+            released; a Replace stores its new buffer before it gives back one reference on the old one, and never writes the old one
+  invariant a Commit-discipline staged value holds its own reference on every collection buffer it names, taken when it is seeded from HEAD
+            (EntityAccessor.ShareStagedCollections): the publish hands those to HEAD and then gives back HEAD's previous ones, after the
+            memcpy (Transaction.PublishStagedEntry); a rollback or a same-transaction destroy gives back the staged value's
+            (Transaction.ReleaseStagedCollections). Neither reads the other's state — a release decided from HEAD at publish time freed a
+            buffer a second Commit transaction's staged value still named
+  invariant no whole-value store changes a collection handle: it counts no reference, so an empty handle in the value keeps the stored
+            collection and a handle naming another buffer throws (CollectionHandles.Keep — EntityRefMut.Set, ClusterRef.Set,
+            EntityAccessor.Teleport). Enable(comp, value) alone adopts one, into a component holding none
   never cache a pointer into a page across calls on the strength of the epoch alone, and never hand one to a caller: a refresh at the
         next call boundary makes the page evictable while the pointer lives on
   scope: EntityRef.Read, EntityRef.TryRead, EntityRef.ReadRaw, EntityRef.ReadSlotRef, EntityRef.ClusterBase, EntityRefMut.Set,
-         EntityRefMut.WriteRef, EntityRefMut.CreateComponentCollectionAccessor, EntityAccessor.ResolveClusterBases,
+         EntityRefMut.WriteRef, EntityRefMut.CreateComponentCollectionAccessor, CollectionHandles.Keep, ComponentCollectionAccessor.Replace,
+         EntityAccessor.ShareStagedCollections, Transaction.ReleaseStagedCollections, Transaction.PublishStagedEntry, ClusterRef.Set,
+         EntityAccessor.Teleport, EntityAccessor.ResolveClusterBases,
          EntityAccessor.ReresolveClusterBase, EntityAccessor.EnsureClusterCache, EntityAccessor.NoteEntityOpen,
          PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext
   on_violation: the cache gives the slot to another page while the pointer lives on — reads return another entity's values, and a
@@ -428,6 +441,13 @@ lock ordering and deadlock prevention are still to come.
   verified: ComponentCollectionTests.Collection_ChangedThroughAHandle_LeavesTheCommittedRevisionsBufferAlone — an older snapshot still sees
             ten elements after a handle-made change commits eleven; without the copy-on-write first, it sees eleven [VerifiesRule];
             Collection_ChangedThroughAHandle_WithoutASet_IsStored — the change is stored with no Set, and fails without the write-back
+  verified: ComponentCollectionReplaceTests — a rollback past an undisposed accessor (Add or Replace) keeps the committed buffer, red with
+            the write-back at dispose [VerifiesRule]; a SingleVersion append with no Set marks the entity dirty, red when only Versioned
+            records its write [VerifiesRule]; under the Commit discipline another transaction sees the old content until the commit, and
+            the publish, a rollback and a same-transaction destroy each release exactly the buffers no committed value names [VerifiesRule];
+            two Commit transactions staging one entity end last-publish-wins with no double free, red without the staging reference or with
+            a release decided from HEAD [VerifiesRule]; a Set or a ClusterRef.Set with an empty handle keeps the collection, a stale or
+            foreign one throws, and an accessor refuses a stale copy [VerifiesRule]
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes — no public member of either handle returns a reference
             [VerifiesRule]
 
