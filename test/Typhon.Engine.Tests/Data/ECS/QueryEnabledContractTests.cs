@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -284,13 +285,37 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         EntityId id;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            id = tx.Spawn<QcSpArch>(QcSpArch.Spatial.Set(new QcSpatial { Bounds = new AABB3F { MinX = 10, MinY = 10, MinZ = 0, MaxX = 20, MaxY = 20, MaxZ = 1 } }),
+            var bounds = new AABB3F { MinX = 10, MinY = 10, MinZ = 0, MaxX = 20, MaxY = 20, MaxZ = 1 };
+            id = tx.Spawn<QcSpArch>(QcSpArch.Spatial.Set(new QcSpatial { Bounds = bounds }),
                 QcSpArch.Ranked.Set(new QcSpRanked(5)), QcSpArch.Tag.Set(new StatsTag(1)));
             Assert.That(tx.Commit(), Is.True);
         }
 
         dbe.WriteTickFence(++_tick);
         EcsQuery<QcSpArch> Box(Transaction tx) => tx.Query<QcSpArch>().WhereInAABB<QcSpatial>(0, 0, -10, 100, 100, 10);
+
+        // The transaction's own first supply: absent to its own field queries, the spatial ones too, until it commits. Out of the box above.
+        EcsQuery<QcSpArch> FarBox(Transaction tx) => tx.Query<QcSpArch>().WhereInAABB<QcSpatial>(250, 250, -10, 400, 400, 10);
+        EntityId bare;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var far = new AABB3F { MinX = 300, MinY = 300, MinZ = 0, MaxX = 310, MaxY = 310, MaxZ = 1 };
+            bare = tx.Spawn<QcSpArch>(QcSpArch.Spatial.Set(new QcSpatial { Bounds = far }), QcSpArch.Tag.Set(new StatsTag(2)));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        dbe.WriteTickFence(++_tick);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(bare).Enable(QcSpArch.Ranked, new QcSpRanked(7));
+            Assert.That(FarBox(tx).WhereField<QcSpRanked>(x => x.Tier == 7).Execute(), Is.Empty, "a spatial field query saw its own first supply");
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(FarBox(tx).WhereField<QcSpRanked>(x => x.Tier == 7).Execute(), Is.EquivalentTo(new[] { bare }), "the committed supply");
+        }
 
         // The transaction's own destroy: the spatial index still holds the entity, which no longer exists for it.
         using (var tx = dbe.CreateQuickTransaction())
@@ -350,7 +375,9 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         OnEveryPath(dbe, tx => VersionedTier(tx, 0), id, false, "an absent component in a recycled slot, at zero");
     }
 
-    /// <summary>One cluster, entities in every state side by side: each path counts exactly the enabled ones, so no slot bit is read for its neighbour.</summary>
+    /// <summary>
+    /// One cluster, entities in every state side by side: each path counts exactly the enabled ones, so no slot bit is read for its neighbour.
+    /// </summary>
     [Test]
     [VerifiesRule("QENABLE-01")]
     public void Versioned_AClusterOfMixedStates_CountsExactlyTheEnabledOnes()
@@ -417,7 +444,9 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         OnEveryPath(dbe, tx => VersionedTier(tx, 5), id, true, "a snapshot older than a disable and a destroy", reader, ordered: false, scanOnly: true);
     }
 
-    /// <summary>A spawn whose component is disabled in the same transaction: a view built before it does not take it in, as a view built after does not.</summary>
+    /// <summary>
+    /// A spawn whose component is disabled in the same transaction: a view built before it does not take it in, as a view built after does not.
+    /// </summary>
     [Test]
     [VerifiesRule("QENABLE-01")]
     public void Versioned_ASpawnDisabledInItsOwnTransaction_IsNotAddedToAnEarlierView()
@@ -533,7 +562,10 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         }
     }
 
-    /// <summary>Whether the <see cref="StatsRanked"/> chain at <paramref name="root"/> is still allocated, and whether its newest published revision is a tombstone.</summary>
+    /// <summary>
+    /// Whether the <see cref="StatsRanked"/> chain at <paramref name="root"/> is still allocated, and whether its newest published revision is a
+    /// tombstone.
+    /// </summary>
     private static (bool Live, bool NewestIsTombstone) RankedChain(DatabaseEngine dbe, int root)
     {
         var segment = dbe.GetComponentTable<StatsRanked>().CompRevTableSegment;
@@ -582,7 +614,9 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         Assert.That(dbe.FirstSupplyClaims, Is.Empty, "a first-supply claim outlived its commit");
     }
 
-    /// <summary>The losing supply's join fails after it added its revision to the winner's chain: its commit fails, the winner's chain and value stand.</summary>
+    /// <summary>
+    /// The losing supply's join fails after it added its revision to the winner's chain: its commit fails, the winner's chain and value stand.
+    /// </summary>
     [Test]
     [VerifiesRule("QENABLE-01")]
     public void Versioned_AFirstSupplyWhoseJoinFails_LeavesTheWinnersChain()
@@ -646,7 +680,9 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         Assert.That(dbe.FirstSupplyClaims, Is.Empty, "a first-supply claim outlived its commit");
     }
 
-    /// <summary>A commit's first supplies are claimed in one global order, whatever order they were written in: crossed commits cannot wait on each other.</summary>
+    /// <summary>
+    /// A commit's first supplies are claimed in one global order, whatever order they were written in: crossed commits cannot wait on each other.
+    /// </summary>
     [Test]
     [VerifiesRule("QENABLE-01")]
     public void FirstSupplies_AreClaimedInOneOrder()
@@ -901,6 +937,86 @@ class QueryEnabledContractTests : TestBase<QueryEnabledContractTests>
         Assert.That(workerFailure, Is.Null, "the second supply failed");
         Assert.That(secondCommitted, Is.True, "premise: the second supply commits");
         AssertSuppliedOnce(dbe, id, 7, 5);
+    }
+
+    /// <summary>
+    /// A reader older than a first supply: the component is absent at its snapshot, so <c>Disabled&lt;T&gt;()</c> does not match it — though the record names a
+    /// chain now, and the slot holds the supplied value.
+    /// </summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_AReaderOlderThanAFirstSupply_SeesTheComponentAbsent()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, null);
+        using var reader = dbe.CreateQuickTransaction();
+        Committed(dbe, tx => tx.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(5, 1)));
+        Committed(dbe, tx => tx.OpenMut(id).Disable(StatsArch.Ranked));
+        OnEveryPath(dbe, tx => VersionedTier(tx, 5, q => q.Disabled<StatsRanked>()), id, false, "Disabled<T> at a snapshot before the first supply",
+            reader);
+        OnEveryPath(dbe, tx => VersionedTier(tx, 5, q => q.Disabled<StatsRanked>()), id, true, "Disabled<T> after the supply and the disable");
+    }
+
+    /// <summary>An entity the transaction destroyed is gone for its own field queries, as for its point reads — on every path and terminal.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_ATransactionsOwnDestroy_HidesTheEntityFromItsFieldQueries()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, 5);
+        var other = SpawnVersioned(dbe, 5);
+        using var tx = dbe.CreateQuickTransaction();
+        tx.Destroy(id);
+        foreach (var (name, path) in Paths)
+        {
+            QueryPathProbe.Reset();
+            QueryPathProbe.Forced = path;
+            try
+            {
+                var a = VersionedTier(tx, 5);
+                Assert.That((a.Count, a.Ids, a.Ordered), Is.EqualTo((1, new HashSet<EntityId> { other }, new List<EntityId> { other }))
+                    .Using(new AnswersComparer()), $"own destroy, on {name}");
+                EcsQuery<StatsArch> First(Transaction t) =>
+                    t.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == 5).OrderByField<StatsRanked, int>(x => x.Tier).Take(1);
+                using (var fresh = dbe.CreateQuickTransaction())
+                {
+                    Assert.That(First(fresh).ExecuteOrdered(), Is.EqualTo(new[] { id }), "premise: the destroyed entity comes first among equal keys");
+                }
+
+                Assert.That(First(tx).ExecuteOrdered(), Is.EqualTo(new[] { other }), $"own destroy is not counted against Take, on {name}");
+            }
+            finally
+            {
+                QueryPathProbe.Reset();
+            }
+        }
+    }
+
+    private sealed class AnswersComparer : IEqualityComparer<(int, HashSet<EntityId>, List<EntityId>)>
+    {
+        public bool Equals((int, HashSet<EntityId>, List<EntityId>) a, (int, HashSet<EntityId>, List<EntityId>) b) =>
+            a.Item1 == b.Item1 && a.Item2.SetEquals(b.Item2) && a.Item3.SequenceEqual(b.Item3);
+
+        public int GetHashCode((int, HashSet<EntityId>, List<EntityId>) obj) => obj.Item1;
+    }
+
+    /// <summary>A component the transaction supplies is absent to its own field queries until it commits: the scans read the committed slot.</summary>
+    [Test]
+    [VerifiesRule("QENABLE-01")]
+    public void Versioned_ATransactionsOwnFirstSupply_IsAbsentToItsFieldQueriesUntilItCommits()
+    {
+        using var dbe = OpenEngine();
+        var id = SpawnVersioned(dbe, null);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Enable(StatsArch.Ranked, new StatsRanked(5, 1));
+            Assert.That(tx.Open(id).Read(StatsArch.Ranked).Tier, Is.EqualTo(5), "premise: the point read sees its own supply");
+            OnEveryPath(dbe, q => VersionedTier(q, 0), id, false, "its own supply, at the slot's bytes", tx, ordered: true);
+            OnEveryPath(dbe, q => VersionedTier(q, 5), id, false, "its own supply, at the supplied value", tx, ordered: true);
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        OnEveryPath(dbe, tx => VersionedTier(tx, 5), id, true, "after the commit");
     }
 
     [Test]

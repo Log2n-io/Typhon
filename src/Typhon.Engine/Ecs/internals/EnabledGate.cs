@@ -15,7 +15,7 @@ namespace Typhon.Engine.Internals;
 /// candidate's bits are resolved as the broad scan resolves them: the committed bits, then the snapshot's overrides, then the transaction's pending
 /// overlay.</para>
 /// <para>Presence is asked only for <c>Disabled&lt;T&gt;()</c> on a Versioned component: its bit is clear when disabled and when absent (STAGE-02), and only
-/// the record's chain root tells them apart. A SingleVersion component the spawn did not supply is present, zero, and disabled.</para>
+/// its chain tells them apart — a revision the snapshot sees. A SingleVersion component the spawn did not supply is present, zero, and disabled.</para>
 /// </remarks>
 internal unsafe struct EnabledGate
 {
@@ -29,8 +29,14 @@ internal unsafe struct EnabledGate
     private long _txTsn;
     private Dictionary<EntityId, ushort> _pending;
 
-    // The predicate component's position among the Versioned slots when presence must be proven, else -1.
+    // The predicate component's position among the Versioned slots when presence must be proven, else -1; its slot, and the reader that proves it.
     private int _presenceVersionedIndex;
+    private int _presenceSlot;
+    private int _predicateTypeId;
+    private ArchetypeMetadata _meta;
+#pragma warning disable TYPHON005 // The gate borrows the query's transaction, it does not own it
+    private Transaction _tx;
+#pragma warning restore TYPHON005
     private ArchetypeEngineState _state;
 
     /// <summary>Whether <see cref="Admits"/> reads records — the presence probe of <c>Disabled&lt;T&gt;()</c> on a Versioned component.</summary>
@@ -44,11 +50,11 @@ internal unsafe struct EnabledGate
     public readonly bool NeedsPerSlot(bool exact) => !exact || _presenceVersionedIndex >= 0;
 
     /// <summary>
-    /// The gate of a field query on <paramref name="predicateSlot"/>, with the named <c>Enabled&lt;T&gt;</c> / <c>Disabled&lt;T&gt;</c> slots already resolved for
-    /// this archetype (<paramref name="namedEnabled"/>, <paramref name="namedDisabled"/>).
+    /// The gate of a field query on <paramref name="predicateSlot"/>, with the named <c>Enabled&lt;T&gt;</c> / <c>Disabled&lt;T&gt;</c> slots already
+    /// resolved for this archetype (<paramref name="namedEnabled"/>, <paramref name="namedDisabled"/>).
     /// </summary>
-    public static EnabledGate Create(ArchetypeEngineState state, ArchetypeClusterInfo layout, int predicateSlot, ushort namedEnabled, ushort namedDisabled,
-        Transaction tx)
+    public static EnabledGate Create(ArchetypeMetadata meta, ArchetypeEngineState state, ArchetypeClusterInfo layout, int predicateSlot, ushort namedEnabled,
+        ushort namedDisabled, Transaction tx)
     {
         var predicateBit = (ushort)(1 << predicateSlot);
         var disabledAsked = (namedDisabled & predicateBit) != 0;
@@ -65,6 +71,10 @@ internal unsafe struct EnabledGate
             _txTsn = tx.TSN,
             _pending = pending,
             _presenceVersionedIndex = disabledAsked && layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[predicateSlot] : -1,
+            _presenceSlot = predicateSlot,
+            _predicateTypeId = meta._componentTypeIds[predicateSlot],
+            _meta = meta,
+            _tx = tx,
             _state = state,
         };
     }
@@ -149,7 +159,7 @@ internal unsafe struct EnabledGate
             return false;
         }
 
-        return _presenceVersionedIndex < 0 || ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, _presenceVersionedIndex) != 0;
+        return _presenceVersionedIndex < 0 || IsPresentAtSnapshot(ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, _presenceVersionedIndex));
     }
 
     /// <summary>The committed <paramref name="bits"/> resolved as the broad scan resolves them — the snapshot's overrides, then the transaction's own pending
@@ -160,13 +170,34 @@ internal unsafe struct EnabledGate
         bits = _overrides.ResolveEnabledBits(id.EntityKey, bits, _txTsn, _cards);
         if (_pending != null && _pending.TryGetValue(id, out var pendingBits))
         {
+            // A component this transaction supplied to the entity is absent to its own field queries until it commits: the scans read the committed slot,
+            // which holds no value of it (QENABLE-01). Its enabled bit alone would test bytes the entity never had. Only an own flip to enabled can be one;
+            // a supply disabled again fails the gate on its bit, or the presence probe on its unpublished root.
+            if ((pendingBits & ~bits & (1 << _presenceSlot)) != 0 && _tx.FirstSuppliedHere(rawId, _predicateTypeId))
+            {
+                return false;
+            }
+
             bits = pendingBits;
         }
 
         return (bits & RequiredEnabled) == RequiredEnabled && (bits & RequiredDisabled) == 0;
     }
 
-    private readonly bool IsPresent(long rawId, byte* recordBuf, ref ChunkAccessor<PersistentStore> mapAccessor) =>
-        _state.EntityMap.TryGet(EntityId.FromRaw(rawId).EntityKey, recordBuf, ref mapAccessor)
-        && ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, _presenceVersionedIndex) != 0;
+    /// <remarks>
+    /// At the snapshot, as a point read decides it: a chain with a revision this reader sees. The record's root alone is current state — a first supply
+    /// committed after the snapshot made the component present to this reader, matching <c>Disabled&lt;T&gt;()</c> on bytes it never had.
+    /// </remarks>
+    private readonly bool IsPresent(long rawId, byte* recordBuf, ref ChunkAccessor<PersistentStore> mapAccessor)
+    {
+        if (!_state.EntityMap.TryGet(EntityId.FromRaw(rawId).EntityKey, recordBuf, ref mapAccessor))
+        {
+            return false;
+        }
+
+        return IsPresentAtSnapshot(ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, _presenceVersionedIndex));
+    }
+
+    /// <summary>Whether the chain at <paramref name="root"/> holds a revision this reader sees — the component exists at its snapshot.</summary>
+    private readonly bool IsPresentAtSnapshot(int root) => root != 0 && _tx.ResolveVersionedContentChunk(_meta, _presenceSlot, root) != 0;
 }

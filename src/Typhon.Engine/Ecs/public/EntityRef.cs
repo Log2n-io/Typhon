@@ -398,7 +398,10 @@ public unsafe ref struct EntityRef
         return true;
     }
 
-    /// <summary>Whether the component at <paramref name="slot"/> exists at this snapshot: a SingleVersion or Transient one from the spawn, a Versioned one once supplied.</summary>
+    /// <summary>
+    /// Whether the component at <paramref name="slot"/> exists at this snapshot: a SingleVersion or Transient one from the spawn, a Versioned one once
+    /// supplied.
+    /// </summary>
     private readonly bool IsPresent(byte slot)
     {
         if ((_archetype.VersionedSlotMask & (1 << slot)) == 0)

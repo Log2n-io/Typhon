@@ -1018,7 +1018,9 @@ both fast and exact inside the window; this rule fixes what it does promise.
              the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
              `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
   note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
-        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). Writable cluster
+        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). An ordered query whose snapshot is
+        older than a destroy reads whole the clusters newer deaths touched (VIS-09) and places their rows by their current value: a written
+        entity there sits by its new value rather than its fence key. Writable cluster
         memory over a SingleVersion or Transient indexed component is refused, so every write reaches this rule's
         mechanism (IX-07). Reads
         of an index that test no value — `Transaction.EnumerateIndex`, foreign-key navigation — are not queries and are
@@ -1042,7 +1044,7 @@ both fast and exact inside the window; this rule fixes what it does promise.
 ### QENABLE-01: A field predicate matches only a component that is there, in the enabled state the query asks for `[fatal]` `[silent]`
   invariant ∀ field query Q with a predicate P on component T (`WhereField`), ∀ entity e visible at Q's snapshot:
             e ∈ Q ⟺ present(e, T) ∧ enabled(e, T) = ¬Q.names(Disabled<T>) ∧ P(value(e, T)) ∧ the other components Q names
-            `Enabled<U>()` / `Disabled<U>()` are so. present: Versioned ⟺ the record's chain root ≠ 0 (STAGE-02); SingleVersion
+            `Enabled<U>()` / `Disabled<U>()` are so. present: Versioned ⟺ its chain holds a revision Q's snapshot sees (STAGE-02); SingleVersion
             and Transient always — one the spawn did not supply is zero and disabled, and the record cannot tell it from a disabled
             one. enabled is resolved at the snapshot: the committed bits, then the overrides (`EnabledBitsOverrides`), then the
             transaction's own pending changes
@@ -1052,7 +1054,15 @@ both fast and exact inside the window; this rule fixes what it does promise.
             while no override is live — re-checked after each cluster's words are read, since a commit registers its override before
             its publish writes them — and the transaction stages no enable or disable; otherwise each candidate is resolved as the
             broad scan resolves it. A reserved slot (VIS-08, VIS-09) is resolved from its record the same way. Presence is probed only
-            for `Disabled<T>()` on a Versioned T
+            for `Disabled<T>()` on a Versioned T, and at the snapshot — a chain with a revision the reader sees, as a point read decides it
+            (`EnabledGate.IsPresentAtSnapshot`): the record's root is current state, and a first supply committed after the snapshot made
+            the component present to an older reader, matching `Disabled<T>()` on bytes it never had
+  invariant a transaction's own changes, as its point reads see them: an entity it destroyed is gone from its field queries, uncounted by
+            Skip / Take (`EcsQuery.ExecuteTargeted`, `EcsQuery.CollectMergedResults`, `EcsQuery.ExecuteSpatial`); a component it supplied to
+            an entity that had none is absent to them until it commits (`Transaction.FirstSuppliedHere`; the spatial field verifier, a point
+            read, refuses it too) — the scans read the committed slot, and its own enabled bit alone tested bytes the entity never had; its
+            own pending spawns are in every terminal, an ordered one included, placed by their own values (`EcsQuery.OwnSpawnStream`, and the
+            sort fallback's key). Its own value writes to committed entities stay unseen by field queries, as before
   invariant the paths that test entities one at a time apply it too: `Where<T>`, the field filter on the transaction's own pending
             spawns, the spatial candidates. Each reads T enabled, or disabled and present when the query names `Disabled<T>()`
             (`EntityRef.TryReadForPredicate`, the names taken when the query runs), and the query's `Enabled<U>()` / `Disabled<U>()` are
@@ -1106,7 +1116,11 @@ both fast and exact inside the window; this rule fixes what it does promise.
             commit that fails before its append, a join that fails, a supply destroyed in its transaction, the claim order; a spatial query
             over the transaction's own destroy; an ordered page past rows the gate refuses — mutants: no claim, no join, the claim released
             before the root is published, the absent read unflagged, the join swapped in first, a destroyed supply joined live, the claims
-            unsorted, the claims kept on a failed commit, the spatial check opening a destroyed entity. The mid-scan
+            unsorted, the claims kept on a failed commit, the spatial check opening a destroyed entity; a reader older than a first supply under
+            Disabled<T>, the transaction's own destroy and own first supply. QueryStressOracleTests [VerifiesRule]: writers spawning,
+            destroying, enabling, disabling, first-supplying (raced), updating and aborting, readers at random snapshots, every path and
+            terminal against the reader's own point reads — mutants: presence at HEAD, own destroys or own first supplies seen, no walk in
+            the selective scan, no side stream, no born gate in the merge, no side-stream dedupe. The mid-scan
             re-check of the overrides has no staged test: it needs a commit landing between a cluster's word loads, with no hook there
   note: a second supply waits for a claim before its PREPARE, holding no chain lock; the wait ends at the holder's publish or exit, or at
         the chain-lock timeout, which fails the waiting commit and leaves it retryable

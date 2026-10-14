@@ -900,7 +900,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             return false;
         }
 
-        gate = EnabledGate.Create(_tx.DBE._archetypeStates[meta.ArchetypeId], layout, predicateSlot, namedEnabled, namedDisabled, _tx);
+        gate = EnabledGate.Create(meta, _tx.DBE._archetypeStates[meta.ArchetypeId], layout, predicateSlot, namedEnabled, namedDisabled, _tx);
         return true;
     }
 
@@ -1290,9 +1290,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var stamps = ArrayPool<long>.Shared.Rent(8);
         var stampCount = 0;
 
-        // The rented cluster bitmaps of the side streams, given back once the merge is done with them.
-        ulong[][] wholeBitmaps = null;
-        var wholeBitmapCount = 0;
+        // The rented entity-key sets of the side streams, given back once the merge is done with them.
+        long[][] sidePkSets = null;
+        var sidePkSetCount = 0;
+
+        // Where this transaction's own pending spawns keep the ordered field, by archetype: they are in no tree yet, and get a stream of their own.
+        List<(ArchetypeMetadata Meta, int CompSlot, int FieldOffset, KeyType KeyType)> ownSpawnSources = null;
 
         // The plan's PrimaryFieldIndex may be -1 when the shared B+Tree has 0 entries (cluster archetypes store entries in per-archetype B+Trees,
         // not the shared one). In that case, use the OrderBy field index directly and full type range for scan bounds.
@@ -1410,20 +1413,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     stampStates[stampCount] = clusterState;
                     stamps[stampCount++] = destroyStamp;
 
-                    ulong[] wholeClusters = null;
+                    long[] sidePks = null;
+                    var sidePkCount = 0;
                     if (destroyStamp > txTsn)
                     {
                         Grow(ref streams, streamCount);
-                        streams[streamCount++] = ReadClustersWhole(evaluators, clusterState, engineState, meta, matchSlot.Slot, field.FieldOffset, keyType, descending,
-                            ref gate, out wholeClusters);
-                        wholeBitmaps ??= ArrayPool<ulong[]>.Shared.Rent(4);
-                        Grow(ref wholeBitmaps, wholeBitmapCount);
-                        wholeBitmaps[wholeBitmapCount++] = wholeClusters;
+                        streams[streamCount++] = ReadClustersWhole(evaluators, clusterState, engineState, meta, matchSlot.Slot, field.FieldOffset, keyType,
+                            descending,
+                            ref gate, out sidePks, out sidePkCount);
+                        sidePkSets ??= ArrayPool<long[]>.Shared.Rent(4);
+                        Grow(ref sidePkSets, sidePkSetCount);
+                        sidePkSets[sidePkSetCount++] = sidePks;
                     }
 
                     snapshot = new StreamSnapshot
                     {
-                        State = engineState, Cards = dbe.CommitCards, TxTsn = txTsn, RecordSize = meta._entityRecordSize, WholeClusters = wholeClusters
+                        State = engineState, Cards = dbe.CommitCards, TxTsn = txTsn, RecordSize = meta._entityRecordSize,
+                        SidePks = sidePkCount > 0 ? sidePks : null, SidePkCount = sidePkCount
                     };
                 }
 
@@ -1435,6 +1441,21 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // QFENCE-01: the stream re-checks the entities written since the last fence against these evaluators — see ArchetypeSortedStream.
                 streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout,
                     evaluators, matchSlot.Slot, gate, snapshot);
+                if (_tx.PendingSpawns is { Count: > 0 })
+                {
+                    (ownSpawnSources ??= []).Add((meta, matchSlot.Slot, field.FieldOffset, keyType));
+                }
+            }
+
+            // Read-your-own-writes: the spawns this transaction matched, by their own values, merged like any archetype's rows.
+            if (ownSpawnSources != null)
+            {
+                var ownStream = OwnSpawnStream(ownSpawnSources, descending);
+                if (ownStream.HasValue)
+                {
+                    Grow(ref streams, streamCount);
+                    streams[streamCount++] = ownStream.Value;
+                }
             }
 
             if (streamCount == 0)
@@ -1455,6 +1476,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             finally
             {
                 merge.Dispose();
+            }
+
+            // The tree reads before the stamp's second read, on arm64 too (see the selective scan's walk); JIT-folded on x64.
+            if (!X86Base.IsSupported)
+            {
+                Interlocked.MemoryBarrier();
             }
 
             for (var i = 0; i < stampCount; i++)
@@ -1485,16 +1512,79 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             ArrayPool<ArchetypeClusterState>.Shared.Return(stampStates, true);
             ArrayPool<long>.Shared.Return(stamps);
-            if (wholeBitmaps != null)
+            if (sidePkSets != null)
             {
-                for (var i = 0; i < wholeBitmapCount; i++)
+                for (var i = 0; i < sidePkSetCount; i++)
                 {
-                    ArrayPool<ulong>.Shared.Return(wholeBitmaps[i]);
+                    ArrayPool<long>.Shared.Return(sidePkSets[i]);
                 }
 
-                ArrayPool<ulong[]>.Shared.Return(wholeBitmaps, true);
+                ArrayPool<long[]>.Shared.Return(sidePkSets, true);
             }
         }
+    }
+
+    /// <summary>
+    /// This transaction's own pending spawns the query matches (the same filter as <see cref="CollectPendingSpawnsWithFieldFilter"/>), sorted by the ordered
+    /// field as their point reads see it, into a side stream; <c>null</c> when none matches.
+    /// </summary>
+    private ArchetypeSortedStream? OwnSpawnStream(List<(ArchetypeMetadata Meta, int CompSlot, int FieldOffset, KeyType KeyType)> sources, bool descending)
+    {
+        var matched = new HashSet<EntityId>();
+        CollectPendingSpawnsWithFieldFilter(matched);
+        if (matched.Count == 0)
+        {
+            return null;
+        }
+
+        var keys = ArrayPool<long>.Shared.Rent(matched.Count);
+        var pks = ArrayPool<long>.Shared.Rent(matched.Count);
+        var count = 0;
+        foreach (var id in matched)
+        {
+            var meta = _tx.DBE.GetMetaByRouting(id.ArchetypeId);
+            foreach (var s in sources)
+            {
+                if (ReferenceEquals(s.Meta, meta) && TryReadOwnSpawnOrderKey(id, s.CompSlot, s.FieldOffset, s.KeyType, out var key))
+                {
+                    keys[count] = key;
+                    pks[count++] = (long)id.RawValue;
+                    break;
+                }
+            }
+        }
+
+        Array.Sort(keys, pks, 0, count);
+        if (descending)
+        {
+            Array.Reverse(keys, 0, count);
+            Array.Reverse(pks, 0, count);
+        }
+
+        return ArchetypeSortedStream.FromSorted(keys, pks, count);
+    }
+
+    /// <summary>
+    /// The ordered field's key of one of this transaction's own pending spawns, as its point read sees it: a spawn is in no tree and in no cluster until
+    /// it commits.
+    /// </summary>
+    private bool TryReadOwnSpawnOrderKey(EntityId id, int compSlot, int fieldOffset, KeyType keyType, out long orderedKey)
+    {
+        orderedKey = 0;
+        if (!_tx.TryOpen(id, out var entity))
+        {
+            return false;
+        }
+
+        var size = entity.GetComponentSize(compSlot);
+        Span<byte> bytes = size <= 256 ? stackalloc byte[256] : new byte[size];
+        if (entity.ReadRaw(compSlot, bytes) < fieldOffset + 1)
+        {
+            return false;
+        }
+
+        orderedKey = OrderedKeyEncoding.EncodeAt(bytes[fieldOffset..], keyType);
+        return true;
     }
 
     /// <summary>Grows a rented array so index <paramref name="count"/> fits.</summary>
@@ -1514,11 +1604,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>
     /// #1347: the rows of each cluster a death newer than this snapshot touched — or a destroy still pending — read whole, as the SoA scan reads a cluster:
     /// every occupied slot and every slot claimed and not occupied (VIS-09), each predicate evaluated on the slot's bytes, each slot decided at the snapshot.
-    /// Sorted by the ordered field into a side stream; <paramref name="wholeClusters"/> marks the clusters, whose tree rows the tree stream drops — rented,
-    /// the caller returns it once the merge is done.
+    /// Sorted by the ordered field into a side stream that carries each row's entity key, read with the row; <paramref name="sidePks"/> holds the same keys,
+    /// sorted, for the tree stream to drop its rows of those entities — rented, the caller returns it once the merge is done.
     /// </summary>
+    /// <remarks>
+    /// By entity, not by cluster: an entity a migration moves between the walk and the tree stream's read is in exactly one of the two, whichever cluster it
+    /// lands in, and a row is never resolved through a slot a migration released and a spawn reused since.
+    /// </remarks>
     private ArchetypeSortedStream ReadClustersWhole(FieldEvaluator[] evaluators, ArchetypeClusterState clusterState, ArchetypeEngineState engineState,
-        ArchetypeMetadata meta, int compSlot, int fieldOffset, KeyType keyType, bool descending, ref EnabledGate gate, out ulong[] wholeClusters)
+        ArchetypeMetadata meta, int compSlot, int fieldOffset, KeyType keyType, bool descending, ref EnabledGate gate, out long[] sidePks, out int sidePkCount)
     {
         var txTsn = _tx.TSN;
         var cards = _tx.DBE.CommitCards;
@@ -1528,14 +1622,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var recordSize = meta._entityRecordSize;
         byte* record = stackalloc byte[recordSize];
 
-        // The active list first, then the capacity: every cluster the walk visits fits the bitmap. Cleared whole — the stream tests a row of any cluster
-        // against it, and one created since lands past the capacity, on what the last renter left.
         var activeIds = clusterState.ReadActiveClusterList(out var activeCount);
-        wholeClusters = ArrayPool<ulong>.Shared.Rent((clusterState.ClusterSegment.ChunkCapacity + 63) >> 6);
-        Array.Clear(wholeClusters);
-
         var keys = ArrayPool<long>.Shared.Rent(64);
-        var locations = ArrayPool<int>.Shared.Rent(64);
+        var pks = ArrayPool<long>.Shared.Rent(64);
         var count = 0;
         var mapAccessor = engineState.EntityMap.Segment.CreateScanAccessor();
         var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
@@ -1551,7 +1640,6 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
-                wholeClusters[clusterChunkId >> 6] |= 1UL << clusterChunkId;
                 var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId);
                 var occupancy = Volatile.Read(ref *(ulong*)clusterBase);
                 if (Unsafe.IsNullRef(ref words))
@@ -1584,16 +1672,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
 
                     Grow(ref keys, count);
-                    Grow(ref locations, count);
+                    Grow(ref pks, count);
                     keys[count] = OrderedKeyEncoding.EncodeAt(entityComp + fieldOffset, keyType);
-                    locations[count++] = clusterChunkId * 64 + slotIndex;
+                    pks[count++] = rawId;
                 }
             }
         }
         catch
         {
             ArrayPool<long>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(locations);
+            ArrayPool<long>.Shared.Return(pks);
             throw;
         }
         finally
@@ -1602,14 +1690,76 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             mapAccessor.Dispose();
         }
 
-        Array.Sort(keys, locations, 0, count);
+        Array.Sort(keys, pks, 0, count);
         if (descending)
         {
             Array.Reverse(keys, 0, count);
-            Array.Reverse(locations, 0, count);
+            Array.Reverse(pks, 0, count);
         }
 
-        return ArchetypeSortedStream.FromSorted(keys, locations, count, clusterState, layout);
+        sidePks = ArrayPool<long>.Shared.Rent(Math.Max(count, 1));
+        Array.Copy(pks, sidePks, count);
+        Array.Sort(sidePks, 0, count);
+        sidePkCount = count;
+
+        // A fence migration publishes the destination slot before it releases the source, so a walk overlapping it can find one entity in two
+        // clusters read whole: it is returned once.
+        if (HasAdjacentDuplicate(sidePks, count))
+        {
+            count = DropDuplicateRows(keys, pks, count);
+            sidePkCount = DistinctSorted(sidePks, sidePkCount);
+        }
+
+        return ArchetypeSortedStream.FromSorted(keys, pks, count);
+    }
+
+    private static bool HasAdjacentDuplicate(long[] sorted, int count)
+    {
+        for (var i = 1; i < count; i++)
+        {
+            if (sorted[i] == sorted[i - 1])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int DistinctSorted(long[] sorted, int count)
+    {
+        var kept = 0;
+        for (var i = 0; i < count; i++)
+        {
+            if (kept == 0 || sorted[i] != sorted[kept - 1])
+            {
+                sorted[kept++] = sorted[i];
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>Compacts rows sorted by key, keeping each entity's first: rare (a migration overlapping the walk), so a quadratic look-back is fine.</summary>
+    private static int DropDuplicateRows(long[] keys, long[] pks, int count)
+    {
+        var kept = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var seen = false;
+            for (var j = 0; j < kept && !seen; j++)
+            {
+                seen = pks[j] == pks[i];
+            }
+
+            if (!seen)
+            {
+                keys[kept] = keys[i];
+                pks[kept++] = pks[i];
+            }
+        }
+
+        return kept;
     }
 
     /// <summary>Collect results from a K-way merge, applying Skip/Take.</summary>
@@ -1621,9 +1771,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var take = _take > 0 ? _take : int.MaxValue;
 
         // Tell the merge up front whether this row is going to be kept: a skipped row needs its ORDER, which the merge
-        // already has, but never its entity key.
-        while (merge.MoveNext(out var entityPK, skipped >= _skip))
+        // already has, but never its entity key — unless this transaction destroyed some entity, which it no longer sees: not counted, not returned.
+        var destroys = _tx.PendingDestroys is { Count: > 0 } pendingDestroys ? pendingDestroys : null;
+        while (merge.MoveNext(out var entityPK, destroys != null || skipped >= _skip))
         {
+            if (destroys != null && destroys.Contains(EntityId.FromRaw(entityPK)))
+            {
+                continue;
+            }
+
             if (skipped < _skip)
             {
                 skipped++;
@@ -1683,7 +1839,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         Debug.Assert(_orderBy != null, nameof(_orderBy) + " != null");
         var orderByFieldIdx = _orderBy.Value.FieldIndex;
         var dbe = _tx.DBE;
-        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)> hiddenKeySources = null;
+        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)>
+            hiddenKeySources = null;
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
@@ -1732,10 +1889,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            if (meta.VersionedSlotMask != 0)
-            {
-                (hiddenKeySources ??= []).Add((meta, engineState, clusterState, ixSlotIdx, field.FieldOffset, orderKeyType));
-            }
+            (hiddenKeySources ??= []).Add((meta, engineState, clusterState, ixSlotIdx, field.FieldOffset, orderKeyType));
 
             // Scan the full B+Tree to build PK→key mapping for entities in our result set
             var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType), false,
@@ -1800,8 +1954,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>
-    /// The ordered field's key of an entity a destroy newer than this snapshot took out of the tree (#1347): read from the bytes its hidden slot kept
-    /// (VIS-09), through its record. False when the entity has no cluster record — an own pending spawn — or its archetype is not a source.
+    /// The ordered field's key of an entity absent from the tree: one a destroy newer than this snapshot took out of it (#1347), read from the bytes its hidden
+    /// slot kept (VIS-09) through its record, or one of this transaction's own pending spawns, read as its point read sees it. False when its archetype is
+    /// not a source.
     /// </summary>
     private bool TryReadHiddenOrderKey(EntityId id,
         List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)> sources,
@@ -1826,15 +1981,17 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var clusterAccessor = s.Cluster.ClusterSegment.CreateScanAccessor();
             try
             {
+                var compSlot = s.Cluster.IndexSlots[s.IxSlot].Slot;
                 if (!s.State.EntityMap.TryGet(id.EntityKey, record, ref mapAccessor))
                 {
-                    return false;
+                    // No record: one of this transaction's own pending spawns, whose value its point read holds.
+                    return TryReadOwnSpawnOrderKey(id, compSlot, s.FieldOffset, s.KeyType, out orderedKey);
                 }
 
                 var layout = s.Cluster.Layout;
-                var compSlot = s.Cluster.IndexSlots[s.IxSlot].Slot;
                 var clusterBase = clusterAccessor.GetChunkAddress(ClusterEntityRecordAccessor.GetClusterChunkId(record));
-                var entityComp = clusterBase + layout.ComponentOffset(compSlot) + ClusterEntityRecordAccessor.GetSlotIndex(record) * layout.ComponentSize(compSlot);
+                var entityComp = clusterBase + layout.ComponentOffset(compSlot)
+                                 + ClusterEntityRecordAccessor.GetSlotIndex(record) * layout.ComponentSize(compSlot);
                 orderedKey = OrderedKeyEncoding.EncodeAt(entityComp + s.FieldOffset, s.KeyType);
                 return true;
             }
@@ -1861,6 +2018,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var result = new HashSet<EntityId>(_take > 0 ? _take : 64);
         var sink = new EntityIdSetSink(result);
         ScanAllArchetypes(plan, evaluators, ct, ref sink);
+
+        // An entity this transaction destroyed is gone for it, as a point read and the broad scan say: the scans read the committed slots.
+        if (_tx.PendingDestroys is { Count: > 0 } destroyedHere)
+        {
+            result.ExceptWith(destroyedHere);
+        }
 
         // Read-your-own-writes: pending spawns have no secondary index entries, so the targeted scan above can't find them. Evaluate them via compiled
         // predicate fallback.
@@ -2638,7 +2801,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             // #1347: a destroy removes its entity's tree entries at its publish, while a snapshot older than it still sees the entity, hidden in its slot
             // (VIS-09). Read AFTER the tree scan: a destroy folds its stamp before it removes the entries, so a scan that missed them reads it here above
-            // this snapshot, and each cluster a death newer than the snapshot touched is then read whole, as the SoA scan reads it.
+            // this snapshot, and each cluster a death newer than the snapshot touched is then read whole, as the SoA scan reads it. The barrier keeps the
+            // tree's leaf loads from sinking below the stamp's acquire on arm64 (an acquire orders only what follows it); JIT-folded on x64.
+            if (!X86Base.IsSupported)
+            {
+                Interlocked.MemoryBarrier();
+            }
+
             var walkDeaths = visGated && clusterState.MaxDestroyStamp > txTsn;
             QueryPathProbe.SelectiveAfterTreeScanHook?.Invoke();
             if (!hasAny && !walkDeaths)
@@ -2698,7 +2867,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                         continue;   // before the slot words: a point lookup touches only the clusters the tree named
                     }
 
-                    ref var slotWords = ref visGated ? ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId) : ref Unsafe.NullRef<long>();
+                    ref var slotWords = ref visGated
+                        ? ref ArchetypeClusterState.SlotWords(clusterState.SlotWordTable, clusterChunkId)
+                        : ref Unsafe.NullRef<long>();
                     var pendingDeaths = ArchetypeClusterState.PendingDeathsOf(ref slotWords);   // before the occupancy word — see ScanClusterSoa
 
                     // A cluster a death newer than this snapshot touched, or one pending, is read whole: its tree entries may be gone (#1347).
@@ -3150,6 +3321,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
         }
 
+        // An entity this transaction destroyed is gone for it: the spatial index still holds it.
+        if (tx.PendingDestroys is { Count: > 0 } destroyedHere)
+        {
+            result.ExceptWith(destroyedHere);
+        }
+
         // QENABLE-01: the spatial index knows nothing of enabled bits, so the query's Enabled<U>() / Disabled<U>() are applied per candidate.
         if (HasT2 && result.Count > 0)
         {
@@ -3185,7 +3362,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var fieldFilter = _pendingSpawnFieldFilter;
         if (fieldFilter != null)
         {
-            result.RemoveWhere(id => !fieldFilter(id, tx, readDisabled));
+            // The verifier is a point read, which sees this transaction's own supply; to its field queries that component is absent until it commits.
+            var predicateTypeId = ArchetypeRegistry.GetComponentTypeId(_whereComponentTable.Definition.POCOType);
+            result.RemoveWhere(id => tx.FirstSuppliedHere((long)id.RawValue, predicateTypeId) || !fieldFilter(id, tx, readDisabled));
         }
 
         return result;

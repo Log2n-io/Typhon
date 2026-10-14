@@ -70,14 +70,16 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     private EnabledGate _gate;
     private bool _gated;
 
-    // #1347: the reader's snapshot — every row's born and died tested against it, as the scans test them — and the clusters a side stream already holds
-    // whole, whose rows this stream drops. Null state: no snapshot test (a non-Versioned archetype, or a caller that maps keys only).
+    // #1347: the reader's snapshot — every row's born and died tested against it, as the scans test them — and the entities a side stream already holds,
+    // whose rows this stream drops. Null state: no snapshot test (a non-Versioned archetype, or a caller that maps keys only).
     private ArchetypeClusterState _clusterState;
     private ArchetypeEngineState _visState;
     private CommitCardTable _cards;
     private long _txTsn;
     private int _recordSize;
-    private ulong[] _wholeClusters;
+    private long[] _sidePks;    // sorted: the entities a side stream holds, whose tree rows this stream drops
+    private int _sidePkCount;
+    private long[] _pks;        // a side stream's rows, by entity key (FromSorted): no cluster to resolve them through
     private bool _filtering;    // any of the three above, or the gate: TryAdmitCurrent tests the row
     private ChunkAccessor<PersistentStore> _mapAccessor;
     private bool _mapOpen;
@@ -98,7 +100,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     public long CurrentEntityPK
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => ResolveEntityPK(_locations[_pos], ref _clusterAccessor, _layout);
+        get => _pks != null ? _pks[_pos] : ResolveEntityPK(_locations[_pos], ref _clusterAccessor, _layout);
     }
 
     /// <summary>
@@ -150,7 +152,8 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _cards = snapshot?.Cards,
             _txTsn = snapshot?.TxTsn ?? 0,
             _recordSize = snapshot?.RecordSize ?? 0,
-            _wholeClusters = snapshot?.WholeClusters,
+            _sidePks = snapshot?.SidePks,
+            _sidePkCount = snapshot?.SidePkCount ?? 0,
             _filtering = gate.HasValue || snapshot.HasValue,
             _evaluators = evaluators,
             _compOffset = componentSlot >= 0 ? layout.ComponentOffset(componentSlot) : 0,
@@ -184,20 +187,16 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     }
 
     /// <summary>
-    /// A stream over rows already filtered and sorted — the clusters an ordered query read whole for a snapshot older than a destroy (#1347). Takes
-    /// ownership of the two arrays, rented from <see cref="ArrayPool{T}"/>.
+    /// A stream over rows already filtered and sorted, each with its entity key — the clusters an ordered query read whole for a snapshot older than a
+    /// destroy (#1347). Takes ownership of the two arrays, rented from <see cref="ArrayPool{T}"/>.
     /// </summary>
-    public static ArchetypeSortedStream FromSorted(long[] orderedKeys, int[] locations, int count, ArchetypeClusterState clusterState,
-        ArchetypeClusterInfo layout) =>
+    public static ArchetypeSortedStream FromSorted(long[] orderedKeys, long[] entityPKs, int count) =>
         new()
         {
-            _layout = layout,
-            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
-            _hasAccessors = true,
             _orderedKeys = orderedKeys,
-            _locations = locations,
+            _pks = entityPKs,
             _count = count,
-            _pageCapacity = Math.Min(orderedKeys.Length, locations.Length),
+            _pageCapacity = Math.Min(orderedKeys.Length, entityPKs.Length),
             _cursor = new LeafPageCursorState { Exhausted = true }
         };
 
@@ -319,7 +318,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
 
     /// <summary>
     /// Whether the current row is one the query returns: the query's enabled gate admits it (QENABLE-01) and, with a snapshot, the snapshot sees it (#1347)
-    /// — born at or before it, not dead at it, not in a cluster a side stream holds whole. <paramref name="entityPK"/>: the row's entity key, read on the
+    /// — born at or before it, not dead at it, not an entity a side stream holds. <paramref name="entityPK"/>: the row's entity key, read on the
     /// way when <paramref name="resolve"/>.
     /// </summary>
     /// <remarks>
@@ -337,8 +336,14 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     /// </remarks>
     public bool TryAdmitCurrent(bool resolve, out long entityPK)
     {
-        var location = _locations[_pos];
         entityPK = 0;
+        if (_pks != null)
+        {
+            entityPK = _pks[_pos];
+            return true;
+        }
+
+        var location = _locations[_pos];
         if (!_filtering)
         {
             if (resolve)
@@ -350,11 +355,6 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         }
 
         var chunkId = location >> 6;
-        if (_wholeClusters != null && (uint)(chunkId >> 6) < (uint)_wholeClusters.Length && (_wholeClusters[chunkId >> 6] & (1UL << chunkId)) != 0)
-        {
-            return false;
-        }
-
         var slotIndex = location & 0x3F;
         var bit = 1UL << slotIndex;
         var clusterBase = _clusterAccessor.GetChunkAddress(chunkId);
@@ -389,12 +389,29 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
                        && ((clusterVisible && (!_gated || !_gate.NeedsPerSlot(exact))) || AdmitsByRecord(clusterBase, slotIndex, exact, clusterVisible));
         }
 
-        if (admitted && resolve)
+        if (!admitted)
         {
-            entityPK = *(long*)(clusterBase + _layout.EntityIdsOffset + slotIndex * 8);
+            return false;
         }
 
-        return admitted;
+        if (resolve || _sidePks != null)
+        {
+            entityPK = *(long*)(clusterBase + _layout.EntityIdsOffset + slotIndex * 8);
+
+            // An entity a side stream already holds: its row is that stream's, read whole at the snapshot.
+            if (_sidePks != null && Array.BinarySearch(_sidePks, 0, _sidePkCount, entityPK) >= 0)
+            {
+                entityPK = 0;
+                return false;
+            }
+
+            if (!resolve)
+            {
+                entityPK = 0;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>An occupied row the cluster words cannot decide: the gate's per-slot resolution, the snapshot's born and died, each from the record.</summary>
@@ -503,6 +520,12 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _locations = null;
         }
 
+        if (_pks != null)
+        {
+            ArrayPool<long>.Shared.Return(_pks);
+            _pks = null;
+        }
+
         if (_hasAccessors)
         {
             _hasAccessors = false;
@@ -533,8 +556,11 @@ internal readonly struct StreamSnapshot
     /// <summary>The archetype's EntityMap record size.</summary>
     public int RecordSize { get; init; }
 
-    /// <summary>One bit per cluster a side stream holds whole (<see cref="ArchetypeSortedStream.FromSorted"/>); null for none.</summary>
-    public ulong[] WholeClusters { get; init; }
+    /// <summary>The entities a side stream holds (<see cref="ArchetypeSortedStream.FromSorted"/>), sorted; null for none.</summary>
+    public long[] SidePks { get; init; }
+
+    /// <summary>How many of <see cref="SidePks"/> are set.</summary>
+    public int SidePkCount { get; init; }
 }
 
 /// <summary>

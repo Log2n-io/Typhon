@@ -702,7 +702,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Test hook: a commit took the first-supply claim of (entity key, component type) — in the order it takes them all.</summary>
     internal Action<long, int> FirstSupplyClaimedProbe { get; set; }
 
-    /// <summary>Test hook: a losing first supply added its revision to the winner's chain and is about to move its bytes there; a throw fails its commit.</summary>
+    /// <summary>
+    /// Test hook: a losing first supply added its revision to the winner's chain and is about to move its bytes there; a throw fails its commit.
+    /// </summary>
     internal Action FirstSupplyJoinProbe { get; set; }
 
     /// <summary>Test seam (VIS-03): invoked by every writing <see cref="Transaction"/> commit once its commit card is reserved, before its PREPARE takes
@@ -1500,8 +1502,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal CommitCardTable CommitCards { get; }
 
     /// <summary>
-    /// The first supplies being committed (QENABLE-01): one per (entity, component type), claimed in PREPARE and released once the commit's publish set the
-    /// record's chain root, or at its abort. A second supply of the same component waits for the claim, then finds the root (<c>Transaction.PrepareFirstSupply</c>).
+    /// The first supplies being committed (QENABLE-01): one per (entity, component type), claimed before PREPARE and released once the commit's publish set the
+    /// record's chain root, or on any exit of the commit. A second supply of the same component waits for the claim, then finds the root
+    /// (<c>Transaction.PrepareFirstSupply</c>).
     /// </summary>
     internal readonly System.Collections.Concurrent.ConcurrentDictionary<(long Pk, int ComponentTypeId), long> FirstSupplyClaims = new();
     internal DeferredCleanupManager DeferredCleanupManager { get; }

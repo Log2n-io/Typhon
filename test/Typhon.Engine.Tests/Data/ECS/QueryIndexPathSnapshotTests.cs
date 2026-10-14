@@ -94,7 +94,10 @@ class QueryIndexPathSnapshotTests : TestBase<QueryIndexPathSnapshotTests>
         }
     }
 
-    /// <summary>Count, Any, Execute and ExecuteOrdered of Tier == <paramref name="tier"/> through <paramref name="tx"/> all return exactly <paramref name="expected"/>.</summary>
+    /// <summary>
+    /// Count, Any, Execute and ExecuteOrdered of Tier == <paramref name="tier"/> through <paramref name="tx"/> all return exactly <paramref
+    /// name="expected"/>.
+    /// </summary>
     private static void AssertTier(Transaction tx, int tier, IReadOnlyCollection<EntityId> expected, string at)
     {
         EcsQuery<StatsArch> Q() => tx.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == tier);
@@ -168,6 +171,36 @@ class QueryIndexPathSnapshotTests : TestBase<QueryIndexPathSnapshotTests>
             Assert.That(Q().OrderByField<QipTwoIndexed, int>(x => x.Tier).Skip(2).Take(3).ExecuteOrdered(), Is.EqualTo(byTier.GetRange(2, 3)),
                 $"a page, on {name}");
         });
+    }
+
+    /// <summary>
+    /// The transaction's own pending spawns, in an ordered query: placed by their own values among the committed rows, on the merge and on the
+    /// scan-then-sort fallback, as Execute returns them.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("QENABLE-01")]
+    public void AnOrderedQuery_PlacesTheTransactionsOwnSpawnsByTheirValues(bool sortFallback)
+    {
+        using var dbe = OpenEngine();
+        EntityId c2, c4;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            c2 = tx.Spawn<QipArch>(QipArch.Ranked.Set(new QipTwoIndexed(2, 20)), QipArch.Tag.Set(new StatsTag(2)));
+            c4 = tx.Spawn<QipArch>(QipArch.Ranked.Set(new QipTwoIndexed(4, 40)), QipArch.Tag.Set(new StatsTag(4)));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var own = dbe.CreateQuickTransaction();
+        var o3 = own.Spawn<QipArch>(QipArch.Ranked.Set(new QipTwoIndexed(3, 30)), QipArch.Tag.Set(new StatsTag(3)));
+        var o1 = own.Spawn<QipArch>(QipArch.Ranked.Set(new QipTwoIndexed(1, 10)), QipArch.Tag.Set(new StatsTag(1)));
+        EcsQuery<QipArch> Q() => sortFallback
+            ? own.Query<QipArch>().WhereField<QipTwoIndexed>(x => x.Tier >= 1 && x.Score >= 0)
+            : own.Query<QipArch>().WhereField<QipTwoIndexed>(x => x.Tier >= 1);
+
+        Assert.That(Q().OrderByField<QipTwoIndexed, int>(x => x.Tier).ExecuteOrdered(), Is.EqualTo(new[] { o1, c2, o3, c4 }), "ascending");
+        Assert.That(Q().OrderByFieldDescending<QipTwoIndexed, int>(x => x.Tier).ExecuteOrdered(), Is.EqualTo(new[] { c4, o3, c2, o1 }), "descending");
+        Assert.That(Q().OrderByField<QipTwoIndexed, int>(x => x.Tier).Skip(1).Take(2).ExecuteOrdered(), Is.EqualTo(new[] { c2, o3 }), "a page");
     }
 
     /// <summary>

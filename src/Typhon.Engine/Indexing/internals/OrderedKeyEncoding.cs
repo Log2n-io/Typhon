@@ -1,4 +1,6 @@
+using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -66,6 +68,23 @@ internal static class OrderedKeyEncoding
             KeyType.Short => Encode(*(short*)field, keyType),
             KeyType.Int => Encode(*(int*)field, keyType),
             KeyType.Long => Encode(*(long*)field, keyType),
+            _ => 0
+        };
+
+    /// <summary><see cref="EncodeAt(byte*, KeyType)"/> of a value copied out — a component a point read returned.</summary>
+    public static long EncodeAt(ReadOnlySpan<byte> field, KeyType keyType) =>
+        keyType switch
+        {
+            KeyType.Float => Encode(MemoryMarshal.Read<float>(field), keyType),
+            KeyType.Double => Encode(MemoryMarshal.Read<double>(field), keyType),
+            KeyType.UShort => Encode(MemoryMarshal.Read<ushort>(field), keyType),
+            KeyType.UInt => Encode(MemoryMarshal.Read<uint>(field), keyType),
+            KeyType.ULong => Encode(MemoryMarshal.Read<ulong>(field), keyType),
+            KeyType.Byte => Encode(field[0], keyType),
+            KeyType.SByte => Encode(MemoryMarshal.Read<sbyte>(field), keyType),
+            KeyType.Short => Encode(MemoryMarshal.Read<short>(field), keyType),
+            KeyType.Int => Encode(MemoryMarshal.Read<int>(field), keyType),
+            KeyType.Long => Encode(MemoryMarshal.Read<long>(field), keyType),
             _ => 0
         };
 

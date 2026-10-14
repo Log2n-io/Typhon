@@ -2463,13 +2463,21 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal bool AreClusterWatermarksVisibleAt(int clusterChunkId, long txTsn) => WatermarksVisibleAt(ref SlotWords(SlotWordTable, clusterChunkId), txTsn);
 
-    private long _maxDestroyStamp;
+    // Padded on both sides — the CLR does not align objects to a line, and Apple arm64 lines are 128 bytes: every destroying commit of the archetype
+    // CASes it, and queries read the fields beside it.
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct PaddedDestroyStamp
+    {
+        [FieldOffset(64)] public long Value;
+    }
+
+    private PaddedDestroyStamp _maxDestroyStamp;
 
     /// <summary>
     /// The highest stamp a destroy of this archetype has published, by acquire; 0 before the first. Only rises. A reader whose snapshot is at or above it
     /// finds no entity a destroy hid from the B+Trees (VIS-09) that it still sees alive, so an index path needs no look at the hidden slots (#1347).
     /// </summary>
-    internal long MaxDestroyStamp => Volatile.Read(ref _maxDestroyStamp);
+    internal long MaxDestroyStamp => Volatile.Read(ref _maxDestroyStamp.Value);
 
     /// <summary>
     /// A destroy's stamp, folded into <see cref="MaxDestroyStamp"/> and its cluster's died watermark (<see cref="NoteClusterDied"/>) BEFORE its B+Tree entries
@@ -2480,8 +2488,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         NoteClusterDied(clusterChunkId, stamp);
         while (true)
         {
-            var current = Volatile.Read(ref _maxDestroyStamp);
-            if (stamp <= current || Interlocked.CompareExchange(ref _maxDestroyStamp, stamp, current) == current)
+            var current = Volatile.Read(ref _maxDestroyStamp.Value);
+            if (stamp <= current || Interlocked.CompareExchange(ref _maxDestroyStamp.Value, stamp, current) == current)
             {
                 return;
             }

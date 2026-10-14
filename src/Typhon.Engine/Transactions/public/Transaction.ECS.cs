@@ -1306,6 +1306,28 @@ public unsafe partial class Transaction
     /// <summary>Pending spawns — exposed for EcsQuery read-your-own-writes support.</summary>
     internal List<SpawnEntry> PendingSpawns => _spawnedEntities;
 
+    /// <summary>
+    /// Whether this transaction supplied the component of type <paramref name="componentTypeId"/> to <paramref name="pk"/>, which had none, and has not
+    /// committed: a component its own field queries take for absent (QENABLE-01).
+    /// </summary>
+    internal bool FirstSuppliedHere(long pk, int componentTypeId)
+    {
+        if (_firstSupplies is not { Count: > 0 } supplies)
+        {
+            return false;
+        }
+
+        foreach (var (supplyPk, typeId) in supplies)
+        {
+            if (supplyPk == pk && typeId == componentTypeId)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Pending destroys — exposed for EcsQuery read-your-own-writes support.</summary>
     internal HashSet<EntityId> PendingDestroys => _pendingDestroys;
 

@@ -207,7 +207,7 @@ below names the invariant that proves it.
             entity's B+Tree entries. The selective scan reads the archetype stamp after its tree read; above its snapshot, each cluster
             whose died watermark is above it, or with a destroy pending, is read whole, as the SoA scan reads it, and a tree candidate
             whose slot is hidden by the cluster read is decided by its record. The ordered merge reads the stamp before its streams
-            open — its tree reads are lazy — reads such clusters whole into a sorted side stream whose clusters the tree stream drops,
+            open — its tree reads are lazy — reads such clusters whole into a sorted side stream whose entities the tree stream drops,
             tests every row's born and died at the snapshot (ArchetypeSortedStream.TryAdmitCurrent, as the merge consumes it), and answers again when the stamp moved
             during the merge; the sort fallback keys a row absent from the tree by its slot's bytes
   scope: Transaction.MarkDestroysPending, Transaction.UnmarkDestroysPending, Transaction.FlushPendingDestroys,

@@ -2001,7 +2001,8 @@ public unsafe partial class Transaction : EntityAccessor
         ref var compRevInfo = ref context.CompRevInfo;
 
         // A component supplied to a published entity that had none (STAGE-02): before its chain is read below, as it may be another's by then.
-        if (_firstSupplyClaims is { Count: > 0 } && (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0 && !SpawnedContains(EntityId.FromRaw(pk)))
+        if (_firstSupplyClaims is { Count: > 0 } && (compRevInfo.Operations & ComponentInfo.OperationType.Created) != 0
+            && !SpawnedContains(EntityId.FromRaw(pk)))
         {
             PrepareFirstSupply(ref context);
         }
