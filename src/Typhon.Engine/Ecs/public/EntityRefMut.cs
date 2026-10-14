@@ -131,7 +131,11 @@ public unsafe ref struct EntityRefMut
         var copy = value;   // on the stack: value may live in a managed array, and a pointer is taken only over the stack
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
         ref var stored = ref WriteSlot<T>(slot, comp._componentTypeId, (byte*)&copy);
-        KeepCollectionHandles(slot, (byte*)&copy, ref stored, adoptIntoEmpty);
+        if ((_ref._archetype.CollectionSlotMask & (1 << slot)) != 0)
+        {
+            // Out of line: inlined, the rule's body cost every Set ~1.7 ns on a SingleVersion component, collection or not (#1362, measured).
+            KeepCollectionHandlesCold(slot, (byte*)&copy, (byte*)Unsafe.AsPointer(ref stored), adoptIntoEmpty);
+        }
         stored = copy;
     }
 
@@ -139,15 +143,21 @@ public unsafe ref struct EntityRefMut
     /// A whole-value store's collection rule (<see cref="CollectionHandles.Keep"/>): <paramref name="value"/>, about to be stored over
     /// <paramref name="stored"/> at <paramref name="slot"/>, gets the stored collection handles. Nothing on a component without a collection.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void KeepCollectionHandles<T>(byte slot, byte* value, ref T stored, bool adoptIntoEmpty) where T : unmanaged
     {
         if ((_ref._archetype.CollectionSlotMask & (1 << slot)) != 0)
         {
-            // The stored component lives in engine-owned memory (a page, the staging buffer, the spawn arena): a pointer over it is allowed.
-            CollectionHandles.Keep(_ref._engineState.SlotToComponentTable[slot].CollectionFields, value, (byte*)Unsafe.AsPointer(ref stored),
-                adoptIntoEmpty, typeof(T).Name);
+            KeepCollectionHandlesCold(slot, value, (byte*)Unsafe.AsPointer(ref stored), adoptIntoEmpty);
         }
+    }
+
+    /// <summary>The body of <see cref="KeepCollectionHandles{T}"/>. <paramref name="stored"/> is engine-owned memory (a page, the staging buffer, the spawn
+    /// arena), so a pointer over it is allowed.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void KeepCollectionHandlesCold(byte slot, byte* value, byte* stored, bool adoptIntoEmpty)
+    {
+        var table = _ref._engineState.SlotToComponentTable[slot];
+        CollectionHandles.Keep(table.CollectionFields, value, stored, adoptIntoEmpty, table.Name);
     }
 
     /// <summary>Set a component by type: as <see cref="Set{T}(Comp{T}, in T)"/>, resolving the slot via archetype metadata.</summary>
