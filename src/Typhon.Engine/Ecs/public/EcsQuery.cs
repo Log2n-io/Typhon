@@ -807,14 +807,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <summary>Order results by an indexed field. Requires <see cref="WhereField{T}"/> to identify the component.</summary>
     public EcsQuery<TArchetype> OrderByField<T, TKey>(Expression<Func<T, TKey>> keySelector) where T : unmanaged
     {
-        _orderBy = new OrderByField(ResolveOrderByFieldIndex(keySelector));
+        _orderBy = ResolveOrderBy(keySelector, false);
         return this;
     }
 
     /// <summary>Order results descending by an indexed field.</summary>
     public EcsQuery<TArchetype> OrderByFieldDescending<T, TKey>(Expression<Func<T, TKey>> keySelector) where T : unmanaged
     {
-        _orderBy = new OrderByField(ResolveOrderByFieldIndex(keySelector), descending: true);
+        _orderBy = ResolveOrderBy(keySelector, true);
         return this;
     }
 
@@ -840,7 +840,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         return this;
     }
 
-    private int ResolveOrderByFieldIndex<T, TKey>(Expression<Func<T, TKey>> keySelector) where T : unmanaged
+    private OrderByField ResolveOrderBy<T, TKey>(Expression<Func<T, TKey>> keySelector, bool descending) where T : unmanaged
     {
         if (_whereComponentTable == null)
         {
@@ -855,7 +855,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             throw new InvalidOperationException($"Field '{fieldName}' must be indexed to use as OrderBy.");
         }
-        return QueryResolverHelper.FindFieldIndex(_whereComponentTable.Definition, field);
+
+        // A field no ordered tree key encodes cannot order a query. Accepted, it sorted by entity key without a word (QORD-01).
+        if (!QueryResolverHelper.TryMapFieldTypeToKeyType(field.Type, out var keyType) || !KeyRange.IsStreamable(keyType))
+        {
+            throw new InvalidOperationException($"Field '{fieldName}' ({field.Type}) cannot order a query: its index has no ordered key.");
+        }
+
+        return new OrderByField(QueryResolverHelper.FindFieldIndex(_whereComponentTable.Definition, field), descending: descending, keyType: keyType,
+            keyTypeKnown: true);
     }
 
     /// <summary>Resolve T2 masks for a specific archetype.</summary>
@@ -1306,8 +1314,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // The merge evaluates no predicate: a row is returned because the scan range admitted it (the streams re-check only entities written since the last
         // fence, QFENCE-01). So every predicate must be one the range enforces exactly, or the query falls back to ExecuteTargeted (which verifies all
-        // evaluators) + sort. A predicate on another field never is, and neither is one ComputeBounds widens on the scan field — `!=` above all, which used to
-        // be exempted here and was then never evaluated (#1185).
+        // evaluators) + sort. A predicate on another field never is: let through, it typed no stream at all and answered nothing (QORD-01). Neither is one
+        // ComputeBounds widens on the scan field — `!=` above all, which used to be exempted here and was then never evaluated (#1185).
         for (var e = 0; e < evaluators.Length; e++)
         {
             if (evaluators[e].FieldIndex != primaryFieldIdx || !KeyRange.AdmitsOnlyMatches(ref evaluators[e], evaluators[e].KeyType))
@@ -1375,23 +1383,12 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
                 else
                 {
-                    // Plan selected nothing — compute bounds from the evaluator that names this field.
-                    keyType = KeyType.Int;
-                    var keyTypeKnown = false;
-                    for (var e = 0; e < evaluators.Length; e++)
-                    {
-                        if (evaluators[e].FieldIndex == fieldIdx)
-                        {
-                            keyType = evaluators[e].KeyType;
-                            keyTypeKnown = true;
-                            break;
-                        }
-                    }
+                    // Plan selected nothing: the ordering field's own key type (QORD-01), and bounds from the predicates that name it.
+                    keyType = _orderBy.Value.KeyType;
 
-                    // No predicate names the ordering field, so its tree cannot be typed. This used to fall through with keyType = Int and the bounds left at
-                    // long.MinValue/MaxValue, which the typed scan truncates to (int)0..(int)-1 — an INVERTED range that enumerates nothing. Skipping says the
-                    // same thing without pretending a stream was built.
-                    if (!keyTypeKnown || !KeyRange.IsStreamable(keyType))
+                    // A field no tree key encodes cannot be streamed. Typed with a default Int and bounds left at long.MinValue/MaxValue, the scan truncated
+                    // them to (int)0..(int)-1 — an INVERTED range that enumerated nothing. Skipping says the same thing without pretending a stream was built.
+                    if (!_orderBy.Value.KeyTypeKnown || !KeyRange.IsStreamable(keyType))
                     {
                         continue;
                     }
@@ -1834,10 +1831,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // ExecuteTargeted verifies all evaluators, handles both cluster and non-cluster archetypes
         var unordered = ExecuteTargeted();
 
-        // Build entity→sortKey mapping by scanning per-archetype B+Trees.
-        // Each B+Tree entry is (key, ClusterLocation) — we reverse-resolve ClusterLocation → EntityPK
-        // to match against our result set.
-        var entityKeyMap = new Dictionary<long, long>(unordered.Count); // entityPK → orderedKey
+        // Where each archetype keeps the ordered field, to read each row's key from.
         Debug.Assert(_orderBy != null, nameof(_orderBy) + " != null");
         var orderByFieldIdx = _orderBy.Value.FieldIndex;
         var dbe = _tx.DBE;
@@ -1858,7 +1852,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            // Persistent home only — see the note in ExecuteOrderedClustered. A Transient home leaves this archetype's entities out of entityKeyMap, so they
+            // Persistent home only — see the note in ExecuteOrderedClustered. A Transient home leaves this archetype's entities without a source, so they
             // sort by EntityKey rather than by the ordered field (#655 follow-up, tracked in #665).
             var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
             if (ixSlotIdx < 0 || transientHome || orderByFieldIdx < 0 || orderByFieldIdx >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
@@ -1868,54 +1862,25 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
             ref var field = ref clusterState.IndexSlots[ixSlotIdx].Fields[orderByFieldIdx];
 
-            // The stream runs over the ORDER BY field's tree, so its key type AND its bounds must both describe that field. They used to come from
-            // plan.PrimaryKeyType and evaluators[0].KeyType — two different fields the moment stream selection is live. Worse, while selection was pinned off
-            // PrimaryKeyType was `default`, i.e. Bool, which no typed tree matches: Create fell out of its switch, the stream came back EMPTY, entityKeyMap
-            // stayed empty and every entity silently sorted by EntityKey instead of by the ordered field (#675).
-            var orderKeyType = KeyType.Bool;
-            var orderKeyKnown = false;
-            for (var e = 0; e < evaluators.Length; e++)
-            {
-                if (evaluators[e].FieldIndex == orderByFieldIdx)
-                {
-                    orderKeyType = evaluators[e].KeyType;
-                    orderKeyKnown = true;
-                    break;
-                }
-            }
-
-            // No predicate names the OrderBy field, so nothing here knows how to type its tree. Skipping leaves this archetype's entities sorting by EntityKey
-            // — the same degradation as before, but now a stated one rather than the accidental result of an empty stream (#591's remaining half).
-            if (!orderKeyKnown || !KeyRange.IsStreamable(orderKeyType))
+            // The ordered field's own key type (QORD-01). It came from plan.PrimaryKeyType and evaluators[0].KeyType — two other fields — until #675, then
+            // from a predicate naming the field, so a query ordered by a field none of its predicates named sorted by EntityKey (#591's remaining half), until
+            // the market storm's query auditor found it.
+            var orderKeyType = _orderBy.Value.KeyType;
+            if (!_orderBy.Value.KeyTypeKnown || !KeyRange.IsStreamable(orderKeyType))
             {
                 continue;
             }
 
             (hiddenKeySources ??= []).Add((meta, engineState, clusterState, ixSlotIdx, field.FieldOffset, orderKeyType));
-
-            // Scan the full B+Tree to build PK→key mapping for entities in our result set
-            var stream = ArchetypeSortedStream.Create(field.Index, orderKeyType, KeyRange.TypeMin(orderKeyType), KeyRange.TypeMax(orderKeyType), false,
-                clusterState, clusterState.Layout);
-            try
-            {
-                while (stream.HasCurrent)
-                {
-                    entityKeyMap.TryAdd(stream.CurrentEntityPK, stream.CurrentKey);
-                    stream.Advance();
-                }
-            }
-            finally
-            {
-                stream.Dispose();
-            }
         }
 
-        // Build sorted list from unordered results
+        // Each row's key as the reader sees it: its point read at the snapshot, the transaction's own pending spawns included; past that, the bytes its hidden
+        // slot kept (VIS-09). The tree used to be read whole — every entry, whatever the result's size — and holds the HEAD's keys, so a reader older than an
+        // update sorted that row by its newer value (#674).
         var withKeys = new List<(long orderedKey, EntityId id)>(unordered.Count);
         foreach (var id in unordered)
         {
-            var pk = (long)id.RawValue;
-            if (!entityKeyMap.TryGetValue(pk, out var orderedKey) && !TryReadHiddenOrderKey(id, hiddenKeySources, out orderedKey))
+            if (!TryReadOrderKeyAtSnapshot(id, hiddenKeySources, out var orderedKey) && !TryReadHiddenOrderKey(id, hiddenKeySources, out orderedKey))
             {
                 orderedKey = id.EntityKey;
             }
@@ -1953,6 +1918,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         return result;
+    }
+
+    /// <summary>The ordered field's key of <paramref name="id"/> as the reader's point read sees it; false when its archetype is not a source.</summary>
+    private bool TryReadOrderKeyAtSnapshot(EntityId id,
+        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)> sources,
+        out long orderedKey)
+    {
+        orderedKey = 0;
+        if (sources == null)
+        {
+            return false;
+        }
+
+        var meta = _tx.DBE.GetMetaByRouting(id.ArchetypeId);
+        foreach (var s in sources)
+        {
+            if (ReferenceEquals(s.Meta, meta))
+            {
+                return TryReadOwnSpawnOrderKey(id, s.Cluster.IndexSlots[s.IxSlot].Slot, s.FieldOffset, s.KeyType, out orderedKey);
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -1041,6 +1041,29 @@ both fast and exact inside the window; this rule fixes what it does promise.
             blind to which component was written, the gate case; with the gate blind to releases, the
             destroy-after-another-write case
 
+## Module: QORD — In what order an ordered query returns its rows
+
+### QORD-01: An ordered query returns its rows in the ordered field's order, whichever fields its predicates name `[correctness]` `[silent]`
+  invariant ∀ ordered query Q = WhereField(P).OrderByField(F) (or OrderByFieldDescending) over an indexed field F: ExecuteOrdered returns exactly Q's
+            rows sorted by F, ascending or descending, and Skip / Take page that order — whether or not a predicate of P names F, a not-equal included
+  invariant the ordered field's key type is the field's own, resolved when OrderByField resolves the field (OrderByField.KeyType); a field no ordered
+            tree key encodes (a string, a bool) is refused there, never sorted by entity key
+  invariant the merge streams F's tree only when F's key range enforces every predicate exactly (KeyRange.AdmitsOnlyMatches); a predicate on another
+            field, a not-equal or a bound the range widens goes to the scan-then-sort fallback, which verifies every predicate and reads each row's F
+            at the reader's snapshot — its point read, the transaction's own spawns included, then the bytes a hidden slot kept (VIS-09)
+  scope: OrderByField.KeyType, OrderByField.KeyTypeKnown, QueryResolverHelper.TryMapFieldTypeToKeyType, EcsQuery.ResolveOrderBy,
+         EcsQuery.MergeOrderedClustered, EcsQuery.ExecuteOrderedViaSortFallback, EcsQuery.TryReadOrderKeyAtSnapshot
+  on_violation: the sort fallback took F's key type from a predicate naming F; with none — filtered on one field, ordered by another — it sorted by
+                EntityKey: silently unordered rows (found by MarketHardeningTests' query auditor, which orders a player's items by their last trade).
+                A not-equal on another field let the merge through untyped, and it answered nothing; one on F was re-checked only on rows written since
+                the last fence, so the excluded rows came back. The fallback read F's whole tree — every entry, whatever the result — at the HEAD's keys
+  note: the merge still orders by F's tree, which holds the committed HEAD's keys: a reader older than an update of F, filtered on F alone, gets that row
+        at its newer value — the ordered face of #674 (OrderedQueryByAnotherFieldTests...OrdersByTheValueItSees_OnTheMerge, quarantined)
+  verified: OrderedQueryByAnotherFieldTests [VerifiesRule] — filtered on another field, ascending and descending, whole and paged; a unique 64-bit
+            sequence other rows' updates and a destroy re-key around; a not-equal on another field, alone or beside a range on F, and on F itself; an
+            older reader on the fallback; a string order refused. Mutants: the key type borrowed again (seven cases red), the not-equal let through
+            (both not-equal cases), the HEAD's keys read (the older reader), the refusal removed (the string case)
+
 ## Module: QENABLE — Which entities a field predicate can match
 
 ### QENABLE-01: A field predicate matches only a component that is there, in the enabled state the query asks for `[fatal]` `[silent]`

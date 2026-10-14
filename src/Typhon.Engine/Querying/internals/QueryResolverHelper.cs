@@ -76,22 +76,31 @@ internal static class QueryResolverHelper
         throw new InvalidOperationException($"Field '{targetField.Name}' not found in indexed fields.");
     }
 
-    private static KeyType MapFieldTypeToKeyType(FieldType fieldType) =>
-        fieldType switch
+    /// <summary>The tree key type of <paramref name="fieldType"/>; false for a type no key encodes (a string).</summary>
+    internal static bool TryMapFieldTypeToKeyType(FieldType fieldType, out KeyType keyType)
+    {
+        (keyType, var known) = fieldType switch
         {
-            FieldType.Boolean => KeyType.Bool,
-            FieldType.Byte => KeyType.SByte,
-            FieldType.UByte => KeyType.Byte,
-            FieldType.Short => KeyType.Short,
-            FieldType.UShort => KeyType.UShort,
-            FieldType.Int => KeyType.Int,
-            FieldType.UInt => KeyType.UInt,
-            FieldType.Long => KeyType.Long,
-            FieldType.ULong => KeyType.ULong,
-            FieldType.Float => KeyType.Float,
-            FieldType.Double => KeyType.Double,
-            _ => throw new NotSupportedException($"Field type {fieldType} is not supported for view predicates.")
+            FieldType.Boolean => (KeyType.Bool, true),
+            FieldType.Byte => (KeyType.SByte, true),
+            FieldType.UByte => (KeyType.Byte, true),
+            FieldType.Short => (KeyType.Short, true),
+            FieldType.UShort => (KeyType.UShort, true),
+            FieldType.Int => (KeyType.Int, true),
+            FieldType.UInt => (KeyType.UInt, true),
+            FieldType.Long => (KeyType.Long, true),
+            FieldType.ULong => (KeyType.ULong, true),
+            FieldType.Float => (KeyType.Float, true),
+            FieldType.Double => (KeyType.Double, true),
+            _ => (default(KeyType), false)
         };
+        return known;
+    }
+
+    private static KeyType MapFieldTypeToKeyType(FieldType fieldType) =>
+        TryMapFieldTypeToKeyType(fieldType, out var keyType)
+            ? keyType
+            : throw new NotSupportedException($"Field type {fieldType} is not supported for view predicates.");
 
     public static long EncodeThreshold(object value, KeyType keyType)
     {

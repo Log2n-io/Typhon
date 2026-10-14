@@ -130,10 +130,21 @@ internal readonly struct OrderByField
     /// <summary>True for descending iteration order.</summary>
     public readonly bool Descending;
 
-    public OrderByField(int fieldIndex, byte componentTag = 0, bool descending = false)
+    /// <summary>
+    /// The ordered field's key type, from its definition; meaningful only when <see cref="KeyTypeKnown"/>. The ordered paths used to take it from a
+    /// predicate on that field, so a query ordered by a field none of its predicates named sorted by entity key, silently.
+    /// </summary>
+    public readonly KeyType KeyType;
+
+    /// <summary>Whether <see cref="KeyType"/> was resolved: false for an order by primary key, or a field type no tree key encodes.</summary>
+    public readonly bool KeyTypeKnown;
+
+    public OrderByField(int fieldIndex, byte componentTag = 0, bool descending = false, KeyType keyType = default, bool keyTypeKnown = false)
     {
         FieldIndex = fieldIndex;
         ComponentTag = componentTag;
         Descending = descending;
+        KeyType = keyType;
+        KeyTypeKnown = keyTypeKnown;
     }
 }
