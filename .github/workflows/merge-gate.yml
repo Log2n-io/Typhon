@@ -185,8 +185,10 @@ jobs:
               - 'scripts/native-live-test.py'
               - 'Directory.Build.props'
               - '.github/workflows/merge-gate.yml'
+            # TLC checks the specs, never the C#: only a spec or a config can change its verdict. The Durability path was the
+            # trigger while the specs lived in the docs repo (#405), the only thing this filter could see; since #747 it only
+            # re-ran ~6 min of identical model checking on every Durability code PR.
             tla:
-              - 'src/Typhon.Engine/Durability/**'
               - 'rules/tla/**'
             # #703: re-audit when a rule, a rule CITATION, or the audit itself changes. `rules/**` was absent
             # from this list until #747 — not an oversight but an impossibility, because the database lived in
