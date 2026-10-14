@@ -30,7 +30,6 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
     private const int WriterCount = 3;
     private const int ReaderCount = 2;
     private static readonly bool OwnChecks = Environment.GetEnvironmentVariable("QSO_OWN") != "0";
-    private static readonly bool WhereChecks = Environment.GetEnvironmentVariable("QSO_WHERE") == "1";
 
     private static readonly ClusterScanPath[] Paths = [ClusterScanPath.Planner, ClusterScanPath.Selective, ClusterScanPath.FullScan];
 
@@ -412,9 +411,9 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
                                                 + $"missing {string.Join(",", expectedIds.Except(executed).Take(3))})");
                     }
 
-                    // Where<T> — a per-entity point read over the broad scan — answers as the oracle does for a reader without changes of its own. Off by
-                    // default: the broad scan misses live entities under concurrent spawns and destroys (#1351); QSO_WHERE=1 runs it.
-                    if (WhereChecks && !own && path == ClusterScanPath.Planner)
+                    // Where<T> — a per-entity point read over the broad scan — answers as the oracle does for a reader without changes of its own. The broad
+                    // scan used to miss live entities while the entity map split under it (#1351).
+                    if (!own && path == ClusterScanPath.Planner)
                     {
                         var where = (range
                                 ? tx.Query<StatsArch>().Where<StatsRanked>(x => x.Tier >= tier)
@@ -422,13 +421,6 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
                         var whereIds = (disabled ? where.Disabled<StatsRanked>() : where).Execute();
                         if (!whereIds.SetEquals(expectedIds))
                         {
-                            foreach (var x in expectedIds.Except(whereIds).Take(1))
-                            {
-                                var inBroad = tx.Query<StatsArch>().Execute().Contains(x);
-                                var reopen = tx.TryOpen(x, out _);
-                                shared.Failures.Enqueue($"WHEREDIAG {shape} missing inBroad={inBroad} reopen={reopen} {Describe(tx, x)} {Head(dbe, x)}");
-                            }
-
                             shared.Failures.Enqueue(
                                 $"{at}: Where<T> has {whereIds.Except(expectedIds).Count()} extra, misses {expectedIds.Except(whereIds).Count()}");
                         }

@@ -1520,17 +1520,16 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// is re-read. Entries are handed to <paramref name="action"/> only once a consistent snapshot of the bucket has been
     /// captured: the callback may have side effects (it collects / invokes), so it must never observe a torn read.
     /// <para>
-    /// Snapshot semantics: an entry present for the whole scan is visited exactly once; an entry concurrently inserted, removed,
-    /// or relocated (by a split) during the scan may or may not be visited. Callers that need a fully consistent view must run
-    /// against a quiescent map (the engine's broad-scan query path already does — it runs on the owning transaction thread).
-    /// Buckets are visited in order, chunk 1 onward (cache-friendly).
+    /// Snapshot semantics: an entry present for the whole scan is visited exactly once, whatever splits run meanwhile
+    /// (<see cref="PagedHashMapBase{TStore}.SplitTolerantScan"/>); an
+    /// entry inserted or removed during the scan may or may not be visited. Buckets are visited in order, chunk 1 onward (cache-friendly).
     /// </para>
     /// </summary>
     /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
     internal int ForEachEntry<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action) where TAction : struct, IEntryAction<TKey>
     {
         int visited = 0;
-        var (_, _, bucketCount) = ReadMeta();
+        var scan = BeginScan();
 
         // Per-bucket optimistic snapshot buffers, addressed by pointer because action.Process takes the value as a byte*. So they live on the
         // stack or in native memory — never in a managed array (CLAUDE.md, Unsafe Code). This buffer used to be a pinned-heap array reached only
@@ -1547,8 +1546,13 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         try
         {
-            for (int b = 0; b < bucketCount; b++)
+            for (int b = 0; b < BucketCount; b++)
             {
+                if (scan.AlreadyVisited(b))
+                {
+                    continue;
+                }
+
                 while (true)   // OLC retry for this bucket
                 {
                     // Re-read fresh each attempt: a concurrent writer can grow the segment (raising the capacity) mid-scan, so a
@@ -1622,6 +1626,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                         continue;
                     }
 
+                    scan.Read(b, (int)packed);
                     for (int i = 0; i < n; i++)
                     {
                         if (!action.Process(keyBuf[i], valBuf + i * _valueSize))
@@ -1638,6 +1643,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         finally
         {
             NativeMemory.Free(spilled);   // Free(null) is a no-op: most scans never spill
+            scan.Dispose();
         }
 
         return visited;
@@ -1718,73 +1724,85 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// append / split) invalidates the read. The predicate runs on the live, un-copied bytes during the optimistic walk; counts are clamped to
     /// <c>_bucketCapacity</c> and chunk ids range-checked, so a torn read can never index past a chunk — it only yields a bogus per-bucket tally that the
     /// version validation discards before it reaches the running total. Snapshot semantics match ForEachEntry: an entry present for the whole scan is counted
-    /// exactly once; an entry concurrently inserted / removed / relocated may or may not be counted.
+    /// exactly once, across splits; an entry inserted or removed during the scan may or may not be counted.
     /// </summary>
     internal int CountEntries<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
     {
         int total = 0;
-        var (_, _, bucketCount) = ReadMeta();
-
-        for (int b = 0; b < bucketCount; b++)
+        var scan = BeginScan();
+        try
         {
-            while (true)   // OLC retry for this bucket
+            for (int b = 0; b < BucketCount; b++)
             {
-                int chunkCapacity = Segment.ChunkCapacity;
-                long packed = ReadPackedMeta();
-                int headId = GetBucketChunkId(b, ref accessor);   // b + 1: below the bucket count, inside the segment
-
-                byte* headAddr = accessor.GetChunkAddress(headId);
-                var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
-                int version = latch.ReadVersion();
-                if (version == 0)
+                if (scan.AlreadyVisited(b))
                 {
-                    continue;   // bucket write-locked — retry
+                    continue;
                 }
 
-                int bucketMatches = 0;
-                bool retry = false;
-                int chunkId = headId;
-                for (int walk = 0; chunkId >= 0; walk++)
+                while (true)   // OLC retry for this bucket
                 {
-                    if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
+                    int chunkCapacity = Segment.ChunkCapacity;
+                    long packed = ReadPackedMeta();
+                    int headId = GetBucketChunkId(b, ref accessor);   // b + 1: below the bucket count, inside the segment
+
+                    byte* headAddr = accessor.GetChunkAddress(headId);
+                    var latch = new OlcLatch(ref GetHeader(headAddr).OlcVersion);
+                    int version = latch.ReadVersion();
+                    if (version == 0)
                     {
-                        retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
-                        break;
+                        continue;   // bucket write-locked — retry
                     }
 
-                    byte* addr = accessor.GetChunkAddress(chunkId);
-                    ref readonly var header = ref GetHeader(addr);
-                    int rawCount = header.EntryCount;
-                    int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
-                    int nextId = header.OverflowChunkId;
-
-                    TKey* keys = KeysPtr(addr);
-                    for (int i = 0; i < count; i++)
+                    int bucketMatches = 0;
+                    bool retry = false;
+                    int chunkId = headId;
+                    for (int walk = 0; chunkId >= 0; walk++)
                     {
-                        if (pred.Matches(keys[i], ValueAt(addr, i)))
+                        if ((uint)chunkId >= (uint)chunkCapacity || walk > chunkCapacity)
                         {
-                            bucketMatches++;
+                            retry = true;   // torn OverflowChunkId or cycle from a repurposed chunk
+                            break;
                         }
+
+                        byte* addr = accessor.GetChunkAddress(chunkId);
+                        ref readonly var header = ref GetHeader(addr);
+                        int rawCount = header.EntryCount;
+                        int count = rawCount <= _bucketCapacity ? rawCount : _bucketCapacity;
+                        int nextId = header.OverflowChunkId;
+
+                        TKey* keys = KeysPtr(addr);
+                        for (int i = 0; i < count; i++)
+                        {
+                            if (pred.Matches(keys[i], ValueAt(addr, i)))
+                            {
+                                bucketMatches++;
+                            }
+                        }
+
+                        chunkId = nextId;
                     }
 
-                    chunkId = nextId;
-                }
+                    if (retry)
+                    {
+                        continue;
+                    }
 
-                if (retry)
-                {
-                    continue;
-                }
+                    // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split moved the bucket count. On failure,
+                    // discard this attempt's tally and re-count the bucket from the head.
+                    if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || ReadPackedMeta() != packed)
+                    {
+                        continue;
+                    }
 
-                // Validate the bucket stayed quiescent for the whole read: no writer bumped the head version, no split moved the bucket count. On failure,
-                // discard this attempt's tally and re-count the bucket from the head.
-                if (!HeadLatch(headId, ref accessor).ValidateVersion(version) || ReadPackedMeta() != packed)
-                {
-                    continue;
+                    scan.Read(b, (int)packed);
+                    total += bucketMatches;
+                    break;   // bucket complete
                 }
-
-                total += bucketMatches;
-                break;   // bucket complete
             }
+        }
+        finally
+        {
+            scan.Dispose();
         }
 
         return total;
@@ -1797,9 +1815,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     internal bool AnyEntry<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
     {
-        var (_, _, bucketCount) = ReadMeta();
-
-        for (int b = 0; b < bucketCount; b++)
+        // To the live bucket count, so an entry a split moves past the count read at the start is still reached (#1351). An existence check does not
+        // mind reading a moved entry twice, so it needs no SplitTolerantScan.
+        for (int b = 0; b < BucketCount; b++)
         {
             while (true)   // OLC retry for this bucket
             {

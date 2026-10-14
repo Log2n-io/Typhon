@@ -1184,3 +1184,26 @@ cost 12 µs at 20M entries (#1205).
             sampled entry found before and after a clean reopen. EntityMapHashTests [VerifiesRule] — an aligned run of keys fills one aligned block of
             buckets; sequential, partly-issued blocks, strided, churned and random keys all overflow and fill buckets within a margin of a random hash's
             on the same keys at load 0.75 ([RuleMutant]: the key's own low bits, the naive locality hash, are reported)
+
+### EMAP-02: A walk of a map visits every entry present throughout exactly once, while the map splits `[fatal]` `[silent]`
+  invariant ∀ complete walk W of an entity map (ForEachEntry, CountEntries), ∀ entry e present from W's start to its end:
+            W visits e exactly once, whatever splits run meanwhile; an entry inserted or removed during W may or may not be visited.
+            AnyEntry visits e at least once, which is all an existence check needs
+  invariant W runs to the live bucket count. A bucket b created during W from parent p = b − N0·2^floor(log2(b / N0)) is passed over exactly when every entry it
+            holds was already visited: p's validated read saw a count ≤ b (b did not exist, so its entries resolved to p), or p was itself passed over.
+            Otherwise b existed at p's read, nothing moved from p into b since, and W reads b. The count each read saw is kept only where it changes,
+            and nothing is allocated unless the map splits during W
+  invariant AnyEntry only runs to the live count, without passing over
+  scope: PagedHashMapBase.BeginScan, PagedHashMapBase.SplitTolerantScan, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
+         RawValuePagedHashMap.AnyEntry
+  on_violation: a walk bounded by the count it read at its start never reached the bucket a split of an unread bucket created, so the entries moved
+                there went unvisited: a broad query (Execute, Count, Any, Where<T>, navigation views) missed live entities whenever the archetype grew
+                under it, about two scans in three in a churn test past 1 300 entities (#1351). One that ran to the live count without passing over
+                would visit twice what a split of an already-read bucket moved
+  verified: EntityMapScanTests [VerifiesRule] — splits staged from the walk's own callback: of a bucket not read yet, of one read, past a level,
+            of a bucket the walk's splits created, a fivefold growth before the second bucket; ForEachEntry visits and CountEntries counts every entry
+            once, AnyEntry finds the one entry a split moved past the start count; inserters and a remover splitting the map while walkers count the
+            entries that stay throughout. QueryStressOracleTests' Where<T> check runs over the broad scan. Mutants, run by hand: the start count as the bound, every
+            staged miss case and the concurrent test; no passing over, every duplicate case and the concurrent test; a passed-over parent not
+            inherited, the images-of-images cases; the count each read saw replaced by the start count, ten of twelve and the concurrent test;
+            AnyEntry bounded by the start count, its test

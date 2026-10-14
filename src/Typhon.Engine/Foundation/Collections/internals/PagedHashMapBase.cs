@@ -1,6 +1,7 @@
 // unset
 
 using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -239,6 +240,166 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// <summary>The hash state as a single comparable value, read with acquire semantics.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected long ReadPackedMeta() => Volatile.Read(ref _packedMeta);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Scans across concurrent splits
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Starts a bucket-by-bucket scan at the current bucket count; see <see cref="SplitTolerantScan"/>.</summary>
+    protected SplitTolerantScan BeginScan() => new((int)ReadPackedMeta(), _n0Shift);
+
+    /// <summary>
+    /// Keeps a bucket-by-bucket scan exact while other threads split the map (#1351): the scan runs to the live bucket count, and visits every entry present
+    /// for its whole duration exactly once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A split of bucket p moves part of it into a new bucket, p + N0·2^level, past every bucket that existed. A scan bounded by the count it read at its start
+    /// never reaches that bucket, so a split of a bucket it had not read yet took entries out of its range: a broad query missed live entities whenever the
+    /// map grew under it. Running to the live count reaches them, but a split of a bucket the scan had already read would then hand it the same entries twice.
+    /// </para>
+    /// <para>
+    /// A bucket's validated read holds every entry that resolves to it at the count it validated against, those of its future split images included: a key
+    /// resolves to its deepest existing ancestor. So a bucket b created during the scan, from parent p, holds entries the scan already visited exactly when
+    /// p's read predates b (b ≥ the count p's read saw), or when p is itself such a bucket; b is passed over then, and read otherwise. When b existed at p's
+    /// read, nothing moves from p into b afterwards: a bucket splits into a given image once. What a passed-over bucket received since is entries inserted
+    /// during the scan, which a scan may or may not visit.
+    /// </para>
+    /// <para>
+    /// Counts only grow and buckets are read in order, so the count each read saw is kept only where it changes. Nothing is allocated unless the map splits
+    /// during the scan.
+    /// </para>
+    /// </remarks>
+    protected struct SplitTolerantScan
+    {
+        private readonly int _startCount;
+        private readonly int _n0Shift;
+        private int _lastCount;
+
+        // (bucket << 32) | count, in bucket order: the count a read validated against, where it differs from the previous read's.
+        private long[] _changes;
+        private int _changeCount;
+
+        // Bit b − _startCount: bucket b, created during the scan, was passed over.
+        private ulong[] _passed;
+
+        internal SplitTolerantScan(int startCount, int n0Shift)
+        {
+            _startCount = startCount;
+            _n0Shift = n0Shift;
+            _lastCount = startCount;
+            _changes = null;
+            _changeCount = 0;
+            _passed = null;
+        }
+
+        /// <summary>True when every entry of <paramref name="bucket"/> was already visited, in the bucket it split from: the scan passes it over.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal bool AlreadyVisited(int bucket) => bucket >= _startCount && CreatedFromAVisitedBucket(bucket);
+
+        /// <summary>Records that <paramref name="bucket"/> was read, validated against the bucket count <paramref name="count"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void Read(int bucket, int count)
+        {
+            if (count != _lastCount)
+            {
+                RecordCount(bucket, count);
+            }
+        }
+
+        /// <summary>Gives back what a scan during splits rented.</summary>
+        internal void Dispose()
+        {
+            if (_changes != null)
+            {
+                ArrayPool<long>.Shared.Return(_changes);
+                _changes = null;
+            }
+
+            if (_passed != null)
+            {
+                ArrayPool<ulong>.Shared.Return(_passed);
+                _passed = null;
+            }
+        }
+
+        private bool CreatedFromAVisitedBucket(int bucket)
+        {
+            // bucket ∈ [N0·2^L, N0·2^(L+1)) was split off bucket − N0·2^L.
+            var parent = bucket - (1 << (BitOperations.Log2((uint)bucket >> _n0Shift) + _n0Shift));
+            var visited = (parent >= _startCount && IsPassed(parent)) || bucket >= CountAt(parent);
+            if (visited)
+            {
+                MarkPassed(bucket);
+            }
+
+            return visited;
+        }
+
+        private void RecordCount(int bucket, int count)
+        {
+            if (_changes == null || _changeCount == _changes.Length)
+            {
+                var grown = ArrayPool<long>.Shared.Rent(Math.Max(16, _changeCount * 2));
+                if (_changes != null)
+                {
+                    Array.Copy(_changes, grown, _changeCount);
+                    ArrayPool<long>.Shared.Return(_changes);
+                }
+
+                _changes = grown;
+            }
+
+            _changes[_changeCount++] = ((long)bucket << 32) | (uint)count;
+            _lastCount = count;
+        }
+
+        // The count bucket's read validated against: that of the last change at or before it, the start count before the first.
+        private int CountAt(int bucket)
+        {
+            int lo = 0, hi = _changeCount - 1, found = -1;
+            while (lo <= hi)
+            {
+                var mid = (lo + hi) >>> 1;
+                if ((int)(_changes[mid] >> 32) <= bucket)
+                {
+                    found = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
+            }
+
+            return found < 0 ? _startCount : (int)(uint)_changes[found];
+        }
+
+        private bool IsPassed(int bucket)
+        {
+            var bit = bucket - _startCount;
+            return _passed != null && (bit >> 6) < _passed.Length && (_passed[bit >> 6] & (1UL << bit)) != 0;
+        }
+
+        private void MarkPassed(int bucket)
+        {
+            var bit = bucket - _startCount;
+            if (_passed == null || (bit >> 6) >= _passed.Length)
+            {
+                var grown = ArrayPool<ulong>.Shared.Rent(Math.Max(4, (bit >> 6) + 1) * 2);
+                Array.Clear(grown);
+                if (_passed != null)
+                {
+                    Array.Copy(_passed, grown, _passed.Length);
+                    ArrayPool<ulong>.Shared.Return(_passed);
+                }
+
+                _passed = grown;
+            }
+
+            _passed[bit >> 6] |= 1UL << bit;
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Bucket addressing
