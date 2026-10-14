@@ -159,6 +159,77 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
     }
 
     /// <summary>
+    /// #1343: a writer's compaction unlinks the chunks its removals emptied — never the append cursor — and stops after as many as it was told; the next
+    /// appends fill the cursor, then reuse a parked chunk.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void Compaction_UnlinksTheEmptiedChunks_ButNotTheCursor_AndStopsAtItsCount()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewBuffer(vsbs, perChunk * 5, i => i);
+        Assert.That(chunks, Has.Count.EqualTo(5), "premise: five data chunks, the last one the append cursor");
+
+        // Emptied by removals: chunks 0, 1 and 3, and the cursor (4). Only the first three are reported as given back.
+        var reported = new List<int>();
+        foreach (var c in new[] { 0, 1, 3, 4 })
+        {
+            Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+            {
+                for (var v = c * perChunk + 1; v <= (c + 1) * perChunk; v++)
+                {
+                    vsbs.DeleteElement(buffer, chunks[c].Chunk, v, ref a, out var emptied);
+                    if (emptied)
+                    {
+                        reported.Add(c);
+                    }
+                }
+
+                return 0;
+            });
+        }
+
+        Assert.That(reported, Is.EqualTo(new[] { 0, 1, 3 }), "every emptied chunk but the cursor is reported, once");
+
+        var first = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => vsbs.CompactEmptyChunks(buffer, 2, ref a));
+        Assert.That(first, Is.EqualTo(2), "stops after the count it was given");
+        Assert.That(Chain(vsbs, buffer).ConvertAll(c => c.Chunk), Is.EqualTo(new[] { chunks[2].Chunk, chunks[3].Chunk, chunks[4].Chunk }),
+            "the first two emptied chunks unlinked, the third left for later");
+
+        var second = Write(vsbs, (ref ChunkAccessor<PersistentStore> a) => vsbs.CompactEmptyChunks(buffer, int.MaxValue, ref a));
+        Assert.That(second, Is.EqualTo(1));
+        Assert.That(Chain(vsbs, buffer).ConvertAll(c => c.Chunk), Is.EqualTo(new[] { chunks[2].Chunk, chunks[4].Chunk }),
+            "the cursor stays linked, empty");
+
+        // Appends fill the cursor, then take a parked chunk: nothing is allocated, and every element is read back.
+        var allocated = vsbs.Segment.AllocatedChunkCount;
+        Write(vsbs, (ref ChunkAccessor<PersistentStore> a) =>
+        {
+            for (var v = 0; v < perChunk + 1; v++)
+            {
+                vsbs.AddElement(buffer, 10_000 + v, ref a);
+            }
+
+            return 0;
+        });
+
+        Assert.That(vsbs.Segment.AllocatedChunkCount, Is.EqualTo(allocated), "the overflow took a parked chunk");
+        var expected = new List<int>();
+        for (var v = 2 * perChunk + 1; v <= 3 * perChunk; v++)
+        {
+            expected.Add(v);
+        }
+
+        for (var v = 0; v < perChunk + 1; v++)
+        {
+            expected.Add(10_000 + v);
+        }
+
+        Assert.That(ReadThrough(vsbs, buffer), Is.EquivalentTo(expected));
+    }
+
+    /// <summary>
     /// A reader that meets an empty chunk of a collection of 4-byte items computed the free-list threshold from the root chunk's element capacity —
     /// 0 for those collections, whose root holds only its header — and threw a <see cref="DivideByZeroException"/> with the buffer's lock promoted and
     /// two pages latched.

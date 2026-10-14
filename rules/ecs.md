@@ -979,7 +979,9 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
 A `SingleVersion` write under the default TickFence discipline, and any `Transient` write, lands in place at once, while
 the secondary B+Tree indexes and the per-cluster zone maps catch up only at `WriteTickFence`: the index still holds the
 entity under its old key, and a zone map may still rule its cluster out for the new value. Writes that reconcile at
-commit have no such window — `Versioned` components, `SingleVersion` under the Commit discipline, spawns. A destroy
+commit have no such window — `Versioned` components, `SingleVersion` under the Commit discipline, spawns — except a Commit
+write to an entity whose SingleVersion keys a TickFence write already recorded this tick: the tree holds those keys, and the
+fence moves the entry, so that write shares the TickFence write's window (#1339, IX-06). A destroy
 removes the entity's entries itself, unless the entity was written earlier in the tick: then it leaves them for the
 fence, and every query path must drop them by the cleared occupancy bit. A query answers from a structure that lags the data, so it cannot be
 both fast and exact inside the window; this rule fixes what it does promise.

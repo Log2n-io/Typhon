@@ -2725,8 +2725,7 @@ public unsafe partial class Transaction
             return false;
         }
 
-        var hasPendingShadow = cs.ClusterShadowBitmap != null && cs.ClusterShadowBitmap.Test(holderLocation);
-        var removeHereMask = hasPendingShadow ? (ushort)~meta.FenceMaintainedSlotsUnder(_discipline) : ushort.MaxValue;
+        var removeHereMask = (ushort)~cs.FenceRecordedSlots(holderLocation);
         return (removeHereMask & (1 << compSlot)) != 0;
     }
 
@@ -4127,10 +4126,11 @@ public unsafe partial class Transaction
                         // component bytes live in the Transient segment.
                         {
                             int entityIndex = clusterChunkId * 64 + slotIndex;
-                            bool hasPendingShadow = destroyClusterState.ClusterShadowBitmap != null && destroyClusterState.ClusterShadowBitmap.Test(entityIndex);
-
-                            // The exact complement of what ShadowClusterIndexedFields captured — both sides read it off the same method so they cannot drift.
-                            ushort removeHereMask = hasPendingShadow ? (ushort)~meta.FenceMaintainedSlotsUnder(_discipline) : ushort.MaxValue;
+                            // The exact complement of what the captures recorded (#1339: on an archetype with two marks, a Commit writer records the
+                            // Transient keys only).
+                            var recorded = destroyClusterState.FenceRecordedSlots(entityIndex);
+                            bool hasPendingShadow = recorded != 0;
+                            ushort removeHereMask = (ushort)~recorded;
 
                             if (removeHereMask != 0)
                             {

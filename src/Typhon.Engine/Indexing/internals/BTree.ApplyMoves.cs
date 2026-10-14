@@ -658,10 +658,11 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             var remaining = -1;
+            var emptiedChunks = 0;
             for (; d < firstArrival; d++)
             {
                 ref var dep = ref events[d];
-                var left = _storage.RemoveFromBuffer(bufferId, dep.ElementId, dep.Value, ref sibAccessor);
+                var left = _storage.RemoveFromBuffer(bufferId, dep.ElementId, dep.Value, ref sibAccessor, out var chunkEmptied);
                 if (left < 0)
                 {
                     outcome.Misses++;
@@ -669,9 +670,17 @@ internal abstract partial class BTree<TKey, TStore>
                 else
                 {
                     remaining = left;
+                    emptiedChunks += chunkEmptied ? 1 : 0;
                 }
 
                 leafChanged = true;
+            }
+
+            // The removals emptied chunks of a key that keeps entities: given back now, or the buffer holds them until a reader walks it (#1343). A key
+            // left empty is removed with its buffer below. No reader walks a buffer during the fence (EW-01).
+            if (emptiedChunks > 0 && remaining > 0)
+            {
+                _storage.CompactBuffer(bufferId, emptiedChunks, ref sibAccessor);
             }
 
             for (; a < end; a++)

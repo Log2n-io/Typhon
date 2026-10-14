@@ -846,8 +846,16 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
         return -1;
     }
 
-    unsafe public int DeleteElement(int bufferId, int elementId, T element, ref ChunkAccessor<TStore> accessor)
+    public int DeleteElement(int bufferId, int elementId, T element, ref ChunkAccessor<TStore> accessor) =>
+        DeleteElement(bufferId, elementId, element, ref accessor, out _);
+
+    /// <summary>
+    /// <see cref="DeleteElement(int, int, T, ref ChunkAccessor{TStore})"/>, also saying whether the removal emptied a chunk the buffer could give back:
+    /// neither the root nor the append cursor (IXW-08). Such a chunk stays linked until <see cref="CompactEmptyChunks"/> or a reader unlinks it (#1343).
+    /// </summary>
+    unsafe public int DeleteElement(int bufferId, int elementId, T element, ref ChunkAccessor<TStore> accessor, out bool emptiedChunk)
     {
+        emptiedChunk = false;
         // Fetch the root chunk — epoch protects page lifetime
         ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
         // Before the try (#1278): a timeout here must not run the finally's release of a lock this thread never took.
@@ -871,10 +879,12 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
             baseElementAddr[count - 1] = default(T);
 #endif
             --elementChunkHeader.ElementCount;
+            var chunkNowEmpty = elementChunkHeader.ElementCount == 0;
 
             // Re-fetch rh before writing TotalCount — GetChunkAddress(elementId) may have evicted its slot
             rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
             --rh.TotalCount;
+            emptiedChunk = chunkNowEmpty && !isRoot && elementId != rh.FirstStoredChunkId;
 
             return rh.TotalCount;
         }
@@ -887,11 +897,78 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     }
 
     /// <summary>
+    /// Unlinks the empty chunks of the buffer's chain but the root and the append cursor (IXW-08), parking them in its free list up to the threshold a
+    /// reader's unlink keeps, and freeing the rest; the walk stops after <paramref name="maxUnlinks"/> of them, the number the caller's removals emptied.
+    /// Returns how many it unlinked (#1343).
+    /// </summary>
+    /// <remarks>
+    /// A removal only empties a chunk; until now only a reader walking the buffer gave it back (<see cref="VariableSizedBufferAccessor{T, TStore}"/>), so a
+    /// key that a tick's moves emptied kept its chunks for as long as no query read it. Writes the chain under the buffer's lock without latching the
+    /// chunks a reader would latch: the caller guarantees no reader walks the buffer, as the tick fence does (EW-01).
+    /// </remarks>
+    internal unsafe int CompactEmptyChunks(int bufferId, int maxUnlinks, ref ChunkAccessor<TStore> accessor)
+    {
+        ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+        var ticket = LockBuffer(ref rh, ref accessor);
+        try
+        {
+            // Locals, as AddElementCore keeps them: every GetChunkAddress below can evict rh's slot.
+            var cursor = rh.FirstStoredChunkId;
+            var firstFree = rh.FirstFreeChunkId;
+            var totalFree = rh.TotalFreeChunk;
+            var threshold = Math.Max(rh.TotalCount / (ElementCountPerChunk * 4), 8);
+            var unlinked = 0;
+            var prevId = bufferId;
+            var curId = ((VariableSizedBufferChunkHeader*)accessor.GetChunkAddress(bufferId))->NextChunkId;
+            while (curId != 0 && unlinked < maxUnlinks)
+            {
+                var cur = (VariableSizedBufferChunkHeader*)accessor.GetChunkAddress(curId);
+                var nextId = cur->NextChunkId;
+                if (cur->ElementCount != 0 || curId == cursor)
+                {
+                    prevId = curId;
+                    curId = nextId;
+                    continue;
+                }
+
+                ((VariableSizedBufferChunkHeader*)accessor.GetChunkAddress(prevId, true))->NextChunkId = nextId;
+                if (totalFree > threshold)
+                {
+                    accessor.Segment.FreeChunk(curId);
+                }
+                else
+                {
+                    ((VariableSizedBufferChunkHeader*)accessor.GetChunkAddress(curId, true))->NextChunkId = firstFree;
+                    firstFree = curId;
+                    ++totalFree;
+                }
+
+                unlinked++;
+                curId = nextId;
+            }
+
+            if (unlinked != 0)
+            {
+                rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+                rh.FirstFreeChunkId = firstFree;
+                rh.TotalFreeChunk = totalFree;
+            }
+
+            return unlinked;
+        }
+        finally
+        {
+            rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, true);
+            ReleaseLockOnBuffer(ref rh, ref accessor, in ticket);
+        }
+    }
+
+    /// <summary>
     /// Replace one element's value in place, leaving the element count, the buffer's chunk layout and every other element untouched.
     /// </summary>
     /// <param name="bufferId">The buffer's root chunk id.</param>
     /// <param name="elementId">
-    /// The chunk holding the element — the same identifier <see cref="DeleteElement"/> takes, and a CHUNK id rather than an index.
+    /// The chunk holding the element — the same identifier <see cref="DeleteElement(int, int, T, ref ChunkAccessor{TStore})"/> takes, and a CHUNK id rather than an index.
     /// </param>
     /// <param name="oldElement">
     /// The current value, which is how the element is located: elements are addressed by value within their chunk, not by position.
@@ -900,7 +977,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     /// <param name="accessor">Chunk accessor for the buffer pages.</param>
     /// <returns><c>true</c> if the element was found and overwritten; <c>false</c> if the chunk does not hold <paramref name="oldElement"/>.</returns>
     /// <remarks>
-    /// The in-place counterpart to <see cref="DeleteElement"/>, and deliberately missing its two side effects: no swap-with-last and no
+    /// The in-place counterpart to <see cref="DeleteElement(int, int, T, ref ChunkAccessor{TStore})"/>, and deliberately missing its two side effects: no swap-with-last and no
     /// <c>TotalCount</c> decrement. That is what keeps <paramref name="elementId"/> and every sibling's position stable across the update, which is the
     /// property a caller holding element ids depends on (#872 AC-4.3). A remove-then-append pair would move whichever element happened to be last into the
     /// vacated slot and hand back a new id.

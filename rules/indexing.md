@@ -99,23 +99,31 @@ scoped.
 ### IX-06: Whoever skips an index removal must be the complement of whoever performs it `[fatal]` `[silent]`
   invariant when a destroy defers an entity's index removal to the tick fence, the set of slots it defers MUST equal the set the
             fence's shadow capture actually recorded for that entity:
-            `deferred(entity) == ArchetypeMetadata.FenceMaintainedSlotsUnder(tx.Discipline)`, and the destroy removes the
-            complement inline
+            `deferred(entity) == ArchetypeClusterState.FenceRecordedSlots(entity)`, and the destroy removes the complement inline, whatever the
+            discipline of the destroy
+  invariant a mark says what was recorded. On an archetype indexing both a SingleVersion and a Transient slot, `ClusterShadowBitmap` says the
+            Transient keys are recorded and `SvShadowBitmap` the SingleVersion ones: a Commit-discipline capture records the Transient keys only,
+            a TickFence one both, and a set `SvShadowBitmap` bit implies the other. On any other archetype one mark covers every fence-indexed slot
+            (a Commit capture can only reach one with no indexed SingleVersion slot). Once a TickFence writer has recorded an entity's
+            SingleVersion keys, the tree holds those, not HEAD's: a Commit-discipline publish leaves that entity's move to the fence
+            (`Transaction.PublishStagedEntry`, `ArchetypeClusterState.SvKeysRecorded`), and the write shares the TickFence window (QFENCE)
   never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set per entity, by a
         write that changes a key of a fence-indexed component (`EntityRefMut.Set`, `ClusterRef.Set`, a key-changing `WriteSpatial`; a write through
         a returned ref captures unconditionally) and records every fence-maintained indexed slot of the entity; the shadow BUFFERS hold only
-        the indexed non-Versioned slots that `ShadowClusterIndexedFields`
-        captured, and under `CommitDiscipline.Commit` not even those - the SingleVersion members are reconciled by the commit
-        publish instead. Before #1344 / #1346 a write to ANY component set the bit
+        the indexed non-Versioned slots that `ShadowClusterIndexedFields` captured. Before #1344 / #1346 a write to ANY component set the bit.
+        Before #1339 one bit served both disciplines: set by a Commit capture over the Transient keys only, it made a later TickFence capture of
+        the SingleVersion keys record nothing
   invariant a slot so released is not claimed again before that fence: its index entries are still in the trees, and the drain matches a shadow
             entry to its slot, not to its entity (#1188)
-  enforce both sides read the split from ONE method (`ArchetypeMetadata.FenceMaintainedSlotsUnder`) rather than each computing it
+  enforce both sides read the split from the cluster state's masks (`ArchetypeClusterState.SvFenceIndexedSlotMask`,
+          `TransientFenceIndexedSlotMask`, their union `FenceIndexedSlotMask`), computed once at initialisation, rather than each computing it
   enforce every claim path counts a slot marked in `ClusterShadowBitmap` as taken (`ArchetypeClusterState.FenceOwedBits`, read inside `TakenBits`,
           `ClaimFirstFree` and `ClaimExact`); the fence clears the bitmap after its drain and before Migrate claims, so the hold lasts one tick at most
-  scope: ArchetypeMetadata.FenceMaintainedSlotsUnder (the single definition), ArchetypeClusterState.CaptureFirstWrite (the capture, given the skip mask
-         by EntityRefMut and ClusterRef.Set), EntityRefMut.ShadowClusterIndexedFields (skips its
-         complement), Transaction.FlushEcsPendingOperations (the destroy hand-off; removes its complement via
-         RemoveClusterIndexEntries' slot mask), Transaction.ReconcileClusterIndexAndViews (commit-scoped maintenance must not run
+  scope: ArchetypeClusterState.FenceRecordedSlots (what the fence holds a record of), ArchetypeClusterState.CaptureFirstWrite,
+         ArchetypeClusterState.CaptureFirstWrites (the captures), ArchetypeClusterState.SvShadowBitmap, ArchetypeClusterState.SvKeysRecorded,
+         EntityRefMut.ShadowClusterIndexedFields, Transaction.FlushPendingDestroys (the destroy hand-off; removes its complement via
+         RemoveClusterIndexEntries' slot mask), Transaction.PublishStagedEntry (an entity whose SingleVersion keys are recorded is the fence's),
+         Transaction.ReconcileClusterIndexAndViews (commit-scoped maintenance must not run
          for an entity the same transaction destroys), ArchetypeClusterState.FenceOwedBits, ArchetypeClusterState.TakenBits (the slot hold)
   on_violation: the index keeps an entry for a released cluster slot. Loud on the next rebuild for a `Unique` index
                 (`EntryCount` exceeds the distinct keys the data holds); SILENT for `AllowMultiple` - a leaf value naming an
@@ -125,7 +133,9 @@ scoped.
   rationale: #711. One write to an UNINDEXED Transient sibling was enough to reach it - no key move required, which is why the
              issue's "mutate-then-destroy" title describes a symptom rather than the trigger. The boundary is stated by a pair of
              cases: writing only the indexed component and destroying passes; writing only the unindexed sibling and destroying
-             fails identically.
+             fails identically. #1339: one entity written in one tick under both disciplines - a Commit write of a Transient key marked it over no
+             SingleVersion record, so a later TickFence move or destroy of it left the SingleVersion entry on the old key; and a Commit publish after a
+             TickFence move moved the entry from HEAD, a key the tree did not hold.
   requires IX-01 (one home per (archetype, field) is what makes "the set of slots" well defined)
   verified: ClusterIndexMatrixTests.MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing,
             DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing (the sharper half - no key move anywhere),
@@ -134,7 +144,8 @@ scoped.
             destroy, a spawn into a full archetype, a write to the newcomer, the fence: the newcomer is returned once before the fence and the
             index agrees with the data after it; both cases red with the hold removed. ADestroyAfterAWriteToAnotherComponent_LeavesNoStaleRow_… and
             IndexWriteRecordingTests.AWriteKeepingTheKeys_ThenADestroy_RemovesTheEntriesAtOnce: a write that changes no key records nothing, so the
-            destroy removes inline and the slot owes the fence nothing
+            destroy removes inline and the slot owes the fence nothing; MixedDisciplineIndexTests [VerifiesRule] - both disciplines on one entity in
+            one tick, moves and destroys in each order (three red before #1339)
 
 ### IX-07: No writable memory over a fence-maintained indexed field; every write to one records the old keys first `[silent]`
   invariant cluster iteration hands out no writable memory (`ClusterRef.GetSpan`, `ClusterRef.Get`) over a component slot with an `[Index]`
@@ -198,6 +209,11 @@ scoped.
             key-changing write
   invariant an AllowMultiple arrival takes a departure's element in place under its key (`UpdateInBuffer`), and the entity's elementId tail is
             written with the element the batch returns, recorded per cluster run after its last store (PS-10)
+  invariant a key that keeps entities gives back the buffer chunks its departures emptied, in the same batch (`VariableSizedBufferSegment.CompactEmptyChunks`:
+            parked in the buffer's free list up to a reader's threshold, the rest freed; never the root or the append cursor, IXW-08) (#1343)
+  invariant Migrate's location update of a unique index names the location it replaces (`BTreeValueUpdate.ExpectedValue`, the migrant's old
+            location): it applies only where the key still names the migrant, and leaves alone a key the tree holds for another entity — a
+            collision's holder when the migrant is the loser (#1348)
   invariant the bulk path changes no tree structure: a leaf is rewritten in place only while it stays between half full and full (its departures
             before its arrivals); a new key, an emptied key and any other leaf go through the latched single-entry path
   enforce `ApplyMoves` runs only with no other writer of the tree (EW-01: the atomic drain's thread, or the tail after every slice retired; the
@@ -211,7 +227,8 @@ scoped.
          FieldShadowBuffer.StageMoveAt, DatabaseEngine.ApplyStagedMoves, DatabaseEngine.ApplyStagedIndexMoves,
          DatabaseEngine.PrepareArchetypeFenceTails, ArchetypeClusterState.PendingIndexCollision, BTreeBase.PrepareMoveBatch,
          BTreeBase.ApplyMoveRange, BTreeBase.FinishMoveBatch, DatabaseEngine.PrepareStagedIndexMoveBatches,
-         DatabaseEngine.ApplyIndexMoveRange, FenceIndexMovesExecSystem
+         DatabaseEngine.ApplyIndexMoveRange, FenceIndexMovesExecSystem, VariableSizedBufferSegment.CompactEmptyChunks, BTreeValueUpdate.AppliesOver,
+         BTreeBase.WriteBulkEntry
   on_violation: a move applied against an intermediate state rejects a legal swap and aborts the fence half drained; a batch applied twice or never
                 leaves the index on keys the data does not hold; an element id not written back sends Migrate's location update to the wrong chunk
   rationale: #1346. One `Move` / `MoveValue` per changed key cost ~350–450 ns, nearly all of it per call (descent, latch, accessor rent and return):
@@ -230,7 +247,10 @@ scoped.
             value back with no miss), Unique_APartitionedBatch_MatchesTheWholeBatch_OnRandomMoves (same outcome, first collision and tree as the
             whole batch); IndexMovesParallelFenceTests [VerifiesRule] — moves applied in ranges by the runtime's IndexMoves phase keep the
             index in agreement with the data, with no element-id miss on later ticks; a range that fails on a worker is applied by the tail, the
-            failure raised, and the next ticks' moves kept (red with the failed archetype's tail skipped: its shadow bits outlived its buffers)
+            failure raised, and the next ticks' moves kept (red with the failed archetype's tail skipped: its shadow bits outlived its buffers);
+            BTreeApplyMovesTests.Multi_ValuesLeavingAKey_GiveItsEmptiedChunksBack (#1343: a round trip grew the segment 46 chunks without the
+            compaction); MigrateUniqueIndexTests [VerifiesRule] (#1348: the loser's migration repointed the holder's key) and
+            BTreeBulkUpdateTests.UpdateValues_AnEntryExpectingAnotherValue_IsSkipped (every applier path)
 
 ## Module: IXS — Ordered index reads
 

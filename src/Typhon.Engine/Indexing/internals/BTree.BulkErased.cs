@@ -14,10 +14,10 @@ internal abstract partial class BTree<TKey, TStore>
 {
     public override int BulkEntryStride(bool multi) => multi ? Unsafe.SizeOf<BTreeMultiValueUpdate<TKey>>() : Unsafe.SizeOf<BTreeValueUpdate<TKey>>();
 
-    public override unsafe void WriteBulkEntry(Span<byte> dest, void* keyAddr, int newValue)
+    public override unsafe void WriteBulkEntry(Span<byte> dest, void* keyAddr, int newValue, int expectedValue)
     {
         AssertWholeEntries(dest.Length, false, nameof(dest));
-        MemoryMarshal.Cast<byte, BTreeValueUpdate<TKey>>(dest)[0] = new BTreeValueUpdate<TKey>(Unsafe.Read<TKey>(keyAddr), newValue);
+        MemoryMarshal.Cast<byte, BTreeValueUpdate<TKey>>(dest)[0] = new BTreeValueUpdate<TKey>(Unsafe.Read<TKey>(keyAddr), newValue, expectedValue);
     }
 
     public override unsafe void WriteBulkMultiEntry(Span<byte> dest, void* keyAddr, int elementId, int oldValue, int newValue)
