@@ -361,7 +361,7 @@ public partial class EntityAccessor : IDisposable
         return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
     }
 
-    /// <summary>The same, writing its final buffer id back into the entity's stored component on dispose (#1199).</summary>
+    /// <summary>The same, writing every buffer id it moves to back into the entity's stored component (#1199, #1362).</summary>
     internal unsafe ComponentCollectionAccessor<T> CreateComponentCollectionAccessorCore<T>(
         ref ComponentCollection<T> field,
         EntityId entity,

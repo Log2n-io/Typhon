@@ -213,7 +213,8 @@ public unsafe partial class EntityAccessor
         }
 
         ref var stored = ref mut.WriteRef(spatial);
-        stored = value;
+        mut.KeepCollectionHandles(mut._ref._archetype.GetSlot(spatial._componentTypeId), (byte*)&copy, ref stored, false);   // as a Set (#1362)
+        stored = copy;
         if (state.SpatialSlot.RealmKeyInSpatialComponent)
         {
             Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), state.SpatialSlot.RealmKeyOffset), realm.Value);
@@ -930,8 +931,32 @@ public unsafe partial class EntityAccessor
             slot.Offset = StageAlloc(size);
             slot.Location = location;                           // captured at stage time — publish uses it, no EntityMap re-lookup
             Unsafe.CopyBlockUnaligned(_commitStagingBuffer + slot.Offset, headDataPtr, (uint)size);   // seed from HEAD (partial-write correctness)
+            if (info.ComponentTable.HasCollections)
+            {
+                ShareStagedCollections(info.ComponentTable, _commitStagingBuffer + slot.Offset);
+            }
         }
         return ref Unsafe.AsRef<T>(_commitStagingBuffer + slot.Offset);
+    }
+
+    /// <summary>
+    /// A staged value seeded from HEAD names HEAD's collection buffers: it takes a reference on each, as a Versioned copy-on-write does for a new revision
+    /// (#1362). The staged value then owns its handles whatever they are — HEAD's shared one, or a buffer an accessor moved it to — so the publish hands
+    /// them to HEAD and gives back HEAD's previous ones, and a rollback gives back the staged value's, without either reading the other's state.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ShareStagedCollections(ComponentTable table, byte* staged)
+    {
+        foreach (var f in table.CollectionFields)
+        {
+            var bufferId = Unsafe.ReadUnaligned<int>(staged + f.OffsetInComponentStorage);
+            if (bufferId != 0)
+            {
+                var accessor = f.Vsbs.Segment.CreateChunkAccessor(_changeSet);
+                f.Vsbs.BufferAddRef(bufferId, ref accessor);
+                accessor.Dispose();
+            }
+        }
     }
 
     /// <summary>

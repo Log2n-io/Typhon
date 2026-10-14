@@ -4503,9 +4503,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             var hasSvSlot = false;
             ushort versionedSlotMask = 0;
             ushort transientSlotMask = 0;
+            ushort collectionSlotMask = 0;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var table = slotToTable[slot];
+                if (table.HasCollections)
+                {
+                    collectionSlotMask |= (ushort)(1 << slot);
+                }
                 if (table.StorageMode == StorageMode.Versioned)
                 {
                     versionedSlotMask |= (ushort)(1 << slot);
@@ -4542,6 +4547,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             meta.VersionedSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(versionedSlotMask) : (byte)0;
             meta.TransientSlotMask = isClusterEligible ? transientSlotMask : (ushort)0;
             meta.TransientSlotCount = isClusterEligible ? (byte)BitOperations.PopCount(transientSlotMask) : (byte)0;
+            meta.CollectionSlotMask = collectionSlotMask;
 
             ArchetypeClusterInfo clusterLayout = default;
 

@@ -502,6 +502,10 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
      entity. A Slot apply overwrites the whole component value, so an earlier flush is clobbered; and because LOG-06
      zeroes the handle in every Slot payload, the apply leaves the row pointing at NO buffer — the flush is what gives
      it one back. A Slot record applied with no fold behind it empties the collection.
+  🔴 A NULL HANDLE EMITS ITS CLEAR TOO (#1362). The fold spans the window, so a Slot whose collection was cleared, logged
+     with nothing behind it, left an earlier record's Clear + Append x N in the fold — and the flush gave the cleared
+     collection its old content back (CollectionDurabilityTests.ReplacedAndClearedCollections_SurviveAHardCrash, red
+     when CollectionContentEmitter.Emit skips a zero handle).
   🔴 TEST-TAG WARNING (2026-07-28, still true for the four pre-existing tags): four tests carry `[VerifiesRule("AP-12")]`
      and NONE of them re-applies anything — they are single-pass crash → reopen → assert. Do not copy their shape.
      CollectionDurabilityTests.ReapplyingTheWindow_ConvergesInContentAndRefcount does re-apply: it replays
