@@ -11,6 +11,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -65,7 +66,7 @@ public struct MkLore
     public long W56, W57, W58, W59, W60, W61, W62, W63;
 }
 
-/// <summary>One committed transfer, appended in the same transaction as the transfer itself.</summary>
+/// <summary>One committed transfer or credit grant, appended in the same transaction as the transfer or the grant itself.</summary>
 [Component("Typhon.Test.Market.Audit", 1)]
 public struct MkAudit
 {
@@ -112,7 +113,10 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// derived from their number. Every transfer — a player buying from the market, selling back to it, or trading with another player — moves credits
 /// and one item, updates both sides' item counts, re-keys a unique index and appends an audit entry, all in one transaction. A player may also
 /// <i>consume</i> an item: its entity is destroyed and the market crafts a new one with the same item number, in the same transaction — so entities
-/// die and slots are reused while the item count stays exact. One transfer in twenty does all of its writes, then rolls back.</para>
+/// die and slots are reused while the item count stays exact. One transfer in twenty does all of its writes, then rolls back. A player who cannot pay
+/// is first granted credits by the item's desk — its starting credits, or the price if that is more — in a transaction and an audit entry of their
+/// own, unless the desk cannot pay either: buys at full price and sells at half drain the players, and at 75M items, where nearly every pick is a buy,
+/// over half of a storm was skipped for lack of credits before grants.</para>
 /// <para><b>Phases.</b> (1) <i>Build</i>, once: bulk-load the world, close. Reused by later runs while its manifest matches the configuration.
 /// (2) <i>Stress</i>: open with the stress cache (default 8 GiB), snapshot and check the state, run the storm, check again. (3) <i>Reopen</i>:
 /// close, reopen with a full checksum sweep, check again.</para>
@@ -143,7 +147,8 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// 20, during the storm), <c>TYPHON_MKT_CRASH</c> (0; 1 ends the process at a random point of the storm, 2 at a random page write after that point —
 /// see <i>Crashes</i>), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none),
 /// <c>TYPHON_MKT_RECOVERY_MUTANT</c> (0; 1 replays the recovery verification without one of the last run's surviving transfers, so it must
-/// fail — the proof that it can).</para>
+/// fail — the proof that it can), <c>TYPHON_MKT_TRACE</c> (a profiler capture of the run to that file; see <see cref="TraceCapture"/> for the
+/// profiler variables it needs).</para>
 /// <para><b>Long readers.</b> While the storm writes, each long reader holds one snapshot and sweeps every trader in it, again and again: each sweep
 /// finds the credits and the item counts conserved — a transfer is whole or absent — and reads every trader, and a growing sample of items, exactly as
 /// the first sweep did. The writers' revision chains grow behind the snapshot (the desks', written by most transfers, the most), and are cleaned up
@@ -167,7 +172,7 @@ class MkAuditArch : Archetype<MkAuditArch>
 [NonParallelizable]
 public class MarketHardeningTests
 {
-    private const long KindBuy = 1, KindSell = 2, KindTrade = 3, KindConsume = 4;
+    private const long KindBuy = 1, KindSell = 2, KindTrade = 3, KindConsume = 4, KindGrant = 5;
     /// <summary>
     /// Items read per short transaction. A reader's pages stay epoch-protected while it lives, and so does every page ANY thread touches meanwhile: the
     /// window is the pages all readers touch while the oldest one is open. Once consumes have scattered the items over clusters a batch touches about a
@@ -450,6 +455,7 @@ public class MarketHardeningTests
         using var sampler = new Sampler(samplesFile);
         _sampler = sampler;
         Log($"sampling every second to {samplesFile}");
+        using var trace = TraceCapture.Start(Environment.GetEnvironmentVariable("TYPHON_MKT_TRACE"), Log);
 
         var manifest = LoadOrBuild();
         var traderIds = ReadIds(TraderIdsFile(_c), _c.TraderCount + 1);
@@ -555,7 +561,75 @@ public class MarketHardeningTests
         }
 
         sampler.Phase = "done";
-        Log($"run {manifest.Runs} coherent: {runAudits:N0} transfers, {manifest.AuditEntries:N0} audit entries in total");
+        Log($"run {manifest.Runs} coherent: {runAudits:N0} transfers and grants, {manifest.AuditEntries:N0} audit entries in total");
+    }
+
+    /// <summary>
+    /// A profiler capture of the whole run to <c>TYPHON_MKT_TRACE</c>, with what the enabled categories emit. The engine starts an exporter only for a
+    /// <see cref="TyphonRuntime"/>, which this test does not create, so it attaches one itself.
+    /// </summary>
+    /// <remarks>
+    /// The test project's <c>typhon.telemetry.json</c> turns the profiler on. Every page-cache disk read and write with its completion, every WAL write and
+    /// every checkpoint, as verified: <c>TYPHON__PROFILER__STORAGE__PAGECACHE__ENABLED=true</c>, <c>TYPHON__PROFILER__DURABILITY__ENABLED=true</c> and
+    /// <c>TYPHON__PROFILER__STORAGE__PAGECACHE__COMPLETIONTHRESHOLDMS=0</c> — without it only completions slower than 1 ms are recorded. The trace is
+    /// finalised when the test ends normally: a run a crash mode ends with <c>TerminateProcess</c> leaves it unfinished.
+    /// </remarks>
+    private sealed class TraceCapture : IDisposable
+    {
+        private readonly ResourceRegistry _registry;
+        private readonly FileExporter _exporter;
+        private readonly Action<string> _log;
+
+        private TraceCapture(string path, Action<string> log)
+        {
+            _log = log;
+            _registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "market-trace" });
+            try
+            {
+                _exporter = new FileExporter(path, _registry.Profiler);
+                TyphonProfiler.AttachExporter(_exporter);
+                TyphonProfiler.Start(_registry.Profiler, new ProfilerSessionMetadata(
+                    systems: [], archetypes: [], componentTypes: [], workerCount: 0, baseTickRate: 60.0f, startTimestamp: Stopwatch.GetTimestamp(),
+                    stopwatchFrequency: Stopwatch.Frequency, startedUtc: DateTime.UtcNow, samplingSessionStartQpc: 0));
+            }
+            catch
+            {
+                if (_exporter != null)
+                {
+                    TyphonProfiler.DetachExporter(_exporter);
+                }
+
+                _registry.Dispose();
+                throw;
+            }
+
+            log($"profiler capture to {path} (QPC {Stopwatch.GetTimestamp()} at {DateTime.Now:O})");
+        }
+
+        public static TraceCapture Start(string path, Action<string> log)
+        {
+            if (path is not { Length: > 0 })
+            {
+                return null;
+            }
+
+            if (!TelemetryConfig.ProfilerActive)
+            {
+                log($"no profiler capture to {path}: the profiler is off (Typhon:Profiler:Enabled)");
+                return null;
+            }
+
+            return new TraceCapture(path, log);
+        }
+
+        public void Dispose()
+        {
+            TyphonProfiler.Stop();
+            TyphonProfiler.DetachExporter(_exporter);
+            _log($"profiler capture closed: {TyphonProfiler.TotalDroppedEvents:N0} event(s) dropped by the producer rings, " +
+                 $"{TyphonProfiler.TotalDroppedExporterBatches:N0} batch(es) by the exporter");
+            _registry.Dispose();
+        }
     }
 
     private void AssertNoErrors(string phase) =>
@@ -1177,8 +1251,8 @@ public class MarketHardeningTests
                     Fail($"recovery: {lost:N0} durable transfers lost, {back:N0} rolled-back ones present");
                 }
 
-                Log($"oracle: {committed.Length - lost:N0} of {committed.Length:N0} durable transfers present, {back:N0} of {rolledBack.Length:N0} " +
-                    $"rolled back present; {fromRun:N0} of the run's transfers survived in all");
+                Log($"oracle: {committed.Length - lost:N0} of {committed.Length:N0} durable transfers and grants present, {back:N0} of " +
+                    $"{rolledBack.Length:N0} rolled back present; {fromRun:N0} of the run's audit entries survived in all");
             }
 
             var replayed = entries;
@@ -1417,6 +1491,69 @@ public class MarketHardeningTests
         $"item {dbe.GetComponentTable<MkItem>().CompRevTableSegment.AllocatedChunkCount:N0}, " +
         $"audit {dbe.GetComponentTable<MkAudit>().CompRevTableSegment.AllocatedChunkCount:N0}";
 
+    /// <summary>
+    /// Grants <paramref name="player"/> credits from <paramref name="desk"/> when it holds fewer than <paramref name="amount"/>: its starting credits, or the
+    /// amount if that is more, in one committed transaction with an audit entry of <see cref="KindGrant"/>. The caller holds both traders' locks. A desk
+    /// that cannot pay grants nothing, and the transfer is skipped as before. False only when the commit failed. A grant's commit counts toward
+    /// <c>TYPHON_MKT_FAIL_PUBLISH_AT</c> like any other.
+    /// </summary>
+    private bool Grant(DatabaseEngine dbe, ulong[] traderIds, long player, long desk, long amount, int runNo, ref long seq, List<ulong> mine,
+        List<long> myCommitted, ref long grants)
+    {
+        // Checked through a read handle, like the item's owner in the storm: the caller holds the player's lock, so the balance stays what it reads, and a
+        // write transaction — a unit-of-work slot and its writes — is paid only for an actual grant.
+        using (var r = dbe.CreateReadOnlyTransaction())
+        {
+            if (r.Open(EntityId.FromRawValue(traderIds[player])).Read(MkTraderArch.Wallet).Credits >= amount)
+            {
+                return true;
+            }
+        }
+
+        using var tx = dbe.CreateQuickTransaction(discipline: _c.Discipline);
+
+        var grant = Math.Max(amount, _c.PlayerCredits);
+        var deskEntity = tx.OpenMut(EntityId.FromRawValue(traderIds[desk]));
+        var deskWallet = deskEntity.Read(MkTraderArch.Wallet);
+        if (deskWallet.Credits < grant)
+        {
+            return true;
+        }
+
+        var s = Interlocked.Increment(ref seq);
+        deskWallet.Credits -= grant;
+        deskEntity.Set(MkTraderArch.Wallet, deskWallet);
+        var playerEntity = tx.OpenMut(EntityId.FromRawValue(traderIds[player]));
+        var playerWallet = playerEntity.Read(MkTraderArch.Wallet);
+        playerWallet.Credits += grant;
+        playerEntity.Set(MkTraderArch.Wallet, playerWallet);
+        var auditId = tx.Spawn<MkAuditArch>(MkAuditArch.Audit.Set(new MkAudit
+        {
+            Seq = s, RunNo = runNo, Kind = KindGrant, ItemNo = -1, Payer = desk, Payee = player, Amount = grant,
+        }));
+        bool committed;
+        try
+        {
+            committed = tx.Commit();
+        }
+        catch (CommitPublishIncompleteException)
+        {
+            Log($"publish incomplete: grant {s} from desk {desk} to player {player}");
+            throw;
+        }
+
+        if (!committed)
+        {
+            Fail($"grant {s} to player {player}: commit returned false");
+            return false;
+        }
+
+        mine.Add(auditId.RawValue);
+        myCommitted?.Add(s);
+        Interlocked.Increment(ref grants);
+        return true;
+    }
+
     /// <remarks>
     /// <paramref name="itemIds"/> follows the storm: a consume replaces an item's entity, and its slot in the table is rewritten under the item's lock,
     /// which is also the only place it is read during the storm.
@@ -1455,7 +1592,7 @@ public class MarketHardeningTests
         }
 
         var seq = firstSeq - 1;
-        long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0, consumes = 0, rollbacks = 0, ownerAudits = 0;
+        long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0, consumes = 0, rollbacks = 0, ownerAudits = 0, grants = 0;
         var stop = 0;
         var stormOver = 0;
         var censusTaken = 0;
@@ -1486,7 +1623,7 @@ public class MarketHardeningTests
                 var myDestroyed = destroyedBy[worker];
                 var myRolledBack = rolledBackBy[worker];
                 var myCommitted = _c.Crash != 0 ? committedBy[worker] : null;
-                var stripes = new int[4];
+                var stripes = new int[5];
                 try
                 {
                     while (Volatile.Read(ref stop) == 0 && Interlocked.Increment(ref started) <= _c.Operations)
@@ -1559,9 +1696,10 @@ public class MarketHardeningTests
                             var fromSlot = CountSlot(_c, owner, itemNo);
                             var toSlot = CountSlot(_c, to, itemNo);
 
-                            // The traders involved, locked in stripe order (an item lock is always taken first and alone: no cycle).
+                            // The traders involved, and the item's desk, which may grant the payer credits: locked in stripe order (an item lock is always
+                            // taken first and alone: no cycle).
                             var n = 0;
-                            foreach (var t in new[] { payer, payee, fromSlot, toSlot })
+                            foreach (var t in new[] { payer, payee, fromSlot, toSlot, desk })
                             {
                                 var stripe = (int)(t & (traderLocks.Length - 1));
                                 if (Array.IndexOf(stripes, stripe, 0, n) < 0)
@@ -1578,6 +1716,15 @@ public class MarketHardeningTests
 
                             try
                             {
+                                // A player who cannot pay is first granted credits by the item's desk, in a transaction of its own with an audit entry of
+                                // its own: a transfer between two traders, so credits stay conserved and the replay reproduces it. Without it, players ran
+                                // dry at scale — buys at full price, sells back at half — and over half of a 75M-item storm was skipped, doing nothing.
+                                if (payer > _c.Desks && !Grant(dbe, traderIds, payer, desk, amount, runNo, ref seq, mine, myCommitted, ref grants))
+                                {
+                                    Volatile.Write(ref stop, 1);
+                                    break;
+                                }
+
                                 using var tx = dbe.CreateQuickTransaction(discipline: _c.Discipline);
 
                                 // The item: still the owner we planned for, and its lore intact. Read through a read handle; reopened to write it.
@@ -2011,7 +2158,8 @@ public class MarketHardeningTests
                 var now = Interlocked.Read(ref done);
                 Log($"  {now:N0} ops, {now / sw.Elapsed.TotalSeconds:N0}/s (buys {Interlocked.Read(ref buys):N0}, sells " +
                     $"{Interlocked.Read(ref sells):N0}, trades {Interlocked.Read(ref trades):N0}, consumed {Interlocked.Read(ref consumes):N0}, " +
-                    $"rolled back {Interlocked.Read(ref rollbacks):N0}, skipped {Interlocked.Read(ref skipped):N0}; " +
+                    $"rolled back {Interlocked.Read(ref rollbacks):N0}, skipped {Interlocked.Read(ref skipped):N0}, " +
+                    $"grants {Interlocked.Read(ref grants):N0}; " +
                     $"{Interlocked.Read(ref ownerAudits):N0} owner audits)");
                 if (now != lastDone)
                 {
@@ -2074,7 +2222,8 @@ public class MarketHardeningTests
 
         lastSeq = Interlocked.Read(ref seq);
         Log($"storm done in {sw.Elapsed.TotalSeconds:F1} s: {done:N0} ops ({done / sw.Elapsed.TotalSeconds:N0}/s), buys {buys:N0}, sells {sells:N0}, " +
-            $"trades {trades:N0}, consumed {consumes:N0}, rolled back {rollbacks:N0}, skipped for lack of credits {skipped:N0}; " +
+            $"trades {trades:N0}, consumed {consumes:N0}, rolled back {rollbacks:N0}, skipped for lack of credits {skipped:N0}, " +
+            $"credit grants {grants:N0}; " +
             $"{ownerAudits:N0} owner audits");
         if (_c.OwnerAudit && ownerAudits == 0)
         {
@@ -2087,9 +2236,9 @@ public class MarketHardeningTests
             all.AddRange(list);
         }
 
-        if (all.Count != buys + sells + trades + consumes)
+        if (all.Count != buys + sells + trades + consumes + grants)
         {
-            Fail($"{all.Count:N0} audit entries recorded for {buys + sells + trades + consumes:N0} committed transfers");
+            Fail($"{all.Count:N0} audit entries recorded for {buys + sells + trades + consumes:N0} committed transfers and {grants:N0} credit grants");
         }
 
         destroyed = new List<DestroyedItem>();
@@ -2151,6 +2300,20 @@ public class MarketHardeningTests
             if (i > 0 && a.Seq == entries[i - 1].Seq)
             {
                 Fail($"audit sequence {a.Seq} appears twice");
+            }
+
+            // Each trader's sequences are taken under its lock, so in sequence order its balance is what it was when it paid: never short. A lost grant
+            // shows here, where the item checks below cannot see it.
+            if (s.Credits[a.Payer] < a.Amount)
+            {
+                Fail($"audit {a.Seq}: trader {a.Payer} pays {a.Amount}, but the replay has it at {s.Credits[a.Payer]}");
+            }
+
+            if (a.Kind == KindGrant)
+            {
+                s.Credits[a.Payer] -= a.Amount;
+                s.Credits[a.Payee] += a.Amount;
+                continue;
             }
 
             var item = (int)a.ItemNo;
