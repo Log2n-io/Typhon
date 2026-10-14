@@ -66,6 +66,12 @@ public unsafe class ConcurrencyConflictSolver
     /// <summary>Whether a conflict was detected for this solver instance.</summary>
     public bool HasConflict { get; private set; }
 
+    /// <summary>
+    /// The component was absent when our transaction wrote it — a first supply, raced by another that committed first. <see cref="ReadData{T}"/> is then
+    /// zeroes, not a value the transaction read.
+    /// </summary>
+    public bool ReadWasAbsent { get; private set; }
+
     /// <summary>Copies <see cref="ReadData{T}"/> into <see cref="ToCommitData{T}"/> (discard all changes, revert to read snapshot).</summary>
     public void TakeRead<T>() where T : unmanaged => ToCommitData<T>() = ReadData<T>();
 
@@ -87,9 +93,11 @@ public unsafe class ConcurrencyConflictSolver
     /// <summary>Returns a ref to the output buffer. Write the resolved value here. Initialized with <see cref="CommittingData{T}"/>.</summary>
     public ref T ToCommitData<T>() where T : unmanaged => ref Unsafe.AsRef<T>(_toCommitData);
 
-    internal void Setup(long pk, ComponentInfo info, byte* readData, byte* committedData, byte* committingData, byte* toCommitData)
+    internal void Setup(long pk, ComponentInfo info, byte* readData, byte* committedData, byte* committingData, byte* toCommitData,
+        bool readWasAbsent = false)
     {
         PrimaryKey = pk;
+        ReadWasAbsent = readWasAbsent;
         _readData = readData;
         _committedData = committedData;
         _committingData = committingData;

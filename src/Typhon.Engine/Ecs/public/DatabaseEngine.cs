@@ -693,6 +693,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// fixture can hold a commit in that window while a checkpoint runs. Null in production: one null check per commit.</summary>
     internal Action CommitAfterAppendProbe { get; set; }
 
+    /// <summary>Test hook: a first supply found its (entity, component) claimed by another commit and is about to wait for it (QENABLE-01).</summary>
+    internal Action FirstSupplyWaitProbe { get; set; }
+
+    /// <summary>Test hook: a commit is about to release the first-supply claims it holds; the roots must be published by then (QENABLE-01).</summary>
+    internal Action FirstSupplyReleaseProbe { get; set; }
+
+    /// <summary>Test hook: a commit took the first-supply claim of (entity key, component type) — in the order it takes them all.</summary>
+    internal Action<long, int> FirstSupplyClaimedProbe { get; set; }
+
+    /// <summary>
+    /// Test hook: a losing first supply added its revision to the winner's chain and is about to move its bytes there; a throw fails its commit.
+    /// </summary>
+    internal Action FirstSupplyJoinProbe { get; set; }
+
     /// <summary>Test seam (VIS-03): invoked by every writing <see cref="Transaction"/> commit once its commit card is reserved, before its PREPARE takes
     /// any lock, so a fixture can hold a reserving committer there. Null in production: one null check per commit.</summary>
     internal Action CommitAfterReserveProbe { get; set; }
@@ -1486,6 +1500,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>The commit cards (VIS-03): a committer's reservation, then its registration and stamp at the commit point.</summary>
     internal CommitCardTable CommitCards { get; }
+
+    /// <summary>
+    /// The first supplies being committed (QENABLE-01): one per (entity, component type), claimed before PREPARE and released once the commit's publish set the
+    /// record's chain root, or on any exit of the commit. A second supply of the same component waits for the claim, then finds the root
+    /// (<c>Transaction.PrepareFirstSupply</c>).
+    /// </summary>
+    internal readonly System.Collections.Concurrent.ConcurrentDictionary<(long Pk, int ComponentTypeId), long> FirstSupplyClaims = new();
     internal DeferredCleanupManager DeferredCleanupManager { get; }
 
     /// <summary>Engine-level MVCC exception dictionary for ECS EnabledBits.</summary>

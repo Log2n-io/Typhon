@@ -170,7 +170,8 @@ below names the invariant that proves it.
             which is safe
   note the B+Tree and the spatial enumerators (AabbClusterEnumerator, ClusterRadiusBatch) read HEAD (design 05's non-goal,
        #674): an index-path or spatial query between a commit's append and its publish does not find the spawn its
-       revisions announce, and an older snapshot's spatial query does not find a hidden destroy. The cluster-free race of
+       revisions announce, and an older snapshot's spatial query does not find a hidden destroy. The index paths do find a hidden
+       destroy (VIS-09, #1347). The cluster-free race of
        a drain outside the fence is #1315
   never a claim sets the occupancy bit of the slot it takes: the claim folds the claimer's TSN into the born watermark first,
         so a reader whose snapshot is above that TSN passes the cluster gate and counts, or enumerates, a slot with no data and
@@ -201,10 +202,23 @@ below names the invariant that proves it.
             entity by scan. The cleanup, keyed by the died STAMP, releases it once MinTSN is past that stamp
             (DatabaseEngine.ReleaseHiddenDestroySlot, ArchetypeClusterState.ReleaseHiddenSlot), then removes the record.
             SingleVersion and Transient archetypes release at publish, as before: they promise no isolation
+  invariant the index paths find a hidden destroy too (#1347): the publish folds its stamp — the archetype's
+            (ArchetypeClusterState.NoteDestroyPublished, MaxDestroyStamp) and the cluster's died watermark — BEFORE it removes the
+            entity's B+Tree entries. The selective scan reads the archetype stamp after its tree read; above its snapshot, each cluster
+            whose died watermark is above it, or with a destroy pending, is read whole, as the SoA scan reads it, and a tree candidate
+            whose slot is hidden by the cluster read is decided by its record. The ordered merge reads the stamp before its streams
+            open — its tree reads are lazy — reads such clusters whole into a sorted side stream whose entities the tree stream drops,
+            tests every row's born and died at the snapshot (ArchetypeSortedStream.TryAdmitCurrent, as the merge consumes it), and answers again when the stamp moved
+            during the merge; the sort fallback keys a row absent from the tree by its slot's bytes
   scope: Transaction.MarkDestroysPending, Transaction.UnmarkDestroysPending, Transaction.FlushPendingDestroys,
          ArchetypeClusterState.HideDestroyedSlot, ArchetypeClusterState.ReleaseHiddenSlot, ArchetypeClusterState.PendingDeaths,
-         ArchetypeClusterState.IsClusterFullyVisibleAt, DatabaseEngine.ReleaseHiddenDestroySlot, DatabaseEngine.ProcessEcsCleanups
-  note the lowest-stamp rule for two concurrent destroys of one entity has no test of its own
+         ArchetypeClusterState.IsClusterFullyVisibleAt, DatabaseEngine.ReleaseHiddenDestroySlot, DatabaseEngine.ProcessEcsCleanups,
+         ArchetypeClusterState.NoteDestroyPublished, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.MergeOrderedClustered,
+         EcsQuery.ReadClustersWhole, ArchetypeSortedStream.TryAdmitCurrent, EcsQuery.TryReadHiddenOrderKey
+  note the lowest-stamp rule for two concurrent destroys of one entity has no test of its own. Of the index-path invariant, the fold
+       before the tree removal has no staged test — no hook sits inside one commit's publish. A row the merge's tree read found
+       and a destroy hid before the merge consumed it is decided by its record, which only spares the merge its second answer: the
+       destroy moved the stamp, and the revalidation answers right without it (mutant dropping such rows: survives, by design)
   spec: tla/CommitStampFamilies.tla — DestroyRead (destroyatpublish, releaseatpublish)
   on_violation: a reader begun after the destroy's stamp still sees the entity alive while it holds the commit's other
                 effects; an older reader's scan loses an entity its snapshot holds

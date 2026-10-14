@@ -625,6 +625,8 @@ reclaimed.
             test), and
             NonGenericEntityAccessTests.ReadRaw_NeverSuppliedComponent_ReturnsAnEmptySpan (absent ≠ disabled for raw
             consumers).
+  note: an absent component is still indexed under its slot's bytes; queries never match it and its first supply moves the entry
+        (QENABLE-01)
 
 ---
 
@@ -1016,7 +1018,9 @@ both fast and exact inside the window; this rule fixes what it does promise.
              the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
              `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
   note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
-        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). Writable cluster
+        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). An ordered query whose snapshot is
+        older than a destroy reads whole the clusters newer deaths touched (VIS-09) and places their rows by their current value: a written
+        entity there sits by its new value rather than its fence key. Writable cluster
         memory over a SingleVersion or Transient indexed component is refused, so every write reaches this rule's
         mechanism (IX-07). Reads
         of an index that test no value — `Transaction.EnumerateIndex`, foreign-key navigation — are not queries and are
@@ -1034,6 +1038,92 @@ both fast and exact inside the window; this rule fixes what it does promise.
             case; without its liveness test, the destroy case; with the gate always off, seven of ten; with the gate
             blind to which component was written, the gate case; with the gate blind to releases, the
             destroy-after-another-write case
+
+## Module: QENABLE — Which entities a field predicate can match
+
+### QENABLE-01: A field predicate matches only a component that is there, in the enabled state the query asks for `[fatal]` `[silent]`
+  invariant ∀ field query Q with a predicate P on component T (`WhereField`), ∀ entity e visible at Q's snapshot:
+            e ∈ Q ⟺ present(e, T) ∧ enabled(e, T) = ¬Q.names(Disabled<T>) ∧ P(value(e, T)) ∧ the other components Q names
+            `Enabled<U>()` / `Disabled<U>()` are so. present: Versioned ⟺ its chain holds a revision Q's snapshot sees (STAGE-02); SingleVersion
+            and Transient always — one the spawn did not supply is zero and disabled, and the record cannot tell it from a disabled
+            one. enabled is resolved at the snapshot: the committed bits, then the overrides (`EnabledBitsOverrides`), then the
+            transaction's own pending changes
+  invariant every path answers the same: the selective B+Tree scan, the SoA scan, the ordered merge, the sort fallback, every
+            terminal (`Count`, `Any`, `Execute`, `ExecuteOrdered`), a view's population and full refresh — one gate
+            (`EnabledGate`): a cluster is filtered with one AND per named component against its enabled words (ENABLE-01), exact
+            while no override is live — re-checked after each cluster's words are read, since a commit registers its override before
+            its publish writes them — and the transaction stages no enable or disable; otherwise each candidate is resolved as the
+            broad scan resolves it. A reserved slot (VIS-08, VIS-09) is resolved from its record the same way. Presence is probed only
+            for `Disabled<T>()` on a Versioned T, and at the snapshot — a chain with a revision the reader sees, as a point read decides it
+            (`EnabledGate.IsPresentAtSnapshot`): the record's root is current state, and a first supply committed after the snapshot made
+            the component present to an older reader, matching `Disabled<T>()` on bytes it never had
+  invariant a transaction's own changes, as its point reads see them: an entity it destroyed is gone from its field queries, uncounted by
+            Skip / Take (`EcsQuery.ExecuteTargeted`, `EcsQuery.CollectMergedResults`, `EcsQuery.ExecuteSpatial`); a component it supplied to
+            an entity that had none is absent to them until it commits (`Transaction.FirstSuppliedHere`; the spatial field verifier, a point
+            read, refuses it too) — the scans read the committed slot, and its own enabled bit alone tested bytes the entity never had; its
+            own pending spawns are in every terminal, an ordered one included, placed by their own values (`EcsQuery.OwnSpawnStream`, and the
+            sort fallback's key). Its own value writes to committed entities stay unseen by field queries, as before
+  invariant the paths that test entities one at a time apply it too: `Where<T>`, the field filter on the transaction's own pending
+            spawns, the spatial candidates. Each reads T enabled, or disabled and present when the query names `Disabled<T>()`
+            (`EntityRef.TryReadForPredicate`, the names taken when the query runs), and the query's `Enabled<U>()` / `Disabled<U>()` are
+            tested against the entity's bits at the snapshot (`EcsQuery.AdmitsT2`, `EcsQuery.CollectPendingSpawnsWithFieldFilter`)
+  invariant an incremental view applies the same contract: a spawn announces to views only the components it publishes enabled
+            (`Transaction.InsertClusterIndexEntries`), an enable or disable announces itself; a view whose query names
+            `Enabled<U>()` / `Disabled<U>()` beside a field predicate is a pull view (`EcsQuery.ToView`), its drain unable to honour them
+  invariant an absent Versioned component keeps the index entry its spawn made under the slot's bytes, which no query matches (its
+            bit is clear, and presence fails `Disabled<T>`); its first supply moves that entry to the supplied value
+            (`Transaction.PublishClusterIndexes`) — added instead, it outlived the supply under a key the entity never had. Enable and
+            disable never touch an index
+  invariant two supplies of one absent Versioned component end in one chain: a commit claims each (entity, component) it first-supplies
+            before PREPARE takes any chain lock, in one global order (`Transaction.ClaimFirstSupplies`, `DatabaseEngine.FirstSupplyClaims`),
+            and releases them once its publish set the records' roots, or on any exit of the commit, its own entries only
+            (`Transaction.ReleaseFirstSupplyClaims`). A second supply waits for the claim, bounded by the chain-lock timeout, and finds that
+            root: its revision joins the chain as an update's (`Transaction.PrepareFirstSupply`, `Transaction.JoinPublishedChain`) — the
+            later commit wins, or the conflict handler decides, shown no read value (`ConcurrencyConflictSolver.ReadWasAbsent`); a supply
+            the transaction then destroyed joins as its tombstone. The join is built aside and swapped in once it holds, so a failure leaves
+            the entry naming its own chain. Each supply creating its own chain left the record on the first one published and the slot and
+            index on the other's value: a point read and every query disagreed for good, and the second chain was unreachable
+  invariant a spawn that leaves a unique-indexed component unsupplied is refused before its append, Versioned and SingleVersion alike
+            (`Transaction.CheckSpawnUniqueKeys`): a SingleVersion one held key 0 against every later spawn that supplied 0. Supplied means the
+            bits the spawn publishes with — an `Enable(comp, value)` on the pending spawn counts
+  note: reads that test no value — `Transaction.EnumerateIndex`, the FK reverse lookup, the cascade — are presence-based, not
+        enabled-based: a disabled foreign key still references its target, and a cascade that skipped it orphaned the child
+  rationale: #1259. The targeted paths evaluated the slot's bytes whatever the component's state and ignored `Enabled<T>` /
+             `Disabled<T>` once a field predicate was present, while views, `Where<T>`, spatial queries and pending spawns honoured
+             the bits: one query answered by path, by terminal, and differently before and after its own commit; a view built after a
+             disable held the entity a view refreshed across it had dropped. The docs had always said disabled components are
+             skipped by query evaluation (04-data.md, ADR-064)
+  scope: EnabledGate.Create, EnabledGate.ClusterMask, EnabledGate.Admits, EnabledGate.AdmitsRecord, EcsQuery.TryCreateEnabledGate,
+         EcsQuery.ScanClusterSoa, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteOrderedClustered, ArchetypeSortedStream.TryAdmitCurrent,
+         EcsQuery.ToView, EcsQuery.Where, EcsQuery.AdmitsT2, EcsQuery.CollectPendingSpawnsWithFieldFilter, EcsQuery.ExecuteSpatial,
+         EntityRef.TryReadForPredicate, Transaction.InsertClusterIndexEntries, Transaction.PublishClusterIndexes, Transaction.CheckSpawnUniqueKeys,
+         Transaction.ClaimFirstSupplies, Transaction.PrepareFirstSupply, Transaction.JoinPublishedChain, Transaction.ReleaseFirstSupplyClaims
+  on_violation: a query returns entities whose component is disabled or was never supplied — under the bytes their slot happened to hold
+                — or misses them under `Disabled<T>`, and the same query answers differently depending on the plan the cardinality picks
+  verified: QueryEnabledContractTests [VerifiesRule] — absent, disabled, enabled, supplied mid-life, re-enabled; Versioned and SingleVersion;
+            on the planner's path and both forced paths; through Count, Any, Execute and ExecuteOrdered; with `Enabled<T>` / `Disabled<T>`
+            on the predicate's component and on another; a snapshot before a disable and before an enable (the overrides); the
+            transaction's own pending disable; views built before and after a disable; the SingleVersion unique refusal; an absent
+            component in a recycled slot; a cluster of mixed states; a reader older than a disable and a destroy (the reserved slot);
+            a spawn disabled in its own transaction against an earlier view; a view naming `Disabled<T>`; a unique component supplied
+            by `Enable(value)` on the pending spawn; `Where<T>` on a disabled and an absent component; a pending spawn under
+            `Enabled<U>` / `Disabled<U>` and its own disable; a spatial query under both, with and without a field predicate. Mutants
+            killed: each path's gate removed (SoA, selective, merge), the overrides ignored, presence ignored, a reserved slot read at its
+            record's latest bits, a spawn announcing a disabled component to views, a `Disabled<T>` view kept incremental, the unique
+            check reading the spawn's supplied mask, the first supply adding, the SingleVersion unique spawn accepted, a predicate read
+            ignoring `Disabled<T>`, a predicate reading an absent component, the spatial and pending-spawn T2 tests removed; two
+            concurrent first supplies, sequential and staged mid-publish, without a handler and with one, after an aborted one, a waiter on a
+            commit that fails before its append, a join that fails, a supply destroyed in its transaction, the claim order; a spatial query
+            over the transaction's own destroy; an ordered page past rows the gate refuses — mutants: no claim, no join, the claim released
+            before the root is published, the absent read unflagged, the join swapped in first, a destroyed supply joined live, the claims
+            unsorted, the claims kept on a failed commit, the spatial check opening a destroyed entity; a reader older than a first supply under
+            Disabled<T>, the transaction's own destroy and own first supply. QueryStressOracleTests [VerifiesRule]: writers spawning,
+            destroying, enabling, disabling, first-supplying (raced), updating and aborting, readers at random snapshots, every path and
+            terminal against the reader's own point reads — mutants: presence at HEAD, own destroys or own first supplies seen, no walk in
+            the selective scan, no side stream, no born gate in the merge, no side-stream dedupe. The mid-scan
+            re-check of the overrides has no staged test: it needs a commit landing between a cluster's word loads, with no hook there
+  note: a second supply waits for a claim before its PREPARE, holding no chain lock; the wait ends at the holder's publish or exit, or at
+        the chain-lock timeout, which fails the waiting commit and leaves it retryable
 
 ## Module: EMAP — Where an entity map keeps its buckets
 
