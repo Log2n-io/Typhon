@@ -109,6 +109,10 @@ public sealed partial class TatooineSim
 
                 // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.
                 IngressBytesPerSecond = _config.IngressBytesPerSecond,
+
+                // --resume-grace (A13). Passed through rather than left at the engine's default, because this is the one option a client ACTS on: it reaches
+                // the catalog as `limits.resumeGraceMs`, and an SDK reads it to choose between presenting its token and connecting fresh.
+                ResumeGraceMs = (int)Math.Round(_config.ResumeGraceS * 1000d),
             },
         });
 

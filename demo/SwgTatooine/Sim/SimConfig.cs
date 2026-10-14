@@ -452,6 +452,18 @@ public sealed class SimConfig
     /// </remarks>
     public double AvatarSaveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds;
 
+    /// <summary>
+    /// <c>--resume-grace S</c>: how long a link-dead session's avatar stays standing for its client to come back to, seconds; 0 disables resume entirely.
+    /// </summary>
+    /// <remarks>
+    /// <b>This number is what a dropped connection costs a player, and what it costs everyone else</b> (A13). Within it, a client that reconnects is handed
+    /// the same body where it stood, with no login and no respawn; past it the avatar is saved and destroyed as an ordinary logout. The cost is that the body
+    /// is in the world the whole time, visible and standing still, and that its account cannot be logged in by a client that has lost its token without
+    /// taking that body over. The engine's own default is 60 s, which is what a mobile client losing a tower needs; this passes it through so that a
+    /// measurement run, or a test that needs a grace to elapse, can say otherwise.
+    /// </remarks>
+    public double ResumeGraceS = 60d;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 

@@ -22,8 +22,48 @@ void Evaluate(const ArchetypeStore& store, std::uint32_t slot, int entry, std::i
     const std::uint32_t t0 = store.T0Of(slot, entry);
     const double dt = static_cast<double>(renderTick - static_cast<std::int64_t>(t0)) + frac;
 
+    // Between two held segments of one epoch the newer origin is authoritative, and both models reach for it -- `none` over the whole gap, because it has no
+    // velocity to offer, and `linear` over the LAST TICK of it only.
+    //
+    // A linear segment's velocity is fitted over the run that ENDED at t0, so it describes travel already taken and predicts the next tick only while the
+    // motion continues; the tick a newer segment was emitted FOR is by definition the one where it stopped doing so, since that tick's error is what triggered
+    // the emit. Drawing the old velocity through it put a player's stop 220 mm past where it had stopped on a 10 Hz server, and 336 mm past it at the end of an
+    // eight-tick gap, each followed by a snap back (design/SwgTatooine/15-client-prediction.md A14c). Blending over the whole gap instead removes the bound the
+    // emit rule provides -- 0.29 m against a 0.05 m tolerance on a path turning every three ticks.
+    //
+    // Behind the `entry != head` test, as in the C# and TypeScript twins: a steady mover holds one segment for tens of ticks and is its own head, so it reads
+    // no neighbouring entry at all.
+    bool crossing = false;
+    double span = 0;
+    int next = 0;
+    if (entry != store.HeadEntry(slot))
+    {
+        next = entry == store.SegmentHistory() - 1 ? 0 : entry + 1;
+
+        // Widened before subtracting: both ticks are u32, so their unsigned difference WRAPS, and `span > 0` would then be true for a newer entry whose t0 is
+        // below this one's -- reachable across the u32 tick wrap, which the pair of them says nothing about.
+        span = static_cast<double>(static_cast<std::int64_t>(store.T0Of(slot, next)) - static_cast<std::int64_t>(t0));
+        crossing = span > 0 && dt >= 0 && store.EpochOf(slot, next) == store.EpochOf(slot, entry);
+    }
+
     if (store.Linear() || !store.Moving())
     {
+        if (crossing && dt >= span - 1)
+        {
+            // Extrapolated to t1 - 1, then across the final tick to the origin the server reported for t1.
+            const double u = dt - (span - 1);
+            const double* n = store.SegmentOf(slot, next);
+            for (int a = 0; a < dims; a++)
+            {
+                const double from = b[a] + b[dims + a] * (span - 1);
+                const double delta = n[a] - from;
+                out[a] = from + delta * (u > 1 ? 1 : u);
+                out[dims + a] = delta;
+            }
+
+            return;
+        }
+
         for (int a = 0; a < dims; a++)
         {
             const double v = b[dims + a];
@@ -34,13 +74,8 @@ void Evaluate(const ArchetypeStore& store, std::uint32_t slot, int entry, std::i
         return;
     }
 
-    // Samples: interpolate toward the next newer sample of the same epoch, when one is held and render time has left t0.
-    const int head = store.HeadEntry(slot);
-    const int next = entry == store.SegmentHistory() - 1 ? 0 : entry + 1;
-    const std::uint32_t t1 = store.T0Of(slot, next);
-    if (entry != head && t1 > t0 && dt >= 0 && store.EpochOf(slot, next) == store.EpochOf(slot, entry))
+    if (crossing)
     {
-        const double span = static_cast<double>(t1 - t0);
         const double u = dt < span ? dt / span : 1;
         const double* n = store.SegmentOf(slot, next);
         for (int a = 0; a < dims; a++)

@@ -685,6 +685,12 @@ public sealed class ClientIntentChecks
         var harness = _harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+
+        // The counter moves INSIDE the binding tick, before its transaction commits, so the read below has to wait for a tick that has ended — the same two
+        // ticks AvatarLoginChecks.LogIn takes, and for the same reason. Without them this case passed only because the fixtures ahead of it had warmed the
+        // process: cold, the login is slower than the assertion and the body is not committed yet. It reads as a flake and is a missing wait.
+        harness.Ticks(2);
+
         var entity = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
         Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session must have been given a body to start with");
 

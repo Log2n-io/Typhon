@@ -52,6 +52,36 @@ internal sealed class FakeLink : ISubscriptionLink
         }
     }
 
+    /// <summary>The resume token the <c>WELCOME</c> carried, or <see langword="null"/> when the server issues none (A13).</summary>
+    /// <remarks>
+    /// Off the wire, for the same reason <see cref="Session"/> is: this is the whole of what a client keeps in order to come back, so a test that read the
+    /// server's own record instead could pass while the client held something else.
+    /// </remarks>
+    public byte[] ResumeToken
+    {
+        get
+        {
+            foreach (var message in Sent)
+            {
+                if (message.Length > 0 && message[0] == MessageTypes.Welcome)
+                {
+                    var token = WelcomeMessage.Parse(message).ResumeToken;
+                    foreach (var b in token)
+                    {
+                        if (b != 0)
+                        {
+                            return token;
+                        }
+                    }
+
+                    return null;   // all-zero is how the wire says there is no resume
+                }
+            }
+
+            return null;
+        }
+    }
+
     /// <summary>Delivers a client-to-server message, as a transport does when bytes arrive.</summary>
     /// <param name="message">The encoded message.</param>
     public void Send(byte[] message) => Connection.OnMessage(message);
@@ -313,8 +343,9 @@ internal static class ClientSays
     /// The credential presented. A <c>player</c> needs a real one since A3 — <see cref="SessionHarness.Connect"/> mints it — and a
     /// <c>god</c> session is anonymous, so anything at all does there.
     /// </param>
+    /// <param name="resumeToken">The resume token a reconnecting client presents (A13), or <see langword="null"/> for a fresh connection.</param>
     /// <returns>The message.</returns>
-    public static byte[] Hello(string kind, string token = "opaque")
+    public static byte[] Hello(string kind, string token = "opaque", byte[] resumeToken = null)
     {
         var hello = new HelloMessage
         {
@@ -323,6 +354,7 @@ internal static class ClientSays
             Caps = Capabilities.None,
             Kind = kind,
             Token = token,
+            ResumeToken = resumeToken,
             ClientCatalogHash = 0,
             HelloPayload = [],
         };
@@ -403,14 +435,35 @@ internal sealed class SessionHarness
     /// <param name="kind">The session kind.</param>
     /// <param name="token">Exactly what the client presents.</param>
     /// <returns>The link. For a refused admission it carries the CLOSE the server sent, which is what the case asserts on.</returns>
-    public FakeLink ConnectWithToken(string kind, string token)
+    public FakeLink ConnectWithToken(string kind, string token) => ConnectWithToken(kind, token, null);
+
+    /// <summary>
+    /// Connects one client that presents a resume token as well as its credential — a reconnect, as the SDK performs it (A13).
+    /// </summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="account">The account the credential names; a fresh one when not given.</param>
+    /// <param name="resumeToken">The token the previous session's <c>WELCOME</c> carried (<see cref="FakeLink.ResumeToken"/>).</param>
+    /// <returns>The link.</returns>
+    /// <remarks>
+    /// <b>The credential is minted again, and that is what a real reconnect does too.</b> A resume token names a session, never an account: the engine
+    /// admits the client through the ordinary hook first and only then looks at the token, so a reconnect proves who it is exactly as a fresh login does.
+    /// </remarks>
+    public FakeLink ConnectResuming(string kind, EntityId account, byte[] resumeToken)
+        => ConnectWithToken(kind, AuthToken.Mint(account), resumeToken);
+
+    /// <summary>Connects one client with a credential and, optionally, a resume token.</summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="token">Exactly what the client presents as its credential.</param>
+    /// <param name="resumeToken">The resume token, or <see langword="null"/>.</param>
+    /// <returns>The link.</returns>
+    public FakeLink ConnectWithToken(string kind, string token, byte[] resumeToken)
     {
         var link = new FakeLink();
         var info = new LinkInfo { Transport = "fake", SubProtocol = ProtocolConstants.WebSocketSubprotocol };
         var connection = _acceptor.Accept(link, info);
         Assert.That(connection, Is.Not.Null, "the runtime declined the link outright");
         link.Connection = connection;
-        connection.OnMessage(ClientSays.Hello(kind, token));
+        connection.OnMessage(ClientSays.Hello(kind, token, resumeToken));
         _links.Add(link);
         return link;
     }

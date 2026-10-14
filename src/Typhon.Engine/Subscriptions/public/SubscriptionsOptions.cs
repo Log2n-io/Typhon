@@ -92,6 +92,34 @@ public sealed class SubscriptionsOptions
     public int MaxSessions { get; init; } = 8192;
 
     /// <summary>
+    /// How long a link-dead session may be resumed, in milliseconds; <c>0</c> issues no resume tokens at all. Default: 60 000.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the only switch resume has, and zero is a real configuration rather than a disabled feature.</b> It is exported as the catalog's
+    /// <c>limits.resumeGraceMs</c>, which is how a client chooses between presenting its token and connecting fresh, so an operator who sets zero has told
+    /// every SDK not to bother: <c>WELCOME</c> then carries the all-zero token the wire reserves for "none", nothing is minted, and neither the token array
+    /// nor the record table is committed.
+    /// </para>
+    /// <para>
+    /// The number is a trade an application makes, not a technical limit. A grace is a promise to one client — its avatar, its claim, whatever the application
+    /// keyed to the session — held at the expense of every other client, who cannot have that record and may see the player standing there. 60 s is what
+    /// 01-model § 3 picked and what a mobile client losing a tower needs; a competitive server wants seconds.
+    /// </para>
+    /// </remarks>
+    public int ResumeGraceMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// How many sessions may have a resume pending at once; <c>0</c> takes <see cref="MaxSessions"/>. Default: 0.
+    /// </summary>
+    /// <remarks>
+    /// Past the cap the oldest pending resume expires early, exactly as it would at its deadline — the application gets its <c>ResumeExpired</c> and lets go.
+    /// <b>The cap bounds promises, not memory</b>: the record table is slot-indexed and sized by <see cref="MaxSessions"/> whenever resume is on, because a
+    /// presented token names its record directly and a smaller table would buy a hash lookup on the ingress path with the memory it saved.
+    /// </remarks>
+    public int MaxPendingResumes { get; init; }
+
+    /// <summary>
     /// Ceiling on native memory held by encoded frames waiting to be sent. Default: 256 MiB.
     /// </summary>
     /// <remarks>

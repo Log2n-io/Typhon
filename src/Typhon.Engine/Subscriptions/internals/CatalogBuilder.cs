@@ -46,12 +46,6 @@ internal static class CatalogBuilder
     internal const string DefaultAppName = "Typhon";
 
     /// <summary>
-    /// Phase 1 has no resume: a dropped session reconnects. Emitted as zero rather than omitted, because the field is not optional and a client chooses
-    /// between resuming and reconnecting from it.
-    /// </summary>
-    internal const int ResumeGraceMs = 0;
-
-    /// <summary>
     /// Builds the catalog, canonicalizes it, serializes it and digests it — in one pass, so the bytes and the hash cannot describe two different declarations.
     /// </summary>
     /// <param name="registry">The frozen registry the plans were compiled from.</param>
@@ -87,7 +81,11 @@ internal static class CatalogBuilder
             Tick = new CatalogTick { PeriodUs = tickPeriodUs, PingHz = registry.Options.PingHz },
             Limits = new CatalogLimits
             {
-                FrameBytes = registry.Options.FrameBytes, ClientMessageBytes = registry.Options.ClientMessageBytes, ResumeGraceMs = ResumeGraceMs,
+                FrameBytes = registry.Options.FrameBytes, ClientMessageBytes = registry.Options.ClientMessageBytes,
+
+                // The operator's own number, and a client acts on it: zero means this server issues no tokens, so an SDK reconnects rather than resuming. It
+                // was a constant zero while resume was unbuilt, which made every catalog say "no resume" whatever the options held.
+                ResumeGraceMs = registry.Options.ResumeGraceMs,
             },
             SessionKinds = Copy(registry.Sessions.DeclaredKinds),
 

@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-02 |
+| Last Updated | 2026-10-14 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -536,6 +536,58 @@
     readings are BotSwarmSmokeTests.FiftyBotsSurviveTwoHundredTicks — which passed before the fix only because the sessions it lost were never
     told, which is SUB-14 — and BotSwarmSmokeTests.TheNaturalSkipRunOfHealthySessionsStaysFarBelowTheCloseBound, which measures the headroom
     rather than asserting it from a number, and carries its own guard against measuring an idle server.
+
+---
+
+### SUB-12: Exactly one of resumed and expired follows a resumable close `[fatal][silent]`
+  invariant ∀ session s closed with resumable = true: the application is delivered EITHER one Opened{resumedFrom = s} OR one ResumeExpired{s},
+    never both and never neither — including for a reconnect that presents s's token in the same instant its deadline passes
+  invariant a resumable close is a link that died on its own (LinkLost, Unacknowledged) and nothing else: a client that sent BYE, one the
+    application kicked, one that broke the protocol, one evicted as abusive and one dropped for lagging all close non-resumably, because resume
+    would otherwise be the cheapest way to survive an eviction
+  invariant Closed.resumable means A RECORD EXISTS, never merely that the reason was of a resumable kind: an application keeps what the session
+    controlled on the strength of that flag, so a close reporting it must be followed by one of the two events. A server with ResumeGraceMs at
+    zero, and a session whose token was never minted, close NON-resumably whatever the reason
+  invariant one token, one resume: a token names at most one record, is accepted at most once, and a second presentation of it — replayed from a
+    log, or sent by a second tab — opens an ordinary session instead
+  invariant a resume opens a NEW session: the closed identity is spent, its slot is recycled on the tick after its Closed as any other, and
+    nothing names it again. What crosses the grace is the record, not the row
+  invariant the deadline is the operator's ResumeGraceMs, measured on one monotonic clock that both the consume and the expiry read
+  invariant a token is a bearer credential: unguessable (≥ 96 bits of cryptographic randomness), never all-zero — which the wire reserves for
+    "no resume" — and never inherited by a session that reuses the slot
+  never let the sweep and the consume both act on one record: the exchange that claims it is the decision, and the loser of that exchange does
+    nothing at all
+  never report an expiry twice, for the same record or for one a later session took over
+  never spend a record and then report nothing: a resume consumed by an admission that goes on to FAIL — a disposed table, an allocation failure
+    copying the HELLO payload, a lease lost — is reported as expired, because from the application's side nobody came back. "Neither event" is
+    the half that strands state outside the engine, where no engine check can see it
+  never hand a consumed record's appData to the wrong session, and never keep it after the resume: the consume copies it BEFORE its
+    compare-exchange, so the copy cannot be cleared or overwritten underneath the winner, and the next sweep releases the array entry — a link
+    thread may not make that managed write (SUB-05)
+  never hold a session's slot for the grace: a pending resume costs a record, and a reconnect storm that held slots would refuse the very clients
+    it exists for
+  scope: SessionTable.TryConsumeResume, SessionTable.ArmResume, SessionTable.ExpireResumes, SessionTable.ClaimResumeRecord, SessionTable.ReportResumeAbandoned,
+    SessionTable.MintResumeToken, SessionTable.IsResumable, SessionTable.TryWriteResumeToken, SessionTable.TryAdmit, SessionTable.CloseCore,
+    SessionTable.ApplyPendingCloses, SessionTable.BeginTick, SubscriptionConnection.HandleHello, SubscriptionConnection.SendWelcome
+  on_violation: both events is the worse half. An application destroys on ResumeExpired what it re-bound on Opened — the avatar of the client that
+    just resumed, taken out from under it, with the client's own session reporting success. Neither event leaks that avatar into the world for
+    ever: nothing drives it, nothing owns it, and no event is left to clean it up. Both are silent, both cost a session's worth of state, and both
+    are reachable only in the one instant where a reconnect meets its deadline.
+  rationale: 01-model § 3 specifies the resume; the exactly-once property is what makes it safe to act on, and acting on it is the point — an
+    application that has to defend itself against both events has to keep the token table the design promises it does not need. The decision is one
+    compare-exchange on the record's state word, which is the same shape SUB-05 allows a transport thread elsewhere: the link thread publishes one
+    number atomically and the tick turns it into events. Deadline order falls out of the grace being one duration, so the expiry sweep is a list
+    head and costs the tick nothing while nothing has expired.
+  verified: ResumeTests.AResumeSpentByAnAdmissionThatThrowsIsStillReportedExactlyOnce for the "neither" half, and
+    ResumeTests.AConsumedRecordLetsGoOfTheApplicationsObject for the release — both found by review, neither reachable through any counter;
+    ResumeTests.AServerWithNoGraceIssuesNoTokenAtAll for the flag meaning a record (the SWG demo found that one by holding a player's body
+    for the life of the process); ResumeTests.AGraceThatElapsesTellsTheApplicationOnceAndTheTokenThenNamesNothing (the expiry, once, with the appData
+    an application lets go of); ResumeTests.AResumeConsumedInTheTickItsGraceElapsesLeavesNoExpiry and
+    ResumeTests.AResumeArrivingAfterTheSweepIsAFreshSessionAndNotASecondExpiry for the two orders of the same instant; and
+    ResumeTests.AReconnectRacingTheSweepOnRealThreadsStillProducesExactlyOneOutcome, 100 rounds of the two sides released together past a deadline
+    both of them read, asserting resumed + expired = 1. The surrounding invariants are ResumeTests.OnlyALinkThatDiedOnItsOwnLeavesAResume (seven
+    reasons), ATokenIsSpentByTheFirstReconnectThatPresentsIt, AnAlteredTokenNamesNothing, AZeroTokenAndAShortOneAreBothNoToken,
+    PastTheCapTheOldestPendingResumeExpiresEarly and ASecondSessionOnOneSlotTakesTheRecordAndTheOlderPendingExpires.
 
 ---
 

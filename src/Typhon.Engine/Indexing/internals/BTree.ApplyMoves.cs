@@ -300,7 +300,13 @@ internal abstract partial class BTree<TKey, TStore>
             return;
         }
 
-        _fenceWindow?.NoteMutation("BTree.ApplyMoveRange");
+        // <b>The second path that drops the protocol, and it is armed exactly as the first one is.</b> The ranges were cut on leaf edges and this pass
+        // navigates with <c>followRightLink: false</c>, changing no leaf's bounds — see <see cref="PrepareMoveBatch"/>'s remarks, and <c>LeafCursor.Load</c>,
+        // which relies on EW-01 to rule out the concurrent merge that would make an empty leaf own every later key. A foreign latched insert that splits a
+        // leaf inside this range relocates keys out from under the cut, which is the same hazard the bulk value rewrite has (<c>UpdateValues</c> →
+        // <c>RunBatch</c>), so this reports itself as unlatched AND marks the tree for the duration.
+        _fenceWindow?.NoteMutation("BTree.ApplyMoveRange", unlatchedHere: true);
+        using var unlatched = EnterUnlatchedRewrite();
         var held = OlcLatchHeld.Count;
         ref var opAccessor = ref _segment.RentWarmAccessor(accessor.ChangeSet);
         try
@@ -356,7 +362,10 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             ThrowIfFaulted();
-            _fenceWindow?.NoteMutation("BTree.FinishMoveBatch");
+
+            // Latched, unlike ApplyMoveRange: what this adds to the ranges' own work is the directory's key count and the deferred single-entry paths, which
+            // run the full protocol and report themselves. It still reports, because a fence that mutated nothing has to fail EW-01's anti-vacuity check.
+            NoteLatchedMutation("BTree.FinishMoveBatch");
             for (var r = 0; r < ranges.Length; r++)
             {
                 ref var o = ref ranges[r].Outcome;

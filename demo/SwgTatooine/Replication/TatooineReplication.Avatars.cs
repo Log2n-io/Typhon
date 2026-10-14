@@ -112,6 +112,47 @@ public static partial class TatooineReplication
     /// </remarks>
     private static readonly Dictionary<ulong, uint> SessionOfAccount = [];
 
+    /// <summary>
+    /// The avatar of every session whose link died and whose client may still come back: the old session's value to the body it left standing (A13).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the whole of what resume costs the application, and it is held on the engine's promise rather than on a timer of our own.</b> The engine
+    /// closes a link-dead session with <c>Resumable</c> set, keeps its record for <c>ResumeGraceMs</c>, and then delivers exactly one of
+    /// <c>Opened{ResumedFrom}</c> or <c>ResumeExpired</c> (SUB-12). So an entry here is removed by one of those two events and by nothing else — there is no
+    /// deadline in this file, and a hold cannot leak unless the engine breaks that rule.
+    /// </para>
+    /// <para>
+    /// <b>The character and the account hold stay where they were.</b> <see cref="CharacterOfSession"/> still names the character under the OLD session's
+    /// value, and <see cref="SessionOfAccount"/> still points at it, which is what keeps a second client from walking in beside a body that is still
+    /// standing. A resume moves both onto the new session; an expiry drops both with the avatar.
+    /// </para>
+    /// <para>
+    /// <b>The body is stopped where it stood</b> (<see cref="HoldForResume"/>). Left alone it would keep walking to the destination its last intent named,
+    /// with nobody able to change it — measured 2.8 m past where its player left it in the first run of these cases, and unbounded on a long walk, which on
+    /// this map can carry a body through a portal into another realm.
+    /// </para>
+    /// </remarks>
+    private static readonly Dictionary<uint, ResumeHold> ResumingPlayer = [];
+
+    /// <summary>One held avatar: the body left standing, and the account it belongs to.</summary>
+    /// <param name="Avatar">The body.</param>
+    /// <param name="AccountRaw">The account's raw value, as <see cref="SessionOfAccount"/> keys it.</param>
+    /// <remarks>
+    /// <b>The account is captured at the hold, by one scan, because afterwards nothing can answer for it.</b> <see cref="AccountOfSession"/> is drained when
+    /// an avatar binds, so a held session has no entry there, and <see cref="SessionOfAccount"/> only goes the other way. Every path that ends a hold has to
+    /// release the account — a resume moves it, an expiry and a vanished body drop it — and a path that cannot name it either strands the account (its own
+    /// player refused with 4103 for ever) or drops it while the body is still being driven (two clients, one character). Both were reachable before this
+    /// field existed; see the review notes on A13 in 14-game-programme.md.
+    /// </remarks>
+    private readonly record struct ResumeHold(EntityId Avatar, ulong AccountRaw);
+
+    /// <summary>Holds whose grace elapsed, queued by the session-event walk for the transaction in <see cref="RetireAvatars"/>.</summary>
+    /// <remarks>
+    /// A queue rather than a destroy at the event, because the walk runs ahead of the tick's player accessor: saving a position needs the avatar's placement
+    /// and the character's component, and both come from accessors <see cref="BindAvatars"/> rents once for the whole tick.
+    /// </remarks>
+    private static readonly List<uint> ResumesToRetire = [];
 
     private static long _avatarsSpawned;
     private static long _avatarsDestroyed;
@@ -120,6 +161,30 @@ public static partial class TatooineReplication
     private static long _loginsRefusedAnonymous;
     private static long _loginsRefusedUnconfigured;
     private static long _locationsSaved;
+    private static long _resumesHeld;
+    private static long _resumesRebound;
+    private static long _resumeHoldsExpired;
+    private static long _resumeHoldsTakenOver;
+
+    /// <summary>Avatars held for a link-dead session's possible return (A13).</summary>
+    public static long ResumesHeld => System.Threading.Interlocked.Read(ref _resumesHeld);
+
+    /// <summary>Avatars handed back to a client that came back within the grace, without a spawn or a login.</summary>
+    public static long ResumesRebound => System.Threading.Interlocked.Read(ref _resumesRebound);
+
+    /// <summary>Held avatars retired because the grace elapsed with nobody coming back.</summary>
+    public static long ResumeHoldsExpired => System.Threading.Interlocked.Read(ref _resumeHoldsExpired);
+
+    /// <summary>Held avatars retired because their own account logged in fresh instead of resuming.</summary>
+    public static long ResumeHoldsTakenOver => System.Threading.Interlocked.Read(ref _resumeHoldsTakenOver);
+
+    /// <summary>Avatars standing for a client that is not connected right now.</summary>
+    /// <remarks>
+    /// <b>The map itself, not an interlocked counter like its neighbours, and the difference is the thread.</b> Those count events and are incremented from
+    /// whichever thread produced one; a hold is taken and released by the serial session system alone, so this is a tick-side read. A caller outside the tick
+    /// — a stats endpoint, a check between ticks — sees a consistent count because the tick is not running, which is also when every one of them asks.
+    /// </remarks>
+    public static int ResumeHoldsStanding => ResumingPlayer.Count;
 
     /// <summary>Avatars spawned by a login since the last reset.</summary>
     public static long AvatarsSpawned => System.Threading.Interlocked.Read(ref _avatarsSpawned);
@@ -216,6 +281,178 @@ public static partial class TatooineReplication
     }
 
     /// <summary>
+    /// Keeps a link-dead session's avatar standing for the grace instead of retiring it (A13).
+    /// </summary>
+    /// <param name="tx">The tick's transaction, or <see langword="null"/> — then the body keeps its last intent until the next tick stops it.</param>
+    /// <param name="session">The session that closed.</param>
+    /// <returns><see langword="true"/> when a hold was taken, so the caller knows the avatar is not being retired.</returns>
+    /// <remarks>
+    /// Moving the entry out of <see cref="BoundPlayer"/> is what spares it: <see cref="RetireAvatars"/> destroys exactly the bound avatars whose session is no
+    /// longer open, and a held one is no longer bound. Everything else about it is unchanged — it is still replicated to everyone else and still in the spatial
+    /// index, which is the point. The player's body is still in the world; it just has nobody driving it.
+    /// </remarks>
+    private static bool HoldForResume(Transaction tx, SessionId session)
+    {
+        if (!BoundPlayer.TryGetValue(session.Value, out var avatar))
+        {
+            return false;
+        }
+
+        BoundPlayer.Remove(session.Value);
+        ResumingPlayer[session.Value] = new ResumeHold(avatar, AccountHeldBy(session.Value));
+        StopHeldAvatar(tx, avatar);
+        System.Threading.Interlocked.Increment(ref _resumesHeld);
+        return true;
+    }
+
+    /// <summary>Whether a session's avatar is being held for its client's return (A13).</summary>
+    /// <param name="session">The session that closed.</param>
+    /// <returns><see langword="true"/> when a hold stands for it.</returns>
+    internal static bool HoldsResume(SessionId session) => ResumingPlayer.ContainsKey(session.Value);
+
+    /// <summary>The account a session holds, or zero.</summary>
+    /// <param name="sessionValue">The session.</param>
+    /// <returns>The account's raw value, or <c>0</c> when it holds none.</returns>
+    /// <remarks>
+    /// A scan, and it is the right shape: <see cref="SessionOfAccount"/> is keyed by account because that is the question a login asks, and this is the one
+    /// moment the inverse is wanted — once per dropped link, over as many entries as there are players on the server.
+    /// </remarks>
+    private static ulong AccountHeldBy(uint sessionValue)
+    {
+        foreach (var (accountRaw, holder) in SessionOfAccount)
+        {
+            if (holder == sessionValue)
+            {
+                return accountRaw;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Drops a hold whose body is no longer there, so that neither the hold nor its account outlives it.
+    /// </summary>
+    /// <param name="sessionValue">The held session's value.</param>
+    /// <remarks>
+    /// <b>Nothing is saved or destroyed, because there is nothing left to save or destroy</b> — this is the path where the avatar has already gone from under
+    /// the hold. What matters is that the hold goes with it: the engine spends its record on whichever of the two events it delivered, so an entry left here
+    /// would stay in a process-lifetime static for ever, and the account it pins would refuse its own player's next login with 4103 for just as long.
+    /// </remarks>
+    private static void ForgetHold(uint sessionValue)
+    {
+        if (!ResumingPlayer.Remove(sessionValue, out var hold))
+        {
+            return;
+        }
+
+        CharacterOfSession.Remove(sessionValue);
+        AccountOfSession.Remove(sessionValue);
+        if (hold.AccountRaw != 0 && SessionOfAccount.TryGetValue(hold.AccountRaw, out var holder) && holder == sessionValue)
+        {
+            SessionOfAccount.Remove(hold.AccountRaw);
+        }
+    }
+
+    /// <summary>
+    /// Stops a held avatar where it stands, because the client that was steering it is gone.
+    /// </summary>
+    /// <param name="tx">The tick's transaction, or <see langword="null"/> to skip it.</param>
+    /// <param name="avatar">The held avatar.</param>
+    /// <remarks>
+    /// <b>The intent outlives the session, and that is the bug this closes.</b> <c>PlayerMotion</c> holds a destination, and <c>PlayerMoveTick</c> keeps
+    /// walking towards it every tick whether or not anybody is connected — so a player who dropped mid-walk would be found somewhere they never chose, having
+    /// run on at full speed with nobody able to stop them. The destination is set to where the body is and the velocity to zero, which is the same stop a
+    /// <c>MoveDir</c> with no direction produces; it is written here rather than left to the intent path because there is no longer a session to send one.
+    /// <para>
+    /// In the session system's own transaction, in the <c>Spawn</c> phase, which is where <c>ApplyIntents</c> writes this component too — so this is one more
+    /// write on a path that already owns it, not a new writer the DAG would have to order.
+    /// </para>
+    /// </remarks>
+    private static void StopHeldAvatar(Transaction tx, EntityId avatar)
+    {
+        if (tx == null || !tx.For<Player>().TryOpenMut(avatar, out var body))
+        {
+            return;
+        }
+
+        var place = body.Read(Player.Bounds);
+        var move = body.Read(Player.Move);
+        move.DestX = place.X;
+        move.DestZ = place.Z;
+        move.VelX = 0f;
+        move.VelZ = 0f;
+        body.Set(Player.Move, move);
+    }
+
+    /// <summary>
+    /// Hands a session the avatar a held one left standing: no spawn, no character read, no position to restore (A13).
+    /// </summary>
+    /// <param name="subs">The commands this tick stages.</param>
+    /// <param name="tx">The tick's transaction.</param>
+    /// <param name="session">The session that gets the body.</param>
+    /// <param name="heldBy">The session whose hold it is — a resume's <c>Opened.ResumedFrom</c>, or the holder a fresh login displaces.</param>
+    /// <returns><see langword="false"/> when there was no hold, so the caller lets the ordinary login run.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why there is nothing to read.</b> A login exists to find out where the character was; this does not have to ask, because the body never left. Its
+    /// position is wherever it is standing, its realm is the realm it is in, and the one thing missing is a session to drive it — which <c>Control</c>
+    /// supplies, and which with the <c>AroundControlled</c> profile also puts the new session in the avatar's realm and centres its sphere there.
+    /// </para>
+    /// <para>
+    /// <b><c>PlayerSession.Controller</c> has to move too, and forgetting it is not a cosmetic bug.</b> That field is the demo's own record of who drives
+    /// this body: <c>TryOpenControlled</c> checks it before applying any intent, and <c>ControlledBy</c> finds an avatar by it. An avatar still naming the
+    /// session that died would have been handed to the client and then refused every command it sent — which is exactly what the first run of
+    /// <c>ResumeAvatarChecks</c> saw.
+    /// </para>
+    /// <para>
+    /// A hold that is not there is not an error: the grace may have elapsed. The client is then logged in normally, at its character's last saved position,
+    /// which is the same answer it would have had without resume.
+    /// </para>
+    /// </remarks>
+    private static bool TryRebindHeldAvatar(SubscriptionsCommands subs, Transaction tx, SessionId session, SessionId heldBy)
+    {
+        if (!ResumingPlayer.TryGetValue(heldBy.Value, out var hold))
+        {
+            return false;
+        }
+
+        if (tx == null || !tx.For<Player>().TryOpenMut(hold.Avatar, out var body))
+        {
+            // The body has gone from under the hold — a realm torn down over it, or anything that destroys a player — and the engine has already spent its
+            // record on the event that brought us here. Forgotten rather than left: an entry nothing can end is a leak in a process-lifetime static, and the
+            // account it pins would refuse this very player for the rest of the run. The caller then logs the client in normally.
+            ForgetHold(heldBy.Value);
+            return false;
+        }
+
+        var owner = body.Read(Player.Session);
+        owner.Controller = session.Value;
+        body.Set(Player.Session, owner);
+
+        ResumingPlayer.Remove(heldBy.Value);
+        BoundPlayer[session.Value] = hold.Avatar;
+
+        if (CharacterOfSession.Remove(heldBy.Value, out var character))
+        {
+            CharacterOfSession[session.Value] = character;
+        }
+
+        // The account moves off the held session and onto this one, taken from the HOLD rather than from what this session presented. Reading it from
+        // `AccountOfSession` instead would leave the account naming a session that no longer holds anything whenever the new session carried no identity —
+        // and `DropAccountHolds` would then free an account whose body is being driven, which is two clients on one character.
+        AccountOfSession.Remove(session.Value);
+        if (hold.AccountRaw != 0)
+        {
+            SessionOfAccount[hold.AccountRaw] = session.Value;
+        }
+
+        subs.Session(session).Control(hold.Avatar);
+        System.Threading.Interlocked.Increment(ref _possessions);
+        return true;
+    }
+
+    /// <summary>
     /// Spawns an avatar for every session that logged in and does not have one, and retires the avatars of sessions that have gone.
     /// </summary>
     /// <param name="tick">The tick context.</param>
@@ -248,7 +485,7 @@ public static partial class TatooineReplication
         // `Unbound` and `Seen` were filled by WalkSessions. Nothing to bind and nothing to retire is the common case by far — a
         // server spends almost every tick with a stable set of clients — and worth detecting, because tx.For<Player>() creates an
         // EntityMap accessor and pre-warms the component table.
-        if (Unbound.Count == 0 && BoundPlayer.Count == Seen.Count)
+        if (Unbound.Count == 0 && BoundPlayer.Count == Seen.Count && ResumesToRetire.Count == 0)
         {
             return;
         }
@@ -273,6 +510,13 @@ public static partial class TatooineReplication
     /// <param name="session">The session to bind.</param>
     private static void BindOneAvatar(SubscriptionsCommands subs, Transaction tx, SessionId session)
     {
+        // A resumed session was bound by the session-event walk, which runs after WalkSessions put it in `Unbound` and cannot take it back out — the list is
+        // what WalkSessions saw. Without this it would be logged in a second time and spawn a second avatar beside the one it had just been handed.
+        if (BoundPlayer.ContainsKey(session.Value))
+        {
+            return;
+        }
+
         if (!AccountOfSession.TryGetValue(session.Value, out var account))
         {
             // Unreachable through Admit, which refuses a player session with no valid token (A3) — so this is the guard that says so
@@ -285,15 +529,36 @@ public static partial class TatooineReplication
 
         if (SessionOfAccount.TryGetValue(account.RawValue, out var holder) && holder != session.Value)
         {
-            System.Threading.Interlocked.Increment(ref _loginsRefusedDuplicate);
-            subs.Session(session).Kick(AccountAlreadyPlayingCloseCode, "that account is already playing");
+            // A HELD account is not a playing one (A13): the body is standing there because the link died, and this is that same account arriving without a
+            // resume token — a reopened browser, a second device, a client that lost the token. Refusing it would lock the player out of their own character
+            // for the whole grace, which is the opposite of what the grace is for.
+            //
+            // <b>It is handed the body rather than a fresh one at the saved position</b>, which is the same move a resume makes and for a stronger reason:
+            // this client proved the ACCOUNT, where a resume proves only that it held a token. Retiring and respawning would also have had to read back a
+            // position written moments earlier in this same transaction, and spawn a second entity for one player in one tick for no gain.
+            // Captured BEFORE the attempt, because a rebind that fails forgets the hold — so testing the map again below would read false and refuse this
+            // client for an account nobody is playing.
+            var held = ResumingPlayer.ContainsKey(holder);
+            if (held && TryRebindHeldAvatar(subs, tx, session, SessionId.FromValue(holder)))
+            {
+                System.Threading.Interlocked.Increment(ref _resumeHoldsTakenOver);
+                return;
+            }
 
-            // Safe to forget the identity on the way out, and it is worth saying why, because the kick is STAGED rather than
-            // immediate. The refused session cannot be reconsidered on a later tick: `SubscriptionsIngressExecSystem.BeginTick`
-            // applies last tick's requests — turning this Kick into a real close — BEFORE it publishes the open set, so the session is
-            // gone from `OpenSessions` by the time `WalkSessions` next runs and never re-enters `Unbound`.
-            AccountOfSession.Remove(session.Value);
-            return;
+            // Refused only for an account a LIVE session is playing. A hold whose body had gone was forgotten just now, account and all, so this login falls
+            // through and spawns a body — which is the right answer for a player whose avatar vanished from under them.
+            if (!held)
+            {
+                System.Threading.Interlocked.Increment(ref _loginsRefusedDuplicate);
+                subs.Session(session).Kick(AccountAlreadyPlayingCloseCode, "that account is already playing");
+
+                // Safe to forget the identity on the way out, and it is worth saying why, because the kick is STAGED rather than
+                // immediate. The refused session cannot be reconsidered on a later tick: `SubscriptionsIngressExecSystem.BeginTick`
+                // applies last tick's requests — turning this Kick into a real close — BEFORE it publishes the open set, so the session is
+                // gone from `OpenSessions` by the time `WalkSessions` next runs and never re-enters `Unbound`.
+                AccountOfSession.Remove(session.Value);
+                return;
+            }
         }
 
         if (!AvatarsConfigured)
@@ -438,7 +703,7 @@ public static partial class TatooineReplication
     /// </remarks>
     private static void FlushAvatarsForShutdown(TickContext tick)
     {
-        if (_shutdownFlushed || BoundPlayer.Count == 0)
+        if (_shutdownFlushed || (BoundPlayer.Count == 0 && ResumingPlayer.Count == 0))
         {
             return;
         }
@@ -461,6 +726,17 @@ public static partial class TatooineReplication
                 SaveAvatarLocation(players, characters, avatar, character);
             }
         }
+
+        // And the held ones (A13). A hold is deliberately out of BoundPlayer, so without this a player who dropped mid-walk and whose server was stopped
+        // before their grace elapsed came back at the last cadence save — up to AvatarSaveIntervalS stale, which is the exact loss this method exists to
+        // prevent. With only holds standing the early-out above used to return before writing anything at all.
+        foreach (var (sessionValue, hold) in ResumingPlayer)
+        {
+            if (CharacterOfSession.TryGetValue(sessionValue, out var character))
+            {
+                SaveAvatarLocation(players, characters, hold.Avatar, character);
+            }
+        }
     }
 
     /// <summary>Whether <see cref="FlushAvatarsForShutdown"/> has run, so a multi-tick shutdown writes once.</summary>
@@ -478,6 +754,32 @@ public static partial class TatooineReplication
     /// </remarks>
     private static void RetireAvatars(Transaction tx, ArchetypeAccessor<Player> players)
     {
+        // The holds whose grace elapsed, before the subset test below: that test is about sessions, and a hold has none — its session was closed ticks or
+        // minutes ago. Saved and destroyed on the same terms as any logout, because that is what this is: a logout that waited to see whether it was one.
+        var expired = 0;
+        for (var i = 0; i < ResumesToRetire.Count; i++)
+        {
+            if (ResumingPlayer.ContainsKey(ResumesToRetire[i]))
+            {
+                RetireHold(tx, players, ResumesToRetire[i]);
+                System.Threading.Interlocked.Increment(ref _resumeHoldsExpired);
+                expired++;
+            }
+        }
+
+        ResumesToRetire.Clear();
+
+        // Before the subset test below, which returns on a tick where only a hold expired. RetireHold already released each hold's own account, so this is
+        // the general sweep: it catches an account whose session left without one.
+        //
+        // <b>Deliberately NOT suppressing the call at the end of this method.</b> A flag that said "already dropped this tick" looked like one scan saved and
+        // was a defect: the retirement loop below runs AFTER this point, so skipping the later sweep left a retired session's account held for as long as the
+        // process lived. The scan is over the players on the server, on a tick where a client both lost its grace and another disconnected.
+        if (expired > 0)
+        {
+            DropAccountHolds();
+        }
+
         // Nothing to retire means every bound session is still open: BoundPlayer is a SUBSET of Seen. Counting alone cannot say
         // that — one session leaving on the same tick as another arrives keeps both counts equal while the set membership has
         // changed completely, and an earlier `BoundPlayer.Count == Seen.Count` returned early on exactly that tick. It left the
@@ -534,13 +836,46 @@ public static partial class TatooineReplication
         DropAccountHolds();
     }
 
+    /// <summary>
+    /// Saves and destroys one held avatar, whether its grace elapsed or its own account took it over.
+    /// </summary>
+    /// <param name="tx">The tick's transaction.</param>
+    /// <param name="players">The player accessor, owned by <paramref name="tx"/>.</param>
+    /// <param name="sessionValue">The old session's value, which is what the hold is keyed by.</param>
+    /// <remarks>
+    /// The same order and the same transaction as <see cref="RetireAvatars"/>: position read off the placement first, then the destroy, so neither reads a
+    /// hole and a crash between them is not a state that exists.
+    /// </remarks>
+    private static void RetireHold(Transaction tx, ArchetypeAccessor<Player> players, uint sessionValue)
+    {
+        if (!ResumingPlayer.TryGetValue(sessionValue, out var hold))
+        {
+            return;
+        }
+
+        if (CharacterOfSession.TryGetValue(sessionValue, out var character))
+        {
+            SaveAvatarLocation(players, tx.For<CharacterArch>(), hold.Avatar, character);
+        }
+
+        tx.Destroy(hold.Avatar);
+        System.Threading.Interlocked.Increment(ref _avatarsDestroyed);
+
+        // ForgetHold drops the hold, the character, the identity and the account together, which is the same release a resume performs in the other
+        // direction. Called after the save and the destroy, because the save reads the character this removes.
+        ForgetHold(sessionValue);
+        System.Threading.Interlocked.Increment(ref _releases);
+    }
+
     /// <summary>Forgets the account hold of every session that no longer has an avatar.</summary>
     private static void DropAccountHolds()
     {
         AccountsToDrop.Clear();
         foreach (var (accountRaw, sessionValue) in SessionOfAccount)
         {
-            if (!BoundPlayer.ContainsKey(sessionValue))
+            // A session holding a resume still holds its account (A13): its body is standing in the world, and releasing the account would let a second
+            // client log the same character in beside it. The hold is released by the resume, by the expiry, or by the account's own fresh login.
+            if (!BoundPlayer.ContainsKey(sessionValue) && !ResumingPlayer.ContainsKey(sessionValue))
             {
                 AccountsToDrop.Add(accountRaw);
             }
@@ -734,6 +1069,8 @@ public static partial class TatooineReplication
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();
         AccountsToDrop.Clear();
+        ResumingPlayer.Clear();
+        ResumesToRetire.Clear();
         System.Threading.Interlocked.Exchange(ref _avatarsSpawned, 0);
         System.Threading.Interlocked.Exchange(ref _avatarsDestroyed, 0);
         System.Threading.Interlocked.Exchange(ref _charactersCreated, 0);
@@ -741,6 +1078,10 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _loginsRefusedAnonymous, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedUnconfigured, 0);
         System.Threading.Interlocked.Exchange(ref _locationsSaved, 0);
+        System.Threading.Interlocked.Exchange(ref _resumesHeld, 0);
+        System.Threading.Interlocked.Exchange(ref _resumesRebound, 0);
+        System.Threading.Interlocked.Exchange(ref _resumeHoldsExpired, 0);
+        System.Threading.Interlocked.Exchange(ref _resumeHoldsTakenOver, 0);
         _shutdownFlushed = false;
         AvatarsConfigured = false;
         SaveIntervalTicks = 0;

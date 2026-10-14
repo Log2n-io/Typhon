@@ -74,8 +74,11 @@ describe('catalog-engine', () => {
       'typhon.session.droppedCommands',
     ]);
 
-    // Phase 1 replicates no aggregate tier, so the engine declares no grid and no resume window.
+    // Phase 1 replicates no aggregate tier, so the engine declares no grid.
     expect(plan.grids).toEqual([]);
-    expect(plan.catalog.limits.resumeGraceMs).toBe(0);
+
+    // The resume window the engine defaults to (A13/EN-B, 2026-10-14). A client reads this to choose between presenting
+    // its token and connecting fresh, so it is 60 s rather than the 0 that said "this server has no resume".
+    expect(plan.catalog.limits.resumeGraceMs).toBe(60_000);
   });
 });

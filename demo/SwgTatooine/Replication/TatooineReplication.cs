@@ -1352,6 +1352,15 @@ public static partial class TatooineReplication
                     request.SetBudget(PlayerBudgetBytesPerSecond);
                 }
 
+                // A13: this session resumed one whose link died, and that session's avatar is still standing in the world. Handing it straight back is the
+                // whole feature — no character read, no spawn, no login transaction — and it happens here rather than in BindAvatars because a resumed
+                // session must never reach the login path at all. A hold that is gone (the grace elapsed, or the account logged in fresh) falls through to
+                // the ordinary login, which is the same answer the client would have had without resume.
+                if (player && e.ResumedFrom.IsValid && TryRebindHeldAvatar(subs, tick.Transaction, e.Session, e.ResumedFrom))
+                {
+                    System.Threading.Interlocked.Increment(ref _resumesRebound);
+                }
+
                 // A player's session is in its player's realm (AroundControlled). A god camera has no entity to follow: with several realms it is in none
                 // until placed, so it starts on planet 0 (12-realms § 1.3).
                 if (!player)
@@ -1366,6 +1375,23 @@ public static partial class TatooineReplication
                 // these maps are process-lifetime statics, and a long run that admits and drops spectators would otherwise accumulate one entry per ride.
                 Spectators.Remove(e.Session);
                 Releasing.Remove(e.Session);
+
+                // A13: the engine says this link died on its own and is keeping the session's resume record for the grace, so the avatar stays standing
+                // instead of being retired by RetireAvatars this tick. The engine then delivers exactly one of Opened{ResumedFrom} or ResumeExpired
+                // (SUB-12), and those two are the only things that end the hold — there is no deadline on this side.
+                if (e.Resumable)
+                {
+                    HoldForResume(tick.Transaction, e.Session);
+                }
+            }
+            else if (e.Kind == SessionEventKind.ResumeExpired && TatooineReplication.HoldsResume(e.Session))
+            {
+                // Nobody came back. Queued rather than retired here: the save needs the tick's player and character accessors, which BindAvatars rents once
+                // for the whole tick (see RetireAvatars).
+                //
+                // Only when there IS a hold behind it: a god session's close is resumable too, and queueing its expiry would defeat BindAvatars' early-out
+                // for a tick in order to run a no-op.
+                ResumesToRetire.Add(e.Session.Value);
             }
             else if (e.Kind == SessionEventKind.RealmClosed)
             {
@@ -2405,6 +2431,11 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _possessions, 0);
         System.Threading.Interlocked.Exchange(ref _releases, 0);
         BoundPlayer.Clear();
+
+        // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold
+        // naming an entity from a disposed world, and the first resumable close of the next run would hand a client a body out of it.
+        ResumingPlayer.Clear();
+        ResumesToRetire.Clear();
 
         // The rest of the statics a runtime leaves behind. _pushCommands in particular holds the LAST runtime's SubscriptionsCommands, so Replicate() from a
         // system of the next one would mark a slot in an object belonging to a disposed engine; the others make a second run in one process inherit the

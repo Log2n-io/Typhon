@@ -72,7 +72,12 @@ internal static class RuleMutants
                 $"Rule {ruleId}: the verifier ACCEPTED a scenario that violates the rule (it called Assert.Pass) — "
                 + "it cannot fail, so its green result is not evidence of anything.";
         }
-        catch (AssertionException ex)
+        // MultipleAssertException beside AssertionException, because it does NOT derive from it: a verifier whose assertions
+        // sit in an Assert.Multiple block — which most of this suite's do, so that one run reports every way a scenario is
+        // wrong — fails with that type instead, and it carried the verifier's own message all along. Without this case such a
+        // verifier was unmutable: the marker check below would never run, and the generic handler would report the mutant as
+        // broken for having been rejected exactly as intended.
+        catch (Exception ex) when (ex is AssertionException or MultipleAssertException)
         {
             if (!ex.Message.Contains(expectedFailureMarker, StringComparison.Ordinal))
             {
