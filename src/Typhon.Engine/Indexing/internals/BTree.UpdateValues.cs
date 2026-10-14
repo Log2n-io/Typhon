@@ -4,23 +4,37 @@ using System.Diagnostics;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// One entry of a bulk value update on a <b>unique</b> index: the key to find, and the value to store under it.
+/// One entry of a bulk value update on a <b>unique</b> index: the key to find, the value to store under it, and the value it must hold for the update to
+/// apply.
 /// </summary>
 /// <remarks>
-/// Deliberately 16 bytes for a 64-bit key, carrying nothing an `AllowMultiple` index would need. A single struct serving both index kinds would put an
-/// <c>ElementId</c> and an <c>OldValue</c> into every unique batch to serve fields the unique path never reads — 50 % more bytes streamed through the
-/// partitioning descent, which is bandwidth-bound over the batch. <see cref="BTreeMultiValueUpdate{TKey}"/> is the wider one.
+/// <para>16 bytes for a 64-bit key (12 for a 32-bit one), carrying no <c>ElementId</c>: <see cref="BTreeMultiValueUpdate{TKey}"/> is the wider one.</para>
+/// <para><b><see cref="ExpectedValue"/> (#1348).</b> Migration repoints the key its migrant's DATA holds, which is not the tree's key for it when the two
+/// disagree: the loser of a unique collision is not indexed under the key it shares with the holder. Without the expected value the update overwrote the
+/// holder's entry with the loser's location, and the holder dropped out of the index. An entry whose key holds another value is skipped.</para>
 /// </remarks>
 internal readonly struct BTreeValueUpdate<TKey> where TKey : unmanaged
 {
+    /// <summary><see cref="ExpectedValue"/> for an update that applies whatever the key holds.</summary>
+    public const int AnyValue = -1;
+
     public readonly TKey Key;
     public readonly int NewValue;
+    public readonly int ExpectedValue;
 
-    public BTreeValueUpdate(TKey key, int newValue)
+    public BTreeValueUpdate(TKey key, int newValue) : this(key, newValue, AnyValue)
+    {
+    }
+
+    public BTreeValueUpdate(TKey key, int newValue, int expectedValue)
     {
         Key = key;
         NewValue = newValue;
+        ExpectedValue = expectedValue;
     }
+
+    /// <summary>Whether this update applies over <paramref name="held"/>, the value its key holds.</summary>
+    public bool AppliesOver(int held) => ExpectedValue == AnyValue || held == ExpectedValue;
 }
 
 /// <summary>

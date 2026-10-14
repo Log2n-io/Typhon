@@ -404,16 +404,11 @@ public unsafe ref struct EntityRefMut
     /// </remarks>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
-        // Skip every slot whose index is maintained at COMMIT rather than at the fence — Versioned always, and SingleVersion too when this transaction runs
-        // under Commit discipline (its writes are staged and reconciled by PublishStagedCommitWrites). Capturing a commit-maintained slot is not merely
-        // wasted work: the fence would then apply a SECOND Move for it, from a pre-write OldKey the commit publish has already moved away from, which
-        // corrupts the entry rather than refreshing it (#711, the SvPlusTransient+Commit half).
-        //
-        // This mask MUST stay the exact complement of the one the destroy path removes inline — see Transaction.FlushEcsPendingOperations. The two
-        // disagreeing is what #711 was.
-        var skipMask = (ushort)~_ref._archetype.FenceMaintainedSlotsUnder(_ref._accessor.Discipline);
+        // Records the fence-maintained indexed slots — never a Versioned one, whose index moves at commit (a second Move from the fence corrupts the entry,
+        // #711), nor a SingleVersion one under the Commit discipline (#1339). The destroy path defers exactly what was recorded (IX-06).
         // Through ClusterBase(): a Transient write lands here without having refreshed the primary base, which may be stale (#1199).
-        clusterState.CaptureFirstWrite(_ref._clusterChunkId, _ref._clusterSlotIndex, _ref._id, _ref.ClusterBase(), _ref._transientClusterBase, skipMask);
+        clusterState.CaptureFirstWrite(_ref._clusterChunkId, _ref._clusterSlotIndex, _ref._id, _ref.ClusterBase(), _ref._transientClusterBase,
+            _ref._accessor.Discipline);
     }
 
     /// <summary>Disable a component by handle. Stages the change for commit.</summary>

@@ -421,14 +421,23 @@ internal sealed unsafe partial class ArchetypeClusterState
         ResetShadowBuffers(IndexSlots);
         ResetShadowBuffers(TransientIndexSlots);
         ClusterShadowBitmap?.Clear();
+        SvShadowBitmap?.Clear();
     }
 
     /// <summary>
     /// Records, on an entity's first write this tick, the keys its fence-maintained indexed fields hold, for the fence to move its index entries from
-    /// (IX-06, IX-07). Every such field of every slot outside <paramref name="skipMask"/>, whichever component the write is about to change: the mark is
+    /// (IX-06, IX-07). Every such field of every slot of <see cref="FenceIndexedSlotMask"/>, whichever component the write is about to change: the mark is
     /// per entity, so a later write to another component finds it set and records nothing.
     /// </summary>
     /// <remarks>
+    /// <para><b>Two marks on an archetype indexing both a SingleVersion and a Transient slot (#1339).</b> Under the Commit discipline the SingleVersion
+    /// keys are the commit publish's to move, so such a writer records the Transient keys only. <see cref="ClusterShadowBitmap"/> then says "the Transient
+    /// keys are recorded" and <see cref="SvShadowBitmap"/> "the SingleVersion keys are recorded", which only a TickFence writer sets. With one mark, a
+    /// Commit write of a Transient key left it set over no SingleVersion record: a TickFence move of the same entity later in the tick recorded nothing and
+    /// the tree kept the old key, and a destroy deferred a SingleVersion entry the fence had no record of. Once a TickFence writer has recorded the
+    /// SingleVersion keys, the tree holds them rather than HEAD's, so a Commit publish leaves that entity's move to the fence
+    /// (<c>Transaction.PublishStagedEntry</c>). Every other archetype has one mark: on it a capture under the Commit discipline records Transient keys
+    /// only because Transient slots are the only indexed fence-maintained ones it has.</para>
     /// <para><b>Recorded before marked.</b> The keys are read before the bit is set, and kept only by the call that sets it. A writer finding the bit set
     /// writes at once, so had the bit gone up first, a writer of another component of the same entity could store its value before this call read it, and
     /// that value would be recorded as the old key: the index would never move off the key the tree holds.</para>
@@ -439,15 +448,24 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <param name="entityId">The entity, recorded for the fence's view notifications.</param>
     /// <param name="primaryBase">The cluster's base on its primary segment, where SingleVersion columns live.</param>
     /// <param name="transientBase">The cluster's base on the Transient segment of a mixed archetype; <c>null</c> otherwise.</param>
-    /// <param name="skipMask">The slots the fence does not maintain under the writer's discipline: <c>~FenceMaintainedSlotsUnder(discipline)</c>.</param>
-    internal void CaptureFirstWrite(int clusterChunkId, int slotIndex, EntityId entityId, byte* primaryBase, byte* transientBase, ushort skipMask)
+    /// <param name="discipline">The writer's: under the Commit discipline the SingleVersion keys are the commit publish's, and not recorded.</param>
+    internal void CaptureFirstWrite(int clusterChunkId, int slotIndex, EntityId entityId, byte* primaryBase, byte* transientBase,
+        CommitDiscipline discipline)
     {
+        if (SvShadowBitmap != null)
+        {
+            CaptureFirstWriteTwoMarks(clusterChunkId, slotIndex, entityId, primaryBase, transientBase, discipline);
+            return;
+        }
+
         var entityIndex = clusterChunkId * 64 + slotIndex;
         var shadow = ClusterShadowBitmap;
         if (shadow.Test(entityIndex))
         {
             return;
         }
+
+        var skipMask = (ushort)~FenceIndexedSlotMask;
 
         // A pure-Transient archetype has no second base: the primary one IS the Transient segment's.
         transientBase = transientBase != null ? transientBase : primaryBase;
@@ -465,35 +483,89 @@ internal sealed unsafe partial class ArchetypeClusterState
         AppendIndexedKeys(TransientIndexSlots, entityIndex, entityId, skipMask, keys, n);
     }
 
+    // CaptureFirstWrite on an archetype with both marks: each home is read before its mark is set and recorded only by the writer that set it.
+    private void CaptureFirstWriteTwoMarks(int clusterChunkId, int slotIndex, EntityId entityId, byte* primaryBase, byte* transientBase,
+        CommitDiscipline discipline)
+    {
+        var entityIndex = clusterChunkId * 64 + slotIndex;
+        var needTransient = !ClusterShadowBitmap.Test(entityIndex);
+        var needSv = discipline == CommitDiscipline.TickFence && !SvShadowBitmap.Test(entityIndex);
+        if (!needTransient && !needSv)
+        {
+            return;
+        }
+
+        var skipMask = (ushort)~((needTransient ? TransientFenceIndexedSlotMask : 0) | (needSv ? SvFenceIndexedSlotMask : 0));
+        transientBase = transientBase != null ? transientBase : primaryBase;
+        var keys = stackalloc KeyBytes8[Math.Max(1, FenceIndexedFieldCount)];
+        var svKeys = ReadIndexedKeys(IndexSlots, primaryBase, slotIndex, skipMask, keys, 0);
+        ReadIndexedKeys(TransientIndexSlots, transientBase, slotIndex, skipMask, keys, svKeys);
+        // The SingleVersion mark first: a set one implies the Transient one (FenceRecordedSlots reads the Transient one first), and both precede the store.
+        if (needSv && !SvShadowBitmap.TestAndSet(entityIndex))
+        {
+            AppendIndexedKeys(IndexSlots, entityIndex, entityId, skipMask, keys, 0);
+        }
+
+        if (needTransient && !ClusterShadowBitmap.TestAndSet(entityIndex))
+        {
+            AppendIndexedKeys(TransientIndexSlots, entityIndex, entityId, skipMask, keys, svKeys);
+        }
+    }
+
+    /// <summary>
+    /// The slots whose keys the fence holds a record of for the entity at <paramref name="entityIndex"/> this tick: what a destroy leaves to the fence, and
+    /// removes the complement of itself (IX-06). 0 for an entity no capture marked.
+    /// </summary>
+    internal ushort FenceRecordedSlots(int entityIndex)
+    {
+        var shadow = ClusterShadowBitmap;
+        if (shadow == null || !shadow.Test(entityIndex))
+        {
+            return 0;
+        }
+
+        var sv = SvShadowBitmap;
+        return sv == null ? FenceIndexedSlotMask : (ushort)(TransientFenceIndexedSlotMask | (sv.Test(entityIndex) ? SvFenceIndexedSlotMask : 0));
+    }
+
+    /// <summary>Whether a TickFence writer recorded the SingleVersion keys of the entity at <paramref name="entityIndex"/> this tick: the tree then holds
+    /// those, not HEAD's, and a Commit publish leaves the entity's move to the fence (#1339).</summary>
+    internal bool SvKeysRecorded(int entityIndex) => (SvShadowBitmap ?? ClusterShadowBitmap)?.Test(entityIndex) ?? false;
+
     /// <summary>
     /// <see cref="CaptureFirstWrite"/> for every slot of <paramref name="slots"/> in one cluster (#1346): the keys of the entities not yet recorded this
     /// tick are read, then one <see cref="DirtyBitmap.TestAndSetWord"/> publishes their bits, and only the entities whose bit it set are appended — one
     /// reservation per field for the run. Per bit the rule is <see cref="CaptureFirstWrite"/>'s: read before marked, recorded only by the marker.
     /// </summary>
-    internal void CaptureFirstWrites(int clusterChunkId, ulong slots, byte* primaryBase, byte* transientBase, ushort skipMask)
+    internal void CaptureFirstWrites(int clusterChunkId, ulong slots, byte* primaryBase, byte* transientBase, CommitDiscipline discipline)
     {
         var shadow = ClusterShadowBitmap;
+        var sv = SvShadowBitmap;
         var need = slots & ~shadow.ReadWord(clusterChunkId);
-        if (need == 0)
+        var needSv = sv != null && discipline == CommitDiscipline.TickFence ? slots & ~sv.ReadWord(clusterChunkId) : 0;
+        if ((need | needSv) == 0)
         {
             return;
         }
 
         var perEntity = Math.Max(1, FenceIndexedFieldCount);
-        var count = BitOperations.PopCount(need);
-        if (count * perEntity > BatchedCaptureKeyBudget)
+        var count = BitOperations.PopCount(need | needSv);
+        // Batched when each entity needs the same homes: on two marks, entities missing only one of them (a Commit write marked the Transient one) are
+        // recorded one at a time, as is a run whose key buffer would not fit the stack budget.
+        if (count * perEntity > BatchedCaptureKeyBudget || (needSv != 0 && needSv != need))
         {
-            // An archetype with many indexed fields: the key buffer would not fit the stack budget, so the run is recorded one entity at a time.
-            for (var rest = need; rest != 0; rest &= rest - 1)
+            for (var rest = need | needSv; rest != 0; rest &= rest - 1)
             {
                 var i = BitOperations.TrailingZeroCount(rest);
                 CaptureFirstWrite(clusterChunkId, i, EntityId.FromRaw(*(long*)(primaryBase + Layout.EntityIdsOffset + i * 8)), primaryBase, transientBase,
-                    skipMask);
+                    discipline);
             }
 
             return;
         }
 
+        // One mark: every fence-indexed slot. Two marks: the Transient slots, and the SingleVersion ones when a TickFence writer records them too.
+        var skipMask = (ushort)~(sv == null ? FenceIndexedSlotMask : TransientFenceIndexedSlotMask | (needSv != 0 ? SvFenceIndexedSlotMask : 0));
         transientBase = transientBase != null ? transientBase : primaryBase;
         var keys = stackalloc KeyBytes8[count * perEntity];   // entity-major: entity e's keys at [e * perEntity, ...)
         var e = 0;
@@ -504,13 +576,20 @@ internal sealed unsafe partial class ArchetypeClusterState
             ReadIndexedKeys(TransientIndexSlots, transientBase, i, skipMask, keys + e * perEntity, n);
         }
 
+        // On two marks the SingleVersion one first, as CaptureFirstWriteTwoMarks sets it.
+        var wonSv = needSv != 0 ? needSv & ~sv.TestAndSetWord(clusterChunkId, needSv) : 0;
         var won = need & ~shadow.TestAndSetWord(clusterChunkId, need);
-        if (won == 0)
+        if (sv == null)
+        {
+            wonSv = won;   // one mark covers both homes
+        }
+
+        if ((won | wonSv) == 0)
         {
             return;   // other writers recorded every one of them first
         }
 
-        var f = AppendIndexedKeyRuns(IndexSlots, clusterChunkId, need, won, primaryBase, skipMask, keys, perEntity, 0);
+        var f = AppendIndexedKeyRuns(IndexSlots, clusterChunkId, need, wonSv, primaryBase, skipMask, keys, perEntity, 0);
         AppendIndexedKeyRuns(TransientIndexSlots, clusterChunkId, need, won, primaryBase, skipMask, keys, perEntity, f);
     }
 
@@ -2804,8 +2883,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal ClusterCollectionSlot[] CollectionSlots;
 
-    /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>.</summary>
+    /// <summary>Shadow guard bitmap. Guards first-write-per-tick shadow capture. Same index semantics as <see cref="ClusterDirtyBitmap"/>. On an archetype
+    /// with <see cref="SvShadowBitmap"/>, it says the Transient keys are recorded; on any other, every fence-indexed key.</summary>
     public DirtyBitmap ClusterShadowBitmap;
+
+    /// <summary>The second mark (#1339): the entity's SingleVersion keys are recorded, by a TickFence writer. Only on an archetype indexing both a
+    /// SingleVersion and a Transient slot, null otherwise. Set only where <see cref="ClusterShadowBitmap"/> is also set, and cleared with it.</summary>
+    internal DirtyBitmap SvShadowBitmap;
+
+    /// <summary>The SingleVersion slots of <see cref="FenceIndexedSlotMask"/> (the <see cref="IndexSlots"/> home).</summary>
+    internal ushort SvFenceIndexedSlotMask;
+
+    /// <summary>The Transient slots of <see cref="FenceIndexedSlotMask"/> (the <see cref="TransientIndexSlots"/> home).</summary>
+    internal ushort TransientFenceIndexedSlotMask;
 
     /// <summary>
     /// The component slots whose indexed fields the tick fence maintains under some discipline: every SingleVersion and Transient slot with an
@@ -10896,25 +10986,29 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // The slots the fence maintains (#1187): the indexed SingleVersion and Transient ones. Versioned slots share IndexSlots, but their index moves
         // at commit.
-        ushort fenceIndexed = 0;
+        ushort svIndexed = 0;
+        ushort transientIndexed = 0;
         var fenceIndexedFields = 0;
         for (var s = 0; s < IndexSlots.Length; s++)
         {
             if (slotToTable[IndexSlots[s].Slot].StorageMode == StorageMode.SingleVersion)
             {
-                fenceIndexed |= (ushort)(1 << IndexSlots[s].Slot);
+                svIndexed |= (ushort)(1 << IndexSlots[s].Slot);
                 fenceIndexedFields += IndexSlots[s].Fields.Length;
             }
         }
 
         for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
         {
-            fenceIndexed |= (ushort)(1 << TransientIndexSlots[s].Slot);
+            transientIndexed |= (ushort)(1 << TransientIndexSlots[s].Slot);
             fenceIndexedFields += TransientIndexSlots[s].Fields.Length;
         }
 
-        FenceIndexedSlotMask = fenceIndexed;
+        SvFenceIndexedSlotMask = svIndexed;
+        TransientFenceIndexedSlotMask = transientIndexed;
+        FenceIndexedSlotMask = (ushort)(svIndexed | transientIndexed);
         FenceIndexedFieldCount = fenceIndexedFields;
+        SvShadowBitmap = svIndexed != 0 && transientIndexed != 0 ? new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64)) : null;
 
         // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against. Persistent slots only: the migration path that produces the
         // staged entries writes IndexSlots and nothing else (DatabaseEngine.ClusterMigration.cs, the `hasIdxAccessor && IndexSlots != null` block).

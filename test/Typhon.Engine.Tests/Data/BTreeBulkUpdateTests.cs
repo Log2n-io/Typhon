@@ -268,6 +268,90 @@ public class BTreeBulkUpdateTests
         });
     }
 
+    /// <summary>
+    /// #1348: an entry carrying the value it expects applies only where its key holds that value — the migration's repoint names the migrant's old location,
+    /// and a key the tree holds for another entity is left alone. Every applier: the int (L32) and long (L64) SIMD paths, dense (merge) and sparse
+    /// (search), and the base per-entry loop (a short-keyed L16 tree).
+    /// </summary>
+    [TestCase(typeof(int), true)]
+    [TestCase(typeof(int), false)]
+    [TestCase(typeof(long), true)]
+    [TestCase(typeof(long), false)]
+    [TestCase(typeof(short), true)]
+    [TestCase(typeof(short), false)]
+    [CancelAfter(15_000)]
+    public unsafe void UpdateValues_AnEntryExpectingAnotherValue_IsSkipped(Type keyType, bool dense)
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var chunkSize = keyType == typeof(int) ? sizeof(Index32Chunk) : keyType == typeof(long) ? sizeof(Index64Chunk) : sizeof(Index16Chunk);
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, chunkSize);
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                if (keyType == typeof(int))
+                {
+                    Check(new IntSingleBTree<PersistentStore>(segment), k => k, dense, ref accessor);
+                }
+                else if (keyType == typeof(long))
+                {
+                    Check(new LongSingleBTree<PersistentStore>(segment), k => k, dense, ref accessor);
+                }
+                else
+                {
+                    Check(new ShortSingleBTree<PersistentStore>(segment), k => (short)k, dense, ref accessor);
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+
+        // Keys 10, 20, ... 2 000 hold 1 .. 200. Dense: eight consecutive keys of one leaf. Sparse: eight keys far apart. Even entries expect the value the
+        // key holds and apply; odd ones expect another and are skipped. One more expects nothing and applies whatever the key holds.
+        static void Check<TKey>(BTree<TKey, PersistentStore> tree, Func<int, TKey> key, bool dense, ref ChunkAccessor<PersistentStore> accessor)
+            where TKey : unmanaged
+        {
+            for (var i = 1; i <= 200; i++)
+            {
+                tree.Add(key(i * 10), i, ref accessor);
+            }
+
+            var batch = new List<BTreeValueUpdate<TKey>>();
+            for (var e = 0; e < 8; e++)
+            {
+                var k = dense ? 50 + e : 10 + e * 24;
+                batch.Add(new BTreeValueUpdate<TKey>(key(k * 10), 1_000 + k, e % 2 == 0 ? k : k + 1));
+            }
+
+            // ABA: two entries for one key, as two migrants of it leave in one fence. The key holds the first's old location, which moves to the slot the
+            // second left; the second expects that slot and must not apply, since the key did not hold it when the batch reached it.
+            var aba = dense ? 58 : 190;
+            batch.Add(new BTreeValueUpdate<TKey>(key(aba * 10), 7_000, aba));
+            batch.Add(new BTreeValueUpdate<TKey>(key(aba * 10), 8_000, 7_000));
+            batch.Add(new BTreeValueUpdate<TKey>(key(dense ? 590 : 2_000), 9_999));
+            var applied = tree.UpdateValues(batch.ToArray(), ref accessor, out _);
+
+            Assert.That(applied, Is.EqualTo(6), "four entries expecting what their key holds, the key holder's ABA entry, one expecting nothing");
+            Assert.That(tree.TryGet(key(aba * 10), ref accessor).Value, Is.EqualTo(7_000), "the ABA key keeps its holder's new location");
+            for (var e = 0; e < 8; e++)
+            {
+                var k = dense ? 50 + e : 10 + e * 24;
+                Assert.That(tree.TryGet(key(k * 10), ref accessor).Value, Is.EqualTo(e % 2 == 0 ? 1_000 + k : k), $"key {k * 10}");
+            }
+
+            Assert.That(tree.TryGet(key(dense ? 590 : 2_000), ref accessor).Value, Is.EqualTo(9_999), "the entry expecting nothing");
+        }
+    }
+
     [Test]
     [CancelAfter(15_000)]
     public void UpdateValues_UniqueBatchRepeatingAKey_AppliesTheLastValue()

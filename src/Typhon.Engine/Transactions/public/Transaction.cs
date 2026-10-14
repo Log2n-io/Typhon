@@ -2962,8 +2962,11 @@ public unsafe partial class Transaction : EntityAccessor
         int compSize = layout.ComponentSize(compSlot);
         byte* headPtr = clusterBase + layout.ComponentOffset(compSlot) + slotIndex * compSize;
 
-        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the HEAD slot, new key in the staged slot (CM-05/AC-11).
-        if (clusterState.IndexSlots != null)
+        // Exact-index reconcile BEFORE the HEAD memcpy: old key still lives in the HEAD slot, new key in the staged slot (CM-05/AC-11). Not for an entity
+        // whose SingleVersion keys a TickFence writer recorded this tick: the tree holds those, not HEAD's, and the fence moves the entry from there to
+        // whatever HEAD holds then (#1339). A move from HEAD here would miss the tree's key, and the fence's from the recorded one would find the entry
+        // already moved. The entity is in the TickFence window already (QFENCE).
+        if (clusterState.IndexSlots != null && !clusterState.SvKeysRecorded(clusterLocation))
         {
             ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
         }

@@ -868,6 +868,10 @@ internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStor
 
         public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor);
+        public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor, out bool emptiedChunk)
+            => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor, out emptiedChunk);
+        public override void CompactBuffer(int bufferId, int maxUnlinks, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.CompactEmptyChunks(bufferId, maxUnlinks, ref bufferAccessor);
         public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.UpdateElement(bufferId, elementId, oldValue, newValue, ref bufferAccessor);
         public override int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)

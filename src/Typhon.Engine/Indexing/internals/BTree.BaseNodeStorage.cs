@@ -78,6 +78,18 @@ internal abstract partial class BTree<TKey, TStore>
         public abstract VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId);
         public abstract int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor);
 
+        /// <summary><see cref="RemoveFromBuffer(int, int, int, ref ChunkAccessor{TStore})"/>, also saying whether the removal emptied a chunk the buffer
+        /// could give back (<see cref="CompactBuffer"/>, #1343).</summary>
+        public virtual int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor, out bool emptiedChunk)
+        {
+            emptiedChunk = false;
+            return RemoveFromBuffer(bufferId, elementId, value, ref bufferAccessor);
+        }
+
+        /// <summary>Gives back the empty chunks of an AllowMultiple key's buffer (<c>VariableSizedBufferSegment.CompactEmptyChunks</c>). Only where no
+        /// reader walks the buffer: the tick fence (EW-01). Nothing for a unique index.</summary>
+        public virtual void CompactBuffer(int bufferId, int maxUnlinks, ref ChunkAccessor<TStore> bufferAccessor) { }
+
         /// <summary>
         /// How many elements an AllowMultiple key's buffer holds right now; 0 for a unique index, which has no buffers.
         /// </summary>
@@ -105,7 +117,7 @@ internal abstract partial class BTree<TKey, TStore>
         /// </summary>
         /// <remarks>
         /// Takes <paramref name="oldValue"/> because elements are addressed BY VALUE within their chunk, not by position — the same reason
-        /// <see cref="RemoveFromBuffer"/> takes the value it is removing. Nothing shifts and no count changes, so <paramref name="elementId"/> and every
+        /// <see cref="RemoveFromBuffer(int, int, int, ref ChunkAccessor{TStore})"/> takes the value it is removing. Nothing shifts and no count changes, so <paramref name="elementId"/> and every
         /// sibling's position survive the update (#872 AC-4.3).
         /// </remarks>
         public abstract bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor);
@@ -189,12 +201,25 @@ internal abstract partial class BTree<TKey, TStore>
             ref ChunkAccessor<TStore> accessor)
         {
             var applied = 0;
+            var runIndex = -1;   // the value a key held when the sub-batch reached it, as in the overrides (#1348)
+            var runHeld = 0;
             for (var i = 0; i < batch.Length; i++)
             {
                 var index = BinarySearch(node, batch[i].Key, comparer, ref accessor);
                 if (index < 0)
                 {
                     continue;
+                }
+
+                if (index != runIndex)
+                {
+                    runIndex = index;
+                    runHeld = GetItem(node, index, true, ref accessor).Value;
+                }
+
+                if (!batch[i].AppliesOver(runHeld))
+                {
+                    continue;   // the key names another entity (#1348)
                 }
 
                 SetValueOnly(node, index, batch[i].NewValue, ref accessor);

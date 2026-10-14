@@ -307,8 +307,8 @@ class ClusterRefIndexedWriteTests : TestBase<ClusterRefIndexedWriteTests>
     }
 
     /// <summary>
-    /// A Transient indexed component, under either discipline: its index is the fence's under both (FenceMaintainedSlotsUnder), so Set records it even
-    /// in a Commit-discipline transaction, which records none of the SingleVersion slots.
+    /// A Transient indexed component, under either discipline: its index is the fence's under both, so Set records it even in a Commit-discipline
+    /// transaction, which stages its SingleVersion writes.
     /// </summary>
     [TestCase(CommitDiscipline.TickFence)]
     [TestCase(CommitDiscipline.Commit)]

@@ -628,6 +628,58 @@ public class BTreeApplyMovesTests
     }
 
     /// <summary>
+    /// #1343: values leaving a key empty chunks of its buffer, and the batch gives them back, so moving the same values from one key to another and back
+    /// does not grow the segment. Before, an emptied chunk stayed linked until a reader walked the buffer: every round trip appended into new chunks.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IX-08")]
+    public void Multi_ValuesLeavingAKey_GiveItsEmptiedChunksBack()
+    {
+        WithSegment(static s => new IntMultipleBTree<PersistentStore>(s),
+            static (IntMultipleBTree<PersistentStore> tree, ChunkBasedSegment<PersistentStore> segment, EpochManager _,
+                ref ChunkAccessor<PersistentStore> accessor) =>
+            {
+                const int Values = 3_000;
+                const int Stay = 100;   // values that never leave key 1: its buffer, and its first chunks, outlive every trip
+                var ids = new int[Values];
+                for (var v = 0; v < Values; v++)
+                {
+                    ids[v] = tree.Add(1, v, ref accessor);
+                }
+
+                tree.Add(2, -1, ref accessor);   // key 2 exists: its buffer receives, and gives back on the return
+                var chunksPerTrip = new List<int>();
+                for (var trip = 0; trip < 4; trip++)
+                {
+                    var (from, to) = trip % 2 == 0 ? (1, 2) : (2, 1);
+                    var moves = new IndexMove[Values - Stay];
+                    for (var m = 0; m < moves.Length; m++)
+                    {
+                        var v = Stay + m;
+                        moves[m] = Move(from, to, v, ids[v]);
+                    }
+
+                    var outcome = tree.ApplyMoves(moves, ref accessor);
+                    Assert.That(outcome.Misses, Is.Zero, $"trip {trip}");
+                    for (var m = 0; m < moves.Length; m++)
+                    {
+                        ids[Stay + m] = moves[m].ElementId;
+                    }
+
+                    chunksPerTrip.Add(segment.AllocatedChunkCount);
+                }
+
+                tree.CheckConsistency(ref accessor);
+                var contents = MultiContents(tree, 0, 3);
+                Assert.That(contents[1], Is.EquivalentTo(Enumerable.Range(0, Values)), "key 1 holds every value again");
+                Assert.That(contents[2], Is.EquivalentTo(new[] { -1 }), "key 2 holds its own");
+                Assert.That(chunksPerTrip[3], Is.LessThanOrEqualTo(chunksPerTrip[1]),
+                    $"a round trip grew the segment: allocated chunks after each trip {string.Join(", ", chunksPerTrip)}");
+            });
+    }
+
+    /// <summary>
     /// AllowMultiple, unbalanced: values leave a key with no arrivals (its last one empties it), others arrive at keys that do not exist yet, and some join
     /// keys that receive more than leave. The structural part takes the single-entry path; the contents are what a loop of moves would leave.
     /// </summary>

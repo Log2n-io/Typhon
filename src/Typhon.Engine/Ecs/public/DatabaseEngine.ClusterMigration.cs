@@ -1217,7 +1217,9 @@ public partial class DatabaseEngine
                             }
                             else
                             {
-                                field.Index.WriteBulkEntry(dest, fieldPtr, newClusterLocation);
+                                // Only where the tree names this migrant (#1348): the key its data holds may be another entity's in the tree, a unique
+                                // collision's holder when this migrant is the loser.
+                                field.Index.WriteBulkEntry(dest, fieldPtr, newClusterLocation, oldClusterLocation);
                             }
 
                             // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.
@@ -1599,6 +1601,7 @@ public partial class DatabaseEngine
         if (resetBuffers)
         {
             clusterState.ClusterShadowBitmap.Clear();
+            clusterState.SvShadowBitmap?.Clear();
             ThrowPendingIndexCollision(clusterState);   // the drain is complete and its buffers reset (#1342)
         }
 

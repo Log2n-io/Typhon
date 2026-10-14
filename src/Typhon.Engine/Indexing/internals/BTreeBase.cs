@@ -111,9 +111,10 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// <summary>Writes one unique-index staged entry into <paramref name="dest"/>, which must be exactly <see cref="BulkEntryStride"/> bytes.</summary>
     /// <remarks>
     /// The destination is a span, not a pointer: it addresses a managed staging array that grows, and a pointer taken before a grow would address the old
-    /// one. The KEY stays a raw address because it comes from cluster memory the caller already holds.
+    /// one. The KEY stays a raw address because it comes from cluster memory the caller already holds. The entry applies only where the key holds
+    /// <paramref name="expectedValue"/> (#1348).
     /// </remarks>
-    public abstract unsafe void WriteBulkEntry(Span<byte> dest, void* keyAddr, int newValue);
+    public abstract unsafe void WriteBulkEntry(Span<byte> dest, void* keyAddr, int newValue, int expectedValue);
 
     /// <summary>Writes one <c>AllowMultiple</c> staged entry at <paramref name="dest"/>.</summary>
     /// <remarks>

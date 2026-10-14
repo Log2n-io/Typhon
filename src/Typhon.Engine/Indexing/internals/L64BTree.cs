@@ -300,6 +300,10 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
             var applied = 0;
             var dirtied = false;
+            // The value a key held when the sub-batch reached it: an entry's expected value is tested against that, not against what an earlier entry
+            // for the same key just wrote (#1348 — two migrants of one key, the second expecting the slot the first moved into).
+            var runPhys = -1;
+            var runHeld = 0;
 
             fixed (long* keys = chunk.Keys)
             {
@@ -332,6 +336,17 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
                         }
 
                         // The cursor is NOT advanced past a match: a batch may carry the same key twice, and both entries address this slot.
+                        if (phys != runPhys)
+                        {
+                            runPhys = phys;
+                            runHeld = chunk.Values[phys];
+                        }
+
+                        if (!batch[i].AppliesOver(runHeld))
+                        {
+                            continue;   // the key names another entity (#1348)
+                        }
+
                         if (!dirtied)
                         {
                             accessor.PreDirtyChunk(node.ChunkId);
@@ -354,13 +369,25 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
                         continue;
                     }
 
+                    var phys = Index64Chunk.Adjust(start + index);
+                    if (phys != runPhys)
+                    {
+                        runPhys = phys;
+                        runHeld = chunk.Values[phys];
+                    }
+
+                    if (!batch[i].AppliesOver(runHeld))
+                    {
+                        continue;
+                    }
+
                     if (!dirtied)
                     {
                         accessor.PreDirtyChunk(node.ChunkId);
                         dirtied = true;
                     }
 
-                    Volatile.Write(ref chunk.Values[Index64Chunk.Adjust(start + index)], batch[i].NewValue);
+                    Volatile.Write(ref chunk.Values[phys], batch[i].NewValue);
                     applied++;
                 }
             }
@@ -1078,6 +1105,10 @@ internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TSt
 
         public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor);
+        public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor, out bool emptiedChunk)
+            => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor, out emptiedChunk);
+        public override void CompactBuffer(int bufferId, int maxUnlinks, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.CompactEmptyChunks(bufferId, maxUnlinks, ref bufferAccessor);
         public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.UpdateElement(bufferId, elementId, oldValue, newValue, ref bufferAccessor);
 

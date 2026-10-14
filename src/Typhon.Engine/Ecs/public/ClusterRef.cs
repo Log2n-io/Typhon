@@ -471,7 +471,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
             if (changed != 0)
             {
-                _state.CaptureFirstWrites(_chunkId, changed, _base, _transientBase, (ushort)~_meta.FenceMaintainedSlotsUnder(discipline));
+                _state.CaptureFirstWrites(_chunkId, changed, _base, _transientBase, discipline);
             }
         }
 
@@ -495,7 +495,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         if ((_meta.TransientSlotMask & (1 << slot)) == 0)
         {
             // A SingleVersion write under the Commit discipline is staged and its index reconciled at commit (CM-01); an in-place store would be seen by
-            // neither the commit, which reads the staged copy, nor the fence, which records no key for a commit-maintained slot (IX-06).
+            // neither the commit, which reads the staged copy, nor the fence, to which a Commit writer records no SingleVersion key (IX-06).
             if (discipline == CommitDiscipline.Commit)
             {
                 ThrowHelper.ThrowInvalidOp($"An in-place cluster write to SingleVersion component slot {slot} under the Commit discipline: "
@@ -509,8 +509,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             && (newValue == null
                 || _state.IndexedKeysDiffer(slot, ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * _layout.ComponentSize(slot), newValue)))
         {
-            var skipMask = (ushort)~_meta.FenceMaintainedSlotsUnder(discipline);
-            _state.CaptureFirstWrite(_chunkId, slotIndex, GetEntityId(slotIndex), _base, _transientBase, skipMask);
+            _state.CaptureFirstWrite(_chunkId, slotIndex, GetEntityId(slotIndex), _base, _transientBase, discipline);
         }
 
         _state.SetDirty(_chunkId, slotIndex, slot);
