@@ -138,6 +138,7 @@ describe('archetype identity', () => {
       viewportHeight: 800,
       selectedNetId: 0,
       ground: FLAT_GROUND,
+      predicted: null,
     });
 
     expect(packer.nearCount + packer.farCount).toBe(1);
@@ -185,6 +186,7 @@ describe('archetype identity', () => {
         viewportHeight: 800,
         selectedNetId: 0,
         ground: FLAT_GROUND,
+        predicted: null,
       });
     }).not.toThrow();
     expect(packer.nearCount + packer.farCount).toBe(1);

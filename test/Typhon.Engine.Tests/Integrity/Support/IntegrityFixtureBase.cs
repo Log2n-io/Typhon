@@ -58,7 +58,7 @@ internal abstract class IntegrityFixtureBase
     [SetUp]
     public void SetUpFixture()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", GetType().Name, CurrentDatabaseName);
+        _root = Path.Combine(TestStorage.Root, GetType().Name, CurrentDatabaseName);
         Directory.CreateDirectory(DbDir);
         // The WAL goes INSIDE the bundle, which is where a real one lives — `typhon ui` and the engine both produce
         // `<name>.typhon/{data,wal/}`. Putting it beside the bundle instead (as the older integrity fixture does) leaves

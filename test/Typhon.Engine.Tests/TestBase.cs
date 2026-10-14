@@ -377,8 +377,9 @@ abstract class TestBase<T> : TestBase
         // that is unrepresentative and slow. Fixtures that deliberately exercise a tiny cache / eviction set an explicit [Property("CacheSize", ...)].
         var dcs = o ? Convert.ToInt64(TestContext.CurrentContext.Test.Properties.Get("CacheSize")) : 8L * 1024 * 1024;
 
-        // Create a per-fixture temp directory to spread I/O across directories
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", typeof(T).Name);
+        // Per-fixture directory to spread I/O, inside a per-RUN root: the fixture name alone separates fixtures within one test host and nothing at all
+        // between two of them, which is how concurrent worktrees and shard.py's eight processes collided on one database. See TestStorage.
+        _testDatabaseDir = Path.Combine(TestStorage.Root, typeof(T).Name);
         Directory.CreateDirectory(_testDatabaseDir);
 
         var serviceCollection = new ServiceCollection();

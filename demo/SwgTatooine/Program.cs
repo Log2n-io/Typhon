@@ -35,12 +35,28 @@ internal static class Program
             return 0;
         }
 
+        // A profiler flag cannot take effect in this process, so it is refused rather than ignored (W1). Checked here — after --help, before any work — because
+        // --help must still list the flags, and because a refusal is only useful before a world has been built. The gate's state is deliberately NOT consulted:
+        // see ProfilerStatus.MustRefuse for why "it is already on" was the worse silence of the two.
+        var profiler = ProfilerArgs.From(config);
+        if (ProfilerStatus.MustRefuse(profiler))
+        {
+            Console.Error.WriteLine(ProfilerArgs.ExplainRefusal(profiler));
+            return 2;
+        }
+
+        // Said in BOTH modes. A sweep is forty-five measured arms, which makes it the mode most damaged by an inherited TYPHON__PROFILER__LIVE and, until this
+        // line existed, the only mode that never reported one. Built once and printed twice rather than hoisted above the banner, because a status line above
+        // the program's own title reads as output from something else.
+        var profilerLine = $"  {ProfilerStatus.Describe(profiler)}";
         if (config.RunSweep)
         {
+            Console.WriteLine(profilerLine);
             return Sweep.Run(config);
         }
 
         Console.WriteLine($"── SWG Tatooine — {config.Label} ──────────────");
+        Console.WriteLine(profilerLine);
 
         // The whole measured run, guarded (P-3). A fault anywhere in it — the world build, a tick, the summary, the report — leaves an artefact beside the
         // database instead of a console line on a box nobody is watching. An ABORTED TICK is caught inside the runtime and writes its own artefact from the
@@ -91,7 +107,10 @@ internal static class Program
         // end.
         if (config.ServePort > 0)
         {
-            sim.ServeAsync(config.ServePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
+            // --client-dir first: DefaultClientRoot walks up from the binary for demo/SwgTatooine.Client/dist, which is a dev tree's layout and
+            // no deployment's.
+            var clientRoot = config.ClientDirectory ?? TatooineSim.DefaultClientRoot(AppContext.BaseDirectory);
+            sim.ServeAsync(config.ServePort, clientRoot, config.BindAddress, config.Origins).GetAwaiter().GetResult();
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");

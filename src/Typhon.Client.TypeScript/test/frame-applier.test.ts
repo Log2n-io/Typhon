@@ -1000,12 +1000,31 @@ describe.each([
     expect(Array.from(out.subarray(0, 4))).toEqual([k + 0.5, -(k + 0.5) / 2, 1, -0.5]);
   });
 
-  it('extrapolates the `linear` segment in force at the largest render delay', () => {
+  /**
+   * The ring reaches back a whole render delay for `linear` too, and the last tick before the next origin crosses to it.
+   *
+   * This fixture's Drone takes a segment EVERY tick, advancing one unit while declaring a velocity of 0.5 — so the pair
+   * render time falls between is one tick apart, where the crossing is the whole segment and the answer is the two origins'
+   * midpoint: `k + 0.5` with the chord velocity 1, not `k + 0.25` with the stale 0.5. The rule is not "the origins win
+   * between any two segments" — over a longer gap the velocity carries every tick but the last, which is what
+   * `motion-rule.test.ts` pins and what `MotionEvaluatorTests` covers with an eight-tick gap.
+   */
+  it('reads the `linear` segment in force at the largest render delay from its origins', () => {
     const applier = run();
     const store = applier.world.archetypeStore(drone.idx);
     const out = new Float64Array(MAX_MOTION_STRIDE);
     const k = last - delay - first;
     evaluateSlot(store, slot(applier, 2), last - delay, 0.5, out, 0);
-    expect(Array.from(out)).toEqual([k + 0.25, 0, 0, 0.5, 0, 0]);
+    expect(Array.from(out)).toEqual([k + 0.5, 0, 0, 1, 0, 0]);
+  });
+
+  /** Past the newest segment there is nothing to interpolate toward, so the velocity is all there is: dead reckoning. */
+  it('still extrapolates the newest `linear` segment, which is what the velocity is for', () => {
+    const applier = run();
+    const store = applier.world.archetypeStore(drone.idx);
+    const out = new Float64Array(MAX_MOTION_STRIDE);
+    const k = last - first;
+    evaluateSlot(store, slot(applier, 2), last + 2, 0.5, out, 0);
+    expect(Array.from(out)).toEqual([k + 0.5 * 2.5, 0, 0, 0.5, 0, 0]);
   });
 });

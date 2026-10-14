@@ -1,4 +1,4 @@
-# Runtime Scheduling Rules
+﻿# Runtime Scheduling Rules
 
 | Field | Value |
 |-------|-------|
@@ -385,16 +385,84 @@ The interval in which the tick fence owns the structures it maintains. Everythin
 is allowed to do cheaply — and steps 4-7 of `design/Spatial/vdb-cell-grid-and-migration.md` are built on it —
 descends from this one property.
 
-### EW-01: The tick fence runs with no concurrent mutation of the structures it maintains `[fatal]` `[silent]`
-  invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating (cluster B+Trees ∪ EntityMap ∪
-            per-cell spatial index ∪ ClusterCellMap ∪ ClusterAabbs)
+### EW-02: What a thread outside the DAG may touch `[fatal]` `[silent]`
+  invariant a thread that is not executing a system may, at any time and with no coordination:
+              - READ anything (pinned: ExclusiveWindowTests.ForeignThreadREADINGInsideTheWindow_IsNotAViolation)
+              - read and write StorageMode.Versioned components of a NON-SPATIAL archetype, including spawning and
+                destroying such entities and writing their [Index]ed fields
+            and must NOT, ever:
+              - write a StorageMode.SingleVersion or StorageMode.Transient component
+              - write any component of an archetype that has a [SpatialIndex] field
+              - call DatabaseEngine.WriteTickFence
+  rationale: Versioned is MVCC and the structures such a write touches are all concurrent by construction — the
+            revision chain, the EntityMap under its bucket write latch, a B+Tree under OLC, the WAL ring under
+            claim/publish, UowRegistry under Interlocked, NextEntityKey under Interlocked. This is the engine's
+            founding guarantee and it holds. Being BLUNT about the other two is the point of this rule: SV and
+            Transient in-place writes and anything spatial are NOT thread-safe outside the DAG, by design, because
+            that is where the fence's fast paths live.
+  never an off-tick SV or Transient in-place write. It sets ClusterShadowBitmap/ClusterDirtyBitmap bits while the
+        fence is draining and Clear()ing those same bitmaps, and DirtyBitmap.Clear is documented "Not thread-safe —
+        call only when no concurrent writers are active" (DirtyBitmap.cs:100). A lost bit means the index keeps the
+        pre-mutation key, or the write never reaches the WAL. SILENT: no detector covers this.
+  never an off-tick write to ClusterAabbs, ClusterCellMap, the per-cell spatial index, the cluster occupancy word,
+        AddToActiveList, FreeClusterHead, EnabledBits, NoteClusterBorn or the ZoneMapArray widen. The fence writes
+        these plainly and ClusterRef.WriteSpatial CASes ClusterAabbs from a user thread under a growth stamp, so the
+        window is the only thing ordering them. SILENT: no detector covers these either (see #1139).
+  caveat a transaction's Dispose can drain the ECS cleanup queue and call EntityMap.Remove
+        (DatabaseEngine.cs:1586), so even a READ-ONLY off-tick transaction mutates a guarded structure on the way
+        out. Harmless under EW-01 as now scoped, but it is why "reads are always safe" is true of the reads and not
+        of the transaction object.
+  scope: DatabaseEngineExtensions.CreateQuickTransaction, Transaction.Commit, EntityRefMut.ShadowClusterIndexedFields,
+         ClusterRef.WriteSpatial, DatabaseEngine.WriteTickFence
+  host_mode: unenforced for every clause. Transaction.AssertThreadAffinity exists but its body is
+        `if (CheckConfig.Enabled && ...)` and Enabled defaults FALSE with no runtime setter (CheckConfig.cs:62), so it
+        is dead code in Debug and Release alike unless TYPHON__CHECKS__ENABLED is set before start.
+  on_violation: silent data loss for the SV/Transient clause; silent structural corruption for the spatial clause.
+  verified: NOT COVERED — the Versioned-is-safe half is pinned by
+        ExclusiveWindowTests.ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine and by
+        ForeignThreadREADINGInsideTheWindow_IsNotAViolation. The two `never` clauses have no verifier and no detector;
+        that is what #1139 is for.
+
+### EW-01: The tick fence runs with no concurrent mutation of the structures it writes WITHOUT their protocol `[fatal]` `[silent]`
+  invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating a structure the fence is, at t, writing
+            through a path that has dropped that structure's latch or OLC validation. Concretely:
+              (a) a cluster B+Tree under a bulk VALUE REWRITE (UpdateValues -> RunBatch -> ApplyBatch)
+              (b) the EntityMap under a pre-sorted BULK BATCH (UpdateValuesBulk / InsertNewBulk)
+              (c) the per-cell spatial index, ClusterCellMap and ClusterAabbs, which the fence writes plainly
+                  throughout (no latch on any path)
   invariant under TyphonRuntime the window opens at Scheduler.TickEndCallback, so every system has completed;
             a system's own Transaction is committed and disposed in its epilogue before the tick can end
-  licences: within the window a writer of those structures may skip OLC version validation, the write latch,
-            the B-link right-walk and the epoch guard, and may use plain reads and plain counter increments on
-            disjoint partitions. This is the whole economic point of the window — roughly 15-20% on top of what
-            batching alone buys — and none of it is safe if the invariant does not hold.
-  never a side transaction that writes any of the structures above is committed while the window is open.
+  NOT_the_invariant: an ordinary latched mutation of a B+Tree or the EntityMap from another thread, while the
+            fence runs, is SAFE and always was — both run their full protocols (BTree.Insert/Remove take
+            SpinWriteLock + ValidateVersionLocked; RawValuePagedHashMap.ApplyBucketRun takes OlcLatch.TryWriteLock).
+            A StorageMode.Versioned, non-spatial entity written from an HTTP handler or an external worker touches
+            nothing else, and is concurrent by design. Stating this as a `never` is what the detector used to do and
+            it was a false positive on the engine's own guarantee -- see `verified:`.
+  licences: (a) and (b) skip OLC version validation, the write latch and the B-link right-walk; their safety comes
+            from slice boundaries snapped to leaf edges (FenceWorkItem.cs:35-36) and from the batch's bucket sort,
+            NOT from the window alone.
+            Detection gap (2026-10-05), stated rather than implied: the licence SPANS the serial prepare and the
+            parallel apply, but the detector is armed only across the apply. The boundaries are computed in
+            FenceExecSystem.PrepareArchetype (FenceExecSystem.cs:1054, tree.PartitionBulkEntries) and consumed much
+            later by DispatchItem (FenceExecSystem.cs:1091, ApplyBulkEntries -> UpdateValues -> RunBatch), which is
+            where EnterUnlatchedRewrite brackets. BTree._unlatchedRewriteDepth is therefore ZERO for the whole
+            prepare -> apply gap, so a foreign latched Add that splits a leaf in that gap relocates keys across a
+            boundary and NoteMutation says nothing. It is worse than undetected: ApplyBatch skips a routed-but-absent
+            key BECAUSE "under EW-01 no concurrent structural change can move it elsewhere"
+            (BTree.UpdateValues.cs:294-297), so the update is dropped with nothing raised. The pre-scoping detector
+            caught this case, because it armed every latched mutator for the whole window.
+            NOT fixed by narrowing further: spanning the bracket would mean a per-tree depth incremented on the
+            prepare thread and released after the last of W parallel slices, which is a cross-thread lifecycle in the
+            fence's hot path. It is a DETECTION gap and not a new hazard for a compliant application — EW-02 forbids
+            an off-tick thread from writing any component of an archetype with a spatial field, which is the only kind
+            of archetype whose index the fence bulk-rewrites. See `verified:` for what is and is not covered. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
+            ArchetypeClusterState.cs:9893-9900), and there the window is the ONLY thing ordering them.
+            Scope correction (2026-10-05): the epoch guard is NOT among the licences — fence workers take guards
+            (FenceExecSystem.cs:242,418,919,996) and the B+Tree / EntityMap mutators never took a per-operation one,
+            so there was never a per-op guard to shed. The "roughly 15-20%" figure is an ESTIMATE, not a
+            measurement: claude/design/Spatial/vdb-cell-grid-and-migration.md:474 says "Estimated ~15-20 %" and no
+            benchmark, trx or issue backs it. Both claims were carried here as fact and were not.
+  never a side transaction that writes a structure under (a), (b) or (c) is committed while the window is open.
         TickContext.CreateSideTransaction returns an ORDINARY transaction (TyphonRuntime.CreateSideTransactionInternal
         -> DatabaseEngine.CreateQuickTransaction), so it CAN write an indexed field and therefore mutate a B+Tree, and
         its caller owns Commit and Dispose — nothing joins it to the tick. One that touches none of those structures is
@@ -429,12 +497,31 @@ descends from this one property.
   verified: ExclusiveWindowTests.LiveWorkload_TheFenceNeverSeesAForeignWriter — a spawn / destroy / indexed-field
             rewrite workload over 6+ ticks asserting zero foreign writers, and asserting ObservedFenceMutation too
             so a fence that wrote no guarded structure fails as loudly as one that was raced. Mutant:
-            ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught.
-            The detector is ExclusiveWindow, an assertion at the MUTATION SITES: armed on the seven typed B+Tree
-            mutators and the EntityMap's five, ALWAYS COMPILED (the merge gate runs Release, so a
-            [Conditional("DEBUG")] guard is one the gate never executes), and scoped PER ENGINE off EpochManager
-            rather than to a process-wide static — under the parallel fixtures a global would let one engine's
-            fence indict another engine's legal write.
+            ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught, which now arms the condition with
+            BTree.EnterUnlatchedRewrite before expecting the throw. The complement is pinned by
+            ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine: window open, 64 latched inserts from a foreign
+            thread, zero violations.
+            The detector is ExclusiveWindow, an assertion at the MUTATION SITES: armed on NINE typed B+Tree mutators
+            and the EntityMap's SEVEN (the "seven and five" this rule claimed were stale), ALWAYS COMPILED (the merge
+            gate runs Release, so a [Conditional("DEBUG")] guard is one the gate never executes), and scoped PER
+            ENGINE off EpochManager rather than to a process-wide static — under the parallel fixtures a global would
+            let one engine's fence indict another engine's legal write.
+            The ENGINE's own arming is pinned by
+            ExclusiveWindowTests.TheProductionBulkPathArmsTheDetector — every other case here arms the scope from the
+            test, so deleting EnterUnlatchedRewrite from BTree.RunBatch left all six of them green while the detector
+            went permanently silent (measured 2026-10-05). That case drives the real UpdateValues path against a
+            hammering foreign writer and asserts the window's own violation counter, which nothing but the production
+            bracket can raise.
+            verified: NOT COVERED — the prepare -> apply gap described under `licences:`, and the `never` clause on a
+            side transaction below, which the per-structure scoping also stopped detecting: a side transaction
+            committed after its creating system returns now reports nothing unless the fence happens to be mid-bulk on
+            that exact structure. Both need a detector that spans the window per tree rather than per call.
+            EnterBulkBatch — the EntityMap half of the scoping — has no test in either direction.
+            Scoped per STRUCTURE since 2026-10-05: NoteMutation takes `unlatchedHere`, and a latched mutator passes
+            its own per-instance depth (BTree._unlatchedRewriteDepth, RawValuePagedHashMap._bulkBatchDepth). A
+            fence-thread mutation still sets ObservedFenceMutation unconditionally, so the anti-vacuity pairing is
+            unaffected; only the VIOLATION narrowed. Before that, the check was "is any fence running on this
+            engine", with no idea which structure the caller held — so it rejected every off-tick commit.
             Two cheaper proxies were tried in step 3 and rejected: TransactionChain.ActiveCount counts handles that
             exist rather than threads that are mutating, and reddens 21 tests that legitimately hold a
             committed-or-idle transaction across the fence — `using var tx = ...; tx.Commit();` before the scope
@@ -736,6 +823,88 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
   scope: TyphonRuntime.SelectDispatchClusters, TyphonRuntime._systemRunCount
   on_violation: clusters starved for the life of the process, silently
   verified: DispatchSelectionTests.TickDivisor2_CellAmortize2_EveryClusterVisited
+
+### DSEL-03: A system's integration step is its own revisit interval `[silent]` (issue #1293)
+  invariant AmortizedDeltaTime(S) = DeltaTime x EffectiveRateDivisor(S) x (amortizeApplied(S) ? CellAmortize(S) : 1), on EVERY
+            path that builds a TickContext for a system — the serial query, the parallel non-Versioned chunk, the parallel
+            Versioned chunk, and the chunked callback
+  invariant EffectiveRateDivisor is the spacing the SCHEDULER is enforcing this tick, not the declared TickDivisor alone: a run
+            must pass both rate gates, so under overload a Normal-priority system runs on the ticks divisible by TickDivisor
+            AND by ThrottledTickDivisor — their LCM. (divisor 2, throttled 3) runs every 6 ticks under load, not every 2
+  invariant the amortization factor counts only when the run's selection STRIDED: the bucketing lives on the tier-scoped path,
+            so a system whose EffectiveTier collapsed to All (no grid, no tier index) covers everything every run however it was
+            declared, and the step is then the rate divisor alone. Read from the run's own selection, like the realm stride
+  invariant the PRODUCT of the strides, not the larger: the rate divisors skip whole runs and cellAmortize skips clusters within
+            a run, so a cluster of a (divisor 2, amortize 3) system is revisited every 6 ticks and steps by 6 periods. DSEL-02
+            is what makes the product exact rather than an upper bound — the bucket is keyed on run count, so the divisor
+            cannot alias the rotation into an uneven revisit interval
+  invariant DeltaTime is NOT scaled: it stays the true inter-tick interval, because "how long since the last tick" has one
+            answer for every system whatever its rate (a timeout, a rate limit, telemetry)
+  never a divided system together with a change filter (refused at build, DSEL-01): a filter's dirty set is delivered once, so
+        the skipped ticks' changes are gone rather than deferred
+  note: ShouldRun and a reactive change-filter skip are NOT accounted for. They are the application's decision about one tick
+        rather than a declared rate, and the engine cannot attribute elapsed time to a condition it does not own.
+  scope: TyphonRuntime.AmortizedDeltaTimeFor, TyphonRuntime.ExecuteChunkedCallback, TyphonRuntime.ExecuteChunkWithAccessor,
+         TyphonRuntime.ExecuteChunkWithTransaction, TyphonRuntime.OnSystemStartInternal, TyphonRuntime.SelectDispatchClusters,
+         DagScheduler.EffectiveRateDivisor, TickContext.AmortizedDeltaTime, RuntimeSchedule.ValidateRegistration
+  on_violation: a system at divisor N integrates at 1/N of real time — movement, decay and timers all run slow, with nothing
+                raised and every test green, because the error is proportional and a fixture that asserts "it moved" still passes
+  verified: DispatchSelectionTests.TheStepEqualsTheMeasuredRevisitInterval (the interval MEASURED, not the formula restated),
+            DispatchSelectionTests.TickDivisor_ScalesAmortizedDeltaTime, DispatchSelectionTests.TickDivisor_DoesNotScaleDeltaTime,
+            DispatchSelectionTests.TickDivisorWithChangeFilter_IsRefusedAtBuild,
+            DispatchSelectionTests.ThrottledTickDivisor_ScalesAmortizedDeltaTimeUnderOverload,
+            DispatchSelectionTests.CellAmortizeWithoutATierIndex_DoesNotClaimAStrideItDidNotTake,
+            DispatchSelectionTests.TickDivisorAndCellAmortize_StridesMultiply, DispatchSelectionTests.TickDivisor_RunsOnlyOnItsOwnTicks
+
+### DSEL-04: A tick offset never separates two divided systems the DAG joins `[fatal]` `[silent]` (issue #1294)
+  invariant a gated system runs exactly on the ticks where tick mod gate == TickOffset, for EVERY gate it has: TickDivisor
+            always, and ThrottledTickDivisor additionally at OverloadLevel >= 1 for Normal priority. The offset is used raw by
+            both, which is sound because it is bounded by the TIGHTEST gate — so no gate has to reduce it, and the throttled
+            path pays no integer division on ticks already short of budget
+  invariant TickOffset < OffsetBound(S) = min over the gates of S that exceed 1, or 1 when it has none. Bounding by TickDivisor
+            alone would leave a throttle-only system (TickDivisor 1, ThrottledTickDivisor 4) with no phase, so every one of
+            them re-synchronises onto phase 0 when overload engages — the spike this rule exists to remove
+  invariant one offset per connected component of the rate-gated subgraph (nodes: OffsetBound > 1; edges: any DAG edge between
+            two of them), and that offset is below the component's tightest bound so every member can reach it
+  invariant components that requested nothing are spread by ONE cursor over the whole schedule, not one per bound: a per-bound
+            cursor puts the first bound-2 and the first bound-4 component both on phase 0, which is the pile-up being removed
+  invariant co-running is preserved by construction, not by solving: two systems share a tick iff o1 == o2 (mod gcd(d1, d2))
+            (CRT), and one offset common to the component satisfies that for every edge in it trivially
+  invariant assignment is STATIC — decided once at RuntimeSchedule.Build from declaration order, never from measured cost: a
+            schedule whose shape depends on last tick's timings is not a static DAG
+  never an explicit offset outside [0, OffsetBound(S)), one at or above its component's tightest bound, or two disagreeing
+        offsets in one component (all refused at build; the disagreement names both systems, the closure bound names the asker
+        and the bound)
+  never an offset on a system with no gate above 1 (refused at build: no gate would apply it, so it would silently do nothing —
+        and the guard tests against AutoTickOffset, not against 0, or an explicit 0 and an explicit -3 both slip through)
+  why: for a plain component read a staggered consumer sees output a few ticks old, which the DAG never promised otherwise —
+       it orders systems rather than making their inputs fresh. For an EVENT QUEUE it is silent damage: a producer and
+       consumer that stop sharing a tick change what the queue holds when the drain runs, and drain is single-consumer
+       precisely because its timing is load-bearing (EQ-04)
+  note: ONLY DIRECT edges union, and the transitive case is accepted rather than overlooked. A div 2 -> B div 1 -> C div 2
+        leaves A and C in different components, so they may hold different phases. That is sound because every relationship
+        whose freshness is DECLARED carries a direct edge of its own: AccessDagDeriver emits producer->consumer for
+        WritesEvents x ReadsEvents (ED-05c) and writer->reader for Writes x ReadsFresh, whatever phases the two sit in. What
+        is left staggerable is a transitive chain of PLAIN reads, which is what the DAG only ever ordered. The alternative —
+        unioning through undivided interiors — was rejected after measuring its reach: in any real schedule nearly everything
+        is connected through some every-tick system, so it collapses the schedule into one component and the stagger does
+        nothing. A system needing another's output in ITS OWN tick says so with ReadsFresh or a queue, and is then unioned.
+  scope: RuntimeSchedule.AssignTickOffsets, RuntimeSchedule.OffsetBound, DagScheduler.CheckOverloadSkip,
+         SystemDefinition.TickOffset, SystemDefinition.AutoTickOffset, SystemBuilder.TickOffset, SystemStat
+  on_violation: a producer and its consumer never run in the same tick again. The queue drains against a batch assembled on a
+                different tick from the one that filled it, so events are processed late, in the wrong groups, or dropped by an
+                overflow that the paired cadence used to prevent. Nothing raises.
+  verified: TickOffsetTests.NoEdgeInTheGraph_SpansTwoOffsets, TickOffsetTests.SystemsTheDagJoins_KeepOneOffset,
+            TickOffsetTests.AClosuresOffset_IsBelowItsSmallestDivisor,
+            TickOffsetTests.AnOffsetItsThrottledGateCannotReach_IsRefusedAtBuild,
+            TickOffsetTests.AnOffsetBothGatesCanReach_RunsUnderBoth,
+            TickOffsetTests.EachSystemRunsOnItsOwnPhase_AndNeverOnTheOthers,
+            TickOffsetTests.TwoJoinedSystemsAskingForDifferentOffsets_AreRefusedAtBuild,
+            TickOffsetTests.AnEdgeSpanningTwoPhases_IsCaughtByTheVerifier,
+            TickOffsetTests.AQueueBetweenTwoGatedSystems_UnionsThemAcrossAnUndividedMiddle,
+            TickOffsetTests.ATransitivePlainReadPath_MayBeStaggered,
+            TickOffsetTests.AThrottleOnlySystem_StillGetsAPhase,
+            TickOffsetTests.AnOffsetOnAnUngatedSystem_IsRefusedAtBuild
 
 ## Module: BIND — QuerySystem ↔ archetype binding
 

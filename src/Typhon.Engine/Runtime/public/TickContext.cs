@@ -110,10 +110,16 @@ public struct TickContext
     public int[] ClusterIds { get; init; }
 
     /// <summary>
-    /// Elapsed time in seconds since the last tick this system processed this cell bucket (issue #231). Equal to <see cref="DeltaTime"/> when the system has
-    /// no <c>cellAmortize</c>. For amortized systems, <c>AmortizedDeltaTime = DeltaTime × CellAmortize</c>, which is the effective integration step for
-    /// movement, decay, or state-machine updates that happen once per amortization cycle.
+    /// Elapsed time in seconds since the last tick this system processed the work it is about to process (issue #231, #1293) — the effective integration step
+    /// for movement, decay, or a state machine that advances once per cycle. Equal to <see cref="DeltaTime"/> for a system that runs every tick over its whole
+    /// selection; otherwise <c>DeltaTime × TickDivisor × CellAmortize</c>.
     /// </summary>
+    /// <remarks>
+    /// <b>Use this, not <see cref="DeltaTime"/>, for anything that integrates.</b> The two coincide only for an undivided, unamortized system, and the
+    /// difference is silent: a system at <c>TickDivisor 10</c> integrating by <see cref="DeltaTime"/> advances at a tenth of real time with nothing raised.
+    /// Both strides count, and they multiply rather than compete — the divisor skips whole runs, <c>cellAmortize</c> skips clusters within a run — so a
+    /// cluster in a <c>TickDivisor 2</c> + <c>cellAmortize 3</c> system is revisited every six ticks and steps by six periods (DSEL-03).
+    /// </remarks>
     public float AmortizedDeltaTime { get; init; }
 
     /// <summary>

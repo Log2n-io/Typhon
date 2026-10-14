@@ -1,6 +1,7 @@
 import { DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
 import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
+import { useSessionStore } from '../state/session-store';
 import { useStats } from '../state/stats-store';
 import { useUi, type Population } from '../state/ui-store';
 import { sourceKindFrom } from './Viewport';
@@ -20,8 +21,48 @@ const LIVE = sourceKindFrom(window.location.search) === 'live';
  * which archetypes exist, in which order, and which of them the far tier counts. Before the first frame the client's own
  * known archetypes stand in, so the panel is never empty.
  */
+/**
+ * What the controls do in the mode the viewer is actually in.
+ *
+ * <b>One line described the god camera whatever was on screen.</b> In third person W/A/S/D walk the avatar and do not pan
+ * anything, the wheel pulls the camera back rather than zooming a map, and a click names a target rather than opening an
+ * inspector — so the panel was telling a player the opposite of what their hands were doing.
+ */
+function controlHint(playing: boolean, cameraMode: 'god' | 'eye'): string {
+  if (cameraMode !== 'eye') {
+    return 'Drag: pan · Right-drag: orbit · Wheel: zoom · WASD/QE/RF · Click: inspect';
+  }
+
+  return playing
+    ? 'WASD: walk · Shift: walk slowly · Drag: look · Wheel: pull back · Click: target'
+    : 'Drag: look · Wheel: pull back · Q/E: turn · R/F: tilt · Click: inspect';
+}
+
+/** What the camera button offers, which is a different thing for a player and for a god camera. */
+function cameraButtonTitle(playing: boolean, cameraMode: 'god' | 'eye', selectedNetId: number): string {
+  if (playing) {
+    return cameraMode === 'eye'
+      ? 'Leave your avatar and fly the map freely. Your character stays where it is, and the world is still served around it.'
+      : 'Go back behind your own character. Drag to look, wheel to pull back over its shoulder.';
+  }
+
+  return selectedNetId === 0
+    ? 'Select an entity first — eye view rides one.'
+    : "Stand in the world, in the selected entity's eyes. Drag to look, wheel to pull back over its shoulder. You cannot drive it: this is spectating.";
+}
+
 export function Toolbar() {
   const ui = useUi();
+
+  // A session that can play has a sphere to widen; one that cannot is a god camera with a region. Read as locals because
+  // the View section tests both and the names are what make that section readable.
+  const playing = ui.playing;
+  const range = ui.playerRadiusRange;
+
+  // Narrowly selected, like the stats below: the session store changes on a login and a kick and nothing else, but the
+  // toolbar re-renders often enough that subscribing to the whole store would be a needless dependency.
+  const accountName = useSessionStore((s) => s.grant?.name ?? null);
+  const logOut = useSessionStore((s) => s.logOut);
 
   // Selected NARROWLY. Stats are published four times a second and the whole snapshot changes each time, so subscribing
   // to it re-rendered the toolbar — and the radius slider under the user's thumb — at that rate. These three change only
@@ -46,6 +87,20 @@ export function Toolbar() {
   return (
     <div className="panel toolbar">
       <div className="toolbar-title">Typhon · Live World</div>
+
+      {/* Who this tab is, and the way out (A8). Shown only for a logged-in session: the god camera is anonymous and has
+          nothing to log out of, which is the one tool that has to work on a box nobody has an account on. */}
+      {accountName !== null && (
+        <section>
+          <h3>Account</h3>
+          <div className="session-row">
+            <span className="session-name">{accountName}</span>
+            <button type="button" onClick={logOut}>
+              Log out
+            </button>
+          </div>
+        </section>
+      )}
 
       <section>
         <h3>{LIVE ? `World (${sourceName ?? 'connecting…'})` : 'World (mock server)'}</h3>
@@ -151,7 +206,8 @@ export function Toolbar() {
         </div>
         {LIVE ? (
           <div className="hint">
-            The engine over <code>/ws</code>. Add <code>?source=mock</code> to the URL for the browser-side mock.
+            The engine over <code>/ws</code>. Add <code>?source=mock</code> for the browser-side mock, or{' '}
+            <code>?as=god</code> for the anonymous god camera — both skip the login screen, which is the point of them.
             {ui.maxViewRadius !== null && ui.maxViewRadius > 0
               ? ` This server honours a radius up to ${ui.maxViewRadius} m.`
               : ''}
@@ -175,7 +231,34 @@ export function Toolbar() {
 
       <section>
         <h3>View</h3>
-        {ui.maxViewRadius === 0 ? (
+        {/* How far the SERVER serves this session, which is the thing that decides whether a building exists at all —
+            distinct from the camera's far plane, which is 40 km and never the limit. A player's session is a sphere the
+            server widens in place; a god camera's is a region. Only one of the two is ever in play, so only one slider
+            is shown, and the player's takes precedence because a session that can play is being played. */}
+        {playing && range !== null ? (
+          <label className="slider">
+            Served radius {ui.playerRadius ?? range.min} m
+            <input
+              type="range"
+              // Both ends are the server's (`/typhon/demo.json`): its profile's own radius, and the ceiling the
+              // replication grid's window bound allows. Neither is a figure this client invents.
+              min={range.min}
+              max={range.max}
+              // A step the range chooses rather than a constant: the ceiling is five replication cells, so it moved from
+              // 320 m to 1 280 m when the demo matched its replication cell to its spatial one, and 16 m steps over a
+              // 1 km range is 68 drag positions of pointless precision. A 64th of the range, rounded to 8 m.
+              step={Math.max(8, Math.round((range.max - range.min) / 64 / 8) * 8)}
+              value={ui.playerRadius ?? range.min}
+              onChange={(e) => {
+                ui.setPlayerRadius(Number(e.target.value));
+              }}
+            />
+          </label>
+        ) : playing ? (
+          <div className="hint">
+            This server does not say what view radius a player may ask for, so the slider is off.
+          </div>
+        ) : ui.maxViewRadius === 0 ? (
           <div className="hint">
             This server serves its camera the whole world, so there is no view radius to set (it was started without{' '}
             <code>--god-region</code>).
@@ -307,6 +390,21 @@ export function Toolbar() {
           >
             Grid
           </button>
+          {/*
+            A14. Offered only to a session that HAS a predicted avatar: for a god camera there is no prediction to contrast
+            with the authority, so the button would toggle nothing — the same rule the camera-mode button follows.
+          */}
+          {ui.playing ? (
+            <button
+              className={ui.showAuthoritative ? 'active' : ''}
+              title="Draw your avatar where the server says it is, instead of where this client predicted. The gap is the latency."
+              onClick={() => {
+                ui.setShowAuthoritative(!ui.showAuthoritative);
+              }}
+            >
+              Server pos
+            </button>
+          ) : null}
           <button
             className={ui.showLabels ? 'active' : ''}
             onClick={() => {
@@ -316,18 +414,19 @@ export function Toolbar() {
             Labels
           </button>
           <button
-            className={ui.cameraMode === 'eye' ? 'active' : ''}
-            disabled={ui.selectedNetId === 0}
-            title={
-              ui.selectedNetId === 0
-                ? 'Select an entity first — eye view rides one.'
-                : "Stand in the world, in the selected entity's eyes. Drag to look, wheel to pull back over its shoulder. You cannot drive it: this is spectating."
-            }
+            // Highlighted only for a god camera, where it is a MODE you are in — "eye view, on the selection". For a
+            // player it is a switch that names where it takes you, and a switch that is also lit reads as a state you
+            // cannot tell the direction of.
+            className={!ui.playing && ui.cameraMode === 'eye' ? 'active' : ''}
+            // A player's eye view rides its own avatar, so a selection is not what makes it available. Testing the
+            // selection alone left a logged-in player with no way back to the god camera at all.
+            disabled={ui.selectedNetId === 0 && !ui.playing}
+            title={cameraButtonTitle(ui.playing, ui.cameraMode, ui.selectedNetId)}
             onClick={() => {
               ui.setCameraMode(ui.cameraMode === 'eye' ? 'god' : 'eye');
             }}
           >
-            Eye view
+            {ui.playing ? (ui.cameraMode === 'eye' ? 'God camera' : 'Third person') : 'Eye view'}
           </button>
           <button
             className={ui.showDebug ? 'active' : ''}
@@ -346,7 +445,7 @@ export function Toolbar() {
         </div>
       </section>
 
-      <div className="hint">Drag: pan · Right-drag: orbit · Wheel: zoom · WASD/QE/RF · Click: inspect</div>
+      <div className="hint">{controlHint(ui.playing, ui.cameraMode)}</div>
     </div>
   );
 }

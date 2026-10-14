@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Accounts;
 using NUnit.Framework;
 using Typhon.Engine;
 using Typhon.Protocol;
@@ -48,6 +49,36 @@ internal sealed class FakeLink : ISubscriptionLink
             }
 
             return SessionId.None;
+        }
+    }
+
+    /// <summary>The resume token the <c>WELCOME</c> carried, or <see langword="null"/> when the server issues none (A13).</summary>
+    /// <remarks>
+    /// Off the wire, for the same reason <see cref="Session"/> is: this is the whole of what a client keeps in order to come back, so a test that read the
+    /// server's own record instead could pass while the client held something else.
+    /// </remarks>
+    public byte[] ResumeToken
+    {
+        get
+        {
+            foreach (var message in Sent)
+            {
+                if (message.Length > 0 && message[0] == MessageTypes.Welcome)
+                {
+                    var token = WelcomeMessage.Parse(message).ResumeToken;
+                    foreach (var b in token)
+                    {
+                        if (b != 0)
+                        {
+                            return token;
+                        }
+                    }
+
+                    return null;   // all-zero is how the wire says there is no resume
+                }
+            }
+
+            return null;
         }
     }
 
@@ -286,11 +317,16 @@ internal static class ClientSays
     /// <summary>The field values of a <c>MoveDir</c>.</summary>
     /// <param name="heading">Radians, 0 along +X.</param>
     /// <param name="speedClass">See <c>SpeedClasses</c>.</param>
+    /// <param name="changePhase">
+    /// How far into the tick the intent changed, in 255ths — <c>MoveDir.ChangePhase</c>. Defaults to 0, which is what a client that does not measure it
+    /// sends and what every case written before A14b means.
+    /// </param>
     /// <returns>The values.</returns>
-    public static RecordValues MoveDir(float heading, byte speedClass) => new()
+    public static RecordValues MoveDir(float heading, byte speedClass, byte changePhase = 0) => new()
     {
         ["heading"] = FieldValue.Of(heading),
         ["speedClass"] = FieldValue.Of(speedClass),
+        ["changePhase"] = FieldValue.Of(changePhase),
     };
 
     /// <summary>The field values of a <c>SetTarget</c>.</summary>
@@ -303,8 +339,13 @@ internal static class ClientSays
 
     /// <summary>Encodes a <c>HELLO</c>.</summary>
     /// <param name="kind">The session kind the client names.</param>
+    /// <param name="token">
+    /// The credential presented. A <c>player</c> needs a real one since A3 — <see cref="SessionHarness.Connect"/> mints it — and a
+    /// <c>god</c> session is anonymous, so anything at all does there.
+    /// </param>
+    /// <param name="resumeToken">The resume token a reconnecting client presents (A13), or <see langword="null"/> for a fresh connection.</param>
     /// <returns>The message.</returns>
-    public static byte[] Hello(string kind)
+    public static byte[] Hello(string kind, string token = "opaque", byte[] resumeToken = null)
     {
         var hello = new HelloMessage
         {
@@ -312,7 +353,8 @@ internal static class ClientSays
             Minor = ProtocolConstants.Minor,
             Caps = Capabilities.None,
             Kind = kind,
-            Token = "opaque",
+            Token = token,
+            ResumeToken = resumeToken,
             ClientCatalogHash = 0,
             HelloPayload = [],
         };
@@ -344,17 +386,84 @@ internal sealed class SessionHarness
         _current = this;
     }
 
+    /// <summary>
+    /// Hands out a fresh synthetic account id, so two <c>player</c> links are two different people.
+    /// </summary>
+    /// <returns>An account id no other link in this process has used.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>DISTINCT per link since A5, and sharing one was a real failure.</b> Every player session used to be minted a token for
+    /// account 1, which was harmless while a session was handed a pooled player — and became visible the moment a login spawned an
+    /// avatar, because one account may only be in the world once (<c>AccountAlreadyPlayingCloseCode</c>). Two sessions sharing an
+    /// account meant the second was refused, and a case asking for two players waited for ever.
+    /// </para>
+    /// <para>
+    /// <b>The account does not have to exist, and that is a property of A3 rather than a shortcut.</b> <c>Admit</c> validates the
+    /// token's signature and expiry and carries the account id through as <c>AppData</c>; it never resolves the entity, because the
+    /// hook runs on the transport thread with no transaction to resolve it in. A5's bind reads the account's CHARACTER through an
+    /// index and creates one when there is none, which works for an account id nothing else has heard of. So a case that only needs
+    /// a session gets one without also needing a signup — and a case that wants the real thing passes its own account.
+    /// </para>
+    /// <para>
+    /// Process-wide rather than per harness, so two fixtures in one process cannot collide on an id either.
+    /// </para>
+    /// </remarks>
+    private static EntityId NextSyntheticAccount()
+        => EntityId.FromRawValue((ulong)Interlocked.Increment(ref _syntheticAccounts));
+
+    private static long _syntheticAccounts;
+
     /// <summary>Connects one client and completes its handshake.</summary>
     /// <param name="kind">The session kind: <c>god</c> or <c>player</c>.</param>
+    /// <param name="account">
+    /// The account a <c>player</c>'s token names; a fresh one from <see cref="NextSyntheticAccount"/> when not given. Ignored for
+    /// <c>god</c>, which is anonymous by design.
+    /// </param>
     /// <returns>The link, whose <see cref="FakeLink.Sent"/> is what the client received.</returns>
-    public FakeLink Connect(string kind)
+    public FakeLink Connect(string kind, EntityId? account = null)
+    {
+        var token = string.Equals(kind, TatooineReplication.PlayerKind, StringComparison.Ordinal)
+            ? AuthToken.Mint(account ?? NextSyntheticAccount())
+            : "opaque";
+
+        return ConnectWithToken(kind, token);
+    }
+
+    /// <summary>
+    /// Connects one client presenting a token this harness did not mint — a rubbish one, an expired one, or none.
+    /// </summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="token">Exactly what the client presents.</param>
+    /// <returns>The link. For a refused admission it carries the CLOSE the server sent, which is what the case asserts on.</returns>
+    public FakeLink ConnectWithToken(string kind, string token) => ConnectWithToken(kind, token, null);
+
+    /// <summary>
+    /// Connects one client that presents a resume token as well as its credential — a reconnect, as the SDK performs it (A13).
+    /// </summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="account">The account the credential names; a fresh one when not given.</param>
+    /// <param name="resumeToken">The token the previous session's <c>WELCOME</c> carried (<see cref="FakeLink.ResumeToken"/>).</param>
+    /// <returns>The link.</returns>
+    /// <remarks>
+    /// <b>The credential is minted again, and that is what a real reconnect does too.</b> A resume token names a session, never an account: the engine
+    /// admits the client through the ordinary hook first and only then looks at the token, so a reconnect proves who it is exactly as a fresh login does.
+    /// </remarks>
+    public FakeLink ConnectResuming(string kind, EntityId account, byte[] resumeToken)
+        => ConnectWithToken(kind, AuthToken.Mint(account), resumeToken);
+
+    /// <summary>Connects one client with a credential and, optionally, a resume token.</summary>
+    /// <param name="kind">The session kind.</param>
+    /// <param name="token">Exactly what the client presents as its credential.</param>
+    /// <param name="resumeToken">The resume token, or <see langword="null"/>.</param>
+    /// <returns>The link.</returns>
+    public FakeLink ConnectWithToken(string kind, string token, byte[] resumeToken)
     {
         var link = new FakeLink();
         var info = new LinkInfo { Transport = "fake", SubProtocol = ProtocolConstants.WebSocketSubprotocol };
         var connection = _acceptor.Accept(link, info);
         Assert.That(connection, Is.Not.Null, "the runtime declined the link outright");
         link.Connection = connection;
-        connection.OnMessage(ClientSays.Hello(kind));
+        connection.OnMessage(ClientSays.Hello(kind, token, resumeToken));
         _links.Add(link);
         return link;
     }

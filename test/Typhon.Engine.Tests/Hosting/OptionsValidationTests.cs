@@ -23,7 +23,7 @@ class OptionsValidationTests
     [SetUp]
     public void Setup()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(OptionsValidationTests));
+        _dir = Path.Combine(TestStorage.Root, nameof(OptionsValidationTests));
         Directory.CreateDirectory(_dir);
     }
 

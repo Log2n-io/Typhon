@@ -167,8 +167,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
     {
         // Build a WAL-enabled engine so RunParallelFence's WAL-mode gate actually dispatches the parallel
         // Prep/Migrate/Finalize phases (not the serial fallback). Mirrors AntHill's setup: WAL + WalFileIO.
-        var walDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Wal_StressTest");
-        var dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Db_StressTest");
+        var walDir = Path.Combine(TestStorage.Root, nameof(ParallelFenceTests), "Wal_StressTest");
+        var dbDir = Path.Combine(TestStorage.Root, nameof(ParallelFenceTests), "Db_StressTest");
         // Wipe wholesale — the database is a {name}.typhon bundle DIRECTORY; deleting only top-level files would leave a
         // stale bundle for the engine to reopen.
         if (Directory.Exists(walDir)) Directory.Delete(walDir, recursive: true);
@@ -292,8 +292,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
     [Test]
     public void SingleThreadedParallelFence_AppliesMigrations()
     {
-        var walDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Wal_SingleThreaded");
-        var dbDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(ParallelFenceTests), "Db_SingleThreaded");
+        var walDir = Path.Combine(TestStorage.Root, nameof(ParallelFenceTests), "Wal_SingleThreaded");
+        var dbDir = Path.Combine(TestStorage.Root, nameof(ParallelFenceTests), "Db_SingleThreaded");
         // Start clean. The database is now a {name}.typhon bundle DIRECTORY under dbDir — deleting only top-level files
         // (the old .bin) would leave the stale bundle behind, and the engine would reopen it with prior entities. Wipe the
         // directories wholesale.

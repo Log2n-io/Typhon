@@ -7,8 +7,10 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Accounts;
 using Typhon.Subscriptions.AspNetCore;
 
 namespace SwgTatooine.Replication;
@@ -30,10 +32,49 @@ namespace SwgTatooine.Replication;
 public static class TatooineHost
 {
     /// <summary>
+    /// Turns the requested bind address into one Kestrel can listen on, saying out loud when the answer is a public one.
+    /// </summary>
+    /// <param name="requested">What the operator asked for, or <see langword="null"/> for the loopback default.</param>
+    /// <returns>The address to bind.</returns>
+    /// <exception cref="ArgumentException">The address does not parse — which must be an error rather than a silent fall back to loopback.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>An unparseable address is refused, not defaulted.</b> Falling back to loopback would be the safe direction for exposure and the wrong one for
+    /// trust: an operator who typed an address meant to be reachable, and whose server came up reachable by nobody, would be debugging the client.
+    /// </para>
+    /// <para>
+    /// Binding something other than loopback prints a line saying so. There is no authentication on this port, and <c>/typhon/stats.json</c> publishes system
+    /// and archetype names to anyone who asks, so the operator should be told in the terminal rather than in a design document.
+    /// </para>
+    /// </remarks>
+    internal static IPAddress ResolveBindAddress(string requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested))
+        {
+            return IPAddress.Loopback;
+        }
+
+        if (!IPAddress.TryParse(requested.Trim(), out var address))
+        {
+            throw new ArgumentException($"--bind '{requested}' is not an IP address. Use 127.0.0.1 for local only, or 0.0.0.0 for every interface.");
+        }
+
+        if (!IPAddress.IsLoopback(address))
+        {
+            Console.WriteLine($"  !! binding {address} — this server is reachable from the network, and it has no authentication");
+        }
+
+        return address;
+    }
+
+    /// <summary>
     /// Serves a running Tatooine over WebSocket until the process is asked to stop.
     /// </summary>
     /// <param name="runtime">The started runtime, whose registry already carries <see cref="TatooineReplication.Declare"/>.</param>
     /// <param name="port">The TCP port to listen on.</param>
+    /// <param name="bindAddress">
+    /// The address to bind, or <see langword="null"/> for loopback. <c>0.0.0.0</c> binds every interface.
+    /// </param>
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/> for none.</param>
     /// <param name="origins">Origins a browser may connect from; empty allows any, which is the right default for a demo on a developer's machine.</param>
     /// <param name="realmsJson">The realm directory to publish at <c>/typhon/demo.json</c>, or <see langword="null"/> to publish none.</param>
@@ -42,29 +83,47 @@ public static class TatooineHost
     /// </param>
     /// <returns>A task that completes when the host has stopped.</returns>
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
-        Func<string> realmInventory = null)
+        Func<string> realmInventory = null, string bindAddress = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
-        builder.WebHost.ConfigureKestrel(k => k.ListenAnyIP(port));
+
+        // LOOPBACK unless an address was asked for. This used to be ListenAnyIP unconditionally, which published the world to every interface the box had: on a
+        // laptop on a shared network, `--serve 8080` served it to the network. Harmless while the only thing a session can do is watch, and not harmless at all
+        // once there is an account to create — so the default changes now rather than on the day the login endpoint lands (08-hosting § 2, 03-server § 2).
+        var address = ResolveBindAddress(bindAddress);
+        builder.WebHost.ConfigureKestrel(k => k.Listen(address, port));
 
         // The runtime is a singleton the endpoints resolve: the WebSocket endpoint starts its transport against it on the first upgrade, and the catalog
         // endpoint serves exactly the bytes WELCOME carries.
         builder.Services.AddSingleton(runtime);
+
+        // Identity (A2). The /auth bodies are the only JSON this host serialises through a serializer rather than a Utf8JsonWriter, so they bring their own
+        // source-generated context — CreateSlimBuilder has no reflection-based resolver to fall back on.
+        builder.Services.AddAuthJson();
+
         builder.Services.AddTyphonSubscriptions(o =>
         {
-            if (origins == null || origins.Length == 0)
-            {
-                o.AllowAnyOrigin();
-            }
-            else
+            if (origins != null && origins.Length > 0)
             {
                 foreach (var origin in origins)
                 {
                     o.AllowOrigin(origin);
                 }
+            }
+            else if (IPAddress.IsLoopback(address))
+            {
+                // Any origin is the right default for a developer's own machine, where the client is served from a Vite port that is not the server's.
+                o.AllowAnyOrigin();
+            }
+            else
+            {
+                // On a reachable bind it is not: any page a visitor opens could then drive this server from their browser. --origin is how a real deployment
+                // names its front door, and a public bind without one is refused rather than opened to everybody.
+                throw new ArgumentException($"--bind {address} is not loopback, so --origin <url> is required: naming no origin would let any website drive "
+                    + "this server from a visitor's browser. Pass --origin for each host the client is served from.");
             }
         });
 
@@ -76,6 +135,11 @@ public static class TatooineHost
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
             app.UseStaticFiles(new StaticFileOptions { FileProvider = new PhysicalFileProvider(clientRoot) });
         }
+
+        // Identity (A2), before the WebSocket route for no technical reason beyond reading order: a client signs up or logs in here, then presents the token
+        // it got on the HELLO that /ws carries. The limiter is one instance for both endpoints, so an address's allowance is shared across them — a signup
+        // flood and a login flood are the same flood.
+        app.MapAuth(runtime.Engine, new AuthRateLimiter());
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
@@ -114,8 +178,14 @@ public static class TatooineHost
             // emits `1E+30` and a non-finite one emits `NaN` — neither is JSON, so the WHOLE document fails to parse and the
             // client loses the realm directory it also carries, with no error path. A ceiling that cannot be expressed is
             // reported as no ceiling, which is what a client already handles.
+            // A PLAYER's range, which is a different mechanism from the god region above: a sphere the session widens with
+            // SetViewRadius, between its profile's own radius and the cap the engine's window bound allows. Told here so the
+            // client's slider has both ends from the server and no figure of its own — a radius mirrored in the client would be
+            // a number the server can never correct, which is the shape of bug `no-speed-literals.test.ts` exists for.
+            var player = FormattableString.Invariant(
+                $",\"playerRadiusM\":{Json(TatooineReplication.PlayerRadiusM)},\"playerMaxRadiusM\":{Json(TatooineReplication.PlayerMaxRadiusM)}");
             return Results.Text(
-                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{realms}}}"),
+                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{realms}}}"),
                 "application/json");
         });
 

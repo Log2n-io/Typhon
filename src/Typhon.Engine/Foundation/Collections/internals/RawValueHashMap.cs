@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Diagnostics;
 using System.Numerics;
@@ -49,6 +49,55 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// <summary>This map's engine-scoped <c>EW-01</c> guard. The EntityMap is one of the structures the tick fence rewrites, so a mutation from
     /// outside the fence while it is open is the same defect as one on a cluster B+Tree.</summary>
     private readonly ExclusiveWindow _fenceWindow;
+
+    /// <summary>
+    /// Non-zero while the tick fence is applying a pre-sorted bulk batch to THIS map.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the point mutators are armed only for this, and not for the whole fence.</b> Every mutator here keeps its bucket write latch, including the bulk
+    /// path (<c>ApplyBucketRun</c> takes <c>OlcLatch.TryWriteLock</c>), so a concurrent insert does not corrupt a chain and never did. What it CAN do is split
+    /// the map: the batch was sorted by bucket indices read before the split, so those indices no longer name the buckets the keys resolve to. The batch detects
+    /// exactly that and throws — on the FENCE's thread, aborting the tick. So the point of arming is to attribute that to the off-tick caller who caused it
+    /// rather than to the fence that tripped over it, and it is meaningful only while a batch is in flight.
+    /// </para>
+    /// <para>
+    /// Previously every mutator was armed whenever any fence ran on the engine, which rejected an ordinary off-tick commit — a
+    /// <c>StorageMode.Versioned</c>, non-spatial spawn writes this map — for a hazard that was not present.
+    /// </para>
+    /// <para>
+    /// A depth, not a flag: the fence partitions a map's batch across workers by bucket range.
+    /// </para>
+    /// </remarks>
+    private int _bulkBatchDepth;
+
+    /// <summary>Reports a latched mutation, which only threatens a bulk batch that is in flight on this map.</summary>
+    /// <param name="site">Call-site name, a literal at every call.</param>
+    /// <remarks>
+    /// The depth goes in by <c>ref</c> so it is not read when the window is closed — see
+    /// <c>ExclusiveWindow.NoteMutation(string, ref int)</c>.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteLatchedMutation(string site)
+        => _fenceWindow?.NoteMutation(site, ref _bulkBatchDepth);
+
+    /// <summary>Marks a bulk batch as in flight on this map for the life of the returned scope.</summary>
+    internal BulkBatchScope EnterBulkBatch() => new BulkBatchScope(this);
+
+    /// <summary>Clears one <see cref="EnterBulkBatch"/>.</summary>
+    internal readonly struct BulkBatchScope : IDisposable
+    {
+        private readonly RawValuePagedHashMap<TKey, TStore> _map;
+
+        internal BulkBatchScope(RawValuePagedHashMap<TKey, TStore> map)
+        {
+            _map = map;
+            Interlocked.Increment(ref map._bulkBatchDepth);
+        }
+
+        /// <inheritdoc />
+        public void Dispose() => Interlocked.Decrement(ref _map._bulkBatchDepth);
+    }
 
     private RawValuePagedHashMap(ChunkBasedSegment<TStore> segment, int n0, int valueSize) : base(segment, n0)
     {
@@ -714,7 +763,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     public bool Insert(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
-        _fenceWindow?.NoteMutation("EntityMap.Insert");
+        NoteLatchedMutation("EntityMap.Insert");
         return AppendUnderBucketLock(key, value, BucketWrite.Insert, ref accessor, changeSet);
     }
 
@@ -724,7 +773,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     public void InsertNew(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
-        _fenceWindow?.NoteMutation("EntityMap.InsertNew");
+        NoteLatchedMutation("EntityMap.InsertNew");
         AppendUnderBucketLock(key, value, BucketWrite.InsertNew, ref accessor, changeSet);
     }
 
@@ -733,7 +782,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     public bool Upsert(TKey key, byte* value, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
-        _fenceWindow?.NoteMutation("EntityMap.Upsert");
+        NoteLatchedMutation("EntityMap.Upsert");
         return AppendUnderBucketLock(key, value, BucketWrite.Upsert, ref accessor, changeSet);
     }
 
@@ -949,7 +998,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// <see cref="IRawValueUpdater.Update"/> call so the callback inlines into this loop.</typeparam>
     public bool TryUpdateInPlace<TUpdater>(TKey key, ref TUpdater updater, ref ChunkAccessor<TStore> accessor) where TUpdater : struct, IRawValueUpdater
     {
-        _fenceWindow?.NoteMutation("EntityMap.TryUpdateInPlace");
+        NoteLatchedMutation("EntityMap.TryUpdateInPlace");
         uint hash = ComputeHash(key);
 
         while (true)
@@ -987,7 +1036,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </summary>
     public bool Remove(TKey key, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
     {
-        _fenceWindow?.NoteMutation("EntityMap.Remove");
+        NoteLatchedMutation("EntityMap.Remove");
         uint hash = ComputeHash(key);
 
         while (true)

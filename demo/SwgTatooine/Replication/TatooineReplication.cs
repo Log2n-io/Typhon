@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using SwgTatooine.Accounts;
 using Typhon.Protocol;
 
 namespace SwgTatooine;
@@ -74,13 +75,60 @@ public struct MoveDir
 
     /// <summary>See <see cref="SpeedClasses"/>. Anything higher is refused and counted.</summary>
     public byte SpeedClass;
+
+    /// <summary>
+    /// How far into the tick this intent CHANGED, in 255ths — the share of the boundary tick that still belongs to the velocity before it. 0 means "the
+    /// whole tick is mine", which is what a re-send of an unchanged intent says and what any client that does not measure it sends.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what makes the client's integration and the server's agree, and nothing else does.</b> A tick advances a player by one whole period of
+    /// whatever intent it held at the boundary, while a client that predicts moves on the key event. Both travel at the same speed, for different
+    /// DURATIONS: the two positions differ by <c>v x (startPhase - stopPhase)</c>, uniformly over a full tick of travel in either direction — 0.5 m at
+    /// 5 m/s and 10 Hz, mean 0.167 m, which is the back-step a player sees every time they let go of a key. With the phase the boundary tick is split
+    /// between the old velocity and the new one (<c>SteerTo</c>) and the two durations are equal exactly.
+    /// </para>
+    /// <para>
+    /// <b>It cannot be used to move faster than this server allows, which is why a client is trusted with it at all.</b> The split is a convex
+    /// combination of two velocities the server itself granted, so the step it produces is never longer than the longer of the two — a lying phase
+    /// redistributes one tick of travel and cannot manufacture any. That is a different thing from a client sending a SPEED, which is the speed hack.
+    /// </para>
+    /// <para>255ths rather than milliseconds, so it means the same thing at every <c>--hz</c> and costs one byte.</para>
+    /// </remarks>
+    public byte ChangePhase;
+}
+
+/// <summary>
+/// "Serve me this far." A player asking for a wider or narrower interest sphere than its profile's own.
+/// </summary>
+/// <remarks>
+/// <b>Metres, and the one place in this file where a client sends a magnitude rather than a class.</b> A speed class is a
+/// class because a speed from a client is the speed hack; a radius cannot be, because the whole point is a slider that
+/// chooses an arbitrary distance. What makes it safe is that it is not a speed or a position: the server declares the
+/// range its profile allows (<see cref="TatooineReplication.PlayerRadiusM"/>..<see cref="TatooineReplication.PlayerMaxRadiusM"/>),
+/// refuses anything outside it, and the engine sizes the session's window for the maximum at start-up — so the worst a
+/// client can do with this is ask for more of what it is already entitled to see, at its own bandwidth's expense.
+/// </remarks>
+public struct SetViewRadius
+{
+    /// <summary>The radius asked for, in metres. 0 returns the session to its profile's own.</summary>
+    public ushort RadiusM;
 }
 
 /// <summary>The speed classes a client may ask for, and what each is worth.</summary>
 /// <remarks>
+/// <para>
 /// <b>A class rather than a speed, because a speed from a client is the speed hack.</b> The server maps the class onto a figure the player is entitled to,
-/// and the mapping is the whole of the entitlement check. There is no mount state in this demo yet, so there is no class above <see cref="Run"/>: a client
-/// asking for one is refused rather than given 12 m/s, and the refusal is counted. When mounts exist, the class stays and the mapping learns about them.
+/// and the mapping is the whole of the entitlement check: a client says "speeder", never "24 m/s", so there is no number on the wire for it to inflate. A
+/// class this server does not grant is refused and counted rather than clamped, which is what makes an attempt visible instead of merely ineffective.
+/// </para>
+/// <para>
+/// <b>This server grants all of them to everyone, and that is a deliberate deviation from how SWG worked</b> (and from what this type said until the gait
+/// shortcuts were added: "there is no class above Run"). In SWG, Burst Run cost action from all three pools and sat on a five-minute cooldown, and a
+/// speeder needed a vehicle you called and mounted. None of that exists here — no action pools, no vehicle items, no mount state — so the ladder is
+/// offered directly as Shift+1..4 in the client. The ENTITLEMENT STRUCTURE is what is being kept: when a vehicle is a thing you own, the classes stay
+/// where they are and <see cref="TatooineReplication.SpeedFor"/> learns to ask whether this player owns one. Nothing above has to change.
+/// </para>
 /// </remarks>
 public static class SpeedClasses
 {
@@ -90,11 +138,20 @@ public static class SpeedClasses
     /// <summary>Half of <see cref="Run"/> — SWG had no separate walk figure worth quoting, so this is a fraction rather than a source.</summary>
     public const byte Walk = 1;
 
-    /// <summary>[CORE3] <c>TatooineData.PlayerRunSpeedMps</c>, the fastest anything on foot moves.</summary>
+    /// <summary>[WIKI] <c>TatooineData.PlayerRunSpeedMps</c> — 5 m/s, an unencumbered player on foot. Shift+1, and the default.</summary>
     public const byte Run = 2;
 
+    /// <summary>[CORE3] <c>TatooineData.PlayerBurstRunSpeedMps</c> — Burst Run's 1.822x, 9.11 m/s. Shift+2.</summary>
+    public const byte Burst = 3;
+
+    /// <summary>[WIKI] <c>TatooineData.PlayerMountSpeedMps</c> — a landspeeder, 12 m/s. Shift+3.</summary>
+    public const byte Speeder = 4;
+
+    /// <summary>Twice a speeder, 24 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
+    public const byte SpeederFast = 5;
+
     /// <summary>The first class this server does not grant.</summary>
-    public const byte Count = 3;
+    public const byte Count = 6;
 }
 
 /// <summary>
@@ -280,7 +337,7 @@ public struct RealmNews
 /// compiler treats "no change group" as an error rather than as a shape.
 /// </para>
 /// </remarks>
-public static class TatooineReplication
+public static partial class TatooineReplication
 {
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
     public const string GodProfile = "god-world";
@@ -299,6 +356,55 @@ public static class TatooineReplication
     /// </summary>
     public const string PlayerProfile = "player-lite";
 
+    /// <summary>
+    /// What a session with something to RENDER is served: <see cref="PlayerProfile"/>'s shape plus the buildings (A7).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A player who cannot see buildings is standing in an empty desert that happens to stop them walking.</b> The world's towns
+    /// are <c>WorldObject</c>s, and <see cref="PlayerProfile"/> does not carry them — correctly, for what it was built for: its
+    /// sessions were headless measurement clients that rendered nothing, and the comment on <see cref="SpectateProfile"/> explains
+    /// at length why an extra archetype on a MOVING sphere is not free. So the buildings go on a profile of their own and the
+    /// measurement profile keeps its numbers.
+    /// </para>
+    /// <para>
+    /// <b>The cost is accepted and is written down rather than discovered later:</b> about 0.7 extra cell-queries per tick per
+    /// moving session, because the crescent sweep queries every archetype in the set over every cell the sphere newly covers. For a
+    /// human that is the right trade — they are one per person, not one per population.
+    /// </para>
+    /// <para>
+    /// <b>Identical in content to <see cref="SpectateProfile"/>, and NOT merged with it.</b> They are the same shape for different
+    /// reasons: a spectator rides somebody else's entity and a player drives its own, and <c>Spectate</c>'s own commentary turns on
+    /// what <c>Control</c> leaks to a watcher. The day a <c>Player</c> declares an <c>[Owner]</c> field those two diverge — the
+    /// spectator must stop seeing it and the player must not — and one shared name would make that a rename under pressure.
+    /// </para>
+    /// </remarks>
+    public const string HumanProfile = "human";
+
+    /// <summary>
+    /// Which profile a <c>player</c> session is given: <see cref="HumanProfile"/> by default, <see cref="PlayerProfile"/> for a measurement run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It is one setting for every player session, and that is forced by what a bot is.</b> Phase B's bots connect as
+    /// <c>player</c> and the server must not be able to tell them from a person, so it cannot serve them a cheaper profile — the
+    /// moment it could, the thing that distinguishes them would be the profile they got. So either everybody pays for buildings or
+    /// nobody does.
+    /// </para>
+    /// <para>
+    /// <b>The default is to pay, because the browser is what the phase is for.</b> The switch exists for the measurement runs whose
+    /// published CPU numbers were all taken on <see cref="PlayerProfile"/>: changing the profile under them would make every figure
+    /// before this change incomparable with every figure after it, and that is a worse outcome than one flag. A run that sets it is
+    /// stating that it wants the old shape, which is exactly what a comparison needs.
+    /// </para>
+    /// <para>
+    /// The honest long answer is that detail level belongs to the CLIENT — a real client says what it renders, and a bot asking for
+    /// no buildings is indistinguishable from a person on low settings. That needs a field in <c>HELLO</c>, which is A8's wire and
+    /// not this.
+    /// </para>
+    /// </remarks>
+    public static string PlayerProfileName { get; set; } = HumanProfile;
+
     /// <summary>The profile a camera riding an entity is served: <see cref="PlayerProfile"/>'s shape plus the buildings. See its declaration for why it is
     /// a separate profile and not a flag on the player's.</summary>
     public const string SpectateProfile = "spectate";
@@ -312,7 +418,35 @@ public static class TatooineReplication
     /// is a DISC rather than the world, and the exact figure only moves the constant. Tatooine's cells are 256 m, so a disc of this size spans a handful of
     /// them and the cluster index has something to reject.
     /// </remarks>
-    private const double PlayerRadiusM = 192d;
+    public const double PlayerRadiusM = 192d;
+
+    /// <summary>The widest a player may set its own sphere to, in metres (<c>SetViewRadius</c>).</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Five cells, because that is the most the engine's window bound allows and not because the number is a nice
+    /// one.</b> A sphere session's gather window is <c>2⌈R / c⌉ + 5</c> cells per axis and may be at most 15 in a flat
+    /// grid (<c>W² ≤ 2 809</c>, <c>ReplicationGrid.MaxWindowCells</c>), so <c>⌈R / c⌉ ≤ 5</c> — at
+    /// <see cref="ReplicationCellM"/>'s 256 m, <b>1 280 m</b>. Declaring more throws at <c>Start</c> with a message
+    /// naming the cell side it would need, which is the engine telling you to make this a deliberate decision rather
+    /// than a typo. Written as an expression so the two cannot drift.
+    /// </para>
+    /// <para>
+    /// <b>The ceiling is five of whatever <see cref="ReplicationCellM"/> is</b>, so it moved from 320 m to 1 280 m when
+    /// that cell went from 64 m to 256 m to match the spatial grid. <b>Measured, the wider ceiling is nearly free</b>
+    /// (<c>ReplicationWindowBench</c>, sweep F, 2026-10-14, same session served 192 m, only the declared maximum moving):
+    /// a 320 m ceiling is 81 window cells and 14.3 µs per tick of gather, 640 m is 121 cells and 14.5 µs, 1 280 m is 225
+    /// cells and 15.7 µs. The window's cells cost about 5 ns each; what costs is the cell SIZE, not how many.
+    /// </para>
+    /// <para>
+    /// <b>Declaring a max at all still has a price, paid by every human session.</b> <c>Sphere(..., max:)</c> sizes the
+    /// window at <c>Start</c> for the maximum, not for the current radius — 15 cells per axis instead of the 9 that
+    /// 192 m needs at this cell, so 225 window cells instead of 81, which the figures above price at 1.4 µs per tick.
+    /// It lands on <see cref="HumanProfile"/> and <see cref="SpectateProfile"/> only, never on
+    /// <see cref="PlayerProfile"/>, which is the one the demo's CPU numbers are taken on: a bot renders nothing and has
+    /// no slider.
+    /// </para>
+    /// </remarks>
+    public static double PlayerMaxRadiusM => ReplicationCellM * 5d;
 
     /// <summary>
     /// <c>ACKS</c> reason: a possessed player's session asked to look at another realm.
@@ -325,6 +459,17 @@ public static class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: the realm asked for is not registered — never was, or is a dungeon nobody is inside.</summary>
     public const byte NoSuchRealm = AckReasons.FirstApplicationReason + 1;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="SetViewRadius"/> outside the range this profile allows.
+    /// </summary>
+    /// <remarks>
+    /// Refused and told, never clamped — the same reasoning as a speed class this server does not grant. A clamp would
+    /// let a slider sit at 2 km while the session was served 320 m, with the client drawing a near-radius ring at a
+    /// figure nothing honours and no way to find out. The client reads the range from <c>/typhon/demo.json</c>, so a
+    /// refusal means the two disagree about the server, which is worth hearing about.
+    /// </remarks>
+    public const byte ViewRadiusRefused = AckReasons.FirstApplicationReason + 2;
 
     /// <summary>
     /// The reason a <see cref="ViewRealm"/> naming an unviewable realm is refused: <see cref="NoSuchRealm"/>, under the name its own callers read.
@@ -356,8 +501,39 @@ public static class TatooineReplication
     /// <summary>The realm kind of space (Realms G3): a deep realm at its own cell.</summary>
     public const string SpaceKind = "space";
 
-    /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
-    public const double ReplicationCellM = PlayerRadiusM / 3d;
+    /// <summary>
+    /// The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): the planet's own spatial cell, set from
+    /// <c>SimConfig.ResolveCellSize</c> before the realms are registered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A deliberate deviation from the engine's documented rule of thumb</b> (09 § 4: <c>c ≈ R′/3</c> of the profile with the most sessions, which would
+    /// be 64 m here), <b>because a replication cell smaller than the SPATIAL cell is paid for on every delivery.</b> Delivering a replication cell queries
+    /// the spatial index over that cell's box, so when four replication cells sit inside one spatial cell, that spatial cell is opened four times to answer
+    /// questions about a quarter of itself each.
+    /// </para>
+    /// <para>
+    /// Measured (<c>ReplicationWindowBench</c>, sweep E, 2026-10-14, 7950X, Release, two runs each in its own process, this demo's own geometry — a session
+    /// served 192 m with a 320 m ceiling, 113 entities held, 1.18 records per tick, identical in every row):
+    /// </para>
+    /// <list type="table">
+    /// <item><term>64 m (4:1)</term><description>33.4 µs per tick of gather</description></item>
+    /// <item><term>128 m (2:1)</term><description>20.8 µs</description></item>
+    /// <item><term>192 m (1.33:1)</term><description>16.1 µs</description></item>
+    /// <item><term>256 m (1:1)</term><description>13.8 µs</description></item>
+    /// <item><term>320 m (0.8:1)</term><description>14.2 µs — coarser than the spatial cell stops helping</description></item>
+    /// </list>
+    /// <para>
+    /// So the rule is <b>match the spatial cell</b>, not "as coarse as possible": past 1:1 one query straddles several spatial cells and the curve turns
+    /// back up. The window's own cell count is nearly free by comparison — 5 ns per cell per tick, measured on an empty world — which is why the wider
+    /// ceiling this buys (<see cref="PlayerMaxRadiusM"/>, five cells) costs 1.4 µs rather than the 2.4x the cell side itself is worth.
+    /// </para>
+    /// <para>
+    /// <b>Not a const, because the spatial cell is not one:</b> <c>SimConfig.ResolveCellSize</c> scales with <c>--content-scale</c> and is overridden by
+    /// <c>--cell</c>, which the sweeps move. Following it keeps the ratio at 1:1 in every configuration instead of only the default one.
+    /// </para>
+    /// </remarks>
+    public static double ReplicationCellM = 256d;
 
     /// <summary>The teleport threshold, in metres per second: the fastest anything on Tatooine moves, plus headroom.</summary>
     /// <remarks>
@@ -366,14 +542,27 @@ public static class TatooineReplication
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
     /// </para>
     /// <para>
-    /// <b>The 5 % headroom over <c>PlayerMountSpeedMps</c> (12 m/s) is not padding, and declaring the true maximum here is broken.</b> The engine's test is
+    /// <b>The 5 % headroom over the fastest gait is not padding, and declaring the true maximum here is broken.</b> The engine's test is
     /// <c>step² &gt; (TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions, with no margin — so an entity travelling at exactly the declared
     /// maximum sits on the boundary and the ~1 mm position quantum tips it over on about half its ticks. Every tip is reported to clients as a teleport,
     /// which forbids interpolation, so a mounted player stood still for 112 frames of 180 and then jumped at 86 m/s. Measured in the browser client, which is
-    /// how it was found. At 12.6 every mover is smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it lives here.
+    /// how it was found. At 5 % over the maximum every mover was smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it
+    /// lives here.
+    /// </para>
+    /// <para>
+    /// <b>It is COMPUTED from the ladder's top, and that is the whole point of the expression.</b> It was 12.6, a hand-written 5 % over the mount's 12 — so
+    /// the day a gait went past 12 m/s, every segment of a player using it would have read as a teleport and the symptom would have been the stutter above,
+    /// in a part of the code that says nothing about speeds. Shift+4 doubled the top gait, and this followed by arithmetic instead of by remembering.
+    /// </para>
+    /// <para>
+    /// <b>What it costs is real and is the price of the fastest gait.</b> The threshold sizes the velocity codec
+    /// (<c>ProjectionCompiler.VelocityCodec</c>: codes = maxSpeed × tickPeriod ÷ unit, then the next width up the ladder) and the teleport test's
+    /// sensitivity. Doubling it doubles the codes a velocity component may need, which can cost a width step for EVERY moving entity in the world, and
+    /// halves how sharp a jump has to be before the engine calls it a teleport rather than motion. A demo that wants to cross 16 km quickly pays that; a
+    /// server that wanted the detector tight would cap the ladder instead.
     /// </para>
     /// </remarks>
-    internal const double MaxSpeedMps = 12.6;
+    internal const double MaxSpeedMps = TatooineData.PlayerSpeederFastSpeedMps * 1.05;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -441,6 +630,23 @@ public static class TatooineReplication
 
     /// <summary>The close code a session kicked by <see cref="RequestShutdown"/> carries.</summary>
     public const ushort ShutdownCloseCode = 4100;
+
+    /// <summary>
+    /// The close code a <c>player</c> session carrying no valid token is refused with (A3).
+    /// </summary>
+    /// <remarks>
+    /// Its own code rather than reusing <see cref="HouseFullCloseCode"/>, because a client must be able to tell "come back
+    /// later" from "log in again": the first is worth a retry on the same credentials and the second never is. A browser that
+    /// cannot distinguish them either retries forever against a rejected token or gives up on a full server.
+    /// </remarks>
+    public const ushort NotAuthenticatedCloseCode = 4102;
+
+    /// <summary>
+    /// How many <c>player</c> admissions were refused for want of a valid token. Read by a test and by the stats page.
+    /// </summary>
+    public static long RefusedUnauthenticated => System.Threading.Interlocked.Read(ref _refusedUnauthenticated);
+
+    private static long _refusedUnauthenticated;
 
     // Live sessions of each role, as the last tick counted them from the session table, and admissions granted since that count. The hook runs on the
     // transport thread and the count runs in the tick, so neither alone is the truth: the hook admits against live + pending, and the tick zeroes pending
@@ -515,6 +721,27 @@ public static class TatooineReplication
     /// </remarks>
     public static EntityId SubjectOf(SessionId session) => _pushCommands?.ControlledOf(session) ?? EntityId.Null;
 
+    /// <summary>
+    /// The <c>netId</c> a session's client knows an entity by, or <c>0</c> when it cannot see it.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <returns>The identity, or <c>0</c>.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The inverse of what a command does, and the demo has wanted it since A11.</b> Everything else here goes the other way — a
+    /// client names a <c>netId</c> and the server resolves it. Naming an entity TO a client is what a GM tool, a tutorial pointing at a
+    /// quest giver, or a test driving a command at a specific entity all need.
+    /// </para>
+    /// <para>
+    /// <b>Read through the cached commands surface, exactly as <see cref="SubjectOf"/> is.</b> Both read committed replication state —
+    /// what the session's last published frame carried — which is the state a system reads and is stable between ticks. It answers 0
+    /// before the first tick of a run, because there is no surface to ask yet.
+    /// </para>
+    /// </remarks>
+    public static uint NetIdOf(SessionId session, EntityId entity)
+        => _pushCommands != null && _pushCommands.TryNetIdOf(session, entity, out var netId) ? netId : 0u;
+
     /// <summary>The sessions whose subject died this tick, collected before any is released because releasing writes to <see cref="Spectators"/>.</summary>
     private static readonly List<SessionId> Dead = [];
 
@@ -575,13 +802,28 @@ public static class TatooineReplication
         var player = string.Equals(request.Kind, PlayerKind, StringComparison.Ordinal);
         if (player)
         {
+            // A3: a player session IS its account, so the token is checked before the capacity reservation — refusing after reserving would leak a pending
+            // slot on every unauthenticated attempt, which is a cap this hook cannot get back without a tick.
+            if (!AuthToken.TryValidate(request.Token, out var account))
+            {
+                System.Threading.Interlocked.Increment(ref _refusedUnauthenticated);
+                return Admission.Reject(NotAuthenticatedCloseCode, "log in at /auth/login and present the token on HELLO");
+            }
+
             // The byte budget stays with BindOpenedSessions' SetBudget rather than moving into these limits. Both would work, and setting it in two places
             // would mean two numbers to keep equal — and that one is what the Phase 2 criteria measure with.
+            //
+            // The account rides through as AppData, which is what the session system reads on SessionEventKind.Opened to know WHICH avatar to bind (A5).
+            // Carrying it here rather than looking the token up again later is the point: the hook is where the token was proved, and proving it twice would
+            // be two places that could disagree.
             return TryReserve(ref _pendingClients, System.Threading.Volatile.Read(ref _liveClients), MaxClients)
-                ? Admission.Accept(SessionRole.Player)
+                ? Admission.Accept(SessionRole.Player, null, new PlayerIdentity(account))
                 : Full("player", MaxClients);
         }
 
+        // A god session stays ANONYMOUS and carries no AppData. It is read-only by role — SessionRole.Spectator — and every game intent is Roles(Player), so
+        // there is nothing for an identity to authorise. Requiring a token here would mean a login screen in front of the god camera, which is the one tool
+        // that has to work on a box nobody has an account on.
         return TryReserve(ref _pendingSpectators, System.Threading.Volatile.Read(ref _liveSpectators), MaxSpectators)
             ? Admission.Accept(SessionRole.Spectator, SessionLimits.God)
             : Full("spectator", MaxSpectators);
@@ -602,6 +844,14 @@ public static class TatooineReplication
         System.Threading.Volatile.Write(ref _pendingClients, 0);
         System.Threading.Volatile.Write(ref _pendingSpectators, 0);
         System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
+        System.Threading.Interlocked.Exchange(ref _refusedUnauthenticated, 0);
+        ResetAvatarAccounting();
+        BoundPlayer.Clear();
+        Unbound.Clear();
+        Seen.Clear();
+        Retired.Clear();
+        System.Threading.Interlocked.Exchange(ref _possessions, 0);
+        System.Threading.Interlocked.Exchange(ref _releases, 0);
         System.Threading.Interlocked.Exchange(ref _kicksStaged, 0);
         Kicked.Clear();
         Spectators.Clear();
@@ -609,6 +859,7 @@ public static class TatooineReplication
         Dead.Clear();
         MaxClients = 0;
         MaxSpectators = 0;
+        PlayerProfileName = HumanProfile;
     }
 
     /// <summary>A refusal for a full house, counted.</summary>
@@ -862,7 +1113,7 @@ public static class TatooineReplication
         subs.Profile(SpectateProfile, p =>
         {
             p.Detection(detection)
-                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
@@ -870,6 +1121,24 @@ public static class TatooineReplication
                 .Of<WorldObject>();
 
             // Free here, unlike on the sphere above: a World observer fills once per realm from a cursor and has no crescent to sweep.
+            p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
+            p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
+        });
+
+        // A7: what a session with something to RENDER is served — the player's own shape plus the buildings. Declared separately from
+        // SpectateProfile despite being identical today; see HumanProfile for why they are kept apart, and for the sweep cost this
+        // accepts. Declared unconditionally rather than only when PlayerProfileName selects it, because the catalog a client
+        // negotiates against is compiled from these declarations: a profile that appeared only in some runs would change the catalog
+        // hash between them, and that hash is what a client checks it is talking to the same server with.
+        subs.Profile(HumanProfile, p =>
+        {
+            p.Detection(detection)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
+                .AroundControlled()
+                .Of<Player>()
+                .Of<CityNpc>()
+                .Of<Creature>()
+                .Of<WorldObject>();
             p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });
@@ -916,7 +1185,7 @@ public static class TatooineReplication
             .Coalesce(CommandCoalesce.LatestPerSession)
             .Rate(30, 60)
             .Roles(SessionRole.Player)
-            .Precheck(static (in MoveTo m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
+            .Precheck(static (in m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
             .Field(m => m.X, Codec.F32, "x")
             .Field(m => m.Z, Codec.F32, "z"));
         subs.Command<MoveDir>(c => c
@@ -926,13 +1195,28 @@ public static class TatooineReplication
             // Finiteness only. The speed class is deliberately NOT checked here: the engine's own contract for a pre-check is that it "rejects the impossible,
             // not the disallowed", and which classes this server grants is policy that lives with the entitlement in TrySpeedFor. Checking it here made the
             // system's refusal counter unreachable by any client — so the code claimed to count something it never could.
-            .Precheck(static (in MoveDir m) => float.IsFinite(m.Heading))
+            .Precheck(static (in m) => float.IsFinite(m.Heading))
             .Field(m => m.Heading, Codec.F16, "heading")
-            .Field(m => m.SpeedClass, Codec.U8, "speedClass"));
+            .Field(m => m.SpeedClass, Codec.U8, "speedClass")
+            .Field(m => m.ChangePhase, Codec.U8, "changePhase"));
         subs.Command<SetTarget>(c => c
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(t => t.NetId, Codec.VarUInt, "netId"));
+
+        // How far this session wants to be served. Coalesced latest-per-session for the same reason MoveDir is: dragging a
+        // slider produces a stream of values of which only the last is wanted, and coalescing is what makes a drag cost one
+        // command instead of sixty. The rate is SetTarget's rather than MoveDir's — a radius is a decision, not a continuous
+        // state, and a client changing it four times a second is already more than a person can mean.
+        //
+        // Metres, not a class, and the pre-check is finiteness only for MoveDir's reason: the range this server allows is
+        // policy that lives with the profile declaration, and checking it on the transport thread would make the system's
+        // refusal counter unreachable by any client.
+        subs.Command<SetViewRadius>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(v => v.RadiusM, Codec.VarUInt, "radiusM"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -990,7 +1274,9 @@ public static class TatooineReplication
     {
         if (BindOpenedSessions(tick))
         {
-            PossessPlayers(tick);
+            // A5: the session's own avatar, spawned at its character's saved position, rather than the first free player out of the
+            // pooled crowd. See TatooineReplication.Avatars.cs for why that distinction is the whole requirement.
+            BindAvatars(tick);
             ApplyIntents(tick);
         }
     }
@@ -1019,6 +1305,12 @@ public static class TatooineReplication
         var shutdown = _shutdownReason;
         if (shutdown != null)
         {
+            // A6's cadence bounds what a CRASH costs. A graceful stop should cost nothing, and it used to cost the same: this branch
+            // returns before the avatar binding, so the last thing a Ctrl-C did was kick everybody and leave up to a whole save
+            // interval of walking unwritten. Flushed once, on the first shutdown tick, while the avatars still exist — the kicks staged
+            // just below are applied by the next tick's prologue, so this is the last tick on which there is anything to read.
+            FlushAvatarsForShutdown(tick);
+
             foreach (var session in subs.OpenSessions)
             {
                 if (Kicked.Add(session))
@@ -1049,10 +1341,24 @@ public static class TatooineReplication
                 // RecountSessions. Clamped at zero: a reservation whose session never opened leaks one place until the next admission, which is the safe
                 // direction, and a decrement that ran twice would be the unsafe one.
                 Release(ref player ? ref _pendingClients : ref _pendingSpectators);
-                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfileName);
+
+                // A5: the account Admit proved, taken from the event because AppData reaches the tick nowhere else. A god session
+                // carries none and nothing is recorded, which is what keeps it out of the avatar binding entirely.
+                NoteOpenedSession(e.Session, e.AppData);
+
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfileName : GodProfileName);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
                     request.SetBudget(PlayerBudgetBytesPerSecond);
+                }
+
+                // A13: this session resumed one whose link died, and that session's avatar is still standing in the world. Handing it straight back is the
+                // whole feature — no character read, no spawn, no login transaction — and it happens here rather than in BindAvatars because a resumed
+                // session must never reach the login path at all. A hold that is gone (the grace elapsed, or the account logged in fresh) falls through to
+                // the ordinary login, which is the same answer the client would have had without resume.
+                if (player && e.ResumedFrom.IsValid && TryRebindHeldAvatar(subs, tick.Transaction, e.Session, e.ResumedFrom))
+                {
+                    System.Threading.Interlocked.Increment(ref _resumesRebound);
                 }
 
                 // A player's session is in its player's realm (AroundControlled). A god camera has no entity to follow: with several realms it is in none
@@ -1069,6 +1375,23 @@ public static class TatooineReplication
                 // these maps are process-lifetime statics, and a long run that admits and drops spectators would otherwise accumulate one entry per ride.
                 Spectators.Remove(e.Session);
                 Releasing.Remove(e.Session);
+
+                // A13: the engine says this link died on its own and is keeping the session's resume record for the grace, so the avatar stays standing
+                // instead of being retired by RetireAvatars this tick. The engine then delivers exactly one of Opened{ResumedFrom} or ResumeExpired
+                // (SUB-12), and those two are the only things that end the hold — there is no deadline on this side.
+                if (e.Resumable)
+                {
+                    HoldForResume(tick.Transaction, e.Session);
+                }
+            }
+            else if (e.Kind == SessionEventKind.ResumeExpired && TatooineReplication.HoldsResume(e.Session))
+            {
+                // Nobody came back. Queued rather than retired here: the save needs the tick's player and character accessors, which BindAvatars rents once
+                // for the whole tick (see RetireAvatars).
+                //
+                // Only when there IS a hold behind it: a god session's close is resumable too, and queueing its expiry would defeat BindAvatars' early-out
+                // for a tick in order to run a no-op.
+                ResumesToRetire.Add(e.Session.Value);
             }
             else if (e.Kind == SessionEventKind.RealmClosed)
             {
@@ -1205,6 +1528,35 @@ public static class TatooineReplication
             {
                 StopSpectating(subs, command.Session, wanted);
             }
+        }
+
+        // A7: how far a session asks to be served. A player's control, unlike ViewRealm — a human watching its own avatar is the one who wants a wider view,
+        // and the engine's SetRadius is built for exactly this ("a player boarding an aircraft").
+        //
+        // <b>Validated here and not by the engine's own throw, because this runs on the tick thread.</b> `SetRadius` raises
+        // ArgumentOutOfRangeException for a radius outside the profile's range, and a throw out of a system is not a refusal — it is a dead tick. So the range
+        // is tested first and a bad ask is refused with a reason the client can show.
+        foreach (var command in subs.Commands<SetViewRadius>())
+        {
+            var asked = (double)command.Value.RadiusM;
+
+            // 0 is "back to the profile's own", which the engine spells the same way. Anything else must land inside the declared range; the client is told
+            // both ends in /typhon/demo.json, so an ask outside it is a client and a server that disagree about which server this is.
+            if (asked != 0d && (asked < PlayerRadiusM || asked > PlayerMaxRadiusM))
+            {
+                subs.Reject(command, ViewRadiusRefused);
+                System.Threading.Interlocked.Increment(ref _radiusRefused);
+                continue;
+            }
+
+            // The session's own profile must be a Sphere, which a player's is and a god camera's is not — the role filter on the command already keeps
+            // spectators out, and this is the second half of that: a session whose profile has not been applied yet would make SetRadius throw.
+            if (!subs.SetRadius(command.Session, asked))
+            {
+                continue;   // closing or gone; nothing to answer to
+            }
+
+            System.Threading.Interlocked.Increment(ref _radiusApplied);
         }
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
@@ -1722,159 +2074,16 @@ public static class TatooineReplication
         }
     }
 
-    /// <summary>
-    /// Hands each player session a player of its own to control, takes it back when the session goes, and marks both on the entity.
-    /// </summary>
-    /// <param name="tick">The tick context.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>The claim is made once per session, not per tick.</b> The engine centres the session's sphere on the entity from then on
-    /// (<c>AroundControlled</c>), so there is no per-tick walk of every player and no <c>Place</c>. See <see cref="BoundPlayer"/> for what re-picking per tick
-    /// cost when this method used to do it.
-    /// </para>
-    /// <para>
-    /// <b>What SWG-01 added is the mark on the ENTITY.</b> The claim table alone tells the session which player it drives; it does not tell the simulation to
-    /// stop driving that player. <c>PlayerControl.Kind</c> is that, and it is written here — the one place that knows both when a claim is made and when it is
-    /// given back — rather than inferred anywhere from the table, which only this system may read.
-    /// </para>
-    /// </remarks>
-    private static void PossessPlayers(TickContext tick)
-    {
-        var subs = tick.Subscriptions;
-        var tx = tick.Transaction;
-        if (subs == null || tx == null)
-        {
-            return;
-        }
+    // PossessPlayers lived here until A5. It handed each session the first FREE player out of the pooled crowd, which is why
+    // logging out and back in landed on whatever body happened to be unclaimed — the one thing "log in and be where you were"
+    // cannot tolerate. Its replacement spawns a body for the session instead: TatooineReplication.Avatars.cs, BindAvatars.
+    //
+    // What came with it and did NOT survive: the cluster walk looking for an unheld player, and BoundIds — the set that told a
+    // free player from a taken one across that walk. BoundIds went with it. The comment here used to say it was "still written,
+    // because ControlledBy's scan and the measurement checks read it", which was not true of either: ControlledBy scans clusters
+    // for the possession mark and never touched the set, and no check referenced it. It was written in three places and read in
+    // none, which is the kind of residue that reads as load-bearing to the next person.
 
-        // `Unbound` and `Seen` were filled by WalkSessions, one walk of the open sessions for this tick rather than one per consumer. There were two, each
-        // with an ordinal string compare per session per tick, to produce facts a single pass already has in hand.
-        //
-        // Nothing to claim and nothing to release is the common case by far — a server spends almost every tick with a stable set of clients — and it is worth
-        // detecting, because `tx.For<Player>()` is not free: it creates an EntityMap accessor and pre-warms the component table.
-        if (Unbound.Count == 0 && BoundPlayer.Count == Seen.Count)
-        {
-            return;
-        }
-
-        // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
-        // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
-        var accessor = tx.For<Player>();
-
-        // A player for every session that does not hold one yet, handed over once with Control: the engine centres the session's sphere on it from then
-        // on (AroundControlled), so there is no per-tick walk of every player and no Place.
-        var cursor = 0;
-        if (Unbound.Count > 0)
-        {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0 && cursor < Unbound.Count)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-                    // The EntityId rather than the raw long the span carries, because the claim has to be opened for writing on RELEASE as well as on claim
-                    // and an EntityId cannot be reconstructed from a raw value outside the engine.
-                    var entity = cluster.GetEntityId(slot);
-                    if (BoundIds.Contains(entity))
-                    {
-                        continue;
-                    }
-
-                    var session = Unbound[cursor++];
-                    BoundPlayer[session.Value] = entity;
-                    BoundIds.Add(entity);
-                    subs.Session(session).Control(entity);
-
-                    // The mark that stops PlayerThink driving it. Written through OpenMut rather than into this cluster's span because the span is read-only
-                    // here and, more to the point, a possession is one entity: opening it says so, and sets the dirty bit the fence and the projection read.
-                    if (accessor.TryOpenMut(entity, out var possessed))
-                    {
-                        var control = possessed.Read(Player.Control);
-                        control.Kind = ControllerKind.Human;
-                        possessed.Set(Player.Control, control);
-                        var owner = possessed.Read(Player.Session);
-                        owner.Controller = session.Value;
-                        owner.Target = EntityId.Null;
-                        possessed.Set(Player.Session, owner);
-                        Normalise(ref possessed);
-                        System.Threading.Interlocked.Increment(ref _possessions);
-                    }
-                }
-
-                if (cursor >= Unbound.Count)
-                {
-                    break;
-                }
-            }
-        }
-
-        // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
-        // point a new session is bound to nothing and sees nothing.
-        Retired.Clear();
-        foreach (var (sessionValue, entity) in BoundPlayer)
-        {
-            if (!Seen.Contains(sessionValue))
-            {
-                Retired.Add(sessionValue);
-                BoundIds.Remove(entity);
-
-                // Back to the simulation. Without this a player whose client left would stand still for ever: possessed, so PlayerThink skips it, and with
-                // nobody left to send it an intent. Zero throughout is the resting state, which is also what a freshly spawned player has.
-                if (accessor.TryOpenMut(entity, out var released))
-                {
-                    var controlCopy = released.Read(Player.Control);
-                    controlCopy.Kind = ControllerKind.InProcess;
-                    released.Set(Player.Control, controlCopy);
-                    var owner = released.Read(Player.Session);
-                    owner.Controller = 0u;
-                    owner.Target = EntityId.Null;
-                    released.Set(Player.Session, owner);
-                    Normalise(ref released);
-                    System.Threading.Interlocked.Increment(ref _releases);
-                }
-            }
-        }
-
-        for (var i = 0; i < Retired.Count; i++)
-        {
-            BoundPlayer.Remove(Retired[i]);
-        }
-    }
-
-    /// <summary>
-    /// Brings a player to a standstill with no half-finished activity, at both ends of a possession.
-    /// </summary>
-    /// <param name="player">The player, already opened for writing.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>On CLAIM, because a mid-activity player would otherwise be frozen in it.</b> <c>PlayerThink</c> is what advances an activity and it now skips a
-    /// possessed player, so one claimed while <c>ToShuttle</c>, <c>AwaitingShuttle</c>, <c>ToPortal</c> or <c>Inside</c> would sit in that state for as long as
-    /// the client held it — and the systems that act on those states would act on it from outside the client's view. They now skip a possessed player too, but
-    /// leaving the state set would be leaving a trap for the next system that reads it.
-    /// </para>
-    /// <para>
-    /// <b>On RELEASE, because a stale activity outlives the session.</b> A player given back mid-intent would return to the simulation as <c>Travelling</c>
-    /// towards wherever its last client pointed it, with a timer of zero — which <c>PlayerThink</c> reads as "arrived, decide again", so this is belt to that
-    /// brace rather than load-bearing. What it does buy is that a released player is indistinguishable from one that was never possessed, which is the property
-    /// the measurement checks assert.
-    /// </para>
-    /// </remarks>
-    private static void Normalise(ref EntityRefMut player)
-    {
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = 0;
-        state.ShuttleFrom = -1;
-        state.ShuttleDest = -1;
-        player.Set(Player.State, state);
-
-        var move = player.Read(Player.Move);
-        move.VelX = 0f;
-        move.VelZ = 0f;
-        player.Set(Player.Move, move);
-    }
 
     // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1965,7 +2174,10 @@ public static class TatooineReplication
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
-            SteerTo(ref move, ref player, subs);
+
+            // No phase: a click names a destination, and nothing about WHEN the pointer went down changes where the server is asked to walk to. The split
+            // exists for a held key, whose duration is the whole of what it means.
+            SteerTo(ref move, ref player, subs, 0f, tick.TickNumber);
             player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
@@ -1991,7 +2203,10 @@ public static class TatooineReplication
             var reach = MathF.Max(speed, 1f);
             move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
             move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
-            SteerTo(ref move, ref player, subs);
+
+            // A14b. Clamped rather than refused: a phase is a measurement of the client's own clock against a grid it estimates, so a nonsensical one is a
+            // bad estimate and not a protocol violation — and 255ths cannot leave the range anyway. See MoveDir.ChangePhase for why it is safe to trust.
+            SteerTo(ref move, ref player, subs, command.Value.ChangePhase / 255f, tick.TickNumber);
             player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
@@ -2013,7 +2228,11 @@ public static class TatooineReplication
 
             // TryResolve, not TryResolveAny: a client may only name what it was shown (SUB-26). A refusal is not an error — the entity may have left since the
             // command was sent — so the target is cleared and counted rather than the session being closed.
-            if (subs.TryResolve(command.Session, command.Value.NetId, out var target))
+            //
+            // A11 adds the second half: resolvable is not the same as ALIVE. A netId stays resolvable for as long as the session's view holds it, so a client
+            // that clicks the moment something dies — or replays the click — names a corpse, and the combat system would then carry a target it can never
+            // resolve a shot against. Refused here, where the refusal is counted and the client is told, rather than silently dropped per shot downstream.
+            if (subs.TryResolve(command.Session, command.Value.NetId, out var target) && IsAliveTarget(tx, target))
             {
                 owner.Target = target;
 
@@ -2028,6 +2247,7 @@ public static class TatooineReplication
                 owner.Target = EntityId.Null;
                 System.Threading.Interlocked.Increment(ref _targetsRefused);
             }
+
             player.Set(Player.Session, owner);
         }
 
@@ -2080,7 +2300,6 @@ public static class TatooineReplication
         if (!accessor.TryOpenMut(entity, out player))
         {
             BoundPlayer.Remove(session.Value);
-            BoundIds.Remove(entity);
             System.Threading.Interlocked.Increment(ref _intentsUnowned);
             player = default;
             return false;
@@ -2094,17 +2313,44 @@ public static class TatooineReplication
     /// <param name="move">The player's motion, already carrying the destination and the speed.</param>
     /// <param name="player">The entity.</param>
     /// <param name="subs">This tick's replication surface, for the push mark.</param>
+    /// <param name="changePhase">
+    /// The share of this tick that still belongs to the velocity being replaced, in <c>[0, 1]</c> — <see cref="MoveDir.ChangePhase"/>. 0 gives the whole
+    /// tick to the new velocity, which is what every intent did before A14b.
+    /// </param>
+    /// <param name="tick">This tick's number, which stamps the bias so the move phase can tell it from a stale one.</param>
     /// <remarks>
+    /// <para>
     /// The same <c>Steer</c> the simulation uses, through the same <c>PlayerMove</c> integration: an intent is a destination and nothing else, and that is
     /// the whole of why a client cannot move faster than the server allows.
+    /// </para>
+    /// <para>
+    /// <b>A14b: the tick an intent changes in is SPLIT, and the share owed to the old velocity travels as a one-tick bias rather than as a velocity.</b>
+    /// Scaling the velocity itself would be wrong for every tick after this one: nothing re-steers a player between commands — a held key re-sends only
+    /// every <c>REFRESH_MS</c>, and a stop is sent exactly once — so a scaled velocity would persist as a speed error for a third of a second, or for
+    /// ever. The bias is stamped with the tick it is owed for and never cleared: the move phase applies it when the stamp matches and ignores it
+    /// afterwards, which costs one comparison and keeps <c>PlayerMove</c> a reader of <c>PlayerMotion</c> rather than a third writer of it.
+    /// </para>
     /// </remarks>
-    private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs)
+    private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs, float changePhase, long tick)
     {
         var place = player.Read(Player.Bounds);
+
+        // Captured before Steer overwrites them: this is the velocity the player held for the first `changePhase` of this tick.
+        var wasX = move.VelX;
+        var wasZ = move.VelZ;
 
         // The simulation's own integration, not a copy of it: one function, so "an intent cannot move a player faster than the server does" is a property of
         // the code rather than of two implementations happening to agree.
         var moving = SimBridge.Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTickForIntents, place.X, place.Z, move.DestX, move.DestZ);
+
+        // The velocity carries the WHOLE tick, so the bias is what the split owes on top of it: `was x p + now x (1 - p)` less `now`.
+        var phase = Math.Clamp(changePhase, 0f, 1f);
+        if (phase > 0f)
+        {
+            move.BiasX = (wasX - move.VelX) * phase;
+            move.BiasZ = (wasZ - move.VelZ) * phase;
+            move.BiasTick = tick;
+        }
 
         var state = player.Read(Player.State);
 
@@ -2129,14 +2375,46 @@ public static class TatooineReplication
     /// </remarks>
     private static bool TrySpeedFor(byte speedClass, out float speed)
     {
-        switch (speedClass)
+        if (speedClass >= SpeedClasses.Count)
         {
-            case SpeedClasses.Stop: speed = 0f; return true;
-            case SpeedClasses.Walk: speed = TatooineData.PlayerRunSpeedMps * 0.5f; return true;
-            case SpeedClasses.Run: speed = TatooineData.PlayerRunSpeedMps; return true;
-            default: speed = 0f; return false;
+            speed = 0f;
+            return false;
         }
+
+        speed = SpeedFor(speedClass);
+        return true;
     }
+
+    /// <summary>What a class this server GRANTS is worth, in metres per second.</summary>
+    /// <param name="speedClass">A class below <see cref="SpeedClasses.Count"/>.</param>
+    /// <returns>Metres per second; 0 for a class this server does not grant.</returns>
+    /// <remarks>
+    /// The entitlement itself, so <see cref="TrySpeedFor"/> (the command path, which must refuse what it does not grant) and the avatar's replicated
+    /// <c>walkMps</c>/<c>runMps</c> stats (A14, which tell the client what to predict with) cannot disagree about what running is worth. Two copies of this
+    /// mapping would be two speeds, and the one the client integrated would be the one that drifts.
+    /// </remarks>
+    internal static float SpeedFor(byte speedClass) => speedClass switch
+    {
+        SpeedClasses.Stop => 0f,
+        SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f,
+        SpeedClasses.Run => TatooineData.PlayerRunSpeedMps,
+        SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps,
+        SpeedClasses.Speeder => TatooineData.PlayerMountSpeedMps,
+        SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps,
+        _ => 0f,
+    };
+
+    /// <summary>How many <see cref="SetViewRadius"/> asks were applied, and how many were refused as out of range.</summary>
+    /// <remarks>
+    /// The refusal is the number that says whether a client and this server disagree about the range — the same role the speed class's refusal count plays.
+    /// Both are reset by <see cref="ResetIntentAccounting"/>, so one check's numbers are its own.
+    /// </remarks>
+    public static (long Applied, long Refused) ViewRadiusAsks =>
+        (System.Threading.Interlocked.Read(ref _radiusApplied), System.Threading.Interlocked.Read(ref _radiusRefused));
+
+    private static long _radiusApplied;
+
+    private static long _radiusRefused;
 
     /// <summary>Clears the intent counters, so one check's refusals do not decide the next one's.</summary>
     /// <remarks>Called from a <c>SetUp</c>, for the reason <see cref="ResetSessionAccounting"/> is. Never from the demo.</remarks>
@@ -2147,11 +2425,17 @@ public static class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _intentsUnowned, 0);
         System.Threading.Interlocked.Exchange(ref _intentsRefusedSpeed, 0);
         System.Threading.Interlocked.Exchange(ref _targetsRefused, 0);
+        System.Threading.Interlocked.Exchange(ref _radiusApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _radiusRefused, 0);
         System.Threading.Interlocked.Exchange(ref _targetsSet, 0);
         System.Threading.Interlocked.Exchange(ref _possessions, 0);
         System.Threading.Interlocked.Exchange(ref _releases, 0);
         BoundPlayer.Clear();
-        BoundIds.Clear();
+
+        // The holds go with it (A13), for the same reason BoundPlayer does: a fixture that resets only the intent accounting would otherwise inherit a hold
+        // naming an entity from a disposed world, and the first resumable close of the next run would hand a client a body out of it.
+        ResumingPlayer.Clear();
+        ResumesToRetire.Clear();
 
         // The rest of the statics a runtime leaves behind. _pushCommands in particular holds the LAST runtime's SubscriptionsCommands, so Replicate() from a
         // system of the next one would mark a slot in an object belonging to a disposed engine; the others make a second run in one process inherit the
@@ -2220,6 +2504,47 @@ public static class TatooineReplication
     private static ushort _creatureRouting;
     private static ushort _lairRouting;
     private static ushort _playerRouting;
+
+    /// <summary>
+    /// Whether an entity is something that can still be shot at: it exists, and whatever vitals it has are above zero (A11).
+    /// </summary>
+    /// <param name="tx">A transaction to read through — the tick's, in the one place this is used for real.</param>
+    /// <param name="target">The entity a client named.</param>
+    /// <returns><see langword="false"/> when the target is gone or dead.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>By archetype, because health lives on a different component in each.</b> A player's is <c>PlayerVitals</c>, a creature's
+    /// <c>CreatureVitals</c>, a lair's <c>LairVitals</c>; there is no shared interface to read, and inventing one for three call
+    /// sites would be an abstraction over a switch.
+    /// </para>
+    /// <para>
+    /// <b>Anything that is not one of the three answers TRUE, and that is deliberate.</b> A city NPC or a building has no vitals and
+    /// is not dead — it is simply not shootable, which <see cref="ClassifyTarget"/> already describes and the combat system already
+    /// refuses. Answering false here would conflate "you cannot attack a cantina" with "that thing is dead", and the client's two
+    /// reactions to those are different.
+    /// </para>
+    /// </remarks>
+    public static bool IsAliveTarget(Transaction tx, EntityId target)
+    {
+        var routing = target.ArchetypeId;
+
+        if (routing == _playerRouting)
+        {
+            return tx.For<Player>().TryOpen(target, out var player) && player.Read(Player.Vitals).Health > 0;
+        }
+
+        if (routing == _creatureRouting)
+        {
+            return tx.For<Creature>().TryOpen(target, out var creature) && creature.Read(Creature.Vitals).Health > 0;
+        }
+
+        if (routing == _lairRouting)
+        {
+            return tx.For<CreatureLair>().TryOpen(target, out var lair) && lair.Read(CreatureLair.Vitals).Health > 0;
+        }
+
+        return true;
+    }
 
     /// <summary>Which of the shootable archetypes an entity belongs to, for <c>PlayerSession.TargetKind</c> (SWG-02).</summary>
     /// <param name="target">The entity a client named.</param>
@@ -2296,7 +2621,6 @@ public static class TatooineReplication
     private static readonly Dictionary<uint, EntityId> BoundPlayer = [];
 
     /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
-    private static readonly HashSet<EntityId> BoundIds = [];
 
     /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
     private static readonly List<SessionId> Unbound = [];

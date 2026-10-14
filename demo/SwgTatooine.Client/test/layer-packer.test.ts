@@ -30,6 +30,7 @@ function view(selectedNetId = 0): FrameView {
     viewportHeight: 800,
     selectedNetId,
     ground: FLAT_GROUND,
+    predicted: null,
   };
 }
 
@@ -126,6 +127,47 @@ describe('LayerPacker', () => {
     // A new entity starts from the midpoint, 6 px: at 5.5 px it is a sprite, whatever the slot held before.
     expect(packer.nearCount).toBe(0);
     expect(packer.farNetIds[0]).toBe(42);
+  });
+
+  /**
+   * A14. The mesh of every entity is placed from the packer's loop, so a prediction that reached only the camera would slide
+   * the view off a character standing where the server last confirmed it — which looks worse than the latency it removes.
+   */
+  it('draws the predicted body at its predicted position, and nothing else', () => {
+    const { packer, place } = setup();
+    place(77, 0, 100);
+    place(78, 1, 100);
+    packer.pack({ ...view(), predicted: { netId: 77, x: 0, z: 60 } });
+
+    expect(packer.nearCount).toBe(2);
+    const own = packer.nearNetIds[0] === 77 ? 0 : 1;
+    const other = 1 - own;
+    expect(Array.from(packer.nearData.subarray(own * 4, own * 4 + 3))).toEqual([0, 0, 60]);
+    expect(Array.from(packer.nearData.subarray(other * 4, other * 4 + 3))).toEqual([1, 0, 100]);
+  });
+
+  /** A god camera and a spectator predict nothing, so a null override must leave every entity exactly where the store says. */
+  it('leaves every entity authoritative when there is no prediction', () => {
+    const { packer, place } = setup();
+    place(77, 0, 100);
+    packer.pack(view());
+
+    expect(packer.nearCount).toBe(1);
+    expect(Array.from(packer.nearData.subarray(0, 3))).toEqual([0, 0, 100]);
+  });
+
+  /** The predicted body stands on the ground under ITS OWN position, or its feet sink on a dune by the lead distance. */
+  it('samples the ground under the predicted position', () => {
+    const { packer, place } = setup();
+    place(77, 0, 100);
+    packer.pack({
+      ...view(),
+      predicted: { netId: 77, x: 0, z: 60 },
+      ground: { heightAt: (_x, z) => z * 0.1 },
+    });
+
+    expect(packer.nearCount).toBe(1);
+    expect(packer.nearData[1]).toBeCloseTo(6, 6);
   });
 
   it('replaces its arrays when the view outgrows them, and says so', () => {

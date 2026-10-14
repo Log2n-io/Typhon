@@ -87,7 +87,34 @@ public static class TatooineData
     public const float PlayerRunSpeedMps = 5f;
 
     /// <summary>[WIKI] Mount and speeder speed, the middle of the 11.8-12.5 range across mount types.</summary>
+    /// <remarks>
+    /// A landspeeder, in the gait ladder: the community's measured figure for the X-34, XP-38, V-35 and AB-1 is 765 m/min
+    /// = 12.75 m/s, and the swoop's 882 m/min = 14.7 m/s is the fastest thing anyone rode. 12 is this range's middle and
+    /// was already here, so the ladder uses it rather than adding a second number six per cent away from it.
+    /// </remarks>
     public const float PlayerMountSpeedMps = 12f;
+
+    /// <summary>
+    /// [CORE3] Burst Run: a run multiplied by 1.822, which is 9.11 m/s.
+    /// </summary>
+    /// <remarks>
+    /// Not a guess and not a feel-good number — it is the multiplier in the source. <c>BurstRunCommand</c> calls
+    /// <c>PlayerManager::doBurstRun</c>, which builds the <c>burstrun</c> buff with
+    /// <c>setSpeedMultiplierMod(1.822f)</c> and the same figure for acceleration, for 30 s on a 300 s cooldown. SWG's
+    /// "running fast" is therefore a precise thing, and this is it; the demo grants it continuously because it has no
+    /// action pools to spend and no cooldowns to serve.
+    /// </remarks>
+    public const float PlayerBurstRunSpeedMps = PlayerRunSpeedMps * 1.822f;
+
+    /// <summary>Twice a speeder, and the only speed here with no source behind it.</summary>
+    /// <remarks>
+    /// <b>Asked for as a way to cross 16 km of planet quickly, and it is honest about being invented.</b> Nothing in SWG
+    /// moved a player at 24 m/s on the ground; the swoop's 14.7 m/s was the ceiling. It earns its place by what it
+    /// exercises rather than by what it reproduces — at 24 m/s a session crosses a replication cell every 2.7 s, which is
+    /// the enter/leave churn no other gait reaches, and it is what sizes
+    /// <see cref="Replication.TatooineReplication.MaxSpeedMps"/>.
+    /// </remarks>
+    public const float PlayerSpeederFastSpeedMps = PlayerMountSpeedMps * 2f;
 
     /// <summary>
     /// [WIKI] Weapon delay floor. Combat is continuous and gated per weapon by

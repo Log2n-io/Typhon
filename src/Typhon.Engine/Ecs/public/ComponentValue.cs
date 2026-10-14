@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using JetBrains.Annotations;
@@ -52,9 +52,11 @@ public unsafe struct ComponentValue
     /// <summary>Create a ComponentValue from raw bytes. Used by reflection-based callers (Shell CLI).</summary>
     internal static ComponentValue CreateFromRaw(int componentTypeId, byte* data, int dataSize)
     {
-        if (CheckConfig.Enabled && dataSize > MaxPayloadSize)
+        // Ungated for the same reason as Create<T>: the CopyTo below is bounded, but DataSize is then stored and read back by Read<T>, so an oversized value
+        // would be silently truncated here and mis-sized there. One compare against a memcpy is not a cost worth a flag.
+        if (dataSize > MaxPayloadSize)
         {
-            ThrowHelper.ThrowInvalidOp($"Data size {dataSize} exceeds max payload {MaxPayloadSize}");
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(null, dataSize, MaxPayloadSize);
         }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;
@@ -63,12 +65,27 @@ public unsafe struct ComponentValue
         return cv;
     }
 
+    /// <summary>Packs a component value for the spawn path.</summary>
+    /// <param name="componentTypeId">The component's type id.</param>
+    /// <param name="value">The value, copied into the inline buffer.</param>
+    /// <returns>The packed value.</returns>
+    /// <remarks>
+    /// <b>The size check is NOT gated on <c>CheckConfig.Enabled</c>, and gating it was a memory-safety hole.</b> The write below is an
+    /// <see cref="Unsafe.WriteUnaligned{T}(ref byte, T)"/> of <c>sizeof(T)</c> bytes into a <see cref="MaxPayloadSize"/>-byte <c>fixed</c> buffer, so an
+    /// oversized component overwrote whatever followed it — a stack frame, or another element of a <c>ComponentValue[]</c> on the heap. With
+    /// <c>CheckConfig.Enabled</c> false by default and no runtime setter, the guard was compiled out of Debug and Release alike, and a 132-byte component
+    /// killed the process with no managed exception, no message and no stack: found that way from the SWG demo's first non-spatial archetype.
+    /// <para>
+    /// <b>It is free.</b> <c>sizeof(T)</c> is a JIT-time constant for a concrete <c>T</c>, so the comparison folds to a constant and the whole branch is
+    /// eliminated in every instantiation that fits — which is every legal one. There was never a cost to gate.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ComponentValue Create<T>(int componentTypeId, in T value) where T : unmanaged
     {
-        if (CheckConfig.Enabled && sizeof(T) > MaxPayloadSize)
+        if (sizeof(T) > MaxPayloadSize)
         {
-            ThrowHelper.ThrowInvalidOp($"Component size {sizeof(T)} exceeds max payload {MaxPayloadSize}");
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(typeof(T), sizeof(T), MaxPayloadSize);
         }
         var cv = new ComponentValue();
         Unsafe.AsRef(in cv.ComponentTypeId) = componentTypeId;
@@ -77,9 +94,32 @@ public unsafe struct ComponentValue
         return cv;
     }
 
+    /// <summary>Reads the payload back as <typeparamref name="T"/>.</summary>
+    /// <typeparam name="T">The component type the value was packed from.</typeparam>
+    /// <returns>The value.</returns>
+    /// <remarks>
+    /// <b>Two checks, and only one of them can be free — which is why they are not one check.</b> The read below is an
+    /// <c>Unsafe.ReadUnaligned&lt;T&gt;</c> of <c>sizeof(T)</c> bytes from <see cref="HeaderSize"/> into a 128-byte struct, so a
+    /// <typeparamref name="T"/> larger than <see cref="MaxPayloadSize"/> reads past the END of the struct — into the next element of a
+    /// <c>ComponentValue[]</c>, or past the stack slot. That bound is on <c>sizeof(T)</c> alone, a JIT-time constant for a concrete
+    /// <typeparamref name="T"/>, so it folds to nothing in every instantiation that fits and is ungated for the same reason
+    /// <see cref="Create{T}"/>'s is: #1140 was a guard that could not run, and a memory-safety bound behind a flag defaulted to off is not a
+    /// bound.
+    /// <para>
+    /// The EXACT match against <see cref="DataSize"/> stays gated, because it is a different kind of check and a different cost.
+    /// <c>DataSize</c> is a runtime field, so that comparison cannot fold: it is a load, a compare and a branch on a path that runs per
+    /// component per spawn. It catches reading a value back as the wrong same-sized type, which is a type-confusion bug rather than an
+    /// out-of-bounds one, and that is what strict mode is for.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal T Read<T>() where T : unmanaged
     {
+        if (sizeof(T) > MaxPayloadSize)
+        {
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(typeof(T), sizeof(T), MaxPayloadSize);
+        }
+
         if (CheckConfig.Enabled && sizeof(T) != DataSize)
         {
             ThrowHelper.ThrowInvalidOp($"Read<{typeof(T).Name}> size {sizeof(T)} != stored DataSize {DataSize}");

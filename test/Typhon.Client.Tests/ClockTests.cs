@@ -282,6 +282,67 @@ public class ClockTests
         Assert.That(clock.RenderTime, Is.EqualTo(98).Within(1e-9));
     }
 
+    /// <summary>
+    /// The tick grid a sub-tick intent is quantised against — the same cases <c>clock.test.ts</c> pins on the other SDK.
+    /// </summary>
+    /// <remarks>
+    /// The server advances an entity by one whole period of whatever intent it held at the boundary, so a client that changes velocity on a key event
+    /// integrates a different DURATION than the server does. Sending the phase lets the server split the boundary tick and close it exactly, and this is
+    /// what says the phase can be measured from what the clock knows.
+    /// </remarks>
+    [Test]
+    public void TheTickGridReadsAnInstantAsAFractionOfTheTick()
+    {
+        const double Delay = 30;
+        var clock = new Clock(new ClockOptions { TickPeriodMs = Period });
+
+        Assert.That(clock.SubTickPhase(5000), Is.NaN, "a confident zero before the grid is anchored would be sent as a claim");
+
+        for (long tick = 0; tick < 12; tick++)
+        {
+            clock.OnFrame(tick, SentAt(tick) + Delay);
+        }
+
+        Assert.Multiple(() =>
+        {
+            foreach (var into in new[] { 0d, 1d, 17d, 50d, 99d, 99.9 })
+            {
+                Assert.That(clock.SubTickPhase(SentAt(7) + into, Delay), Is.EqualTo(into / Period).Within(1e-12), $"{into} ms into a tick");
+            }
+
+            Assert.That(clock.SubTickPhase(SentAt(4), Delay), Is.Zero, "exactly on a boundary");
+            Assert.That(clock.SubTickPhase(SentAt(4) + Period, Delay), Is.Zero, "and it wraps rather than reaching 1");
+
+            // Not a defect to fix here: `OffsetMs` is the arrival of a tick's frame, so the grid sits one downlink behind the server's. Stated as an
+            // assertion because the size of it decides whether a caller needs the ping.
+            Assert.That(clock.SubTickPhase(SentAt(7) + 50, 0), Is.EqualTo((50 - Delay) / Period).Within(1e-12), "uncorrected, the documented bias");
+
+            // An estimate large enough to carry the instant over a boundary stays in range and wraps.
+            Assert.That(clock.SubTickPhase(SentAt(7) + 90, Delay + Period), Is.EqualTo(0.9).Within(1e-12));
+        });
+    }
+
+    /// <summary>A period change moves the grid with it, so a server that slows down is still read on the right one.</summary>
+    [Test]
+    public void TheTickGridFollowsAPeriodChange()
+    {
+        const double Delay = 30;
+        var clock = new Clock(new ClockOptions { TickPeriodMs = Period });
+        for (long tick = 0; tick < 12; tick++)
+        {
+            clock.OnFrame(tick, SentAt(tick) + Delay);
+        }
+
+        clock.OnPeriodChange(12, 40);
+        for (long tick = 12; tick < 20; tick++)
+        {
+            clock.OnFrame(tick, SentAt(12) + ((tick - 12) * 40) + Delay);
+        }
+
+        // Tick 14 begins 80 ms after tick 12; 10 ms into it is a quarter of a 40 ms period, not a tenth of a 100 ms one.
+        Assert.That(clock.SubTickPhase(SentAt(12) + 80 + 10, Delay), Is.EqualTo(0.25).Within(1e-12));
+    }
+
     /// <summary>The clock runs once per rendered frame: after construction it must not allocate.</summary>
     [Test]
     public void TheClockAllocatesNothingPerFrame()

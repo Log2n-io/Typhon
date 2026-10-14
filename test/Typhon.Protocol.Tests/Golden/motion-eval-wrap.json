@@ -1,5 +1,5 @@
 {
-  "description": "Motion evaluated over the committed stream-motion replay, in the schema of motion-eval: after frame \u0060afterFrame\u0060, every live entity of the archetypes a case names, evaluated at renderTick \u002B renderFrac and rendered as IEEE bit strings. These are the two cases motion-eval says it cannot reach. The ring: a render time before the ring wrapped, one inside a ring entry that has been overwritten, one whose next sample is entry 0 reached from entry 7 (the modular step the wrap exists to exercise), one past the newest sample, and one older than the oldest segment the ring still holds \u2014 meaningful only once a wrap has thrown older segments away. The epoch: just before a teleport, between the two epochs\u0027 samples, and just after it, for a none-model Buoy and a linear Drone at once. Render time is split into an integer tick and a fraction in [0, 1) \u2014 never one float \u2014 so evaluation stays exact however long the server has been running (03 \u00A7 6), and \u0060epoch\u0060 is the motion epoch in force at renderTick. Entities are named by archetype and netId, never by slot, ordered by catalog archetype then ascending netId; \u0060position\u0060 and \u0060velocity\u0060 each carry \u0060dims\u0060 values in axis order. segmentHistory is the ring depth the vector was generated with.",
+  "description": "Motion evaluated over the committed stream-motion replay, in the schema of motion-eval: after frame \u0060afterFrame\u0060, every live entity of the archetypes a case names, evaluated at renderTick \u002B renderFrac and rendered as IEEE bit strings. These are the two cases motion-eval says it cannot reach. The ring: a render time before the ring wrapped, one inside a ring entry that has been overwritten, one whose next sample is entry 0 reached from entry 7 (the modular step the wrap exists to exercise), one past the newest sample, and one older than the oldest segment the ring still holds \u2014 meaningful only once a wrap has thrown older segments away. The epoch: just before a teleport, between the two epochs\u0027 samples, and just after it, for a none-model Buoy and a linear Drone at once \u2014 where both interpolate between the two same-epoch origins they hold, since the gate is the epoch and not the model. Render time is split into an integer tick and a fraction in [0, 1) \u2014 never one float \u2014 so evaluation stays exact however long the server has been running (03 \u00A7 6), and \u0060epoch\u0060 is the motion epoch in force at renderTick. Entities are named by archetype and netId, never by slot, ordered by catalog archetype then ascending netId; \u0060position\u0060 and \u0060velocity\u0060 each carry \u0060dims\u0060 values in axis order. segmentHistory is the ring depth the vector was generated with.",
   "catalog": "catalog-kitchen-sink",
   "stream": "stream-motion",
   "segmentHistory": 8,
@@ -325,12 +325,12 @@
           "position": [
             "c068fe0000000000",
             "c043ff8000000000",
-            "405007ffe0000000"
+            "404fffffc0000000"
           ],
           "velocity": [
             "3fd0000000000000",
             "3f90000000000000",
-            "3fe0000000000000"
+            "0000000000000000"
           ]
         }
       ]

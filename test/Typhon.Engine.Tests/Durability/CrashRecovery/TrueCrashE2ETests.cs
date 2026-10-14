@@ -55,7 +55,7 @@ internal sealed class TrueCrashE2ETests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(TrueCrashE2ETests));
+        var root = Path.Combine(TestStorage.Root, nameof(TrueCrashE2ETests));
         _dbDir = Path.Combine(root, CurrentDatabaseName, "db");
         _walDir = Path.Combine(root, CurrentDatabaseName, "wal");
         Directory.CreateDirectory(_dbDir);

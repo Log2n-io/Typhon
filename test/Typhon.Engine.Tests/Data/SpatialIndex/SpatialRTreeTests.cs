@@ -33,7 +33,7 @@ public class SpatialRTreeTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialRTreeTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialRTreeTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

@@ -54,7 +54,7 @@ internal sealed class DifferentialRecoveryOracleTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(DifferentialRecoveryOracleTests));
+        var root = Path.Combine(TestStorage.Root, nameof(DifferentialRecoveryOracleTests));
         _dbDir = Path.Combine(root, CurrentDatabaseName, "db");
         _walDir = Path.Combine(root, CurrentDatabaseName, "wal");
         Directory.CreateDirectory(_dbDir);

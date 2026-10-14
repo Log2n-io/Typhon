@@ -6,7 +6,6 @@ import {
   CreatureTemplate,
   LAIR_SPAWN_RADIUS_M,
   PLANET_HALF_EXTENT_M,
-  PLAYER_RUN_SPEED_MPS,
   POIS,
   SPAWN_REGIONS,
   TEMPLATE_HEALTH,
@@ -14,6 +13,7 @@ import {
   TEMPLATE_SPEED_MPS,
 } from '../world-data';
 import { Rng } from './rng';
+import { PLAYER_RUN_SPEED_MPS } from './mock-speeds';
 
 /**
  * The mock server's world: every entity of the planet as structure-of-arrays, built the way

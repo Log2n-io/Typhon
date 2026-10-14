@@ -134,7 +134,14 @@ public class QueryViewBenchmarks : IDisposable
                     BaseBlockChance = rng.Next(0, 30)
                 };
 
-                var eid = tx.Spawn<BenchItemArch>(BenchItemArch.Item.Set(in item));
+                // TWO-STEP, and this is a bug fix rather than a style choice. ItemData is 136 bytes; a ComponentValue carries 112 inline, so
+                // Spawn(BenchItemArch.Item.Set(in item)) wrote 24 bytes past that buffer on every one of these spawns. The bounds check that
+                // should have refused it was behind CheckConfig.Enabled - false by default, no runtime setter - so it corrupted memory silently
+                // instead (#1140; the check is ungated now and TYPHON013 reports the declaration). Spawning empty and writing through OpenMut
+                // keeps the component, its stride and its four indexes exactly as they were, so what this benchmark measures does not change;
+                // only the setup path does, and setup is not measured.
+                var eid = tx.Spawn<BenchItemArch>();
+                tx.OpenMut(eid).Set(BenchItemArch.Item, item);
 
                 // Track Epic+ items for view cycling
                 if (item.Rarity >= 3)

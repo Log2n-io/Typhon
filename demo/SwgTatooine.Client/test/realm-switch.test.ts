@@ -24,6 +24,7 @@ interface Spy extends RealmSwitchTargets {
   order: string[];
   selectionCaches: number;
   regions: number;
+  radii: number;
 }
 
 function spy(): Spy {
@@ -33,6 +34,7 @@ function spy(): Spy {
     order: [],
     selectionCaches: 0,
     regions: 0,
+    radii: 0,
     setCameraBounds(bounds) {
       calls.bounds.push(bounds);
       calls.order.push('bounds');
@@ -46,6 +48,9 @@ function spy(): Spy {
     },
     forgetRegion() {
       calls.regions++;
+    },
+    forgetViewRadius() {
+      calls.radii++;
     },
   };
   return calls;
@@ -90,6 +95,20 @@ describe('resetForRealm', () => {
     resetForRealm(INTERIOR, calls);
     expect(calls.selectionCaches).toBe(1);
     expect(calls.regions).toBe(1);
+  });
+
+  /**
+   * The radius is the region's twin and had the region's bug.
+   *
+   * `ClientApp.sendViewRadius` sends only when the figure CHANGES, so a slider left at the ceiling from a previous
+   * session matched what the app believed it had already asked for and nothing was sent — while the new session was
+   * being served its profile's own radius. The slider then showed one number and the HUD another, which is exactly the
+   * failure #1075 names.
+   */
+  it('forgets the view radius it last asked for, because the new session was never told', () => {
+    const calls = spy();
+    resetForRealm(INTERIOR, calls);
+    expect(calls.radii).toBe(1);
   });
 
   it('jumps the camera to the new realm — to its CENTRE, which an interior does not share with the origin', () => {
@@ -155,6 +174,7 @@ describe('the camera actually lands inside the realm', () => {
       },
       forgetSelectionCaches: () => {},
       forgetRegion: () => {},
+      forgetViewRadius: () => {},
     });
 
     // STRICTLY inside, not merely within the bounds. `(0, 0)` is a corner of this realm and satisfies a
@@ -178,7 +198,7 @@ describe('resetForSession — a reset that did not move the session', () => {
 
     const ui = useUi.getState();
     expect([ui.selectedNetId, ui.follow, ui.cameraMode]).toEqual([0, false, 'god']);
-    expect([calls.selectionCaches, calls.regions, useChat.getState().lines.length]).toEqual([1, 1, 0]);
+    expect([calls.selectionCaches, calls.regions, calls.radii, useChat.getState().lines.length]).toEqual([1, 1, 1, 0]);
   });
 
   it('leaves the camera exactly where it was, because nothing it holds became invalid', () => {

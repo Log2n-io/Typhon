@@ -540,6 +540,21 @@ class TcpTransportTests : TestBase<TcpTransportTests>
     }
 
     /// <summary>
+    /// Zeroes a <c>WELCOME</c>'s resume token in place, so that the rest of the message can be compared as bytes.
+    /// </summary>
+    /// <param name="welcome">The whole message, type byte included.</param>
+    /// <remarks>
+    /// The offset is the layout <c>WelcomeMessage.Write</c> declares: type (1), major (2), minor (2), caps (4) and the session id (4) come first, and the
+    /// token's sixteen bytes follow. Spelled out as a sum rather than as 13, so that a field inserted above it fails to compile here instead of masking the
+    /// wrong bytes.
+    /// </remarks>
+    private static void MaskResumeToken(byte[] welcome)
+    {
+        const int Offset = sizeof(byte) + sizeof(ushort) + sizeof(ushort) + sizeof(uint) + sizeof(uint);
+        Array.Clear(welcome, Offset, 16);
+    }
+
+    /// <summary>
     /// AC-15's first half: the same script over a real socket and over an in-process link produces byte-identical protocol messages.
     /// </summary>
     /// <remarks>
@@ -552,6 +567,12 @@ class TcpTransportTests : TestBase<TcpTransportTests>
     /// <para>
     /// <c>Typhon.Client</c> has no TCP client yet (P1-20b), so the bot half is a raw socket driven with messages from <c>Typhon.Protocol</c>'s own writers —
     /// which is what that client will send when it exists.
+    /// </para>
+    /// <para>
+    /// <b>The resume token is the one field compared for difference instead of equality.</b> It is a per-session secret, 111 random bits, so two sessions
+    /// producing the same one would be the defect — the second client could then resume the first's session. It is masked out of the byte comparison and
+    /// asserted on separately, which is a stronger claim about that field than the comparison could make, and leaves every other byte of the <c>WELCOME</c>
+    /// compared as before.
     /// </para>
     /// </remarks>
     [Test]
@@ -571,6 +592,20 @@ class TcpTransportTests : TestBase<TcpTransportTests>
         var overTcp = RunScriptOverTcp(script);
 
         Assert.That(overTcp, Has.Count.EqualTo(inProcess.Count), "the two arms produced a different number of messages");
+
+        var socketToken = WelcomeMessage.Parse(overTcp[0]).ResumeToken;
+        var oracleToken = WelcomeMessage.Parse(inProcess[0]).ResumeToken;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(socketToken, Is.Not.All.Zero);
+            Assert.That(oracleToken, Is.Not.All.Zero);
+            Assert.That(socketToken, Is.Not.EqualTo(oracleToken), "a resume token is a per-session secret, and two sessions sharing one is the hazard");
+        });
+
+        MaskResumeToken(overTcp[0]);
+        MaskResumeToken(inProcess[0]);
+
         Assert.Multiple(() =>
         {
             for (var i = 0; i < overTcp.Count; i++)

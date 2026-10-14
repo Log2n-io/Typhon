@@ -65,7 +65,7 @@ internal sealed class EngineState : IDisposable
     {
         var id = System.Threading.Interlocked.Increment(ref _instanceCounter);
         var name = $"Lin_{id}";
-        var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "Typhon.Tests", nameof(LinearizabilityTests), name);
+        var root = System.IO.Path.Combine(TestStorage.Root, nameof(LinearizabilityTests), name);
         System.IO.Directory.CreateDirectory(root);
         Root = root;
 

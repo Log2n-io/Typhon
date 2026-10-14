@@ -51,19 +51,19 @@ function stubCanvas(handlers: Handler[]): HTMLCanvasElement {
 }
 
 /** Fires a keyup, so a held key does not leak into the next case. */
-function release(handlers: Handler[], code: string): void {
+function release(handlers: Handler[], code: string, atMs = 0): void {
   for (const h of handlers) {
     if (h.type === 'keyup') {
-      h.listener({ code, target: null });
+      h.listener({ code, target: null, timeStamp: atMs });
     }
   }
 }
 
 /** Fires a keydown for `code` through whichever window listener the input registered. */
-function press(handlers: Handler[], code: string): void {
+function press(handlers: Handler[], code: string, atMs = 0): void {
   for (const h of handlers) {
     if (h.type === 'keydown') {
-      h.listener({ code, target: null });
+      h.listener({ code, target: null, timeStamp: atMs });
     }
   }
 }
@@ -169,5 +169,76 @@ describe('CameraInput routing', () => {
     press(handlers, 'KeyW');
     settle();
     expect(map.targetZ).not.toBe(0);
+  });
+});
+
+/**
+ * When the held set last changed, which A14b needs to be the KEY's instant and not the frame's.
+ *
+ * A frame notices a press up to a frame after it happened, and both the predictor and the server are told how far into
+ * their own step the intent changed — so a frame-rounded instant puts a sixteenth of a second of travel back into the
+ * figure the sub-tick phase exists to make exact.
+ */
+describe('CameraInput key instants', () => {
+  let handlers: Handler[];
+  let input: CameraInput;
+
+  beforeEach(() => {
+    handlers = [];
+    installDomStubs(handlers);
+    input = new CameraInput(
+      stubCanvas(handlers),
+      new MapCamera(),
+      { width: 800, height: 600 },
+      { onClick: () => {}, onManualMove: () => {} },
+      new EyeCamera(),
+      () => true,
+    );
+  });
+
+  it('is NaN until a key has moved, so a caller can tell it apart from a real zero', () => {
+    expect(input.keysChangedAtMs).toBeNaN();
+  });
+
+  it('takes the event timestamp of a press, and of the release that ends it', () => {
+    press(handlers, 'KeyW', 1234.5);
+    expect(input.keysChangedAtMs).toBe(1234.5);
+    release(handlers, 'KeyW', 1890.25);
+    expect(input.keysChangedAtMs).toBe(1890.25);
+  });
+
+  /**
+   * The browser delivers `keydown` every few tens of milliseconds for a key that is already down. Taking those would
+   * re-stamp a held key for ever, and the client would then report a fresh "the intent just changed" on whichever frame
+   * the repeat landed in — a phase that is a lie about an intent that has not moved since.
+   */
+  it('ignores auto-repeat, which is a press that adds nothing', () => {
+    press(handlers, 'KeyW', 1000);
+    press(handlers, 'KeyW', 1050);
+    press(handlers, 'KeyW', 1100);
+    expect(input.keysChangedAtMs).toBe(1000);
+  });
+
+  it('ignores a release of something that was never held', () => {
+    press(handlers, 'KeyW', 1000);
+    release(handlers, 'KeyA', 1200);
+    expect(input.keysChangedAtMs).toBe(1000);
+  });
+
+  it('is not moved by a keystroke that went to a text field', () => {
+    // `isTyping` already stops those reaching the held set; this says the instant does not move either, or chatting would
+    // tell the predictor the avatar's gait had just changed.
+    press(handlers, 'KeyW', 1000);
+    for (const h of handlers) {
+      if (h.type === 'keydown') {
+        h.listener({
+          code: 'KeyS',
+          target: new (globalThis as unknown as { HTMLInputElement: new () => unknown }).HTMLInputElement(),
+          timeStamp: 1500,
+        });
+      }
+    }
+
+    expect(input.keysChangedAtMs).toBe(1000);
   });
 });

@@ -1,5 +1,7 @@
+import { gaitDigit, gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
+import { useTerrain } from '../state/terrain-store';
 import { useUi } from '../state/ui-store';
 
 const fmt = (v: number, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
@@ -10,6 +12,11 @@ export function Hud() {
   const stats = useStats((s) => s.stats);
   // Whether this server told us the radius it honours; without it the row cannot claim to be the granted one.
   const radiusKnown = useUi((s) => s.maxViewRadius) !== null;
+  // How the planet was obtained. Two selectors rather than one returning an object: zustand compares with Object.is, so
+  // a fresh object every render would re-render forever. Read before the early return, because a hook may not be called
+  // conditionally.
+  const terrainCached = useTerrain((s) => s.fromCache);
+  const terrainLoadMs = useTerrain((s) => s.loadMs);
   if (stats === null) {
     return <div className="panel hud">Starting…</div>;
   }
@@ -66,14 +73,23 @@ export function Hud() {
             <td>{fmt(stats.altitude, 0)} m</td>
           </tr>
           <tr>
-            {/* The terrain under the camera's target, and — until the bake lands — that it has not landed. The bake time is
-                worth a place here rather than a console line: it is a full second, and a session that looks flat for its
-                first second should say why. */}
+            {/* Which of Shift+1..4 is selected, and what the SERVER says it is worth — the figure is replicated, so a
+                dash here means the owner block has not arrived and the predictor is in its no-prediction fallback,
+                which is worth being able to see. */}
+            <td>Gait</td>
+            <td>{`${gaitLabel(stats.gait)} (⇧${gaitDigit(stats.gait)}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
+          </tr>
+          <tr>
+            {/* The terrain under the camera's target, and where it came from. The world no longer starts before the field
+                does, so there is no 'baking' state to report here any more — what is worth reporting instead is whether
+                this session paid the bake or read it back, because that is the difference between ~2 s and a fraction of
+                it, and it is the one number that says the local database is doing its job. */}
             <td>Ground</td>
             <td>
-              {stats.terrainBakeMs === 0
-                ? 'baking…'
-                : `${fmt(stats.groundM, 1)} m (baked in ${fmt(stats.terrainBakeMs, 0)} ms)`}
+              {`${fmt(stats.groundM, 1)} m `}
+              {terrainCached
+                ? `(cached, read in ${fmt(terrainLoadMs, 0)} ms)`
+                : `(baked in ${fmt(stats.terrainBakeMs, 0)} ms)`}
             </td>
           </tr>
         </tbody>
@@ -149,6 +165,21 @@ export function Hud() {
             <td>Anomalies</td>
             <td>{stats.anomalies}</td>
           </tr>
+          {/* A14. Shown only for a session that predicts: the lead is the removed latency as a distance, and the counters are
+              how a prediction fault announces itself. Any of them climbing is a bug, not a network condition. */}
+          {stats.prediction === null ? null : (
+            <tr>
+              <td title="How far ahead of the server's own figure your body is drawn, and the prediction's three fault counters: snaps, stat fallbacks, unreconciled frames. All three should sit at their warm-up value.">
+                Predict lead
+              </td>
+              <td>
+                {fmt(stats.prediction.leadM, 2)} m
+                {stats.prediction.snaps + stats.prediction.fallbacks > 0
+                  ? ` · ${stats.prediction.snaps} snap / ${stats.prediction.fallbacks} fb`
+                  : ''}
+              </td>
+            </tr>
+          )}
           {repl === null ? null : (
             <>
               <tr>

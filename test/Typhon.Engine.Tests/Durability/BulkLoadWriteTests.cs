@@ -53,7 +53,7 @@ internal sealed class BulkLoadWriteTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(BulkLoadWriteTests));
+        var root = Path.Combine(TestStorage.Root, nameof(BulkLoadWriteTests));
         _dbDir = Path.Combine(root, "db");
         _walDir = Path.Combine(root, "wal");
         Directory.CreateDirectory(_dbDir);

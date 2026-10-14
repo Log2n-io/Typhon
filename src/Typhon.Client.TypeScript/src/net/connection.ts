@@ -327,6 +327,16 @@ export class Connection {
   private dispatch(message: Uint8Array, recvMs: number): void {
     const type = message[0];
     if (this.currentState === ConnectionState.AwaitingWelcome) {
+      // A KICK before WELCOME is the server REFUSING the session, which is a normal answer to HELLO and not a protocol
+      // error: an expired or unsigned token, a full house, an application that declined the admission. Treating it as
+      // malformed replaced the server's own code and sentence with "message type 0x4 before WELCOME", so the one close
+      // code the client acts on — "not authenticated", which is what drops a stale grant — never reached it, and a tab
+      // holding a token the server would not accept could not recover by reconnecting.
+      if (type === MessageType.Kick) {
+        this.onKickMessage(message);
+        return;
+      }
+
       if (type !== MessageType.Welcome) {
         this.fail(CloseCode.ProtocolError, `message type 0x${(type ?? 0).toString(16)} before WELCOME`);
         return;
@@ -343,17 +353,29 @@ export class Connection {
       case MessageType.Pong:
         this.handlers.onPong?.(parsePong(message), recvMs);
         break;
-      case MessageType.Kick: {
-        const kick = parseKick(message);
-        this.handlers.onKick?.(kick.code, kick.reason);
-        // The server closes next; remember its code, which the close frame may not carry.
-        this.verdict = { code: kick.code, reason: kick.reason, local: false };
+      case MessageType.Kick:
+        this.onKickMessage(message);
         break;
-      }
       default:
         this.fail(CloseCode.ProtocolError, `message type 0x${(type ?? 0).toString(16)} is unknown or out of state`);
         break;
     }
+  }
+
+  /**
+   * Reports a `KICK`, from either side of the handshake.
+   *
+   * @param message The kick.
+   *
+   * @remarks
+   * Shared so a refusal carries the server's own code and sentence whether it arrives before or after `WELCOME`. See the
+   * pre-`WELCOME` branch in {@link dispatch} for why that distinction mattered.
+   */
+  private onKickMessage(message: Uint8Array): void {
+    const kick = parseKick(message);
+    this.handlers.onKick?.(kick.code, kick.reason);
+    // The server closes next; remember its code, which the close frame may not carry.
+    this.verdict = { code: kick.code, reason: kick.reason, local: false };
   }
 
   private onWelcome(message: Uint8Array): void {

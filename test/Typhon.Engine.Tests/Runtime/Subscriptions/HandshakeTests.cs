@@ -344,7 +344,8 @@ class HandshakeTests
             Assert.That(welcome.Tick, Is.EqualTo(_host.CurrentTick));
             Assert.That(welcome.TickPeriodUs, Is.EqualTo(_host.TickPeriodUs));
             Assert.That(welcome.CatalogHash, Is.EqualTo(_host.CatalogHash));
-            Assert.That(welcome.ResumeToken, Is.All.Zero, "resume is not built yet, and all zeros is how the wire says so");
+            Assert.That(welcome.ResumeToken, Has.Length.EqualTo(16));
+            Assert.That(welcome.ResumeToken, Is.Not.All.Zero, "the token this session may come back with; all-zero is the wire's no-resume");
             Assert.That(connection.State, Is.EqualTo(SubscriptionConnectionState.Open));
         });
     }

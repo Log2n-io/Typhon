@@ -537,7 +537,7 @@ class TransactionChainMaxActiveTests : TestBase<TransactionChainMaxActiveTests>
             .AddScopedManagedPagedMemoryMappedFile(options =>
             {
                 options.DatabaseName = CurrentDatabaseName;
-                options.DatabaseDirectory = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(TransactionChainMaxActiveTests));
+                options.DatabaseDirectory = Path.Combine(TestStorage.Root, nameof(TransactionChainMaxActiveTests));
                 options.DatabaseCacheSize = (ulong)PagedMMF.MinimumCacheSize;
                 options.PagesDebugPattern = false;
             })

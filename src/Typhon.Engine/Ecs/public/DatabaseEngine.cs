@@ -73,6 +73,10 @@ public struct FieldR1
 /// Persisted schema descriptor for a registered component (revision-1 layout). One row per component; makes the database self-describing and
 /// enables load-time schema validation against the runtime component definitions.
 /// </summary>
+// TYPHON013 suppressed, and this is the diagnostic's own documented escape hatch rather than a workaround. A catalog row is never passed to Spawn: it is
+// written through the component table directly (_componentsTable, see RegisterSchemaComponents), so the 112-byte inline payload a ComponentValue carries does not apply. Splitting it would
+// split one logical record for no reader's benefit, and both halves are already on disk.
+#pragma warning disable TYPHON013
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential)]
 [PublicAPI]
@@ -114,6 +118,7 @@ public struct ComponentR1
     /// <summary>AssemblyR1 row id (chunkId) of the assembly that declares this component. 0 = core engine assembly (implicit, never in the manifest).</summary>
     public ushort AssemblyId;
 }
+#pragma warning restore TYPHON013
 
 /// <summary>
 /// Persisted archetype schema. One entity per registered archetype.
@@ -273,6 +278,10 @@ public enum SchemaObjectKind
 /// Audit trail entry for schema changes. One entity is created for each component schema change (add/remove/widen fields, migration function execution, etc.).
 /// </summary>
 // Pack = 4 — see ArchetypeR1 above for why (#816, SCHEMA-05). 176 → 172, no offset moves.
+// TYPHON013 suppressed, and this is the diagnostic's own documented escape hatch rather than a workaround. A catalog row is never passed to Spawn: it is
+// written through the component table directly (_schemaHistoryTable, see RegisterSchemaComponents), so the 112-byte inline payload a ComponentValue carries does not apply. Splitting it would
+// split one logical record for no reader's benefit, and both halves are already on disk.
+#pragma warning disable TYPHON013
 [Component(SchemaName, 1)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 [PublicAPI]
@@ -326,6 +335,7 @@ public struct SchemaHistoryR1
     /// <summary>Whether this row describes a component or an archetype. See <see cref="SchemaObjectKind"/> for why the discriminator is necessary.</summary>
     public SchemaObjectKind Target;
 }
+#pragma warning restore TYPHON013
 
 /// <summary>
 /// Configuration options for <see cref="DatabaseEngine"/>.

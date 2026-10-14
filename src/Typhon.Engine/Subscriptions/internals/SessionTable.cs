@@ -59,7 +59,7 @@ namespace Typhon.Engine.Internals;
 /// anything, which is the same answer it would get for a recycled slot.
 /// </para>
 /// </remarks>
-internal sealed unsafe class SessionTable : IDisposable
+internal sealed unsafe partial class SessionTable : IDisposable
 {
     /// <summary>The structural ceiling: a slot is a <see cref="ushort"/>, and 65 535 leaves the top value free as a sentinel.</summary>
     internal const int MaxSlots = ushort.MaxValue;
@@ -107,6 +107,15 @@ internal sealed unsafe class SessionTable : IDisposable
     private readonly double[] _radii;
     private readonly SessionLimits[] _declaredLimits;
 
+    // Resume (01-model § 3), all three committed only when ResumeGraceMs is above zero. The tokens are two words per slot, minted at Open and read for the
+    // WELCOME; the records outlive their slots, which is what a pending resume is; the appData is the handle the application re-binds with. See
+    // SessionTable.Resume.cs, which is where every one of them is written.
+    private ulong* _openTokens;
+    private ResumeRecord* _resumes;
+    private readonly object[] _resumeAppData;
+    private readonly long _resumeGraceTicks;
+    private readonly int _maxPendingResumes;
+
     // Tick-side bookkeeping. Every one of these is driven by delivered events, never by scanning the table: the cost of a tick follows the sessions that
     // changed, not the size of the table an operator configured.
     private readonly List<int> _openSlots = [];
@@ -133,6 +142,10 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <c>64 + MaxSessions × (64 + 4)</c> bytes — 544 KiB at the default — and its whole purpose is an O(1) lookup from a slot number, which a growing
     /// structure cannot give without a level of indirection on every session touch of every tick. Nothing is committed until a runtime with subscriptions
     /// configured starts, so a database with no replication still pays zero.
+    /// <para>
+    /// With <see cref="SubscriptionsOptions.ResumeGraceMs"/> on, a resume token (16 B) and a resume record (40 B) per slot join the same allocation — 992 KiB
+    /// at the default — and both are left out when it is zero.
+    /// </para>
     /// </remarks>
     public SessionTable(string id, IResource parent, IMemoryAllocator allocator, SubscriptionsOptions options, SessionEvents events)
     {
@@ -156,17 +169,47 @@ internal sealed unsafe class SessionTable : IDisposable
 
         Debug.Assert(sizeof(SessionRow) == RowBytes, "a session row must be exactly one cache line");
 
+        if (options.ResumeGraceMs < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), options.ResumeGraceMs,
+                $"{nameof(SubscriptionsOptions.ResumeGraceMs)} is a duration and cannot be negative; zero issues no resume tokens.");
+        }
+
+        if (options.MaxPendingResumes is < 0 or > MaxSlots)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxPendingResumes,
+                $"{nameof(SubscriptionsOptions.MaxPendingResumes)} is 0-{MaxSlots}, where zero takes {nameof(SubscriptionsOptions.MaxSessions)}.");
+        }
+
         _options = options;
         _events = events;
         _capacity = options.MaxSessions;
 
+        // Rounded up, so a grace below one stopwatch tick is still a grace: a configured 1 ms must not truncate to "already expired".
+        _resumeGraceTicks = options.ResumeGraceMs == 0
+            ? 0
+            : Math.Max(1L, (long)Math.Ceiling(options.ResumeGraceMs * (Stopwatch.Frequency / 1000d)));
+        _maxPendingResumes = options.MaxPendingResumes == 0 ? _capacity : Math.Min(options.MaxPendingResumes, _capacity);
+
         var rowBytes = _capacity * RowBytes;
         var stackBytes = _capacity * sizeof(uint);
-        _memory = allocator.AllocatePinned(id, parent, HeaderBytes + rowBytes + stackBytes, zeroed: true, alignment: RowBytes);
+        var tokenBytes = _resumeGraceTicks > 0 ? _capacity * 2 * sizeof(ulong) : 0;
+        var recordBytes = _resumeGraceTicks > 0 ? _capacity * sizeof(ResumeRecord) : 0;
+
+        // Ordered so that everything 8-aligned comes before the 4-aligned free stack: rows are a whole number of cache lines, tokens and records are words,
+        // and the stack's uint entries are what may leave the tail odd.
+        _memory = allocator.AllocatePinned(id, parent, HeaderBytes + rowBytes + tokenBytes + recordBytes + stackBytes, zeroed: true, alignment: RowBytes);
         _freeHead = (long*)_memory.DataAsPointer;
         _pushLock = (int*)(_memory.DataAsPointer + sizeof(long));
         _rows = (SessionRow*)(_memory.DataAsPointer + HeaderBytes);
-        _freeIds = (uint*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
+        if (_resumeGraceTicks > 0)
+        {
+            _openTokens = (ulong*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
+            _resumes = (ResumeRecord*)(_memory.DataAsPointer + HeaderBytes + rowBytes + tokenBytes);
+            _resumeAppData = new object[_capacity];
+        }
+
+        _freeIds = (uint*)(_memory.DataAsPointer + HeaderBytes + rowBytes + tokenBytes + recordBytes);
 
         _viewpoints = new SessionViewpoint[_capacity];
         _realms = new int[_capacity];
@@ -187,6 +230,14 @@ internal sealed unsafe class SessionTable : IDisposable
         {
             _freeIds[_capacity - 1 - slot] = new SessionId((ushort)slot, 1).Value;
             _openIndexBySlot[slot] = -1;
+
+            // -1, not the zero the allocation came with: a record's links name slots, and slot 0 is a slot. Zeroed memory would make every record claim to be
+            // linked to the first one.
+            if (_resumes != null)
+            {
+                _resumes[slot].Prev = -1;
+                _resumes[slot].Next = -1;
+            }
         }
 
         *_freeHead = _capacity;
@@ -334,12 +385,23 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <param name="admission">What the application's hook answered.</param>
     /// <param name="sessionKind">The kind the client presented.</param>
     /// <param name="helloPayload">The client's payload; copied, because the transport's buffer is reused.</param>
+    /// <param name="resumedFrom">The session this one resumed, or <see cref="SessionId.None"/>.</param>
+    /// <param name="resumedAppData">The resumed session's application data, used when admission attached none of its own.</param>
     /// <exception cref="InvalidOperationException">The identity does not hold a lease — it was never leased, was already opened, or was released.</exception>
     /// <remarks>
+    /// <para>
     /// Called by the thread that leased the slot, exactly once, and never again — after the release store at the end, the row belongs to the tick. The payload
     /// is copied before anything is written, so an allocation failure leaves the row untouched and the lease still releasable.
+    /// </para>
+    /// <para>
+    /// <b>The admission hook's <c>appData</c> wins over a resumed session's, and only a hook that attached none inherits.</b> A hook is the authenticated,
+    /// current answer — in a server with accounts it is the account the token proved — and silently replacing it with a minute-old one would be the resume
+    /// deciding who the client is. An application that keeps its session state in <c>appData</c> alone and attaches nothing at admission gets it back; one
+    /// that attaches its own re-binds from <see cref="SessionEvent.ResumedFrom"/>, which names the old session whatever the data says.
+    /// </para>
     /// </remarks>
-    public void Open(SessionId session, in Admission admission, string sessionKind, ReadOnlySpan<byte> helloPayload)
+    public void Open(SessionId session, in Admission admission, string sessionKind, ReadOnlySpan<byte> helloPayload, SessionId resumedFrom = default,
+        object resumedAppData = null)
     {
         var slot = session.Slot;
         if (slot >= _capacity)
@@ -367,7 +429,17 @@ internal sealed unsafe class SessionTable : IDisposable
                 payload = helloPayload.ToArray();
             }
 
+            if (ThrowFromOpenForTest)
+            {
+                throw new InvalidOperationException("ThrowFromOpenForTest");
+            }
+
             var limits = admission.Limits ?? SessionLimits.Default;
+            var appData = admission.AppData ?? resumedAppData;
+
+            // Before the row is published, by the one thread that may: the WELCOME this connection is about to send reads it back out, and the tick never
+            // writes it.
+            MintResumeToken(slot);
 
             row->State = (int)SessionSlotState.Admitted;
             row->Role = (byte)admission.Role;
@@ -389,7 +461,7 @@ internal sealed unsafe class SessionTable : IDisposable
             _profileNames[slot] = null;
             _profileIndices[slot] = -1;
             _closeReasons[slot] = null;
-            _appData[slot] = admission.AppData;
+            _appData[slot] = appData;
             _declaredLimits[slot] = limits;
 
             // Release: everything above must be visible to the tick before the gate that makes the row reachable. Dropping the lease mark in the same store is
@@ -401,8 +473,8 @@ internal sealed unsafe class SessionTable : IDisposable
                     $"{session} lost its lease while it was being opened; a lease is released by its own thread or not at all.");
             }
 
-            _events.Append(new SessionEvent(SessionEventKind.Opened, session, admission.Role, limits, admission.AppData, sessionKind, payload, null,
-                SessionId.None, default, 0, false));
+            _events.Append(new SessionEvent(SessionEventKind.Opened, session, admission.Role, limits, appData, sessionKind, payload, null,
+                resumedFrom, default, 0, false));
         }
         finally
         {
@@ -418,14 +490,21 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <param name="session">The new session, when it was admitted.</param>
     /// <param name="closeCode">The code to answer a refused client with.</param>
     /// <param name="closeReason">Why, when there is something to say.</param>
+    /// <param name="resumeToken">
+    /// The resume token the client's <c>HELLO</c> carried, or empty. A token that names no armed record, has expired, or has already been spent simply yields
+    /// a fresh session: there is no refusal for it, because a client cannot act on the difference, and telling it apart would say whether a session had
+    /// existed. <b>Last and optional because most callers have none</b> — an in-process link, a test harness, every admission that is not a reconnect.
+    /// </param>
     /// <returns><see langword="true"/> when a session now exists.</returns>
     /// <remarks>
     /// <b>The order is deliberate.</b> The kind is checked first, so an unknown name never reaches application code. The hook runs next, so a refusal costs no
     /// slot. Capacity is checked last, because "who may connect" and "how many fit" are different questions and running them the other way round would have the
     /// application answer for the operator's ceiling. A throw out of <see cref="Open"/> gives the lease back before it propagates, because a half-admitted
-    /// client that loses its slot for ever is a worse failure than the one that caused it.
+    /// client that loses its slot for ever is a worse failure than the one that caused it. The resume token is consumed after both, which
+    /// <see cref="TryConsumeResume"/> gives the reasons for.
     /// </remarks>
-    public bool TryAdmit(SubscriptionsSessions sessions, in AdmissionRequest request, out SessionId session, out ushort closeCode, out string closeReason)
+    public bool TryAdmit(SubscriptionsSessions sessions, in AdmissionRequest request, out SessionId session, out ushort closeCode, out string closeReason,
+        ReadOnlySpan<byte> resumeToken = default)
     {
         ArgumentNullException.ThrowIfNull(sessions);
 
@@ -445,13 +524,26 @@ internal sealed unsafe class SessionTable : IDisposable
             return false;
         }
 
+        // AFTER the hook, because the token is bound to the principal the authenticator produces (04-transport § 3) and the hook is where that will run; and
+        // after the LEASE, because a server-full refusal must not burn a single-use token the client could have spent on its next attempt.
+        var resumed = TryConsumeResume(resumeToken, out var resumedFrom, out var resumedAppData);
+
         try
         {
-            Open(session, admission, request.Kind, request.HelloPayload);
+            Open(session, admission, request.Kind, request.HelloPayload, resumed ? resumedFrom : SessionId.None, resumedAppData);
         }
         catch
         {
             ReleaseLease(session);
+
+            // The record was claimed before the open, so this client's resume is spent and its Opened never happened. Left here, the application would be
+            // holding what the old session controlled with neither of SUB-12's two events ever arriving. Reported as an expiry, which is what it is from
+            // the application's side: nobody came back.
+            if (resumed)
+            {
+                ReportResumeAbandoned(resumedFrom, resumedAppData);
+            }
+
             session = SessionId.None;
             throw;
         }
@@ -805,6 +897,15 @@ internal sealed unsafe class SessionTable : IDisposable
             return false;
         }
 
+        // <b>Armed BEFORE the flag is published, and the flag is the arming's answer.</b> <c>Resumable</c> is what an application acts on — it keeps an
+        // avatar standing on the strength of it — so it has to mean "a record exists and one of Opened{resumedFrom} or ResumeExpired is coming", not "this
+        // close was of a resumable KIND". A server with ResumeGraceMs at zero, or a session opened before a token was minted for it, has no record: saying
+        // resumable there left the application holding a body that no event would ever release. Found by the SWG demo's own A13 cases.
+        if (resumable)
+        {
+            resumable = _resumes != null && ArmResume(session, _appData[session.Slot]);
+        }
+
         row->CloseCode = code;
         row->CloseReason = (byte)reason;
         row->Resumable = resumable ? (byte)1 : (byte)0;
@@ -922,7 +1023,7 @@ internal sealed unsafe class SessionTable : IDisposable
                     }
                 }
 
-                if (CloseCore(session, reason, code, null, false))
+                if (CloseCore(session, reason, code, null, IsResumable(reason)))
                 {
                     closed++;
                 }
@@ -967,6 +1068,13 @@ internal sealed unsafe class SessionTable : IDisposable
         _affinity.Enter(nameof(SessionTable), nameof(BeginTick));
         try
         {
+            // Before the batch is taken, so a grace that elapsed since the last tick is delivered in THIS one rather than waiting for the next: an
+            // application that destroys an avatar on ResumeExpired should not hold it a tick longer than the operator's number says.
+            if (_resumes != null)
+            {
+                ExpireResumes();
+            }
+
             RecycleDelivered();
 
             var count = _events.BeginTick();
@@ -1447,6 +1555,7 @@ internal sealed unsafe class SessionTable : IDisposable
         _closeReasons[slot] = null;
         _appData[slot] = null;
         _declaredLimits[slot] = null;
+        ClearResumeToken(slot);
 
         row->Followed = EntityId.Null;
         if (!row->Controlled.IsNull)

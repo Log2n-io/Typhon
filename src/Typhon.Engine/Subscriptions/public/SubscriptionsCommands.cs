@@ -1,4 +1,4 @@
-using JetBrains.Annotations;
+﻿using JetBrains.Annotations;
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -1019,6 +1019,43 @@ public sealed class SubscriptionsCommands
 
         entity = candidate;
         return true;
+    }
+
+    /// <summary>
+    /// The <c>netId</c> a session's client knows an entity by — the inverse of <see cref="TryResolve"/>.
+    /// </summary>
+    /// <param name="session">The session whose view the identity is for.</param>
+    /// <param name="entity">The entity to name.</param>
+    /// <param name="netId">The identity, or <c>0</c> when that session cannot name it.</param>
+    /// <returns><see langword="false"/> when the entity is gone, is not replicated, or is not held by that session.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>What it is for: naming an entity the application chose to a client that can see it.</b> Everything else in this surface goes the
+    /// other way — a client names something and the server resolves it. An operator tool, a GM command, a tutorial that points at a
+    /// quest giver, or a test that wants to drive a command at a specific entity all start from the entity and need the number.
+    /// </para>
+    /// <para>
+    /// <b>Session-scoped although the identity is engine-wide, and that is a deliberate narrowing.</b> One allocator issues netIds across
+    /// every replicated archetype, so an unscoped version would be a line shorter and a trap: handing a client an identity it was never
+    /// shown lets it name something outside its view, which is what <c>SUB-26</c> exists to prevent and what <see cref="TryResolve"/>
+    /// enforces in the other direction. Scoped, the worst a caller can do is be told no.
+    /// </para>
+    /// <para>
+    /// <b>Same cost and same contract as <see cref="TryResolve"/>:</b> an EntityMap probe and a geometric test against the session's
+    /// COMMITTED geometry — what its last published frame carried — so call it for the entities an application names, not per entity per
+    /// tick. Callable from a system; it reads state the frame stage and the projection write after systems run.
+    /// </para>
+    /// </remarks>
+    public bool TryNetIdOf(SessionId session, EntityId entity, out uint netId)
+    {
+        netId = 0;
+        if (!_ingress.Sessions.IsOpen(session))
+        {
+            return false;
+        }
+
+        var frames = _ingress.Frames;
+        return frames != null && frames.TryHeldNetId(session, entity, out netId);
     }
 
     /// <summary>

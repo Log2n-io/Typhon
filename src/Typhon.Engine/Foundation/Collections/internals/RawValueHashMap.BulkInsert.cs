@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -66,7 +66,12 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore>
         where TEntry : struct
         where TInserter : struct, IRawBulkInserter<TKey, TEntry>
     {
-        _fenceWindow?.NoteMutation("EntityMap.InsertNewBulk");
+        _fenceWindow?.NoteMutation("EntityMap.InsertNewBulk", unlatchedHere: true);
+
+        // THE BRACKET IS LOAD-BEARING, exactly as in UpdateValuesBulk. It is what arms the point mutators for the duration, so a foreign insert that splits
+        // the map mid-batch is blamed on the caller who split it instead of on the fence that then found every bucket index naming the wrong chain. A third
+        // unlatched path added here without this scope reports nothing: the detector goes quiet rather than loud, which is the failure mode #1139 is about.
+        using var batch = EnterBulkBatch();
 
         if (sortedByBucket.Length == 0)
         {

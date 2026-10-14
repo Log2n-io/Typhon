@@ -195,6 +195,16 @@ public static class TyphonSubscriptionsEndpoints
                 writer.WriteStartObject();
                 writer.WriteString("name"u8, system.Name);
                 writer.WriteNumber("meanUs"u8, system.MeanUs);
+
+                // The rate, only when it is not "every tick". A divided system's phase is chosen by the schedule rather than declared (DSEL-04), so
+                // "why did this system run on tick 7" is otherwise unanswerable from outside the process — and an operator reading a mean cost for a
+                // system that ran a tenth as often as its neighbours needs to know that before comparing them.
+                if (system.TickDivisor > 1)
+                {
+                    writer.WriteNumber("tickDivisor"u8, system.TickDivisor);
+                    writer.WriteNumber("tickOffset"u8, system.TickOffset);
+                }
+
                 writer.WriteEndObject();
             }
 

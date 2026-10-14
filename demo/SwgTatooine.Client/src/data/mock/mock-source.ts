@@ -16,10 +16,20 @@ import { TickFlags, type MainToWorker, type TickMessage, type WorkerToMain } fro
  * `appTag` 0 is a planet in slot 0 with the default palette and place table, which is exactly Tatooine.
  */
 const MOCK_PLANET: RealmView = realmViewOf(
-    // Axis 2 is the degenerate slab a flat `SpatialGridConfig` leaves behind, `[0, cellM]` — not a height. A
+  // Axis 2 is the degenerate slab a flat `SpatialGridConfig` leaves behind, `[0, cellM]` — not a height. A
   // `RealmFrame` requires a strict `min < max` on every axis, so it cannot be zero-width, and `realmViewOf`
   // gives a flat realm no altitude whatever it holds.
-  new RealmFrame(0, 1, 0, 0, 24, 64, false, [-PLANET_HALF_EXTENT_M, -PLANET_HALF_EXTENT_M, 0], [PLANET_HALF_EXTENT_M, PLANET_HALF_EXTENT_M, 64]),
+  new RealmFrame(
+    0,
+    1,
+    0,
+    0,
+    24,
+    64,
+    false,
+    [-PLANET_HALF_EXTENT_M, -PLANET_HALF_EXTENT_M, 0],
+    [PLANET_HALF_EXTENT_M, PLANET_HALF_EXTENT_M, 64],
+  ),
 )!;
 
 /** The part of a `Worker` the source uses: tests hand in a fake. */
@@ -106,9 +116,17 @@ export class MockSource implements DataSource, LatencyControl {
 
   spectate(): void {}
 
+  /** The mock owns the world it draws and serves all of it, so there is no sphere to widen. */
+  setViewRadius(): void {}
+
   /** The mock controls nothing: it has no sessions and no SELF block. */
   get selfNetId(): number {
     return 0;
+  }
+
+  /** No SELF block, so no owner field ever arrived — which is what `NaN` means, and it is what stops A14 predicting here. */
+  selfNumber(): number {
+    return NaN;
   }
 
   /** The mock's own worker stops on demand, so pausing has always worked here. */
@@ -122,6 +140,33 @@ export class MockSource implements DataSource, LatencyControl {
    * The selector hides itself against a source that answers false, which is the same way the Pause button behaves
    * against a catalog that does not declare `SetPaused`: a control that cannot work is worse than no control.
    */
+  /**
+   * The mock has no avatar and no server to send an intent to (A9).
+   *
+   * False rather than "accept and ignore", so no UI offers a control that cannot work — the same rule `canViewRealm` and
+   * `canPause` follow here.
+   */
+  get canPlay(): boolean {
+    return false;
+  }
+
+  /** @inheritdoc */
+  moveTo(): void {}
+
+  /** @inheritdoc */
+  moveDir(): void {}
+
+  /**
+   * Twice the simulated one-way delay, so the mock exercises the correction a live link needs rather than a zero that
+   * hides it.
+   */
+  get rttMs(): number {
+    return this.options.latencyMs * 2;
+  }
+
+  /** @inheritdoc */
+  setTarget(): void {}
+
   get canViewRealm(): boolean {
     return false;
   }

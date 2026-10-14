@@ -1,6 +1,5 @@
 ﻿using System.Runtime.InteropServices;
 using Typhon.Protocol;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 
@@ -409,6 +408,65 @@ public struct PlayerMotion
     [Field] public float SpeedMps;
     [Field] public float DestX;
     [Field] public float DestZ;
+
+    /// <summary>
+    /// What this player's WALK is worth, in metres per second — the figure <c>TrySpeedFor</c> grants for
+    /// <see cref="Replication.SpeedClasses.Walk"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Owner-only, and it exists so the client can predict its own avatar (A14).</b> Prediction integrates the server's own rule,
+    /// <c>pos += dir(heading) x speed x dt</c>, and the client sends a speed CLASS rather than a speed — so without this it would not know how fast to start
+    /// moving on the first key press of a session.
+    /// </para>
+    /// <para>
+    /// <b>A replicated stat rather than a constant mirrored in the client, and the difference is the failure mode.</b> A mismatched class VALUE is refused by
+    /// the server and counted, loudly; a mismatched SPEED produces position drift that grows without bound for as long as the player keeps walking. The
+    /// client already shipped one hard-coded figure the server never corrected — a 100 ms tick period — and it cost four separate symptoms.
+    /// </para>
+    /// <para>
+    /// Per player, because that is where this is going: a mount, a buff or a skill modifier changes it for one character and not for the world. Owner-scoped,
+    /// so nobody else's session pays a byte for it.
+    /// </para>
+    /// </remarks>
+    [Field, Owner(CodecKind.F32, Name = "walkMps", Group = "move")] public float WalkMps;
+
+    /// <summary>What this player's RUN is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
+    [Field, Owner(CodecKind.F32, Name = "runMps", Group = "move")] public float RunMps;
+
+    /// <summary>What this player's BURST RUN is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
+    [Field, Owner(CodecKind.F32, Name = "burstMps", Group = "move")] public float BurstMps;
+
+    /// <summary>What this player's SPEEDER is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
+    [Field, Owner(CodecKind.F32, Name = "speederMps", Group = "move")] public float SpeederMps;
+
+    /// <summary>What this player's FAST SPEEDER is worth, in metres per second. See <see cref="WalkMps"/>.</summary>
+    /// <remarks>
+    /// <b>Five speeds and not one "current speed", because prediction needs the figure BEFORE the server has been told.</b> The client integrates the gait
+    /// the person just selected, in the same frame they selected it; a single replicated current speed would arrive a round trip later, and the predictor
+    /// would spend that round trip integrating the previous gait and then being corrected. Owner-scoped, so the whole ladder costs twelve bytes to one
+    /// session and nothing to anyone watching.
+    /// </remarks>
+    [Field, Owner(CodecKind.F32, Name = "speederFastMps", Group = "move")] public float SpeederFastMps;
+
+    /// <summary>
+    /// A one-tick position offset the move phase owes this player, in METRES — the share of a split tick that belonged to the velocity before an intent
+    /// changed (A14b). Metres and not metres per second, because it is paid once whatever the tick rate.
+    /// </summary>
+    [Field] public float BiasX;
+
+    /// <summary>As <see cref="BiasX"/>.</summary>
+    [Field] public float BiasZ;
+
+    /// <summary>
+    /// The tick <see cref="BiasX"/>/<see cref="BiasZ"/> are owed for. The move phase applies them only when this matches the tick it is running.
+    /// </summary>
+    /// <remarks>
+    /// <b>Stamped rather than cleared, so that <c>PlayerMove</c> stays a READER of this component.</b> Clearing would make the move phase a writer of
+    /// <c>PlayerMotion</c> — which the intent path and <c>PlayerThink</c> already write — and three writers of one component in different phases need an
+    /// edge to say which wins. A stale stamp costs one comparison to ignore, and the bias a stopped player leaves behind is never read again.
+    /// </remarks>
+    [Field] public long BiasTick;
 }
 
 /// <summary>A city NPC's shuffle.</summary>

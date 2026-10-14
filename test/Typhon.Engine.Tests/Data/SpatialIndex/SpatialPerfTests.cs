@@ -23,7 +23,7 @@ public class SpatialPerfTests
     [SetUp]
     public void Setup()
     {
-        _testDatabaseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", "SpatialPerfTests");
+        _testDatabaseDir = Path.Combine(TestStorage.Root, "SpatialPerfTests");
         Directory.CreateDirectory(_testDatabaseDir);
 
         var sc = new ServiceCollection();

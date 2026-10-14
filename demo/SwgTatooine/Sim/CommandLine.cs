@@ -118,6 +118,10 @@ public static class CommandLine
             "per-player outbound budget, bytes per second; 0 is none", min: 0);
         c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
         c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
+        c.AvatarSaveIntervalS = r.Dbl(
+            "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);
+        c.ResumeGraceS = r.Dbl(
+            "--resume-grace", c.ResumeGraceS, "how long a link-dead session's avatar waits for its client, s; 0 disables resume", min: 0d);
         c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
         c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
@@ -160,6 +164,26 @@ public static class CommandLine
         c.Persist = r.Switch("--persist", "keep the database across runs and reopen it instead of building a fresh world");
         c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
         c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
+
+        r.Group("hosting — only with --serve");
+        c.BindAddress = r.Str("--bind", c.BindAddress, "address the web host binds; loopback when unset, 0.0.0.0 for every interface", "<addr>");
+        // Comma-separated, not repeatable: this parser refuses a flag given twice (a corrected A/B arm used to run the value it was meant to replace), and
+        // --sweep-worlds sets the house pattern for a list. Split in Validate so the help text shows the raw form.
+        var origins = r.Str("--origin", null, "origins a browser may connect from, comma-separated. Required when --bind is not loopback", "<url,url>");
+        c.ClientDirectory = r.Str("--client-dir", c.ClientDirectory, "directory of built client files to serve; the repo's dist/ when unset", "<path>");
+        c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
+        // REFUSED by Program when the profiler is not already on, because no host can switch its own profiler on: the engine's master gate is baked before Main
+        // runs. See ProfilerArgs for the mechanism and scripts/swg-serve.ps1 for the equivalent that works. A flag that is listed and refused with instructions
+        // beats both an unknown-flag error, which teaches nothing, and the silent no-op this started as.
+        r.Group("live profiling — set before the process starts; these flags only tell you how");
+        c.ProfilerLivePort = r.Int("--live", c.ProfilerLivePort, $"the Workbench's profiler port; refused in-process, use scripts/swg-serve.ps1 -Live "
+            + $"{ProfilerArgs.DefaultLivePort}", min: 0, max: 65535);
+        c.ProfilerBindAddress = r.Str("--profiler-bind", c.ProfilerBindAddress, "address the profiler port binds; loopback when unset, and a routable address "
+            + "publishes your telemetry", "<addr>");
+        c.ProfilerTracePath = r.Str("--trace", c.ProfilerTracePath, "write a .typhon-trace capture here instead of the database's profilings/ directory",
+            "<path>");
 
         r.Group("diagnostics — measurement only, and refused with --serve");
         c.Probe = r.Switch("--probe", "time port queries around shuttle arrivals");
@@ -210,6 +234,37 @@ public static class CommandLine
         {
             throw new ArgumentException($"--db-name must be a bare file name with no directory and no invalid characters; got '{c.DatabaseName}'. "
                 + "Use --db-dir for the directory.");
+        }
+
+        // A hosting flag without --serve is a command line that cannot do what it says: there is no host to bind, no origin to admit and no client to serve.
+        // Refused rather than ignored, which is this parser's whole character (SWG-07).
+        if (c.ServePort == 0 && (c.BindAddress != null || c.Origins.Length > 0 || c.ClientDirectory != null))
+        {
+            throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>.");
+        }
+
+        // The address and the origin pairing, checked HERE rather than where the host binds. Both used to be: the host's own version throws from inside the DI
+        // options callback, which runs after the world is built — so a command line that could never serve spent a second and a half building a world first.
+        // A cross-flag check that a parse can make is a parse's job (SWG-07).
+        if (c.BindAddress != null)
+        {
+            if (!System.Net.IPAddress.TryParse(c.BindAddress.Trim(), out var bind))
+            {
+                throw new ArgumentException($"--bind '{c.BindAddress}' is not an IP address. Use 127.0.0.1 for local only, or 0.0.0.0 for every interface.");
+            }
+
+            if (!System.Net.IPAddress.IsLoopback(bind) && c.Origins.Length == 0)
+            {
+                throw new ArgumentException($"--bind {bind} is reachable from the network, so --origin <url> is required: allowing any origin there would let "
+                    + "any page a visitor opens drive this server from their browser.");
+            }
+        }
+
+        if (c.ClientDirectory != null && !System.IO.Directory.Exists(c.ClientDirectory))
+        {
+            // Checked here rather than left to the host, which skips a missing directory silently: a deployment whose payload unpacked wrong would serve a
+            // WebSocket and no page, and the operator would be looking at the browser.
+            throw new ArgumentException($"--client-dir '{c.ClientDirectory}' does not exist.");
         }
 
         if (c.ServePort == 0)

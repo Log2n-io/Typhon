@@ -2489,6 +2489,63 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// How many ticks apart this system's runs are, under the gates <see cref="CheckOverloadSkip"/> is applying right now (DSEL-03).
+    /// </summary>
+    /// <param name="sysIdx">The system.</param>
+    /// <returns>The tick spacing, at least 1.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The LCM, because the two gates are independent and a run has to pass both.</b> A system admitted only when
+    /// <c>tick % TickDivisor == 0</c> AND <c>tick % ThrottledTickDivisor == 0</c> runs on the ticks divisible by both, which is their least common multiple —
+    /// so <c>tickDivisor 2</c> with <c>throttledTickDivisor 3</c> runs every SIX ticks under load, not every two and not every three.
+    /// </para>
+    /// <para>
+    /// <b>Why this lives here rather than being read off <see cref="SystemDefinition"/>.</b> The throttled gate is conditional on the overload level and on
+    /// the system's priority, and the runtime has to scale <see cref="TickContext.AmortizedDeltaTime"/> by whatever is actually gating the system this tick.
+    /// Recomputing that condition at the point of use is how the two halves drift apart: the first version of #1293 scaled by <c>TickDivisor</c> alone, so
+    /// every throttled system silently integrated at a fraction of real time from the moment overload engaged — the very defect it was fixing, displaced
+    /// into the path nobody tests.
+    /// </para>
+    /// <para>
+    /// It does NOT account for <see cref="SystemDefinition.ShouldRun"/> or a reactive change-filter skip. Those are the application's own decisions about a
+    /// particular tick rather than a declared rate, and a system that skips itself knows why; the engine cannot attribute elapsed time to a condition it
+    /// does not own.
+    /// </para>
+    /// </remarks>
+    public int EffectiveRateDivisor(int sysIdx)
+    {
+        var sys = Systems[sysIdx];
+        var declared = Math.Max(1, sys.TickDivisor);
+        if (_overloadDetector.CurrentLevel == OverloadLevel.Normal || sys.Priority != SystemPriority.Normal)
+        {
+            return declared;
+        }
+
+        var throttled = Math.Max(1, sys.ThrottledTickDivisor);
+        return throttled == 1 ? declared : declared / Gcd(declared, throttled) * throttled;
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b != 0)
+        {
+            (a, b) = (b, a % b);
+        }
+
+        return a;
+    }
+
+    /// <summary>
+    /// Puts the overload detector at <paramref name="level"/> directly, for a test that needs the throttled regime without provoking real overruns.
+    /// </summary>
+    /// <param name="level">The level to sit at.</param>
+    /// <remarks>
+    /// The detector de-escalates only after 20 consecutive under-budget ticks, so a forced level survives long enough for a test to observe it — but it IS
+    /// the live state machine, not a stub: the next <c>Update</c> may move it. Assert on what a tick observed, never on the level holding afterwards.
+    /// </remarks>
+    internal void ForceOverloadLevelForTests(OverloadLevel level) => _overloadDetector.ForceLevel(level);
+
+    /// <summary>
     /// Checks whether a system should be skipped due to tick divisor or overload throttling/shedding.
     /// Returns <see cref="SkipReason.NotSkipped"/> if the system should execute normally.
     /// </summary>
@@ -2497,8 +2554,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         var sys = Systems[sysIdx];
 
-        // Baseline TickDivisor (active even at Normal load)
-        if (sys.TickDivisor > 1 && _currentTickNumber % sys.TickDivisor != 0)
+        // Baseline TickDivisor (active even at Normal load), on the phase the schedule gave this system (DSEL-04).
+        if (sys.TickDivisor > 1 && _currentTickNumber % sys.TickDivisor != sys.TickOffset)
         {
             TyphonEvent.EmitSchedulerOverloadSystemShed((ushort)sysIdx, (byte)_overloadDetector.CurrentLevel, (ushort)sys.TickDivisor, 1);
             return SkipReason.Throttled;
@@ -2517,8 +2574,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return SkipReason.Shed;
         }
 
-        // Level 1+: Throttle Normal-priority systems via ThrottledTickDivisor
-        if (sys.Priority == SystemPriority.Normal && sys.ThrottledTickDivisor > 1 && _currentTickNumber % sys.ThrottledTickDivisor != 0)
+        // Level 1+: Throttle Normal-priority systems via ThrottledTickDivisor, on the same phase the schedule gave this system — without a phase here,
+        // overload re-synchronises every throttled system onto one tick, producing a spike at exactly the moment the server least wants one.
+        //
+        // The offset is used RAW, and that is a property of how it was chosen rather than a convenience: RuntimeSchedule bounds it by the tightest of ALL the
+        // system's gates, so it is already below this divisor and `t = offset` satisfies this congruence. Bounding it by the TickDivisor alone would have
+        // needed `offset % ThrottledTickDivisor` here — a runtime integer division per system on precisely the ticks that are already short of budget.
+        if (sys.Priority == SystemPriority.Normal && sys.ThrottledTickDivisor > 1 && _currentTickNumber % sys.ThrottledTickDivisor != sys.TickOffset)
         {
             TyphonEvent.EmitSchedulerOverloadSystemShed((ushort)sysIdx, (byte)level, (ushort)sys.ThrottledTickDivisor, 1);
             return SkipReason.Throttled;

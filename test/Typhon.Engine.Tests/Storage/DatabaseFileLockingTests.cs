@@ -16,7 +16,7 @@ class DatabaseFileLockingTests
     [SetUp]
     public void Setup()
     {
-        _testDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(DatabaseFileLockingTests));
+        _testDir = Path.Combine(TestStorage.Root, nameof(DatabaseFileLockingTests));
         Directory.CreateDirectory(_testDir);
     }
 

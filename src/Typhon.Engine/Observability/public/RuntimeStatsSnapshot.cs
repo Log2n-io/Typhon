@@ -242,11 +242,17 @@ public readonly record struct RealmStat(
     public long Work => Enters + Updates + Leaves + CellsDelivered + Resets + Events;
 }
 
-/// <summary>One system's mean cost over the window.</summary>
+/// <summary>One system's mean cost over the window, and the rate it runs at.</summary>
 /// <param name="Name">The system's name, as the schedule declares it.</param>
 /// <param name="MeanUs">Mean duration over the window, in microseconds.</param>
+/// <param name="TickDivisor">How many ticks apart its runs are by declaration; 1 for a system that runs every tick.</param>
+/// <param name="TickOffset">
+/// Which of those ticks it runs on — the phase <c>RuntimeSchedule.Build</c> assigned it (DSEL-04), or the one it asked for. Reported because the assignment
+/// is automatic and spreads a schedule's slow work across phases: without it there is no way to answer "why did this system run on tick 7", and a stagger
+/// nobody can see is a stagger nobody can debug. Always 0 at divisor 1.
+/// </param>
 [PublicAPI]
-public readonly record struct SystemStat(string Name, double MeanUs);
+public readonly record struct SystemStat(string Name, double MeanUs, int TickDivisor, int TickOffset);
 
 /// <summary>One archetype's live entity count.</summary>
 /// <param name="Name">The archetype's name.</param>

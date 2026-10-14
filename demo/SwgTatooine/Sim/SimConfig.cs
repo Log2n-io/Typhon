@@ -310,6 +310,69 @@ public sealed class SimConfig
     /// </remarks>
     public bool Persist;
 
+    // ── Live profiling ──────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // These three are READ HERE and ACTED ON ELSEWHERE, which is unlike every other field in this class. The profiler's master gate is a static readonly bool
+    // in the engine, baked at assembly load, so the only layer that can still open it is the environment — and `ProfilerArgs`, called from `Program.Main`
+    // before any engine type is touched, is what writes it. They live in SimConfig anyway so that `--help` lists them and the strict parse accepts them from
+    // one declaration, as it does for every other flag (SWG-07).
+
+    // ── Hosting ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>--bind</c>: the address the web host binds, or <see langword="null"/> for loopback.
+    /// </summary>
+    /// <remarks>
+    /// <b>Loopback is the default, and it is a change.</b> The host used to call <c>ListenAnyIP</c> unconditionally, so
+    /// <c>--serve 8080</c> on a laptop published the world to whatever network the laptop was on. That is survivable
+    /// while a session can only watch; it stops being survivable the day there is an account to create. Exposing the
+    /// server is now something an operator says out loud.
+    /// </remarks>
+    public string BindAddress;
+
+    /// <summary>
+    /// <c>--origin</c>: origins a browser may connect from, comma-separated. Empty allows any, which is refused on a non-loopback bind.
+    /// </summary>
+    /// <remarks>
+    /// Any origin is right for a dev box, where the Vite port is not the server's. On a reachable bind it would let any
+    /// page a visitor opens drive this server from their browser, so there it is required rather than defaulted.
+    /// </remarks>
+    public string[] Origins = [];
+
+    /// <summary>
+    /// <c>--client-dir</c>: where the built browser client is, or <see langword="null"/> to look for it in the repository.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this a published server serves no client at all.</b> The fallback walks up from the binary looking for
+    /// <c>demo/SwgTatooine.Client/dist</c>, which exists in a dev tree and in no deployment — so the artefact
+    /// <c>scripts/publish-swg.ps1</c> builds would answer 404 for the root and leave nothing but a WebSocket. The flag is
+    /// what the deployed unit passes.
+    /// </remarks>
+    public string ClientDirectory;
+
+    /// <summary>
+    /// <c>--live</c>: the TCP port the profiler serves the Workbench on; 0 is off.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, and the default matters: the exporter costs tick time and the numbers in this repository are taken without it. The engine binds it to
+    /// loopback unless <see cref="ProfilerBindAddress"/> says otherwise, so turning it on does not publish telemetry off-box.
+    /// </remarks>
+    public int ProfilerLivePort;
+
+    /// <summary>
+    /// <c>--profiler-bind</c>: the address <see cref="ProfilerLivePort"/> binds, or <see langword="null"/> for the engine's loopback default.
+    /// </summary>
+    /// <remarks>
+    /// There is no validation of the address here because the engine's own parser is the authority on what an address is
+    /// (<c>IPAddress.TryParse</c>, in <c>ProfilerLaunchConfig</c>), and it ignores one it cannot read — which leaves the loopback default, the safe direction.
+    /// </remarks>
+    public string ProfilerBindAddress;
+
+    /// <summary>
+    /// <c>--trace</c>: where to write the capture, or <see langword="null"/> for the database's own <c>profilings/</c> directory.
+    /// </summary>
+    public string ProfilerTracePath;
+
     /// <summary>Run the tick fence on the worker pool rather than serially on the tick driver.</summary>
     public bool ParallelFence = true;
 
@@ -377,6 +440,29 @@ public sealed class SimConfig
 
     /// <summary><c>--max-spectators N</c>: how many god-camera sessions are admitted at once; 0 (the default) is unlimited.</summary>
     public int MaxSpectators;
+
+    /// <summary>
+    /// <c>--avatar-save-interval S</c>: how often a live avatar's position is written back to its character, seconds; 0 disables it.
+    /// </summary>
+    /// <remarks>
+    /// <b>This number is the bound on what a hard kill costs a player</b> (A6, acceptance criterion A-5): a logout always saves, but
+    /// a <c>SIGKILL</c>, a crash or an operator stopping the instance runs no logout, so without the cadence a whole session of
+    /// walking is lost. Ten seconds is about seventy metres at the run speed — recognisable but not a session. Zero is for a
+    /// measurement run that wants the write out of its numbers, and says so by being explicit.
+    /// </remarks>
+    public double AvatarSaveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds;
+
+    /// <summary>
+    /// <c>--resume-grace S</c>: how long a link-dead session's avatar stays standing for its client to come back to, seconds; 0 disables resume entirely.
+    /// </summary>
+    /// <remarks>
+    /// <b>This number is what a dropped connection costs a player, and what it costs everyone else</b> (A13). Within it, a client that reconnects is handed
+    /// the same body where it stood, with no login and no respawn; past it the avatar is saved and destroyed as an ordinary logout. The cost is that the body
+    /// is in the world the whole time, visible and standing still, and that its account cannot be logged in by a client that has lost its token without
+    /// taking that body over. The engine's own default is 60 s, which is what a mobile client losing a tower needs; this passes it through so that a
+    /// measurement run, or a test that needs a grace to elapse, can say otherwise.
+    /// </remarks>
+    public double ResumeGraceS = 60d;
 
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;

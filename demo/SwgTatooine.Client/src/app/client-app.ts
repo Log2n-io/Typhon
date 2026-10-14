@@ -17,42 +17,53 @@ import {
   slotOf,
   WorldStore,
 } from '@typhondb/client';
-import { CameraInput } from '../camera/camera-input';
+import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { meanAndP95, regionDue } from './frame-policy';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
-import type { DataSource, EventSink } from '../data/source';
+import { SpeedClass, type DataSource, type EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
-import { AGG_GRID, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
+import { AGG_GRID, FASTEST_TICK_PERIOD_MS, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
-import { EntityLayer, type FrameView, type PickHit, type PickRay } from '../render/entity-layer';
+import {
+  EntityLayer,
+  type FrameView,
+  type PickHit,
+  type PickRay,
+  type PredictedOverride,
+} from '../render/entity-layer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { GroundView, SKY } from '../render/ground';
 import { PlanetProfile } from '../render/planet-profile';
 import { InteriorProfile } from '../render/interior-profile';
 import { SpaceProfile } from '../render/space-profile';
 import type { SceneProfile } from '../render/scene-profile';
-import { startTerrainBake, type TerrainBake } from '../terrain/bake-client';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
 import { styleFor } from '../render/styles';
-import {
-  RenderOrigin,
-  extractFrustumPlanes,
-  invertMatrix4,
-  rayGroundT,
-  unprojectRay,
-} from '../render/view-math';
+import { RenderOrigin, extractFrustumPlanes, invertMatrix4, rayGroundT, unprojectRay } from '../render/view-math';
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
+import { DEFAULT_GAIT, gaitFor } from './gait';
+import {
+  gaitChanged,
+  gaitOf,
+  intentChanged,
+  movementIntent,
+  REFRESH_MS,
+  stopAfter,
+  type MoveIntent,
+} from './player-intent';
+import { Predictor, speedForClass } from './predictor';
+import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
 
@@ -61,6 +72,16 @@ const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
 const ERROR_LOG_INTERVAL_MS = 5000;
+
+/**
+ * How much of a tick a gait change needs in front of it to name that tick, on top of the round trip (A14b).
+ *
+ * The socket write and the server's own drain are what this floor covers: measured on loopback at 10 Hz, a transition
+ * past about 0.96 of a tick still missed the boundary at an RTT of half a millisecond. Inside the margin the client names
+ * the next boundary instead and waits for it, which costs this many milliseconds of input lag on that fraction of presses
+ * and is the cheaper side of the trade against being one whole step wrong.
+ */
+const SEND_MARGIN_MS = 5;
 /**
  * Largest device pixel ratio rendered: a 1080p laptop at 150 % would otherwise shade the full-screen ground at 2880 × 1620.
  * Babylon applies its own `limitDeviceRatio` only at construction, so the client sets the scaling itself on every resize.
@@ -156,6 +177,14 @@ class MutableFrameView implements FrameView {
   viewportHeight = 1;
   selectedNetId = 0;
   ground: GroundSampler = FLAT_GROUND;
+  predicted: PredictedOverride | null = null;
+}
+
+/** Reused each frame so a predicted body costs no allocation; the packer only reads it. */
+class MutablePredictedOverride implements PredictedOverride {
+  netId = 0;
+  x = 0;
+  z = 0;
 }
 
 /**
@@ -165,6 +194,31 @@ class MutableFrameView implements FrameView {
  * One frame: advance the clock → apply held keys, follow the selection → move the camera → pick the render origin →
  * update the view matrices → evaluate, cull and pack every layer → attack lines, ground, labels → Babylon draws.
  */
+/**
+ * What the render clock is told, and the one value here that is not a default.
+ *
+ * <b>`minDelayMs` is the floor on the interpolation buffer, and the SDK's 150 ms is a floor for the internet, not for
+ * this.</b> The clock already computes `period + p95(jitter)`, which is the honest answer — one tick, plus however
+ * unevenly frames actually arrive — and then clamps it up to 150. On a server on the same machine the measured answer is
+ * about one tick and the clamp was the whole delay: 150 ms of latency added to every key press and every release, on top
+ * of the round trip, for jitter that was not there.
+ *
+ * The floor is the FASTEST period this client supports, not the one it happens to have been compiled with, because the
+ * clock's own formula already produces the right answer: `period + p95(jitter)`, where the period is the server's real one
+ * once `Clock.onPeriodChange` has been seeded from the catalog. A floor set from a guessed rate is the binding constraint
+ * whenever the guess is too slow — which is what kept a 25 Hz server on a 100 ms buffer it did not need.
+ *
+ * `initialDelayMs` stays at two of the DEFAULT period: it applies only until the first frames arrive, and being generous
+ * there costs one settling second and avoids a visible snap on a connection that turns out to be jittery.
+ *
+ * Passed by the APP rather than changed in the SDK: a default that suits one deployment is not a default.
+ */
+const CLOCK_OPTIONS = {
+  tickPeriodMs: TICK_PERIOD_MS,
+  minDelayMs: FASTEST_TICK_PERIOD_MS,
+  initialDelayMs: 2 * TICK_PERIOD_MS,
+};
+
 export class ClientApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly createSource: SourceFactory;
@@ -177,6 +231,10 @@ export class ClientApp {
   private readonly input: CameraInput;
   private readonly origin = new RenderOrigin();
   private readonly view = new MutableFrameView();
+
+  /** A14: the locally predicted avatar, and the scratch record the packer reads it through. */
+  private readonly predictor = new Predictor();
+  private readonly predictedOverride = new MutablePredictedOverride();
   private readonly groundView = new GroundView();
   /** One per archetype of the CURRENT world's schema, rebuilt when a source brings a different one. */
   private layers: EntityLayer[];
@@ -190,14 +248,13 @@ export class ClientApp {
   private readonly profiles = new Map<SceneKind, SceneProfile>();
   private readonly planetProfile: PlanetProfile;
   private profile: SceneProfile;
-  /** The planet's heightfield: flat until the worker's bake lands, then the one source of ground height for everything. */
+  /** The planet's heightfield: the one source of ground height for everything, filled before the first frame. */
   private readonly field: Heightfield;
   /** Retained across clicks: the inverse view-projection, the ray through the cursor, and the winning hit. */
   private readonly pickInverse = new Float64Array(16);
   private readonly pickRay: PickRay = { ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 1 };
   private readonly pickBest: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
-  private readonly terrainBake: TerrainBake;
-  /** How long the bake took, reported once in the HUD's session block. */
+  /** How long the bake took, reported in the HUD's session block. On a cache hit this is the ORIGINAL bake's cost. */
   private terrainBakeMs = 0;
   private readonly attacks: AttackLines;
   private readonly labels: Labels;
@@ -256,8 +313,52 @@ export class ClientApp {
   /** The selection's altitude and facing, for the eye camera (CLI3D-10). */
   private selectedY = 0;
   private selectedHeading = 0;
+
+  /**
+   * The EYE SUBJECT's evaluated position, which since A10 is not the selection's.
+   *
+   * <b>A slot of its own, because a player's camera rides their avatar while the selection is whatever they clicked.</b>
+   * Both used to be evaluated into `selectedX/Y/Z/Heading`, the eye subject second — so for a playing session the
+   * selection marker and its label were drawn at the player's own body, with the player's own label, whatever they had
+   * clicked. The god camera never saw it, because there the two subjects are the same entity.
+   */
+  private eyeX = 0;
+  private eyeZ = 0;
+  private eyeY = 0;
+  private eyeHeading = 0;
   /** Whose eyes the eye camera is in; 0 for nobody. A change is a cut, not a glide. */
   private eyeSubject = 0;
+
+  /**
+   * The gait Shift+1..4 last selected, and the speed class every movement intent is sent at.
+   *
+   * <b>Latched here rather than derived from the held keys, because it is a MODE and not a chord.</b> `movementIntent` is
+   * pure in the keys currently down — which is what makes it testable — and a mode is by definition not in them. It is
+   * also why this is a key DOWN listener and not a per-frame poll of `heldKeys`: a tap shorter than a frame is a tap the
+   * person made, and a poll at 60 Hz would silently lose it.
+   *
+   * Per app, so it survives a logout and a realm crossing and is reset by a reload, which is the lifetime of everything
+   * else about how this session is being played.
+   */
+  private gait: number = DEFAULT_GAIT;
+
+  /** The gait shortcut's listener, which is this class's own and not the camera's. */
+  private readonly gaitKeys = new AbortController();
+
+  /** The movement intent last sent, so an unchanged one is not re-sent every frame (A9). */
+  private lastIntent: MoveIntent | null = null;
+
+  /** When it was sent, so a held key is refreshed before the server's destination is reached. */
+  private lastIntentMs = 0;
+
+  /**
+   * Whether the camera has been put behind the avatar for this session yet (A10).
+   *
+   * <b>Once per session, not once per frame.</b> The default has to be third person — A10 says so, and first person on a
+   * body you have just created tells you nothing about it — but it must be a STARTING point rather than a value the app
+   * keeps restoring, or the wheel and the camera-mode button would both snap back on the next frame.
+   */
+  private playerCameraReady = false;
 
   /**
    * The realm the scene is currently set up for: what {@link adoptSourceRealm} compares against each frame.
@@ -280,7 +381,13 @@ export class ClientApp {
   private selectionTextArchetype = -1;
   private readonly unsubscribe: () => void;
 
-  constructor(canvas: HTMLCanvasElement, overlay: HTMLElement, createSource: SourceFactory) {
+  /**
+   * @param canvas The canvas the engine renders into.
+   * @param overlay The DOM layer the labels are drawn on.
+   * @param createSource Builds the session this app drives.
+   * @param terrain The planet, **already baked**. See {@link terrain/terrain-provider} for why it is a parameter.
+   */
+  constructor(canvas: HTMLCanvasElement, overlay: HTMLElement, createSource: SourceFactory, terrain: TerrainBaked) {
     this.canvas = canvas;
     this.createSource = createSource;
     this.engine = new Engine(canvas, true, {
@@ -300,25 +407,31 @@ export class ClientApp {
     this.instrumentation = new SceneInstrumentation(this.scene);
     this.instrumentation.captureFrameTime = true;
 
-    // The ground starts FLAT and gains relief about a second later, when the worker's bake lands. That is not a
-    // compromise forced by the worker — the flat field is the same code path with every post at zero, which is also the
-    // regression the tests lean on, so the first second of the session exercises it for free.
+    // The ground is REAL before anything reads it, and that is a correctness property rather than a nicety.
+    //
+    // It used to start flat and gain relief about a second later, when the worker's bake landed. Everything that samples
+    // the ground in between was answered with zero while the server's altitudes were the true ones — and the eye camera's
+    // clearance probe, which walks the pull-back ray and stops before the ground, read a spawn 20 m below sea level as
+    // entirely underground and collapsed third person to first. The player spent the first two seconds inside their own
+    // avatar, under a plane that was not there. Filling the field here means no frame, no camera and no altitude query
+    // ever sees the placeholder.
     this.field = new Heightfield();
     this.view.ground = this.field;
     this.eyeCamera.ground = this.field;
-    this.terrainBake = startTerrainBake((baked) => {
-      this.onTerrainBaked(baked);
-    });
+    this.adoptTerrain(terrain);
     this.planetProfile = new PlanetProfile(this.scene, this.field, PLANET_HALF_EXTENT_M);
     this.profiles.set('planet', this.planetProfile);
     this.profile = this.planetProfile;
     this.planetProfile.enter(PLANET_AT_START);
+    // The per-node error the bake measured: what the pixel tolerance is spent against. Measured off the main thread
+    // because it is a pass over 4.19 M posts per level and the frame budget is 2 ms.
+    this.planetProfile.refreshTerrain(terrain.nodeError, terrain.nodeMinY, terrain.nodeMaxY);
     this.attacks = new AttackLines(this.scene);
     this.labels = new Labels(overlay);
 
     this.world = new WorldStore(SWG_SCHEMA);
     this.grid = new AggregateGrid(AGG_GRID);
-    this.clock = new Clock({ tickPeriodMs: TICK_PERIOD_MS });
+    this.clock = new Clock(CLOCK_OPTIONS);
     this.archetypes = resolveArchetypes(SWG_SCHEMA);
     this.layers = this.buildLayers();
     this.bindLayers();
@@ -332,7 +445,17 @@ export class ClientApp {
       this.cssSize,
       {
         onClick: (x, y) => {
-          useUi.getState().select(this.pickAt(x, y));
+          const netId = this.pickAt(x, y);
+          useUi.getState().select(netId);
+
+          // A9: clicking something is also how a player attacks it. The selection and the target move together on
+          // purpose — the inspector shows what you clicked and the avatar shoots at it, which is one gesture and one
+          // mental model. The server refuses a netId this session was never shown and one whose entity is dead, so a
+          // click on empty ground (0) is a legitimate clear rather than something to filter here.
+          const live = this.source;
+          if (live !== null && live.canPlay) {
+            live.setTarget(netId);
+          }
         },
         onManualMove: () => {
           if (useUi.getState().follow) {
@@ -341,7 +464,43 @@ export class ClientApp {
         },
       },
       this.eyeCamera,
-      () => useUi.getState().cameraMode === 'eye' && useUi.getState().selectedNetId !== 0,
+      // Eye mode IS the condition — no second opinion about what makes it legal. `setCameraMode` already refuses eye
+      // without a subject, and a player's subject is its avatar rather than a selection, so re-testing the selection here
+      // routed every wheel and drag of a playing session to the MAP camera: the look controls silently drove a camera
+      // that was not on screen, which reads as a dead mouse wheel.
+      () => useUi.getState().cameraMode === 'eye',
+    );
+
+    // The gait shortcuts. On `window` like the camera's keys, with the same typing guard — Shift+2 in the chat box is a
+    // quotation mark, not a speeder — and on this class's own AbortController so disposing the app takes it with it.
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (isTyping(e)) {
+          return;
+        }
+
+        const gait = gaitFor(e.code, e.shiftKey);
+        if (gait !== null) {
+          // The browser's own Shift+number does nothing on a canvas, but a page that has focus in the sidebar would
+          // otherwise type into it, and a repeat of a held digit would re-latch sixty times a second for no effect.
+          e.preventDefault();
+          this.gait = gait;
+        }
+
+        this.flushGaitNow(e.timeStamp);
+      },
+      { signal: this.gaitKeys.signal },
+    );
+
+    // The other half of A14b's send: letting go of the last direction key is a gait change too, and the stop it owes has to
+    // leave on the same terms as the start.
+    window.addEventListener(
+      'keyup',
+      (e) => {
+        this.flushGaitNow(e.timeStamp);
+      },
+      { signal: this.gaitKeys.signal },
     );
 
     // Observer callbacks run after the frame's draw and before its paint: resizing the canvas there would paint it blank.
@@ -452,6 +611,7 @@ export class ClientApp {
     this.ratioQuery?.removeEventListener('change', this.onRatioChange);
     this.ratioQuery = null;
     this.unsubscribe();
+    this.gaitKeys.abort();
     this.input.dispose();
     this.source?.dispose();
     this.source = null;
@@ -465,7 +625,6 @@ export class ClientApp {
       profile.dispose();
     }
 
-    this.terrainBake.terminate();
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -473,10 +632,13 @@ export class ClientApp {
   /**
    * Adopts the baked heightfield.
    *
-   * Copied into the field's own array rather than swapped in, because the GPU texture was created over that array and a
+   * Copied into the field's own array rather than swapped in, because the GPU texture is created over that array and a
    * swap would leave it pointing at the flat one. 16.8 MB is a few milliseconds, once.
+   *
+   * Called from the constructor, before the profile exists — the quadtree arrays are handed to `PlanetProfile` separately,
+   * right after it is built, because they are its data and not the field's.
    */
-  private onTerrainBaked(baked: TerrainBaked): void {
+  private adoptTerrain(baked: TerrainBaked): void {
     const grid = this.field.grid;
     if (baked.posts !== grid.posts || baked.spacingM !== grid.spacingM || baked.originM !== grid.originM) {
       // Both sides read the same constants, so this cannot happen without a bug; it is here because silently rendering a
@@ -488,9 +650,6 @@ export class ClientApp {
     grid.height.set(baked.height);
     this.field.measure();
     this.terrainBakeMs = baked.bakeMs;
-    // The per-level error the worker measured: what the pixel tolerance is spent against. Measured there because it is a
-    // pass over 4.19 M posts per level and the main thread has a 2 ms frame.
-    this.planetProfile.refreshTerrain(baked.nodeError, baked.nodeMinY, baked.nodeMaxY);
   }
 
   private resize(): void {
@@ -514,7 +673,7 @@ export class ClientApp {
 
     // What the last session was told is not this one's to show: a reconnect or a source change starts the room empty.
     useChat.getState().clear();
-    this.clock = new Clock({ tickPeriodMs: TICK_PERIOD_MS });
+    this.clock = new Clock(CLOCK_OPTIONS);
 
     // The world the context offers is the one a source that does not own its own fills — the mock. A live connection can
     // only size its store from the server's catalog, which arrives with the WELCOME, so it hands one back later instead
@@ -681,6 +840,9 @@ export class ClientApp {
         this.regionRadius = Number.NaN;
         this.lastRegionMs = Number.NEGATIVE_INFINITY;
       },
+      forgetViewRadius: () => {
+        this.sentViewRadius = null;
+      },
     };
   }
 
@@ -713,6 +875,261 @@ export class ClientApp {
     // changes and the camera keeps standing on the old world's hills.
     this.view.ground = profile.ground;
     this.eyeCamera.ground = profile.ground;
+  }
+
+  /**
+   * Sends the movement intent the held keys mean, when it has changed or is due a refresh (A9).
+   *
+   * @param source The live session.
+   * @param nowMs The frame's clock.
+   * @param steering Whether the keys are the avatar's this frame — true in eye mode, false in map mode where they pan the camera.
+   *
+   * @remarks
+   * <b>Two reasons to send, and both are needed.</b> A CHANGE — a new heading, a new speed class, the stop that ends a run —
+   * must go at once or the avatar does the wrong thing for as long as the key is held. A REFRESH must go because the server
+   * turns a heading into a destination one second of travel away: an intent that stopped being re-sent would simply be
+   * reached, and the avatar would halt while the key was still down.
+   *
+   * <b>The heading is the camera's yaw AFTER this frame's update.</b> Taken before it, every intent would be a frame behind
+   * the view the person is steering by — which at sixty frames a second is invisible standing still and clearly wrong while
+   * turning.
+   *
+   * <b>`steering: false` is not the same as not calling this.</b> It reads as "the keys are not mine this frame", which still owes
+   * the avatar a stop if it was moving — so switching to the map camera mid-run halts the character instead of leaving it walking
+   * off under a camera that is no longer behind it.
+   */
+  /**
+   * Starts, steps or stops the avatar's prediction (A14).
+   *
+   * @param netId The avatar to predict, or 0 for "nothing to predict" — a god camera, a spectator, or a session whose intents
+   * the server refuses.
+   * @param nowMs This frame's timestamp.
+   * @param dt Seconds since the previous frame.
+   *
+   * @remarks
+   * <b>Reconciles against {@link eyeX}/{@link eyeZ}, which {@link locateEyeSubject} has just written for this very netId.</b>
+   * Calling {@link evaluate} again would interpolate the same entity a second time per frame, and would overwrite the shared
+   * `eval*` slots that {@link locateSelected} and {@link locateEyeSubject} both read — harmless today only because both copy
+   * their values out first, which is the kind of ordering that holds until someone moves a line.
+   *
+   * The caller passes 0 for anything that is not a player steering its own body, and only passes a netId once
+   * {@link locateEyeSubject} has succeeded for it — so there is always an authority here to reconcile against.
+   */
+  private advancePrediction(netId: number, nowMs: number, dt: number): void {
+    if (netId === 0) {
+      this.predictor.stop();
+      this.predictedSubject = 0;
+      return;
+    }
+
+    if (this.predictedSubject !== netId) {
+      this.predictedSubject = netId;
+      this.predictor.start(nowMs, this.eyeX, this.eyeZ);
+      return;
+    }
+
+    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderDelayMs);
+  }
+
+  /** The netId {@link predictor} is anchored on, so a change of avatar re-anchors instead of integrating from the old one. */
+  private predictedSubject = 0;
+
+  private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
+    const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait) : null;
+
+    // A14b: when the gait changed, the instant it changed at — and `NaN` otherwise, which is every other frame. See
+    // `gaitChanged` for why a heading change is not one of these.
+    //
+    // Against the PREDICTOR's own record and not against `lastIntent`, because by the time this runs the key handler has
+    // already sent the change and moved `lastIntent` on. Comparing with that would hide every transition from the
+    // predictor, which would then integrate whole frames while the server integrated from the key — the error the split
+    // exists to remove, reintroduced at the frame scale.
+    const changedAtMs = this.predictedClass === gaitOf(intent) ? Number.NaN : this.takeDeclaredChange(nowMs);
+    this.predictedClass = gaitOf(intent);
+
+    // A14: the predictor is driven by the CURRENT intent, whether or not this frame sends one. The send is coalesced and rate
+    // limited (REFRESH_MS), so a predictor fed only on sends would stand still for up to a third of a second at a time.
+    if (this.predictor.active) {
+      if (intent === null || intent.speedClass === SpeedClass.stop) {
+        this.predictor.clearIntent(changedAtMs);
+      } else {
+        this.predictor.setIntent(
+          intent.heading,
+          speedForClass(intent.speedClass, {
+            walkMps: source.selfNumber('walkMps'),
+            runMps: source.selfNumber('runMps'),
+            burstMps: source.selfNumber('burstMps'),
+            speederMps: source.selfNumber('speederMps'),
+            speederFastMps: source.selfNumber('speederFastMps'),
+          }),
+          changedAtMs,
+        );
+      }
+    }
+
+    if (intent === null) {
+      // The keys are up. If the avatar was moving it must be TOLD to stop — the server is steering towards a destination a second
+      // of travel ahead, so silence lets the character walk on for about five metres after the key came up.
+      // Cleared either way, so a standing session sends nothing at all and the next press reads as a change rather than as a
+      // repeat the refresh window would have swallowed for up to a third of a second.
+      this.emitIntent(source, null, this.changePhase(source, changedAtMs), nowMs);
+      return;
+    }
+
+    if (!intentChanged(intent, this.lastIntent) && nowMs - this.lastIntentMs < REFRESH_MS) {
+      return;
+    }
+
+    this.emitIntent(source, intent, this.changePhase(source, changedAtMs), nowMs);
+  }
+
+  /**
+   * Sends a gait change the instant the key moved, rather than on the frame that notices it.
+   *
+   * @param atMs The key event's own timestamp.
+   *
+   * @remarks
+   * <b>A frame of delay is a tick boundary one time in five, and that costs a whole tick of travel (A14b).</b> The phase
+   * tells the server which part of the tick the intent changed in, and the server splits THAT tick — so the command has to
+   * reach it before the tick ends. Sending from the frame loop meant a key in the last frame of a tick arrived after the
+   * boundary, the server split the following tick instead, and the gesture came out one step long or one step short:
+   * measured on loopback at 10 Hz, every transition past phase 0.8 was wrong by 0.498 m and nothing below it was wrong at
+   * all. Sending here cuts the window from a frame to the socket write.
+   *
+   * It also takes half a frame off the start latency, which A14 measures, and that is a side effect rather than the point.
+   *
+   * <b>The held set is already up to date.</b> `CameraInput` registers its own `keydown` on `window` in its constructor,
+   * which runs before this listener is added, and listeners on one target fire in registration order.
+   *
+   * <b>Gated more loosely than the frame loop.</b> That one also requires the avatar to have been LOCATED this frame,
+   * which is a frame-time fact this cannot see. The cost of the difference is an intent sent in the gap between a session
+   * gaining `selfNetId` and its avatar appearing in the view, which the server validates and refuses like any other.
+   */
+  private flushGaitNow(atMs: number): void {
+    const source = this.source;
+    if (source === null || !source.canPlay || source.selfNetId === 0 || useUi.getState().cameraMode !== 'eye') {
+      return;
+    }
+
+    const intent = movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait);
+    if (!gaitChanged(intent, this.lastIntent)) {
+      return;
+    }
+
+    // Declared once, here, and read by the frame loop for the predictor: both sides have to integrate from the SAME
+    // instant, and this is the only place that knows which one the server was told about.
+    const declared = this.declareChange(source, atMs);
+    this.declaredChangeAtMs = declared.atMs;
+    this.emitIntent(source, intent, declared.phase, atMs);
+  }
+
+  /**
+   * The instant the key handler told the server about, or `nowMs` for a change that came from somewhere else.
+   *
+   * @param nowMs This frame's timestamp.
+   * @returns The instant to integrate the change from.
+   *
+   * @remarks
+   * Consumed, because a declaration belongs to exactly one transition. The fallback covers a gait change with no key event
+   * behind it — the camera leaving eye mode, a session losing `canPlay` — where no phase was sent either.
+   */
+  private takeDeclaredChange(nowMs: number): number {
+    const declared = this.declaredChangeAtMs;
+    this.declaredChangeAtMs = Number.NaN;
+    return Number.isFinite(declared) ? declared : nowMs;
+  }
+
+  /** What the key handler told the server, for the frame loop to drive the predictor with. */
+  private declaredChangeAtMs = Number.NaN;
+
+  /**
+   * The instant this client will honour for a transition, and the phase that tells the server about it.
+   *
+   * @param source The live session, for its RTT.
+   * @param atMs When the key actually moved.
+   * @returns The instant to integrate from, and the wire phase in 255ths.
+   *
+   * @remarks
+   * <b>A phase names a tick, and a command that misses that tick costs a whole step.</b> The server splits the tick the
+   * phase belongs to; if the command arrives after that tick has ended it splits the next one instead, having already paid
+   * a full step of the old velocity — so the gesture comes out one step long or one step short. Measured on loopback at
+   * 10 Hz: with the send on the next frame every transition past phase 0.8 was wrong by 0.498 m; sending from the key
+   * handler moved that edge to 0.99, which is still one gesture in fourteen.
+   *
+   * <b>So the client declares a boundary it can still reach.</b> Inside the margin it gives up on the current tick, names
+   * the next boundary instead — phase 0, the whole of the next tick to the new velocity — and waits for it before
+   * integrating. The cost is the margin's worth of input lag on the small fraction of presses that land in it: 5 ms on
+   * loopback, which is a third of a frame and below what anyone can feel. The alternative is being exactly one step wrong,
+   * visibly, instead of a few milliseconds late, invisibly.
+   *
+   * <b>The margin is the round trip and not half of it.</b> What has to fit is the uplink plus however long the server
+   * takes to drain, and the floor is what loopback still needs: the measured dead zone there was about 4 ms with an RTT of
+   * half a millisecond, so the write and the drain are the term that does not scale with distance.
+   */
+  private declareChange(source: DataSource, atMs: number): { atMs: number; phase: number } {
+    const phase = this.clock.subTickPhase(atMs, source.rttMs / 2);
+    if (!Number.isFinite(phase)) {
+      // No grid yet: the server treats 0 as "the whole tick is mine", which is what it did before phases existed.
+      return { atMs, phase: 0 };
+    }
+
+    const toBoundaryMs = (1 - phase) * this.clock.tickPeriodMs;
+    if (toBoundaryMs < SEND_MARGIN_MS + source.rttMs) {
+      return { atMs: atMs + toBoundaryMs, phase: 0 };
+    }
+
+    return { atMs, phase: Math.round(phase * 255) };
+  }
+
+  /**
+   * Sends an intent — or the stop that ends one — and records it as what was last sent.
+   *
+   * @param source The live session.
+   * @param intent What to say, or `null` for "the keys are up", which owes a stop and then nothing.
+   * @param changePhase The sub-tick phase, in 255ths.
+   * @param atMs When this counts as having been sent, for the refresh window.
+   *
+   * @remarks
+   * One rule in one place, because there are now two callers — the key handler and the frame loop — and the half that is
+   * easy to get wrong is the `null` branch: the server aims at a destination a second of travel away, so a client that
+   * merely stopped talking would watch its character walk on for about five metres.
+   */
+  private emitIntent(source: DataSource, intent: MoveIntent | null, changePhase: number, atMs: number): void {
+    if (intent === null) {
+      const stop = stopAfter(this.lastIntent);
+      if (stop !== null) {
+        source.moveDir(stop.heading, stop.speedClass, changePhase);
+        this.lastIntentMs = atMs;
+      }
+
+      this.lastIntent = null;
+      return;
+    }
+
+    source.moveDir(intent.heading, intent.speedClass, changePhase);
+    this.lastIntent = intent;
+    this.lastIntentMs = atMs;
+  }
+
+  /** The gait the PREDICTOR was last driven with, which is how a transition is still visible after the send took it. */
+  private predictedClass: number = SpeedClass.stop;
+
+  /**
+   * The wire's sub-tick phase for an intent that changed at `atMs`, in 255ths — `MoveDir.changePhase`.
+   *
+   * @param source The live session, for its RTT.
+   * @param atMs When the intent changed, or `NaN` for an intent that did not.
+   * @returns The phase, or 0 when there is nothing to measure against — which is what the server treats as "the whole
+   *   tick is mine", the behaviour it had before the phase existed.
+   *
+   * @remarks
+   * Half the RTT, because the clock's tick grid is anchored on the ARRIVAL of each tick's frame and therefore sits one
+   * downlink behind the server's own boundaries; uncorrected, every phase would be short by `delay / period` — nothing on
+   * loopback and a third of a step at 30 ms on a 100 ms tick. Half the round trip is the usual estimate of a one-way
+   * delay and the residual is the asymmetry between the two directions, which is a few milliseconds.
+   */
+  private changePhase(source: DataSource, atMs: number): number {
+    return Number.isFinite(atMs) ? this.declareChange(source, atMs).phase : 0;
   }
 
   /**
@@ -880,15 +1297,86 @@ export class ClientApp {
       this.mapCamera.follow(this.selectedX, this.selectedZ);
     }
 
-    // Eye mode rides the selection; without one there is nothing to ride, so it falls back to the map rather than
+    // A10: a PLAYING session's eye camera rides the avatar the server gave it — `selfNetId`, from the `SELF` block, which
+    // is what `Control` fills — and not the selection. Clicking something must not move the camera off your own body; the
+    // selection stays what the inspector shows and what `SetTarget` names. A god camera keeps riding its selection, which
+    // is what CLI3D-10 built this for.
+    const live = this.source;
+    const playing = live !== null && live.canPlay && live.selfNetId !== 0;
+    const eyeNetId = playing ? live.selfNetId : ui.selectedNetId;
+
+    // Into the eye subject's OWN slot when it is not the selection. Sharing one slot drew the selection marker and its
+    // label on the player's own avatar, because the eye subject was evaluated second and overwrote it.
+    const haveEyeSubject = playing ? this.locateEyeSubject(eyeNetId) : hasSelection;
+
+    // The store's camera actions need to know this session has an avatar to ride: eye mode is legal without a selection
+    // for a player and not for a god camera, and `select(0)` must not drop a player out of third person. Published on
+    // change only — this runs every frame and the store is one React subscribes to.
+    if (ui.playing !== playing) {
+      ui.setPlaying(playing);
+      ui = useUi.getState();
+    }
+
+    // A10: a player arrives in third person, behind their own avatar. Done here rather than in the store's initial state
+    // because it depends on the session being a player's, which is only known once the catalog has arrived — and done
+    // ONCE, so the camera-mode button and the wheel still belong to the viewer afterwards.
+    //
+    // <b>The latch closes only if the mode actually took.</b> It used to be set before the request and the request was
+    // refused — `setCameraMode('eye')` dropped it because the session had no selection — so the one chance to enter third
+    // person was spent on a call that did nothing, and a logged-in player sat in the god camera for the whole session.
+    // Reading the mode back costs one store read on the frames before it succeeds and none after.
+    if (playing && haveEyeSubject && !this.playerCameraReady) {
+      this.eyeCamera.setDistance(DEFAULT_THIRD_PERSON_M);
+      if (ui.cameraMode !== 'eye') {
+        ui.setCameraMode('eye');
+        ui = useUi.getState();
+      }
+
+      this.playerCameraReady = ui.cameraMode === 'eye';
+    }
+
+    // Eye mode rides that subject; without one there is nothing to ride, so it falls back to the map rather than
     // stranding the viewer at the origin (CLI3D-10).
-    const inEye = ui.cameraMode === 'eye' && hasSelection;
+    const inEye = ui.cameraMode === 'eye' && haveEyeSubject;
+
+    // Bolted to your own avatar, eased when watching somebody else's — see EyeCamera.rigid.
+    // A9: the held keys, in the camera's frame, as a movement intent.
+    //
+    // <b>Before the camera's own update, and A14 is why.</b> The three are circular: the heading is the eye camera's yaw, the
+    // camera's position follows the predicted body, and the prediction integrates the intent. Something has to be a frame
+    // stale, and the yaw is by far the cheapest: `update` EASES it toward its goal, so reading it here costs one ease step —
+    // a fraction of a degree — where ordering the prediction after the camera instead costs a whole frame of movement latency
+    // on every key press, and ordering the camera after the prediction without this costs a constant 8 cm of camera lag at a
+    // run. Measured latency is 9.4 ms p50 with this order.
+    //
+    // Gated on IN EYE and not merely on playing, because the heading is the eye camera's yaw. A10 leaves the camera-mode button to
+    // the viewer, and in map mode that yaw is whatever it was when the viewer left eye mode — nothing updates it — while W/A/S/D
+    // belong to the map camera's pan. Sending then walked the avatar along a stale facing the person could not see, in response to
+    // keys they were using for something else.
+    if (playing) {
+      this.sendMovementIntent(live, now, inEye);
+    }
+
+    // A14: the predicted avatar, stepped with the intent just computed. Started on the authority the first frame the session
+    // has one, stopped for anything that is not a player steering its own body — a god camera, a spectator, or a session whose
+    // intents the server refuses.
+    this.advancePrediction(playing && haveEyeSubject ? eyeNetId : 0, now, dt);
+
+    this.eyeCamera.rigid = playing;
     if (inEye) {
-      if (this.eyeSubject !== ui.selectedNetId) {
-        this.eyeSubject = ui.selectedNetId;
-        this.eyeCamera.jumpTo(this.selectedX, this.selectedY, this.selectedZ, this.selectedHeading);
+      // A god camera rides its selection, so the two slots hold the same subject and either would do; a player's camera
+      // must read the eye slot, which is the only one holding the avatar.
+      // The PREDICTED position when there is one: the camera and the body must agree, or the view slides off a character
+      // standing where the server last confirmed it.
+      const predicting = playing && this.predictor.active && !ui.showAuthoritative;
+      const camX = predicting ? this.predictor.x : playing ? this.eyeX : this.selectedX;
+      const camY = playing ? this.eyeY : this.selectedY;
+      const camZ = predicting ? this.predictor.z : playing ? this.eyeZ : this.selectedZ;
+      if (this.eyeSubject !== eyeNetId) {
+        this.eyeSubject = eyeNetId;
+        this.eyeCamera.jumpTo(camX, camY, camZ, playing ? this.eyeHeading : this.selectedHeading);
       } else {
-        this.eyeCamera.follow(this.selectedX, this.selectedY, this.selectedZ);
+        this.eyeCamera.follow(camX, camY, camZ);
       }
 
       this.eyeCamera.update(dt);
@@ -914,6 +1402,18 @@ export class ClientApp {
     view.viewportHeight = this.cssSize.height;
     view.pixelsPerMetre = this.cssSize.height / (2 * Math.tan(cam.fov / 2));
     view.selectedNetId = ui.selectedNetId;
+    if (this.predictor.active && live !== null) {
+      this.predictedOverride.netId = live.selfNetId;
+      this.predictedOverride.x = this.predictor.x;
+      this.predictedOverride.z = this.predictor.z;
+      // The debug toggle renders the SERVER's position instead of the predicted one, so the viewer can A/B the two and watch
+      // the body step back by exactly the lead distance. A side-by-side ghost would need a second mesh instance per frame in
+      // the packer's hot loop; a toggle shows the same quantity for nothing, and arguably more clearly than two meshes 0.3 m
+      // apart. Deviation from `15-client-prediction.md` § 5, recorded there.
+      view.predicted = ui.showAuthoritative ? null : this.predictedOverride;
+    } else {
+      view.predicted = null;
+    }
 
     this.camera.position.set(view.eyeX, view.eyeY, view.eyeZ);
     this.camera.rotation.set(cam.pitch, cam.yaw, 0);
@@ -933,6 +1433,7 @@ export class ClientApp {
 
     this.attacks.update(view);
     this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ);
+    this.sendViewRadius(ui.playerRadius);
     // `stats` builds a whole snapshot — objects, a template string, a pass over the byte window — so it is read four
     // times a second by `publishStats`, never once a frame. The radius the server is actually serving has its own cheap
     // accessor for exactly this reason.
@@ -971,7 +1472,14 @@ export class ClientApp {
       // Place names are the PLANET's: they are Tatooine's towns, and in a room or in space they name somewhere the
       // viewer is not. The selection's tag below is realm-agnostic and stays either way.
       if (this.profile.kind === 'planet') {
-        this.labels.update(matrix, view.originX, view.originZ, this.cssSize.width, this.cssSize.height, this.profile.ground);
+        this.labels.update(
+          matrix,
+          view.originX,
+          view.originZ,
+          this.cssSize.width,
+          this.cssSize.height,
+          this.profile.ground,
+        );
       } else {
         this.labels.hidePlaces();
       }
@@ -1024,6 +1532,30 @@ export class ClientApp {
    * the eye is riding, which the store arranges on entering eye mode and nothing keeps true: turn following off and the eye
    * rides an NPC out of the served disc while the region stays where the map was left, so entities silently stop arriving.
    */
+  /**
+   * Asks the server for a wider sphere, when the slider has moved.
+   *
+   * <b>On CHANGE, not on a cadence, which is the opposite of {@link sendRegion}.</b> A region is a hull the server can
+   * clamp or reject and the client re-offers; a radius is a single number the server either grants until further notice
+   * or refuses, so re-sending an unchanged one is pure ingress. The command is coalesced latest-per-session, so a drag
+   * costs one command however many frames it spans.
+   *
+   * Null is "the server has not told us its range yet", not a radius: sending 0 would mean "back to the profile's own",
+   * which is a different statement and would fight a slider the person has already moved.
+   */
+  private sendViewRadius(radius: number | null): void {
+    const source = this.source;
+    if (source === null || radius === null || radius === this.sentViewRadius) {
+      return;
+    }
+
+    source.setViewRadius(radius);
+    this.sentViewRadius = radius;
+  }
+
+  /** The radius last asked for, so an unchanged slider sends nothing. */
+  private sentViewRadius: number | null = null;
+
   private sendRegion(now: number, radius: number, x: number, z: number): void {
     if (
       this.source === null ||
@@ -1096,6 +1628,58 @@ export class ClientApp {
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
   private locateSelected(netId: number): boolean {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    this.selectedX = this.evalX;
+    this.selectedZ = this.evalZ;
+    // Altitude and heading, for the eye camera (CLI3D-10). A still entity keeps the heading it last had, the way the
+    // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
+    this.selectedY = this.evalY;
+    this.selectedHeading = headingOf(this.evalVx, this.evalVz, this.selectedHeading);
+    if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== this.evalArchetype) {
+      this.selectionTextNetId = netId;
+      this.selectionTextArchetype = this.evalArchetype;
+      this.selectionText = `${this.archetypes.label(this.evalArchetype)} #${netId}`;
+    }
+
+    return true;
+  }
+
+  /**
+   * Evaluates the EYE SUBJECT's position into {@link eyeX}/{@link eyeY}/{@link eyeZ}/{@link eyeHeading}.
+   *
+   * @param netId The entity the camera is riding — a player's own avatar, or the god camera's selection.
+   * @returns Whether it was found and has a position.
+   *
+   * @remarks
+   * Separate from {@link locateSelected} rather than sharing its slot, and it deliberately does NOT touch
+   * {@link selectionText}: the label belongs to whatever the viewer clicked. See {@link eyeX}.
+   */
+  private locateEyeSubject(netId: number): boolean {
+    if (!this.evaluate(netId)) {
+      return false;
+    }
+
+    this.eyeX = this.evalX;
+    this.eyeZ = this.evalZ;
+    this.eyeY = this.evalY;
+    this.eyeHeading = headingOf(this.evalVx, this.evalVz, this.eyeHeading);
+    return true;
+  }
+
+  /**
+   * Interpolates one netId's placement for this frame into the `eval*` fields.
+   *
+   * @param netId The entity.
+   * @returns Whether it is here and has a position.
+   *
+   * @remarks
+   * Fields rather than a returned object, so two subjects per frame cost no allocation. Written and read within one
+   * frame step and never held across one.
+   */
+  private evaluate(netId: number): boolean {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
       return false;
@@ -1107,22 +1691,25 @@ export class ClientApp {
       return false;
     }
 
-    evaluateSlot(store, slotOf(location), this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
-    const selected = this.placement.read(store.dims, this.scratch, 0);
-    this.selectedX = selected.x;
-    this.selectedZ = selected.z;
-    // Altitude and heading, for the eye camera (CLI3D-10). A still entity keeps the heading it last had, the way the
-    // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
-    this.selectedY = altitudeOf(altitudeField(store), slotOf(location), selected, this.field);
-    this.selectedHeading = headingOf(selected.vx, selected.vz, this.selectedHeading);
-    if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== archetype) {
-      this.selectionTextNetId = netId;
-      this.selectionTextArchetype = archetype;
-      this.selectionText = `${this.archetypes.label(archetype)} #${netId}`;
-    }
-
+    const slot = slotOf(location);
+    evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+    const read = this.placement.read(store.dims, this.scratch, 0);
+    this.evalX = read.x;
+    this.evalZ = read.z;
+    this.evalVx = read.vx;
+    this.evalVz = read.vz;
+    this.evalY = altitudeOf(altitudeField(store), slot, read, this.field);
+    this.evalArchetype = archetype;
     return true;
   }
+
+  /** {@link evaluate}'s output: one subject's interpolated placement, valid until the next call. */
+  private evalX = 0;
+  private evalZ = 0;
+  private evalY = 0;
+  private evalVx = 0;
+  private evalVz = 0;
+  private evalArchetype = -1;
 
   private publishStats(ui: UiState, nearRadius: number): void {
     const source = this.source?.stats;
@@ -1161,6 +1748,19 @@ export class ClientApp {
       // The ACTIVE camera's, not the map's: in eye view the map camera is still smoothing along at its own altitude,
       // and reporting that read as "you are 1 474 m up" while standing in a street.
       altitude: this.activeAltitude,
+      gait: this.gait,
+      // What the server says that gait is worth. NaN before the owner block arrives, which the HUD shows as a dash
+      // rather than as a figure it made up.
+      gaitMps:
+        this.source === null
+          ? Number.NaN
+          : speedForClass(this.gait, {
+              walkMps: this.source.selfNumber('walkMps'),
+              runMps: this.source.selfNumber('runMps'),
+              burstMps: this.source.selfNumber('burstMps'),
+              speederMps: this.source.selfNumber('speederMps'),
+              speederFastMps: this.source.selfNumber('speederFastMps'),
+            }),
       groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
       terrainBakeMs: this.terrainBakeMs,
       terrainTriangles: this.profile.stats.triangles,
@@ -1178,6 +1778,16 @@ export class ClientApp {
       inspection: ui.selectedNetId === 0 ? null : this.inspect(ui.selectedNetId),
       held: this.world.entityCount,
       anomalies: this.world.anomalies,
+      // A14. The lead is the latency expressed as a distance — the gap between the body on screen and the server's own
+      // figure — and the three counters are how a prediction fault announces itself; see PredictionStats for what each means.
+      prediction: this.predictor.active
+        ? {
+            leadM: Math.hypot(this.predictor.x - this.eyeX, this.predictor.z - this.eyeZ),
+            snaps: this.predictor.snaps,
+            fallbacks: this.predictor.fallbacks,
+            stale: this.predictor.staleReads,
+          }
+        : null,
     });
   }
 

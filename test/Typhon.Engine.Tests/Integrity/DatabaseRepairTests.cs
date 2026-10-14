@@ -44,7 +44,7 @@ internal sealed class DatabaseRepairTests
     [SetUp]
     public void Setup()
     {
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(DatabaseRepairTests), CurrentDatabaseName);
+        _root = Path.Combine(TestStorage.Root, nameof(DatabaseRepairTests), CurrentDatabaseName);
         Directory.CreateDirectory(DbDir);
         Directory.CreateDirectory(Path.Combine(_root, "wal"));
 

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Typhon.Schema.Definition;
 
 namespace Bench;
@@ -9,6 +9,11 @@ namespace Bench;
 /// (a former example schema project was retired in #531). Benchmarks always regenerate their database, so the
 /// standalone identity is safe.
 /// </summary>
+// TYPHON013 suppressed deliberately: 136 bytes is past the 112 a ComponentValue carries inline, so this is spawned in two steps - empty Spawn
+// then a write through OpenMut, see QueryViewBenchmarks.Setup. Pack = 4 would bring it to 132, still over, and splitting it would change what the
+// benchmark measures: the four [Index] fields, the 64-byte name and the stat block are one row on purpose, because the queries under test filter
+// on the keys and read the whole row. A benchmark whose subject changed would have a history nobody can compare against.
+#pragma warning disable TYPHON013
 [Component("Bench.ItemData", 1)]
 [StructLayout(LayoutKind.Sequential)]
 public struct ItemData
@@ -38,3 +43,4 @@ public struct ItemData
     [Field] public int BaseArmor;
     [Field] public int BaseBlockChance;
 }
+#pragma warning restore TYPHON013

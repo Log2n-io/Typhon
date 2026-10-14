@@ -47,7 +47,7 @@ internal abstract partial class BTree<TKey, TStore>
 
     private bool MoveUnguarded(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
-        _fenceWindow?.NoteMutation("BTree.Move");
+        NoteLatchedMutation("BTree.Move");
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
         ref var opAccessor = ref _segment.RentWarmAccessor(accessor.ChangeSet);
         try
@@ -390,7 +390,7 @@ internal abstract partial class BTree<TKey, TStore>
     private int MoveValueUnguarded(TKey oldKey, TKey newKey, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
-        _fenceWindow?.NoteMutation("BTree.MoveValue");
+        NoteLatchedMutation("BTree.MoveValue");
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
         ref var opAccessor = ref _segment.RentWarmAccessor(accessor.ChangeSet);
         // Separate CA for VSBS buffer operations — prevents VSBS page loads from evicting

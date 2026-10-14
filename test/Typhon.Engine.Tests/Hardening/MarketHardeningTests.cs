@@ -51,6 +51,11 @@ public struct MkItem
 /// 512 bytes of content derived from the item's number and never written after the build: what makes the database large, and what every read
 /// checks — a page served from the wrong slot, a torn write or a stale read shows up as lore that does not match its item.
 /// </summary>
+// TYPHON013 suppressed, and this is the diagnostic's own documented escape hatch rather than a workaround: 512 bytes is past the 112 a ComponentValue
+// carries inline, and this component is never passed to Spawn. Every fixture that holds it spawns the item without it and supplies it through
+// OpenMut(...).Enable(MkItemArch.Lore, ...), which writes into the slot's own storage and never builds a ComponentValue. The size is the point of the
+// component — it is what makes the database large enough for a page served from the wrong slot to be visible — so it cannot be split.
+#pragma warning disable TYPHON013
 [Component("Typhon.Test.Market.Lore", 1, StorageMode = StorageMode.SingleVersion)]
 public struct MkLore
 {
@@ -65,6 +70,7 @@ public struct MkLore
     public long W48, W49, W50, W51, W52, W53, W54, W55;
     public long W56, W57, W58, W59, W60, W61, W62, W63;
 }
+#pragma warning restore TYPHON013
 
 /// <summary>One committed transfer or credit grant, appended in the same transaction as the transfer or the grant itself.</summary>
 [Component("Typhon.Test.Market.Audit", 1)]

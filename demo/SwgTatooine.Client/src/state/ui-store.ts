@@ -46,6 +46,16 @@ export interface UiState {
    */
   readonly maxViewRadius: number | null;
   /**
+   * The radius a PLAYER session asks to be served over, metres, or `null` until the server states its range.
+   *
+   * Separate from {@link viewRadius}, which is a god camera's region: the two have different mechanisms, different
+   * ceilings and are never both in play for one session, so one number would have to mean whichever the session happens
+   * to be — and the first panel to read it would get the other one's bound.
+   */
+  readonly playerRadius: number | null;
+  /** The range {@link playerRadius} may be set over, metres, or `null` while the server has not said. */
+  readonly playerRadiusRange: { readonly min: number; readonly max: number } | null;
+  /**
    * Heatmap channels by archetype NAME. Which channels exist is the aggregate grid's to say, and the server's grid holds
    * three (`Creature`, `CityNpc`, `Player`) where the client's old constant assumed four in a different order — so a
    * channel is addressed by name and an unlisted one is off.
@@ -58,6 +68,22 @@ export interface UiState {
   readonly terrainPixelError: number;
   /** `god` looks down on the world; `eye` stands in it, riding the selection (CLI3D-10). */
   readonly cameraMode: 'god' | 'eye';
+  /**
+   * Whether this session drives an avatar of its own (A10).
+   *
+   * <b>Eye mode needs something to ride, and since A10 that is no longer only the selection.</b> A god camera rides what
+   * it has selected; a PLAYER rides its own avatar and typically has no selection at all. Without this flag the camera
+   * actions below could only ask "is something selected", and so refused a player eye mode outright.
+   */
+  readonly playing: boolean;
+  /**
+   * Draw the avatar where the SERVER says it is, rather than where the client predicted (A14).
+   *
+   * <b>A diagnostic, and the answer to a fair objection.</b> Prediction makes the displayed position a fiction, in a demo
+   * whose whole point is that the engine is the authority — so the fiction has to be inspectable. Toggling this steps the body
+   * back by exactly the lead distance, which makes the latency something the demo SHOWS rather than only measures.
+   */
+  readonly showAuthoritative: boolean;
   readonly showLabels: boolean;
   readonly showAttacks: boolean;
   /** Per archetype NAME; an archetype the user has not touched is visible. */
@@ -94,12 +120,19 @@ export interface UiState {
   readonly setSeed: (seed: number) => void;
   readonly setViewRadius: (radius: number) => void;
   readonly setMaxViewRadius: (radius: number | null) => void;
+  /** Asks for a player radius, clamped to the server's range. Ignored until the range is known. */
+  readonly setPlayerRadius: (radius: number) => void;
+  /** Adopts the server's range, and starts at its own radius — which is what the session is already being served. */
+  readonly setPlayerRadiusRange: (range: { min: number; max: number } | null) => void;
   readonly toggleHeatmap: (name: string) => void;
   readonly setShowGrid: (on: boolean) => void;
   readonly setShowDebug: (on: boolean) => void;
   /** Sets the terrain's screen-space error budget, in pixels. */
   readonly setTerrainPixelError: (pixels: number) => void;
   readonly setCameraMode: (mode: 'god' | 'eye') => void;
+  /** Tells the store this session has an avatar to ride; see {@link UiState.playing}. */
+  readonly setPlaying: (playing: boolean) => void;
+  readonly setShowAuthoritative: (showAuthoritative: boolean) => void;
   readonly setShowLabels: (on: boolean) => void;
   readonly setShowAttacks: (on: boolean) => void;
   readonly toggleLayer: (name: string) => void;
@@ -123,11 +156,15 @@ export const useUi = create<UiState>()((set) => ({
   seed: 20260916,
   viewRadius: 1500,
   maxViewRadius: null,
+  playerRadius: null,
+  playerRadiusRange: null,
   heatmap: { Creature: true },
   showGrid: true,
   showDebug: false,
   terrainPixelError: 2,
   cameraMode: 'god',
+  playing: false,
+  showAuthoritative: false,
   showLabels: true,
   showAttacks: true,
   layers: {},
@@ -159,6 +196,31 @@ export const useUi = create<UiState>()((set) => ({
       viewRadius: maxViewRadius === null || maxViewRadius <= 0 ? s.viewRadius : Math.min(s.viewRadius, maxViewRadius),
     }));
   },
+
+  setPlayerRadius: (radius) => {
+    // Clamped here rather than at the slider, for the reason setViewRadius is: the server REFUSES a radius outside its
+    // range instead of clamping it, so an unclamped ask is a slider that moves and a session that is not widened.
+    set((s) => {
+      const range = s.playerRadiusRange;
+      if (range === null || !Number.isFinite(radius)) {
+        return {};
+      }
+
+      return { playerRadius: Math.min(Math.max(Math.round(radius), range.min), range.max) };
+    });
+  },
+
+  setPlayerRadiusRange: (playerRadiusRange) => {
+    set((s) => ({
+      playerRadiusRange,
+      // Starts at the profile's own radius, which is what the session is already served — so adopting the range changes
+      // nothing until the person moves the slider. An existing value is kept, clamped, so a re-fetch does not reset it.
+      playerRadius:
+        playerRadiusRange === null
+          ? null
+          : Math.min(Math.max(s.playerRadius ?? playerRadiusRange.min, playerRadiusRange.min), playerRadiusRange.max),
+    }));
+  },
   toggleHeatmap: (name) => {
     set((s) => ({ heatmap: { ...s.heatmap, [name]: !(s.heatmap[name] ?? false) } }));
   },
@@ -169,13 +231,23 @@ export const useUi = create<UiState>()((set) => ({
     set({ showDebug });
   },
   setCameraMode: (cameraMode) => {
-    // Eye mode rides the selection, so entering it without one would strand the camera. Entering follow too is what
-    // makes it read as "I am this creature" rather than "I am standing where it was".
+    // Eye mode needs a subject, so entering it without one would strand the camera. A selection is one subject; a
+    // player's own avatar is the other, and that second case is what A10 added.
+    //
+    // Refusing on the selection ALONE is what left a logged-in player in the god camera: a player has an avatar and no
+    // selection, so the one request that mattered was dropped silently. Entering follow too is what makes it read as
+    // "I am this creature" rather than "I am standing where it was".
     set((s) =>
-      cameraMode === 'eye' && s.selectedNetId === 0
+      cameraMode === 'eye' && s.selectedNetId === 0 && !s.playing
         ? {}
         : { cameraMode, follow: cameraMode === 'eye' ? true : s.follow },
     );
+  },
+  setPlaying: (playing) => {
+    set({ playing });
+  },
+  setShowAuthoritative: (showAuthoritative) => {
+    set({ showAuthoritative });
   },
   setShowLabels: (showLabels) => {
     set({ showLabels });
@@ -195,10 +267,14 @@ export const useUi = create<UiState>()((set) => ({
   select: (selectedNetId) => {
     // One `set`, so one re-render. Losing the selection must leave eye mode — there is nothing left to ride — and doing
     // that in its own `set` first made every subscriber render twice for one click.
+    //
+    // UNLESS this session is playing, in which case the eye camera is on its own avatar and the selection was never what
+    // it rode. A9 makes clicking empty ground a legitimate way to clear the target, and without this a player would be
+    // thrown out of third person for doing it.
     set((s) => ({
       selectedNetId,
       follow: selectedNetId === 0 ? false : s.follow,
-      cameraMode: selectedNetId === 0 ? 'god' : s.cameraMode,
+      cameraMode: selectedNetId === 0 && !s.playing ? 'god' : s.cameraMode,
     }));
   },
   setFollow: (follow) => {

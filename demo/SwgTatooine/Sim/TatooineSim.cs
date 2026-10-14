@@ -3,7 +3,6 @@ using System.IO;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 
@@ -271,11 +270,23 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<ShipMotion>();
         Dbe.RegisterComponentFromAccessor<ShipRealm>();
 
+        // Identity (A1). The only NON-SPATIAL archetype here — no placement, so no AABB and no cluster migration — and the only one carrying an [Index]. That
+        // combination is what lets /auth read and write it from a Kestrel thread while the tick runs: Versioned is MVCC, and being out of the spatial index
+        // keeps it clear of the fence's unlatched fast paths (EW-02 in rules/runtime-scheduling.md).
+        Dbe.RegisterComponentFromAccessor<Account>();
+        Dbe.RegisterComponentFromAccessor<AccountSecret>();
+        Dbe.RegisterComponentFromAccessor<Character>();
+
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
         // that way, and shifting them would put a transcription error between the source and the world.
         var half = _config.WorldEdgeM * 0.5f;
         var cell = _config.ResolveCellSize();
+
+        // The replication cell follows the spatial one, 1:1 (TatooineReplication.ReplicationCellM): delivering a replication cell queries the spatial index
+        // over that cell's box, so a finer replication grid opens the same spatial cell once per replication cell inside it. Measured at 2.4x on this demo's
+        // geometry. Set here rather than in StartReplication because the realms registered below carry it, and they are registered first.
+        TatooineReplication.ReplicationCellM = cell;
         var planetGrid = SpatialGridConfig.Flat(
             worldMin: new Vector2(-half, -half),
             worldMax: new Vector2(half, half),

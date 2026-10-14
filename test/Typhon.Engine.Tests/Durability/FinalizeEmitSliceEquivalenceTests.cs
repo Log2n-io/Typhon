@@ -74,7 +74,7 @@ internal sealed class FinalizeEmitSliceEquivalenceTests
             name = name.Replace(c, '_');
         }
 
-        _root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(FinalizeEmitSliceEquivalenceTests), name);
+        _root = Path.Combine(TestStorage.Root, nameof(FinalizeEmitSliceEquivalenceTests), name);
     }
 
     [TearDown]

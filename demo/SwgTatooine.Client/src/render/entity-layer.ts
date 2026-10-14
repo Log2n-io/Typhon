@@ -20,7 +20,7 @@ import {
   type ScreenPoint,
 } from './view-math';
 
-export type { FrameView } from './layer-packer';
+export type { FrameView, PredictedOverride } from './layer-packer';
 export type { PickHit, PickRay } from './view-math';
 
 const SUN = new Vector3(-0.45, -0.8, -0.4).normalize();

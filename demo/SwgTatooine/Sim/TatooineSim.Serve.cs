@@ -24,14 +24,16 @@ public sealed partial class TatooineSim
     /// </summary>
     /// <param name="port">The port to listen on.</param>
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/>.</param>
+    /// <param name="bindAddress">The address to bind, or <see langword="null"/> for loopback.</param>
+    /// <param name="origins">Origins a browser may connect from; required when <paramref name="bindAddress"/> is not loopback.</param>
     /// <returns>A task that completes when the host has stopped.</returns>
-    public async Task ServeAsync(int port, string clientRoot)
+    public async Task ServeAsync(int port, string clientRoot, string bindAddress = null, string[] origins = null)
     {
         StartReplication();
         try
         {
             await TatooineHost
-                .ServeAsync(_runtime, port, clientRoot, realmsJson: RealmDirectoryJson(), realmInventory: RealmInventoryJson)
+                .ServeAsync(_runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress)
                 .ConfigureAwait(false);
         }
         finally
@@ -61,6 +63,10 @@ public sealed partial class TatooineSim
     /// </remarks>
     public void StartReplication()
     {
+        // Before anything else, so a misconfigured SWG_AUTH_KEY stops the server here rather than surfacing as a wrapped
+        // TypeInitializationException inside the admission hook, on a transport thread, for the first client that connects.
+        Accounts.AuthToken.EnsureConfigured();
+
         BuildViews();
 
         _bridge = new SimBridge(_config, Map, Index)
@@ -98,11 +104,15 @@ public sealed partial class TatooineSim
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
 
-                // A third of the players' 192 m radius: an 11 x 11 window per session.
+                // The planet's own spatial cell, 1:1 (set in Initialize): a 9 x 9 window for a 192 m session, 15 x 15 for the slider's ceiling.
                 ReplicationCellM = TatooineReplication.ReplicationCellM,
 
                 // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.
                 IngressBytesPerSecond = _config.IngressBytesPerSecond,
+
+                // --resume-grace (A13). Passed through rather than left at the engine's default, because this is the one option a client ACTS on: it reaches
+                // the catalog as `limits.resumeGraceMs`, and an SDK reads it to choose between presenting its token and connecting fresh.
+                ResumeGraceMs = (int)Math.Round(_config.ResumeGraceS * 1000d),
             },
         });
 
@@ -117,6 +127,18 @@ public sealed partial class TatooineSim
         // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01). Required rather than defaulted, so a
         // path that forgot it would refuse to start rather than clamp to the wrong world silently.
         TatooineReplication.ConfigureIntents(Dbe, _config.WorldEdgeM, _config.TickRateHz);
+
+        // Where a first login arrives (A5): the capital's centre, on the ground, in planet 0. Taken from the map rather than
+        // defaulted to the origin, which on this planet is open desert a long way from anything a new player could interact with.
+        var capital = Map.Cities.Count > 0 ? Map.Cities[0] : default;
+        var spawnY = TerrainField.Shared(_config.ContentScale).GroundAt(capital.X, capital.Z);
+        // The last two arguments are A6: how often a live avatar's position is written back, which is the bound on what a kill -9
+        // costs. Stated as seconds and turned into ticks here, so the same number means the same thing at 10 Hz and at 50 Hz.
+        TatooineReplication.ConfigureAvatars(
+            Dbe, new Point3F { X = capital.X, Y = spawnY, Z = capital.Z }, 0, _config.TickRateHz, _config.AvatarSaveIntervalS);
+
+        // States the obligation rather than leaving it to the first login to discover. See ThrowIfAvatarsNotConfigured.
+        TatooineReplication.ThrowIfAvatarsNotConfigured();
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
@@ -141,6 +163,13 @@ public sealed partial class TatooineSim
         // declarations against the builder ones this way).
         var catalog = _runtime.SubscriptionsCatalogJson;
         Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
+
+        // Where the token signing key came from, and NEVER the key itself. Printed because the consequence is invisible otherwise: with a per-process key,
+        // every token a browser holds stops working the moment this process restarts, and the operator finds that out from a user rather than from the log.
+        Console.WriteLine(Accounts.AuthToken.KeyIsPersistent
+            ? $"  auth: tokens signed with {Accounts.AuthToken.KeyVariable} — they survive a restart"
+            : $"  auth: tokens signed with a key generated for this process — every token stops working on restart. "
+              + $"Set {Accounts.AuthToken.KeyVariable} (openssl rand -base64 32) for an instance that is kept.");
     }
 
     /// <summary>The simulation's own schedule, plus the two systems a server needs that a benchmark does not.</summary>

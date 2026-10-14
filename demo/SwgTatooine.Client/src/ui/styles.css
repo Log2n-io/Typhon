@@ -1,5 +1,12 @@
 :root {
   --panel-bg: rgba(24, 22, 20, 0.82);
+  /*
+   * The OPAQUE panel, for surfaces with no world behind them. `--panel-bg` is translucent on purpose — a HUD panel should
+   * show the world through it — but the login screen is drawn over the page's sand background with the viewport
+   * unmounted, and a translucent dark over sand composites to a muddy mid-tone that neither the label grey nor the
+   * button text can be read against.
+   */
+  --panel-solid: #1b1917;
   --panel-fg: #eee6d8;
   --muted: #b3a894;
   --accent: #f0b43c;
@@ -223,7 +230,7 @@ button.active {
   margin-top: 2px;
 }
 
- /* The scrolling belongs to the wrapper, not to the table: `display: block` on a `table` wraps its row groups in an
+/* The scrolling belongs to the wrapper, not to the table: `display: block` on a `table` wraps its row groups in an
    anonymous table box that shrink-wraps, so `width: 100%` would stop reaching the columns. The default bar is also a
    white slab against a dark panel, and this is the only scrolling region on it. */
 .realm-scroll {
@@ -241,7 +248,7 @@ button.active {
   table-layout: fixed;
 }
 
- /* Sticky because the headings are single letters, which is exactly when a scrolled-away header hurts. */
+/* Sticky because the headings are single letters, which is exactly when a scrolled-away header hurts. */
 .realm-table th {
   position: sticky;
   top: 0;
@@ -297,7 +304,6 @@ button.active {
 .realm-table .realm-state {
   color: var(--muted);
 }
-
 
 .realm-table button.link {
   background: none;
@@ -456,4 +462,214 @@ button.active {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   opacity: 0.75;
+}
+
+/* ── The login screen (A8) ─────────────────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * A centred card over the page background rather than over the viewport: App does not mount the viewport without a
+ * grant, so there is nothing behind this to see through. Centred with flex on the full height, which is what keeps the
+ * card in the middle of a phone's viewport as well as a desktop's.
+ */
+.login {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 320px;
+  background: var(--panel-solid);
+  color: var(--panel-fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 18px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.login-card h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.login-card label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.login-card input {
+  font: inherit;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--panel-fg);
+}
+
+.login-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.login-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.login-actions button {
+  flex: 1;
+}
+
+/* Loud enough to notice without being the only thing on the card: a refusal is information, not an emergency. */
+.login-error {
+  margin: 10px 0 0;
+  color: #ff9c8a;
+  font-size: 12px;
+}
+
+.login-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* The logged-in identity and the way out, in the toolbar. */
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-name {
+  font-weight: 700;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── The session-ended overlay (A8) ────────────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Over the world, unlike `.login`, because this is shown with the viewport still mounted: the three close codes that keep
+ * the grant leave a world on screen that has stopped receiving frames. The scrim is what says it is no longer live.
+ */
+.kicked-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.kicked {
+  /* `.panel` is absolutely positioned for the HUD, which would take this out of the scrim's centring flow. */
+  position: static;
+  background: var(--panel-solid);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 320px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.kicked-reason {
+  margin: 0;
+  color: var(--panel-fg);
+  line-height: 1.4;
+}
+
+.kicked-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.kicked-actions button {
+  flex: 1;
+}
+
+/*
+ * The planet's loading cover.
+ *
+ * Opaque, like the login card and for the same reason: there is nothing behind it worth seeing. The canvas underneath is
+ * alive but holds an empty scene until the field arrives, and letting that show through would be showing the very
+ * half-built world this cover exists to hide.
+ */
+.terrain-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-solid);
+  z-index: 5;
+}
+
+.terrain-loading-panel {
+  width: min(28rem, 80vw);
+  padding: 1.5rem 1.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--panel-fg);
+}
+
+.terrain-loading-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.terrain-loading-note {
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/*
+ * Indeterminate, and honestly so: the bake reports nothing until it is done, so a bar that claimed a percentage would be
+ * inventing one. It sweeps to say the page is alive and nothing more.
+ */
+.terrain-loading-bar {
+  margin-top: 1rem;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.terrain-loading-fill {
+  width: 35%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: terrain-loading-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes terrain-loading-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
 }

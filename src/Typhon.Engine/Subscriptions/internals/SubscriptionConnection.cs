@@ -498,7 +498,7 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         StopHelloTimer();
 
         var request = new AdmissionRequest(hello.Kind, hello.Token, (uint)hello.Caps, hello.HelloPayload, null, null, _info.Remote, _info.Transport);
-        if (!_host.SessionTable.TryAdmit(_host.Sessions, request, out var session, out var code, out var reason))
+        if (!_host.SessionTable.TryAdmit(_host.Sessions, request, out var session, out var code, out var reason, hello.ResumeToken))
         {
             // TryAdmit checks the declared kind before the application's hook and capacity after it, so an unknown name never reaches application code and a
             // refusal costs no slot (01 § 3).
@@ -567,13 +567,26 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
             catalog = [];
         }
 
+        // The token this session may come back with, or null for a server that issues none — which the wire carries as all-zero and an SDK reads as "do not
+        // bother" (01-model § 3). Allocated here rather than held: it is one 16-byte array per connection, against a catalog that can be kilobytes. Not
+        // allocated at all on a server with no grace, which is the configuration that would have paid for an array it then dropped.
+        byte[] resumeToken = null;
+        if (_host.SessionTable.ResumeEnabled)
+        {
+            resumeToken = new byte[SessionTable.ResumeTokenBytes];
+            if (!_host.SessionTable.TryWriteResumeToken(_session, resumeToken))
+            {
+                resumeToken = null;
+            }
+        }
+
         var welcome = new WelcomeMessage
         {
             Major = ProtocolConstants.Major,
             Minor = minor,
             CapsGranted = _capsGranted,
             SessionId = _session.Value,
-            ResumeToken = null,
+            ResumeToken = resumeToken,
             Tick = _host.CurrentTick,
             TickPeriodUs = _host.TickPeriodUs,
             CatalogHash = hash,

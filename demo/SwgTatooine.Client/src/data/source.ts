@@ -115,9 +115,34 @@ interface MutableDebugView {
   geometry: PushGeometry | null;
 }
 
+/**
+ * The movement classes the server grants, mirroring `SpeedClasses` on the server.
+ *
+ * Mirrored rather than read from the catalog because the catalog carries the FIELD (`speedClass`, a `u8`) and not its
+ * admissible values — so this is the one place the client's idea of them lives, and a value the server does not grant is
+ * refused and counted rather than silently clamped.
+ */
+export const SpeedClass = {
+  stop: 0,
+  walk: 1,
+  run: 2,
+  burst: 3,
+  speeder: 4,
+  speederFast: 5,
+} as const;
+
 export interface DataSource {
   start(): void;
   dispose(): void;
+  /**
+   * Round trip from the `PING` loop in milliseconds, or 0 before the first `PONG`.
+   *
+   * <b>On the source rather than only inside {@link cost}, because a sub-tick intent needs it to mean anything.</b> The
+   * clock's tick grid is anchored on the ARRIVAL of each tick's frame, so it sits one downlink behind the server's own
+   * boundaries; half of this is the usual estimate of that downlink, and without it every phase a client sends is short
+   * by `delay / period`. {@link cost} is a display surface that may be absent, and this is arithmetic.
+   */
+  readonly rttMs: number;
   /** Whether {@link setPaused} does anything a viewer can see. */
   readonly canPause: boolean;
   /**
@@ -193,6 +218,67 @@ export interface DataSource {
    * `SELF` — that is what `Control` is for — so the client re-finds its subject by being told rather than by guessing.
    */
   readonly selfNetId: number;
+  /**
+   * Whether this session may send the movement and targeting intents: a `player` whose catalog declares them (A9).
+   *
+   * <b>False for the god camera, and the engine is what says so.</b> The intents are declared `Roles(SessionRole.Player)`,
+   * so a spectator's are refused on the wire before any system sees them — this flag is how the client avoids sending
+   * what it knows will be refused, not a second opinion about who may play.
+   */
+  readonly canPlay: boolean;
+  /**
+   * An owner-only field of the controlled entity (the `SELF` block, W17), or `NaN` when none has arrived.
+   *
+   * <b>`NaN` is the answer, not an error.</b> These are per-player stats — A14 uses `walkMps` and `runMps` to predict the
+   * avatar's own movement — and a client that guessed a speed instead of declining to predict would drift without bound for
+   * as long as the player walked. Callers must test it.
+   *
+   * @param name The field's catalog name.
+   * @returns The value, or `NaN`.
+   */
+  selfNumber(name: string): number;
+  /**
+   * Walks the avatar towards a point on the ground (`MoveTo`).
+   *
+   * <b>A destination, not a velocity, and the server picks the speed.</b> That is what makes a speed hack impossible by
+   * construction rather than by a check: the only number a client contributes is where it wants to go, which the server
+   * clamps to the world and then approaches one tick of travel at a time.
+   */
+  moveTo(x: number, z: number): void;
+  /**
+   * Walks the avatar in a direction (`MoveDir`).
+   *
+   * @param heading Radians, measured from +X towards +Z — the same frame the server integrates in.
+   * @param speedClass One of {@link SpeedClass}; anything else is refused and counted by the server.
+   * @param changePhase
+   *   How far into the server's tick this intent CHANGED, in 255ths — the share of the tick the server drains it in that
+   *   still belongs to the velocity before it. 0 for a re-send of an unchanged intent, and for a client that cannot
+   *   measure it.
+   *
+   * <b>A CLASS, not a speed.</b> Same reason as {@link moveTo}: the client says "run", the server decides what running is.
+   *
+   * <b>The phase is what makes prediction and authority agree, rather than agree on average.</b> A tick advances a player
+   * by one whole period of whatever intent it held at the boundary, while this client moves on the key event — so the two
+   * integrate the same speed for different DURATIONS, and the stop positions differ by `v x (startPhase - stopPhase)`,
+   * uniformly over a full tick of travel in either direction. With the phase the server splits the boundary tick between
+   * the old velocity and the new one and the durations are equal. It is not a speed and cannot be used as one: the split
+   * is a convex combination of two velocities the server itself granted.
+   */
+  moveDir(heading: number, speedClass: number, changePhase?: number): void;
+  /**
+   * Names the entity the avatar is attacking, or 0 to clear (`SetTarget`).
+   *
+   * An ask, not a change: the server refuses a netId this session was never shown, and one whose entity is dead.
+   */
+  setTarget(netId: number): void;
+  /**
+   * Asks to be served over `radiusM` metres (`SetViewRadius`), or 0 for the profile's own.
+   *
+   * <b>An ask the server REFUSES rather than clamps</b> when it is outside the range `/typhon/demo.json` states, so a
+   * caller that sends an unclamped slider value gets a session that was not widened and an `ACKS` reason. Growing it
+   * sweeps the shell between the two radii and the client keeps everything it already holds — nothing resets.
+   */
+  setViewRadius(radiusM: number): void;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -208,6 +294,14 @@ export interface TyphonSourceOptions {
   /** The clock render time comes from; the source feeds it every frame. */
   readonly clock: Clock;
   readonly events: EventSink;
+  /**
+   * Called when the session ends, with the close code and the server's reason.
+   *
+   * <b>The code is the only thing that tells a retry from a re-login</b>, and A3 added one that needs it: `4102` means the
+   * token was not accepted, so presenting it again loops; `4103` means the account is already playing, so presenting it
+   * again is exactly right once the other client has gone. The SDK has always reported both and this demo discarded them.
+   */
+  readonly onClosed?: (code: number, reason: string) => void;
   /** The application-declared session kind handed to the server's admission hook. Default `god`. */
   readonly kind?: string;
   readonly token?: string;
@@ -242,6 +336,17 @@ export class TyphonSource implements DataSource {
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
   private spectateCommand: MessagePlan | null = null;
+
+  private moveToCommand: MessagePlan | null = null;
+
+  private moveDirCommand: MessagePlan | null = null;
+
+  private setTargetCommand: MessagePlan | null = null;
+
+  private setViewRadiusCommand: MessagePlan | null = null;
+
+  /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
+  private askedViewRadiusM = 0;
   /** The sequence of the `Spectate` still awaiting an answer, or -1. */
   private pendingSpectateSeq = -1;
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
@@ -297,8 +402,16 @@ export class TyphonSource implements DataSource {
         onMessage: (message, recvMs) => {
           this.recorder?.record(message, recvMs);
         },
-        onClose: () => {
+        onClose: (close) => {
           this.onClose();
+
+          // Not reported when this client asked for the close. The SDK's reconnect hands `onClose` up before it checks its own
+          // `running` flag, so `dispose()` — which is what logging out and unmounting the viewport both do — arrived here as an
+          // ordinary close with code 1000. The store then recorded "the server closed the session (1000)" AFTER `logOut` had
+          // cleared it, and the login screen showed a clean logout as a refusal.
+          if (!this.disposed) {
+            this.options.onClosed?.(close.code, close.reason);
+          }
         },
       },
     });
@@ -351,6 +464,11 @@ export class TyphonSource implements DataSource {
    * for a session with no `DEBUG` cap, and it is the number that was previously shown always — so the ground's
    * near-radius ring and the heatmap fade were drawn at the radius the camera **asked for**, which is exactly the
    * quantity #1075 says the server silently shrinks.
+   *
+   * <b>The fallback asks the SPHERE first.</b> A player session has no region, so `sendRegion` sends nothing for it —
+   * but the caller still offers one, and a pending region's radius was therefore the fallback for a session that has a
+   * sphere: the HUD read "1500 m" (the god camera's default) beside a panel that said the session was served 192.
+   * `SetViewRadius` is what a sphere session asked for, and it is the right last resort for one.
    */
   get effectiveRadiusM(): number {
     const g = this.debugGeometrySeen ? this.debugGeometry : null;
@@ -367,7 +485,9 @@ export class TyphonSource implements DataSource {
       }
     }
 
-    return this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0;
+    return this.askedViewRadiusM > 0
+      ? this.askedViewRadiusM
+      : (this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0);
   }
 
   get stats(): SourceStats {
@@ -389,11 +509,16 @@ export class TyphonSource implements DataSource {
     return null;
   }
 
+  /** Whether {@link dispose} has been called, so a close this client asked for is not reported as the server's. */
+  private disposed = false;
+
   start(): void {
     this.client.start();
   }
 
   dispose(): void {
+    // Set BEFORE stop(), because stop() synchronously drives the close callback above.
+    this.disposed = true;
     this.ping?.stop();
     this.client.stop();
 
@@ -467,6 +592,97 @@ export class TyphonSource implements DataSource {
     return this.spectateCommand !== null;
   }
 
+  /** Whether this session may play: the catalog declares the movement intents (A9). */
+  get canPlay(): boolean {
+    return this.moveToCommand !== null && this.moveDirCommand !== null;
+  }
+
+  /** @inheritdoc */
+  moveTo(x: number, z: number): void {
+    if (this.moveToCommand === null) {
+      return;
+    }
+
+    // No sequence kept, unlike ViewRealm and Spectate. Those two are asks whose refusal the client must notice, because
+    // each changes the session's whole view; a dropped step is answered by the next one 16 ms later, and a client that
+    // reacted to one would flicker on every rate limit.
+    this.commands?.enqueue(this.moveToCommand, { x, z });
+    this.sendPending();
+  }
+
+  /** @inheritdoc */
+  moveDir(heading: number, speedClass: number, changePhase = 0): void {
+    if (this.moveDirCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase });
+    this.sendPending();
+  }
+
+  /**
+   * Sends whatever is queued, now.
+   *
+   * @remarks
+   * <b>Called on every enqueue of a movement verb, and not only from `onTick`, which is where the whole batch used to be
+   * sent.</b> Flushing only when a server frame ARRIVES means an intent produced just after one waits most of a tick
+   * period before it is even put on the wire — latency the client adds to itself, on top of the round trip and the
+   * interpolation delay, and paid twice per press because the stop waits the same way. The press is the event; the send
+   * belongs to it.
+   *
+   * Cheap to call repeatedly: `CommandQueue.flush` writes nothing when the queue is empty, and the movement verbs are
+   * already suppressed to a change plus a periodic refresh by `player-intent`. Does nothing before the first frame, when
+   * there is no applied tick to stamp a batch with.
+   */
+  private sendPending(): void {
+    const applier = this.applier;
+    const connection = this.client.connection;
+    if (applier === null || connection === null) {
+      return;
+    }
+
+    // NOTHING may be sent before the first applied frame, and this guard is the whole reason the old code was safe: the
+    // flush used to live in `onTick`, which by definition runs after `WELCOME`. Sending on the enqueue instead reaches a
+    // socket that is open but has not finished its handshake, and the server closes the session with
+    // "message type 0x4 before WELCOME" — which cost a whole debugging round, because the symptom is a session that
+    // silently receives nothing rather than an error at the call site.
+    if (this.ticks === 0) {
+      return;
+    }
+
+    // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
+    this.commands?.flush(
+      applier.tick,
+      (bytes) => {
+        connection.send(bytes);
+      },
+      applier.realmFrame,
+    );
+  }
+
+  /** @inheritdoc */
+  setTarget(netId: number): void {
+    if (this.setTargetCommand === null) {
+      return;
+    }
+
+    this.commands?.enqueue(this.setTargetCommand, { netId });
+    this.sendPending();
+  }
+
+  setViewRadius(radiusM: number): void {
+    // Absent from the catalog on a server that does not declare it, which is a server whose sessions have a fixed
+    // radius: the panel reads the same catalog and offers no slider, so this is the belt to that braces.
+    if (this.setViewRadiusCommand === null) {
+      return;
+    }
+
+    const asked = Math.max(0, Math.round(radiusM));
+    this.commands?.enqueue(this.setViewRadiusCommand, { radiusM: asked });
+    this.askedViewRadiusM = asked;
+    this.sendPending();
+  }
+
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
   get spectatingNetId(): number {
     return this.spectating;
@@ -498,6 +714,11 @@ export class TyphonSource implements DataSource {
   /** The controlled entity's netId, from `SELF`; see {@link DataSource.selfNetId}. */
   get selfNetId(): number {
     return this.applier?.selfState.netId ?? 0;
+  }
+
+  /** An owner-only field of the controlled entity; see {@link DataSource.selfNumber}. */
+  selfNumber(name: string): number {
+    return this.applier?.selfState.number(name) ?? NaN;
   }
 
   /** The realm this session is in, or `null` before its first `REALM` block and after a `REALM(NONE)`. */
@@ -550,6 +771,22 @@ export class TyphonSource implements DataSource {
         this.onDebug(subType, data, offset, length);
       },
     });
+    // ── The server's real tick period, before a single frame is interpolated ────────────────────────────────────────
+    //
+    // The clock is constructed from a COMPILED-IN period, because it exists before any connection. It then learns the real
+    // one only from a `PERIOD` field, which the server sends when the period CHANGES — so a server that simply runs at a
+    // different rate than this client assumed never corrects it, and the clock maps every tick to the wrong instant for
+    // the whole session. At `--hz 25` against an assumed 10 Hz that is a timeline running 2.5x too slow: render time
+    // falls behind, snaps forward, and entities move in jumps rather than lines. It is not a dropped-message problem,
+    // which is what it looks like.
+    //
+    // The catalog carries it, and the catalog is in hand here, before the first frame. Seeded through the same entry
+    // point a later change would use: with no pieces recorded yet it simply becomes the base period.
+    const periodMs = plan.catalog.tick.periodUs / 1000;
+    if (periodMs > 0) {
+      this.options.clock.onPeriodChange(0, periodMs);
+    }
+
     this.attack = plan.eventByName('Attack');
     this.chat = plan.eventByName('Chat');
 
@@ -558,6 +795,13 @@ export class TyphonSource implements DataSource {
     this.pauseCommand = plan.commandByName('SetPaused');
     this.viewRealmCommand = plan.commandByName('ViewRealm');
     this.spectateCommand = plan.commandByName('Spectate');
+
+    // A9's three. Absent from a god session's catalog view the same way Spectate is absent from a player's: the engine
+    // compiles what a role may send, so `canPlay` below is the engine's answer rather than the client's guess.
+    this.moveToCommand = plan.commandByName('MoveTo');
+    this.moveDirCommand = plan.commandByName('MoveDir');
+    this.setTargetCommand = plan.commandByName('SetTarget');
+    this.setViewRadiusCommand = plan.commandByName('SetViewRadius');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -675,17 +919,7 @@ export class TyphonSource implements DataSource {
 
     // One batch a frame, sharing its client tick — the newest applied server tick (§ 10).
     region?.poll();
-    const connection = this.client.connection;
-    if (connection !== null) {
-      // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
-      this.commands?.flush(
-        applier.tick,
-        (bytes) => {
-          connection.send(bytes);
-        },
-        applier.realmFrame,
-      );
-    }
+    this.sendPending();
   }
 
   private onEvent(event: EventRecord): void {

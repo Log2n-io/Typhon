@@ -48,7 +48,7 @@ internal sealed class BulkLoadApiSurfaceTests
     [SetUp]
     public void Setup()
     {
-        var root = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(BulkLoadApiSurfaceTests));
+        var root = Path.Combine(TestStorage.Root, nameof(BulkLoadApiSurfaceTests));
         _dbDir = Path.Combine(root, "db");
         _walDir = Path.Combine(root, "wal");
         Directory.CreateDirectory(_dbDir);

@@ -1272,6 +1272,62 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <summary>This tree's engine-scoped <c>EW-01</c> guard, or <c>null</c> for a segment with no epoch manager.</summary>
     private readonly ExclusiveWindow _fenceWindow;
 
+    /// <summary>
+    /// Non-zero while the tick fence is rewriting THIS tree's values through the unlatched bulk path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what makes the EW-01 detector precise, and the imprecision it replaces was rejecting correct code.</b> The window is per ENGINE: it says "a
+    /// fence is running somewhere", and <c>ExclusiveWindow.NoteMutation</c> is handed a call-site string and nothing else, so it could not tell whether
+    /// the fence was touching the caller's tree. Every latched mutator was armed, so an off-tick commit — a <c>StorageMode.Versioned</c>, non-spatial
+    /// entity's perfectly ordinary indexed write — threw, although it runs the full OLC protocol and the fence was nowhere near its tree.
+    /// </para>
+    /// <para>
+    /// <b>The real hazard is narrow.</b> The only path on which the fence drops the protocol is the bulk value rewrite (<c>UpdateValues</c> → <c>RunBatch</c> →
+    /// <c>ApplyBatch</c>), which repoints migrants' index entries after cluster relocation and is therefore reached only for a SPATIAL archetype. It navigates
+    /// by <c>FindChildAndBound</c> with no <c>ValidateVersion</c>, no write latch and no B-link right-walk, relying on slice boundaries snapped to leaf edges.
+    /// A concurrent latched insert that splits one of those leaves relocates keys out from under the slice — that, and only that, is what the detector exists to
+    /// catch on a B+Tree.
+    /// </para>
+    /// <para>
+    /// A depth rather than a flag because the fence partitions one tree's rewrite across workers by key range, so several of them are inside it at once.
+    /// </para>
+    /// </remarks>
+    private int _unlatchedRewriteDepth;
+
+    /// <summary>
+    /// Reports a mutation that took the ordinary latched path, which is a violation only while the fence is rewriting this tree unlatched.
+    /// </summary>
+    /// <param name="site">Call-site name, a literal at every call.</param>
+    /// <remarks>
+    /// <b>ONE relaxed field read and a not-taken branch when the window is closed, which is what the unconditional call cost before.</b>
+    /// The depth goes in by <c>ref</c> rather than as a computed <c>bool</c> precisely so that it is not read on that path: an argument is
+    /// evaluated before the call, so passing the answer made every latched mutation load this tree's depth only for
+    /// <c>ExclusiveWindow.NoteMutation(string, ref int)</c> to return without looking at it.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteLatchedMutation(string site)
+        => _fenceWindow?.NoteMutation(site, ref _unlatchedRewriteDepth);
+
+    /// <summary>Marks this tree as under the fence's unlatched bulk rewrite for the life of the returned scope.</summary>
+    /// <returns>A scope that clears the mark.</returns>
+    internal UnlatchedRewriteScope EnterUnlatchedRewrite() => new UnlatchedRewriteScope(this);
+
+    /// <summary>Clears one <see cref="EnterUnlatchedRewrite"/>.</summary>
+    internal readonly struct UnlatchedRewriteScope : IDisposable
+    {
+        private readonly BTree<TKey, TStore> _tree;
+
+        internal UnlatchedRewriteScope(BTree<TKey, TStore> tree)
+        {
+            _tree = tree;
+            Interlocked.Increment(ref tree._unlatchedRewriteDepth);
+        }
+
+        /// <inheritdoc />
+        public void Dispose() => Interlocked.Decrement(ref _tree._unlatchedRewriteDepth);
+    }
+
     public override ChunkBasedSegment<TStore> Segment => _segment;
 
     protected BTree(ChunkBasedSegment<TStore> segment, bool load, BTreeStableKey key = default, ChangeSet changeSet = null)
@@ -1491,7 +1547,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
     {
-        _fenceWindow?.NoteMutation("BTree.Add");
+        NoteLatchedMutation("BTree.Add");
         // The outer `using var` was adding a second EH region on a per-key hot path; we keep the inner try/finally for accessor return and rely on the body
         // being throw-free in practice.
         var scope = TyphonEvent.BeginBTreeInsert();
@@ -1523,7 +1579,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool Remove(TKey key, out int value, ref ChunkAccessor<TStore> accessor)
     {
-        _fenceWindow?.NoteMutation("BTree.Remove");
+        NoteLatchedMutation("BTree.Remove");
         var scope = TyphonEvent.BeginBTreeDelete();
 
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
@@ -2298,7 +2354,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     private bool RemoveValueUnguarded(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
-        _fenceWindow?.NoteMutation("BTree.RemoveValue");
+        NoteLatchedMutation("BTree.RemoveValue");
         var scope = TyphonEvent.BeginBTreeDelete();
 
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)

@@ -128,6 +128,10 @@ public sealed partial class TyphonRuntime : IDisposable
     // whether any realm narrowing applied (dormant filter or stride — descendants must then be narrowed the same way), and the run key the stride used.
     private readonly bool[] _systemStrided;
     private readonly bool[] _systemRealmNarrowed;
+    // DSEL-03, per system, set by each run's selection: whether the cellAmortize stride actually applied. Declaring cellAmortize is not enough — the
+    // bucketing lives on the tier-scoped path only, so a system whose EffectiveTier collapsed to All (no grid, or no tier index) covers everything every
+    // run, and AmortizedDeltaTime must not then claim an N-tick step it did not take.
+    private readonly bool[] _systemAmortizeApplied;
     private readonly ulong[] _systemStrideRun;
     // Issue #231: per-system cluster-range entity view, allocated lazily the first time a tier-filtered system runs Path 1 (full non-versioned). Reused across
     // ticks. [sysIdx][workerIdx]. Null slot = not allocated yet.
@@ -368,6 +372,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _systemRunCount = new long[scheduler.AllSystemCount];
         _systemStrided = new bool[scheduler.AllSystemCount];
+        _systemAmortizeApplied = new bool[scheduler.AllSystemCount];
         _systemRealmNarrowed = new bool[scheduler.AllSystemCount];
         _systemStrideRun = new ulong[scheduler.AllSystemCount];
         _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
@@ -602,7 +607,12 @@ public sealed partial class TyphonRuntime : IDisposable
         var systemStats = new SystemStat[systemSums.Length];
         for (var sys = 0; sys < systemStats.Length; sys++)
         {
-            systemStats[sys] = new SystemStat(Scheduler.Systems[sys]?.Name ?? string.Empty, ticks > 0 ? systemSums[sys] / ticks : 0.0);
+            var definition = Scheduler.Systems[sys];
+            systemStats[sys] = new SystemStat(
+                definition?.Name ?? string.Empty,
+                ticks > 0 ? systemSums[sys] / ticks : 0.0,
+                definition?.TickDivisor ?? 1,
+                definition?.TickOffset ?? 0);
         }
 
         var subscriptions = _subscriptionsRuntime;
@@ -1978,6 +1988,7 @@ public sealed partial class TyphonRuntime : IDisposable
         count = 0;
         _systemStrided[sysIdx] = false;
         _systemRealmNarrowed[sysIdx] = false;
+        _systemAmortizeApplied[sysIdx] = false;
         var cs = _systemClusterStates[sysIdx];
         if (cs == null)
         {
@@ -2010,6 +2021,8 @@ public sealed partial class TyphonRuntime : IDisposable
                     buf[count++] = tierIds[i];
                 }
                 ids = buf;
+                // DSEL-03: the step this run earns. Set HERE and not from sys.CellAmortize, because this is the only branch that strides.
+                _systemAmortizeApplied[sysIdx] = true;
             }
             else
             {
@@ -2658,7 +2671,43 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Chunked-parallel <see cref="CallbackSystem"/> dispatch. Builds a minimal <see cref="TickContext"/> (no entity Accessor, no per-chunk Transaction, 
+    /// The integration step for the system at <paramref name="sysIdx"/>: <see cref="TickContext.DeltaTime"/> scaled by every reason this system runs at a
+    /// reduced rate (DSEL-03). It is the interval since the system last processed the work it is about to process, which is what an integration must step by.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The PRODUCT of the two strides, not the larger of them, because they stride for different reasons and compose: the rate divisors skip whole runs,
+    /// <see cref="SystemDefinition.CellAmortize"/> skips clusters within a run. A cluster in a <c>TickDivisor 2</c> + <c>cellAmortize 3</c> system is
+    /// therefore visited once every six ticks, and six periods is the step. DSEL-02 is what makes the product exact rather than an upper bound: the bucket
+    /// rotation is keyed on the system's own run count, so a divisor sharing a factor with the amortization cannot alias it into revisiting some buckets
+    /// more often than others.
+    /// </para>
+    /// <para>
+    /// <b>The amortization factor applies only when the selection actually strided.</b> <see cref="SelectDispatchClusters"/> buckets the cluster list only on
+    /// the tier-scoped path, so a system whose <see cref="EffectiveTier"/> collapsed to <see cref="SimTier.All"/> — no spatial grid, or no tier index
+    /// built — visits every cluster every run however it was declared. Multiplying regardless would then over-step by the whole amortization factor, which
+    /// is the shape of bug this method exists to remove rather than relocate. Read from the run's own selection, the way the realm stride already is.
+    /// </para>
+    /// <para>
+    /// <b><see cref="TickContext.DeltaTime"/> is deliberately NOT scaled.</b> A system asking "how long since the last tick" — a timeout, a rate or
+    /// telemetry — must still be able to, and that question has one answer for every system whatever its rate.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private float AmortizedDeltaTimeFor(int sysIdx)
+    {
+        var sys = Scheduler.Systems[sysIdx];
+        var stride = Scheduler.EffectiveRateDivisor(sysIdx);
+        if (_systemAmortizeApplied[sysIdx])
+        {
+            stride *= sys.CellAmortize;
+        }
+
+        return stride == 1 ? _currentDeltaTime : _currentDeltaTime * stride;
+    }
+
+    /// <summary>
+    /// Chunked-parallel <see cref="CallbackSystem"/> dispatch. Builds a minimal <see cref="TickContext"/> (no entity Accessor, no per-chunk Transaction,
     /// empty Entities) carrying tick metadata + chunk coordinates, then invokes the system callback. Used by systems registered with
     /// <see cref="SystemBuilder.ChunkedParallel"/>.
     /// </summary>
@@ -2669,7 +2718,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             TickNumber = Scheduler.CurrentTickNumber,
             DeltaTime = _currentDeltaTime,
-            AmortizedDeltaTime = _currentDeltaTime,
+            AmortizedDeltaTime = AmortizedDeltaTimeFor(sysIdx),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks,
@@ -2780,7 +2829,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Get this worker's EntityAccessor — direct array lookup, zero dictionary overhead
         var workerAccessor = pta.GetWorkerAccessor(workerId);
 
-        float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
+        float amortizedDt = AmortizedDeltaTimeFor(sysIdx);
 
         var ctx = new TickContext
         {
@@ -2928,7 +2977,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             var slice = new PooledEntitySlice(fullList.BackingArray, plan.EntityStart, plan.EntityCount);
             var sys = Scheduler.Systems[sysIdx];
-            float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
+            float amortizedDt = AmortizedDeltaTimeFor(sysIdx);
 
             // Populate ClusterIds + StartClusterIndex/EndClusterIndex for tier-filtered Versioned systems so game code that iterates via
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) sees the correct tier scope. The cluster partition is computed independently of
@@ -3064,6 +3113,9 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 TickNumber = scheduler.CurrentTickNumber,
                 DeltaTime = _currentDeltaTime,
+                // DSEL-03 tells every caller to integrate by the amortized step, and this hook belongs to no system, so no rate divisor applies to it.
+                // Set rather than left at its 0 default: a hook that follows that advice would otherwise integrate by nothing at all.
+                AmortizedDeltaTime = _currentDeltaTime,
                 Transaction = tx,
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
@@ -3844,7 +3896,7 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         var sys = Scheduler.Systems[sysIdx];
-        float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
+        float amortizedDt = AmortizedDeltaTimeFor(sysIdx);
         return new TickContext
         {
             TickNumber = Scheduler.CurrentTickNumber,
