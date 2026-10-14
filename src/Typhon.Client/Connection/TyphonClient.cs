@@ -28,6 +28,9 @@ namespace Typhon.Client;
 /// </remarks>
 public sealed class TyphonClient : IAsyncDisposable
 {
+    /// <summary>How long a refusal's <c>BYE</c> may take: the same bound the WebSocket transport gives its close handshake.</summary>
+    private static readonly TimeSpan ByeTimeout = TimeSpan.FromSeconds(2);
+
     private readonly ClientOptions _options;
     private readonly Func<IClientTransport> _transportFactory;
     private readonly ReconnectPolicy _policy;
@@ -79,10 +82,16 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <summary>Raised when a session ends, with the close code and whether the client will try again.</summary>
     public event Action<ushort, bool> Disconnected;
 
-    /// <summary>Raised when the server sends a <c>KICK</c>, before the transport closes.</summary>
+    /// <summary>
+    /// Raised when the server sends a <c>KICK</c>, before the transport closes. A handler that throws refuses the stream, as it would for any message.
+    /// </summary>
     public event Action<KickMessage> Kicked;
 
-    /// <summary>Raised for a message the client could not apply. The session continues; the frame is lost.</summary>
+    /// <summary>
+    /// Raised for a failure the client reports rather than throws: a message it could not apply — a malformed one, or one the event handler threw on —
+    /// after which it refuses the stream and the session ends (<see cref="Disconnected"/> follows, with 1002, 1007 or 1009); or a receive or reconnect
+    /// attempt that failed.
+    /// </summary>
     public event Action<Exception> Fault;
 
     /// <summary>The decoded world, or <see langword="null"/> until the first <c>WELCOME</c> has been applied.</summary>
@@ -150,7 +159,7 @@ public sealed class TyphonClient : IAsyncDisposable
 
         foreach (var message in recording.Messages)
         {
-            Dispatch(message);
+            Dispatch(message, live: false);
         }
 
         return Store;
@@ -374,6 +383,7 @@ public sealed class TyphonClient : IAsyncDisposable
             }
 
             byte[] message = null;
+            ushort refusal = 0;
             try
             {
                 message = await transport.ReceiveAsync(ct).ConfigureAwait(false);
@@ -382,9 +392,26 @@ public sealed class TyphonClient : IAsyncDisposable
             {
                 return;
             }
+            catch (WireFormatException exception)
+            {
+                // A message above the cap, refused by the transport before its body was read: the stream is refused like any other message this client
+                // cannot take, BYE 4004 included (03 § 3).
+                Fault?.Invoke(exception);
+                refusal = RefusalCode(exception);
+            }
             catch (Exception exception)
             {
                 Fault?.Invoke(exception);
+            }
+
+            if (refusal != 0)
+            {
+                if (!await RefuseAsync(transport, refusal, ct).ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                continue;
             }
 
             if (message == null)
@@ -406,22 +433,91 @@ public sealed class TyphonClient : IAsyncDisposable
 
             try
             {
-                Dispatch(message);
+                Dispatch(message, live: true);
+                continue;
             }
             catch (Exception exception)
             {
-                // One frame the decoder could not apply does not end the session: the next frame is absolute and will describe the world again. A decode
-                // fault that IS fatal — a length mismatch, an unknown archetype — closes the transport from inside the decoder instead.
+                // A message that could not be applied ends the session (03 § 3, FrameApplier.Apply). The store may hold part of a frame — its leaves, among
+                // others, apply last — and no later frame repairs it: state records carry only the groups that changed and a leave is sent once, so carrying
+                // on left entities in the store that the server had removed. A throw from the event handler is refused like a malformed payload, as the
+                // TypeScript and native SDKs do: the same handler would throw again on the same world, so a reconnect would only repeat it.
                 Fault?.Invoke(exception);
+                refusal = RefusalCode(exception);
+            }
+
+            if (!await RefuseAsync(transport, refusal, ct).ConfigureAwait(false))
+            {
+                return;
             }
         }
     }
 
-    private void Dispatch(byte[] message)
+    /// <summary>
+    /// The code a refusal closes with: a wire error's own when it is one a client refuses a stream with, else 1007. A <see cref="WireFormatException"/> the
+    /// application threw from a handler could carry anything, and a retryable code there would reconnect onto the same failure.
+    /// </summary>
+    private static ushort RefusalCode(Exception exception) =>
+        exception is WireFormatException { CloseCode: CloseCodes.ProtocolError or CloseCodes.MalformedPayload or CloseCodes.MessageTooBig } wire
+            ? wire.CloseCode
+            : CloseCodes.MalformedPayload;
+
+    /// <summary>Refuses the stream, then lets the reconnect policy decide what follows.</summary>
+    /// <param name="transport">The session's transport.</param>
+    /// <param name="code">1002, 1007 or 1009.</param>
+    /// <param name="ct">Stops the client.</param>
+    /// <returns>Whether the receive loop goes on.</returns>
+    private async Task<bool> RefuseAsync(IClientTransport transport, ushort code, CancellationToken ct)
+    {
+        await RefuseStreamAsync(transport, code).ConfigureAwait(false);
+        return await HandleCloseAsync(code, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Closes a stream this client cannot go on applying, telling the server why in the only form both transports carry.</summary>
+    /// <param name="transport">The session's transport.</param>
+    /// <param name="code">The real code: 1002, 1007 or 1009.</param>
+    /// <returns>The close.</returns>
+    /// <remarks>
+    /// A <c>BYE</c> carries only 1000 or 4000-4999, so the refusal travels as 4004 ("the client refused the stream") and the transport closes with the real
+    /// code where it has a place for one — a WebSocket close frame; TCP's FIN carries nothing (03 § 3). Neither step may throw or hang: a refusal that
+    /// failed must still end in <see cref="Disconnected"/>, and a server that has stopped reading would otherwise hold the BYE — and a dispose awaiting
+    /// this loop — forever.
+    /// </remarks>
+    private static async Task RefuseStreamAsync(IClientTransport transport, ushort code)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(ByeTimeout);
+            await transport.SendAsync(Encode(new ByeMessage(CloseCodes.ClientRefusedTheStream).Write), timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The link may already be going; the close below is the refusal either way.
+        }
+
+        try
+        {
+            await transport.CloseAsync(code, "client refused the stream").ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A transport that cannot close is dropped by HandleCloseAsync all the same.
+        }
+    }
+
+    /// <summary>Applies one message the server sent.</summary>
+    /// <param name="message">The message, type byte included.</param>
+    /// <param name="live">
+    /// Whether it arrived on an open session. A live <c>WELCOME</c> is out of state, since the handshake consumed the only one; a recording holds one per
+    /// session it spans, each opening the next.
+    /// </param>
+    /// <exception cref="WireFormatException">The message is unknown or out of state (1002), or malformed.</exception>
+    private void Dispatch(byte[] message, bool live)
     {
         if (message.Length == 0)
         {
-            return;
+            // No type byte, so no message: a framing error, as the native and TypeScript clients refuse it.
+            throw new WireFormatException(CloseCodes.ProtocolError, "an empty message");
         }
 
         switch (message[0])
@@ -429,6 +525,9 @@ public sealed class TyphonClient : IAsyncDisposable
             case MessageTypes.Tick:
                 _applier?.Apply(message);
                 break;
+            case MessageTypes.Welcome when live:
+                // Applying it would recompile the catalog and replace the store under the application, mid-session.
+                throw new WireFormatException(CloseCodes.ProtocolError, "a WELCOME on a session that is already open");
             case MessageTypes.Welcome:
                 ApplyWelcome(WelcomeMessage.Parse(message));
                 break;
@@ -441,11 +540,13 @@ public sealed class TyphonClient : IAsyncDisposable
                 Kicked?.Invoke(kick);
                 break;
             case MessageTypes.Pong:
+                // Parsed though unused, so a malformed one is refused as the native and TypeScript clients refuse it.
+                PongMessage.Parse(message);
                 break;
             default:
-                // An unknown message type is skipped, not fatal: 03 § 10's versioning rule is that a minor revision may add message types, and a client that
-                // closed on one could never talk to a newer server.
-                break;
+                // 1002, as 03 § 3 has it. A newer server cannot send this client a type it does not know: the lower minor wins the handshake and the server
+                // emits nothing the session did not ask for, so what extends the protocol is a TICK block, which IS skipped by its length (03 § 10).
+                throw new WireFormatException(CloseCodes.ProtocolError, $"message type 0x{message[0]:X2} is unknown or out of state");
         }
     }
 

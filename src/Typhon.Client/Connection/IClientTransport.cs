@@ -33,6 +33,9 @@ public interface IClientTransport : IAsyncDisposable
     /// </summary>
     /// <param name="ct">Cancels the receive.</param>
     /// <returns>The message, or <see langword="null"/> when the peer closed the stream.</returns>
+    /// <exception cref="Typhon.Protocol.WireFormatException">
+    /// The message is above the cap (1009). The stream is left open: refusing it — a <c>BYE 4004</c>, then the close — is the caller's.
+    /// </exception>
     /// <remarks>
     /// The returned array belongs to the caller: a transport that pooled it would hand the same buffer to the decoder and to a recorder, and the recorder
     /// keeps what it is given.

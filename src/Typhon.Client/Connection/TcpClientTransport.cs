@@ -32,6 +32,7 @@ public sealed class TcpClientTransport : IClientTransport
     private readonly int _maxMessageBytes;
     private readonly byte[] _header = new byte[FrameHeaderBytes];
     private readonly byte[] _sendHeader = new byte[FrameHeaderBytes];
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     private Socket _socket;
     private NetworkStream _stream;
 
@@ -84,9 +85,19 @@ public sealed class TcpClientTransport : IClientTransport
             return;
         }
 
-        BinaryPrimitives.WriteUInt32LittleEndian(_sendHeader, (uint)message.Length);
-        await stream.WriteAsync(_sendHeader.AsMemory(0, FrameHeaderBytes), ct).ConfigureAwait(false);
-        await stream.WriteAsync(message, ct).ConfigureAwait(false);
+        // One sender at a time: the ping loop, commands and a refusal's BYE all send, and two interleaved prefix-then-body pairs — over one shared header
+        // buffer — are a corrupt stream the server closes 1002.
+        await _sendLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(_sendHeader, (uint)message.Length);
+            await stream.WriteAsync(_sendHeader.AsMemory(0, FrameHeaderBytes), ct).ConfigureAwait(false);
+            await stream.WriteAsync(message, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -109,8 +120,8 @@ public sealed class TcpClientTransport : IClientTransport
             var length = BinaryPrimitives.ReadUInt32LittleEndian(_header);
             if (length > (uint)_maxMessageBytes)
             {
+                // Left open: the client refuses the stream itself, and a BYE can still go out ahead of the FIN only while it is (03 § 3).
                 CloseCode = CloseCodes.MessageTooBig;
-                await CloseAsync(CloseCodes.MessageTooBig, "length prefix above the cap").ConfigureAwait(false);
                 throw new WireFormatException(CloseCodes.MessageTooBig, $"the server announced a {length}-byte message, above the {_maxMessageBytes}-byte cap");
             }
 
