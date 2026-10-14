@@ -32,6 +32,8 @@ and send commands in the server's encoding — without being regenerated every t
 
 - `TyphonClient` over `ws://`, `wss://` or `tcp://`: connect, reconnect policy, `SendCommandAsync(name, values)`, a `WorldStore` with
   per-archetype columns and `SelfState`, a `Recorder`. Built for bots, tools, load tests and integration tests.
+- `FrameApplied` — raised on the receive thread after each `TICK` is applied whole (events and leaves included) and before the next: the window
+  to copy the frame's change lists and columns out to a game or render thread, since the next frame clears and rewrites them.
 
 ## 💻 Usage
 
