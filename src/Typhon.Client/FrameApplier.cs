@@ -7,6 +7,7 @@ namespace Typhon.Client;
 /// Receives a frame's events as they are decoded: the type, then its fields through the <see cref="IFieldSink"/> members. Called while the frame is being
 /// applied, before its leaves, so an event can still resolve an entity that leaves in the same frame.
 /// </summary>
+/// <remarks>The store is not yet the frame's final state here; <see cref="TyphonClient.FrameApplied"/> is raised once it is.</remarks>
 public interface IEventHandler : IFieldSink
 {
     /// <summary>An event begins.</summary>

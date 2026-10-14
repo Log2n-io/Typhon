@@ -50,6 +50,14 @@ public sealed class TyphonClient : IAsyncDisposable
     private Task _receiveLoop;
     private Task _pingLoop;
 
+    /// <summary>The managed id of the thread the receive loop is running a handler on, or zero when it is not running one.</summary>
+    /// <remarks>
+    /// Lets <see cref="DisposeAsync"/> tell a call from inside a handler the loop raised — <see cref="FrameApplied"/>, <see cref="Fault"/>,
+    /// <see cref="Disconnected"/>, an event — from one made anywhere else: the first must not wait for the loop, because the loop is waiting for it. Only
+    /// the loop's own thread can ever match it.
+    /// </remarks>
+    private int _dispatchThread;
+
     /// <summary>Builds a client for the options' endpoint.</summary>
     /// <param name="options">Where to connect and how to behave.</param>
     public TyphonClient(ClientOptions options)
@@ -82,8 +90,38 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <summary>Raised when the server sends a <c>KICK</c>, before the transport closes.</summary>
     public event Action<KickMessage> Kicked;
 
-    /// <summary>Raised for a message the client could not apply. The session continues; the frame is lost.</summary>
+    /// <summary>
+    /// Raised for a message the client could not apply — the session continues and the frame is lost — or for an exception a <see cref="FrameApplied"/>
+    /// handler threw, whose frame did apply whole.
+    /// </summary>
     public event Action<Exception> Fault;
+
+    /// <summary>
+    /// Raised after each <c>TICK</c> has been applied whole — its records, its events, then its leaves — and before the next one begins: the one point at
+    /// which <see cref="Store"/> holds a complete frame, its per-frame change lists included.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Synchronous, on the thread that applies frames</b> — the receive loop, or the caller of <see cref="Replay"/> — and the next frame waits for it.
+    /// This is the window to copy out what another thread needs: <see cref="ArchetypeStore.Entered"/>, <see cref="ArchetypeStore.Updated"/> and
+    /// <see cref="ArchetypeStore.Left"/> are cleared by the next frame, and every column under them is rewritten in place. No reference into the store
+    /// may outlive the handler.
+    /// </para>
+    /// <para>
+    /// <b>Copy, do not compute.</b> While the handler runs nothing is received and the <c>PING</c>s carry an older tick, which the server's lag skip reads
+    /// as a client falling behind. Meshing, physics rebuilds and the like belong on the thread the copy is handed to.
+    /// </para>
+    /// <para>
+    /// The argument is the store the frame was applied to: a <c>WELCOME</c> that carries a new catalog replaces <see cref="Store"/>, so a held reference
+    /// can go stale. A frame whose apply throws raises <see cref="Fault"/> instead, never this.
+    /// </para>
+    /// <para>
+    /// <b>A handler may end the session</b> with <see cref="CloseAsync"/> or <see cref="DisposeAsync"/>, blocking on either: no later frame is applied. An
+    /// exception it throws is reported through <see cref="Fault"/> on the receive loop, and the session continues; under <see cref="Replay"/> it
+    /// propagates to the caller.
+    /// </para>
+    /// </remarks>
+    public event Action<WorldStore> FrameApplied;
 
     /// <summary>The decoded world, or <see langword="null"/> until the first <c>WELCOME</c> has been applied.</summary>
     public WorldStore Store { get; private set; }
@@ -125,7 +163,7 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <returns>The <c>WELCOME</c> the server answered with.</returns>
     public async Task<WelcomeMessage> ConnectAsync(CancellationToken ct = default)
     {
-        var welcome = await HandshakeAsync(ct).ConfigureAwait(false);
+        var welcome = await HandshakeAsync(ct, onReceiveLoop: false).ConfigureAwait(false);
         _receiveLoop = Task.Run(() => ReceiveLoopAsync(_stopping.Token), CancellationToken.None);
 
         // No loop when the host drives the cadence: see ClientOptions.PingHz. A thousand bots in one process would otherwise be a thousand timers.
@@ -236,8 +274,11 @@ public sealed class TyphonClient : IAsyncDisposable
         await _stopping.CancelAsync().ConfigureAwait(false);
 
         // Awaited rather than abandoned: the loops touch the transport, and disposing it under them turns an orderly shutdown into an ObjectDisposedException
-        // on a background task nobody is watching.
-        foreach (var loop in new[] { _receiveLoop, _pingLoop })
+        // on a background task nobody is watching. Except from a handler the receive loop is running: that loop cannot finish until this returns, and a
+        // handler blocking on it would wait forever. Skipping it is safe — the loop's next step, once the handler returns, is to see the cancellation and
+        // leave without touching the transport.
+        var insideReceiveLoop = _dispatchThread == Environment.CurrentManagedThreadId;
+        foreach (var loop in new[] { insideReceiveLoop ? null : _receiveLoop, _pingLoop })
         {
             if (loop != null)
             {
@@ -277,7 +318,7 @@ public sealed class TyphonClient : IAsyncDisposable
         throw new ArgumentException($"'{scheme}' is not a Typhon endpoint scheme; use ws, wss or tcp", nameof(options));
     }
 
-    private async Task<WelcomeMessage> HandshakeAsync(CancellationToken ct)
+    private async Task<WelcomeMessage> HandshakeAsync(CancellationToken ct, bool onReceiveLoop)
     {
         var transport = _transportFactory();
         await transport.ConnectAsync(ct).ConfigureAwait(false);
@@ -323,7 +364,15 @@ public sealed class TyphonClient : IAsyncDisposable
         // A new connection has said nothing yet, so the previous one's close code must not decide this one's.
         _kickCode = 0;
         Connects++;
-        Connected?.Invoke(welcome);
+        if (onReceiveLoop)
+        {
+            RaiseOnLoop(Connected, welcome);
+        }
+        else
+        {
+            Connected?.Invoke(welcome);
+        }
+
         return welcome;
     }
 
@@ -384,7 +433,7 @@ public sealed class TyphonClient : IAsyncDisposable
             }
             catch (Exception exception)
             {
-                Fault?.Invoke(exception);
+                RaiseOnLoop(Fault, exception);
             }
 
             if (message == null)
@@ -406,6 +455,7 @@ public sealed class TyphonClient : IAsyncDisposable
 
             try
             {
+                _dispatchThread = Environment.CurrentManagedThreadId;
                 Dispatch(message);
             }
             catch (Exception exception)
@@ -413,6 +463,10 @@ public sealed class TyphonClient : IAsyncDisposable
                 // One frame the decoder could not apply does not end the session: the next frame is absolute and will describe the world again. A decode
                 // fault that IS fatal — a length mismatch, an unknown archetype — closes the transport from inside the decoder instead.
                 Fault?.Invoke(exception);
+            }
+            finally
+            {
+                _dispatchThread = 0;
             }
         }
     }
@@ -427,7 +481,12 @@ public sealed class TyphonClient : IAsyncDisposable
         switch (message[0])
         {
             case MessageTypes.Tick:
-                _applier?.Apply(message);
+                if (_applier != null)
+                {
+                    _applier.Apply(message);
+                    FrameApplied?.Invoke(Store);
+                }
+
                 break;
             case MessageTypes.Welcome:
                 ApplyWelcome(WelcomeMessage.Parse(message));
@@ -464,7 +523,7 @@ public sealed class TyphonClient : IAsyncDisposable
     private async Task<bool> HandleCloseAsync(ushort code, CancellationToken ct)
     {
         var decision = _policy.Decide(code);
-        Disconnected?.Invoke(code, decision == ReconnectDecision.Retry);
+        RaiseOnLoop(Disconnected, code, decision == ReconnectDecision.Retry);
 
         if (decision != ReconnectDecision.Retry)
         {
@@ -480,7 +539,7 @@ public sealed class TyphonClient : IAsyncDisposable
         try
         {
             await Task.Delay(_policy.NextDelay(), ct).ConfigureAwait(false);
-            await HandshakeAsync(ct).ConfigureAwait(false);
+            await HandshakeAsync(ct, onReceiveLoop: true).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException)
@@ -489,10 +548,49 @@ public sealed class TyphonClient : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            Fault?.Invoke(exception);
+            RaiseOnLoop(Fault, exception);
 
             // The attempt failed rather than the session ending; loop round and let the policy decide again with a longer backoff.
             return !ct.IsCancellationRequested;
+        }
+    }
+
+    // A handler raised from the receive loop runs marked as such, so a DisposeAsync it makes does not wait for the loop that is running it.
+    private void RaiseOnLoop<T>(Action<T> handler, T arg)
+    {
+        if (handler == null)
+        {
+            return;
+        }
+
+        var outer = _dispatchThread;
+        _dispatchThread = Environment.CurrentManagedThreadId;
+        try
+        {
+            handler(arg);
+        }
+        finally
+        {
+            _dispatchThread = outer;
+        }
+    }
+
+    private void RaiseOnLoop<T1, T2>(Action<T1, T2> handler, T1 arg1, T2 arg2)
+    {
+        if (handler == null)
+        {
+            return;
+        }
+
+        var outer = _dispatchThread;
+        _dispatchThread = Environment.CurrentManagedThreadId;
+        try
+        {
+            handler(arg1, arg2);
+        }
+        finally
+        {
+            _dispatchThread = outer;
         }
     }
 
