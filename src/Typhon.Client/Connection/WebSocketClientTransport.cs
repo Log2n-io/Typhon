@@ -23,6 +23,7 @@ public sealed class WebSocketClientTransport : IClientTransport
 {
     private readonly Uri _endpoint;
     private readonly int _maxMessageBytes;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     private ClientWebSocket _socket;
 
     /// <summary>Builds a transport for an endpoint.</summary>
@@ -63,12 +64,24 @@ public sealed class WebSocketClientTransport : IClientTransport
     }
 
     /// <inheritdoc />
-    public ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
+    public async ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
     {
         var socket = _socket;
-        return socket == null || socket.State != WebSocketState.Open
-            ? ValueTask.CompletedTask
-            : socket.SendAsync(message, WebSocketMessageType.Binary, endOfMessage: true, ct);
+        if (socket == null || socket.State != WebSocketState.Open)
+        {
+            return;
+        }
+
+        // One sender at a time: ClientWebSocket allows a single outstanding send, and the ping loop, commands and a refusal's BYE all send.
+        await _sendLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await socket.SendAsync(message, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -106,7 +119,8 @@ public sealed class WebSocketClientTransport : IClientTransport
             assembled.Write(buffer, 0, result.Count);
             if (assembled.Length > _maxMessageBytes)
             {
-                await CloseAsync(CloseCodes.MessageTooBig, "message above the negotiated cap").ConfigureAwait(false);
+                // Left open: the client refuses the stream itself, a BYE ahead of the close frame (03 § 3).
+                CloseCode = CloseCodes.MessageTooBig;
                 throw new WireFormatException(CloseCodes.MessageTooBig, $"the server sent a message above the {_maxMessageBytes}-byte cap");
             }
 
