@@ -146,6 +146,48 @@ public sealed class Clock
     /// <summary>Render time as a single value, for display only: evaluation takes <see cref="RenderTick"/> and <see cref="RenderFrac"/>.</summary>
     public double RenderTime => RenderTick + RenderFrac;
 
+    /// <summary>
+    /// How far into the server's tick a local instant fell, as a fraction of the tick period in <c>[0, 1)</c>.
+    /// </summary>
+    /// <param name="atMs">The instant, on the same monotonic clock <see cref="Update"/> is driven with.</param>
+    /// <param name="oneWayDelayMs">
+    /// The estimated downlink delay to take off the grid's anchor — see the remarks. Half the RTT is the usual estimate; 0 leaves the bias in, which is
+    /// what loopback wants.
+    /// </param>
+    /// <returns>The fraction, or <see cref="double.NaN"/> before the first frame has anchored the grid.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the grid a client has to quantise an INTENT against, and the reason is that the server's own integration is quantised.</b> A tick
+    /// advances an entity by one whole period's worth of whatever intent it held at the boundary, so a client that changes velocity on a key event and a
+    /// server that changes it on a boundary integrate for different DURATIONS — the stop position differs by <c>v x (startPhase - stopPhase)</c>, up to a
+    /// full tick's travel in either direction. Sending the phase with the intent lets the server split the boundary tick between the old velocity and the
+    /// new one, after which both sides have integrated the same duration exactly.
+    /// </para>
+    /// <para>
+    /// <b>The anchor carries the downlink delay, which is why the estimate is a parameter.</b> <see cref="OffsetMs"/> is the smallest
+    /// <c>recvMs - serverMs(tick)</c> over the window — the local instant a tick's frame ARRIVED, not the instant the boundary happened, so the grid read
+    /// here sits one downlink behind the server's. Uncorrected, the phase is short by <c>delay / period</c>, which on loopback is nothing and at 30 ms on a
+    /// 100 ms tick is a third of a step. The caller owns the estimate because the SDK does not know whether the ping is being measured.
+    /// </para>
+    /// </remarks>
+    public double SubTickPhase(double atMs, double oneWayDelayMs = 0)
+    {
+        if (_pieceCount == 0 || _sampleCount == 0)
+        {
+            return double.NaN;
+        }
+
+        var ms = atMs - _minOffsetMs + oneWayDelayMs;
+        var p = PieceAt(ms);
+        var rel = (ms - _pieceMs[p]) / _piecePeriod[p];
+
+        // `rel - floor(rel)` can land on exactly 1: a `rel` a hair below an integer from below — −1e-17 floors to −1, and 1 − 1e-17 has no double
+        // neighbour short of 1. The range this promises is half-open, and a caller quantising it to a byte would send "a whole tick" where it means
+        // "none of it".
+        var fraction = rel - Math.Floor(rel);
+        return fraction < 1 ? fraction : 0;
+    }
+
     /// <summary>Records a frame. Frames must be passed in arrival order.</summary>
     /// <param name="tick">The frame's tick.</param>
     /// <param name="recvMs">The local time it was received at, in milliseconds.</param>
@@ -271,7 +313,13 @@ public sealed class Clock
         return _pieceMs[p] + ((tick - _pieceTick[p]) * _piecePeriod[p]);
     }
 
-    private void ToTick(double ms)
+    /// <summary>
+    /// The piece of the tick → server-time map that <paramref name="ms"/> falls in.
+    /// </summary>
+    /// <param name="ms">A server-timeline instant.</param>
+    /// <returns>The piece index.</returns>
+    /// <remarks><b>Requires a non-empty map</b> — it returns −1 for an empty one. Both callers test <c>_pieceCount</c> first, and a third has to.</remarks>
+    private int PieceAt(double ms)
     {
         var p = _pieceCount - 1;
         while (p > 0 && ms < _pieceMs[p])
@@ -279,6 +327,12 @@ public sealed class Clock
             p--;
         }
 
+        return p;
+    }
+
+    private void ToTick(double ms)
+    {
+        var p = PieceAt(ms);
         var rel = (ms - _pieceMs[p]) / _piecePeriod[p];
         var whole = Math.Floor(rel);
         RenderTick = (long)(_pieceTick[p] + whole);

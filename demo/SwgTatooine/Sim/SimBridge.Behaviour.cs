@@ -919,6 +919,7 @@ public sealed partial class SimBridge
 
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
+        var tick = ctx.TickNumber;
         Span<PlayerPlacement> next = stackalloc PlayerPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -945,15 +946,26 @@ public sealed partial class SimBridge
                 bits &= bits - 1;
 
                 var move = motions[idx];
-                if (move.VelX == 0f && move.VelZ == 0f)
+
+                // A14b: the tick a client's intent changed in is split between the velocity before the change and the one after, so that both sides
+                // integrate the same duration. The velocity carries the whole tick and this is the remainder owed to the old one, stamped with the tick it
+                // belongs to (TatooineReplication.SteerTo). Read BEFORE the standing-still test, because the commonest bias of all belongs to a STOP,
+                // whose new velocity is exactly zero — testing first would drop the last fraction of every run a player ever makes.
+                var owed = move.BiasTick == tick;
+                var biasX = owed ? move.BiasX : 0f;
+                var biasZ = owed ? move.BiasZ : 0f;
+                if (move.VelX == 0f && move.VelZ == 0f && biasX == 0f && biasZ == 0f)
                 {
                     continue;
                 }
 
                 var p = places[idx];
                 var h = p.HalfExtent;
-                var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
-                var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
+
+                // The bias is one tick's remainder and is NOT scaled by `k`: a realm visited every k-th tick moves k ticks of velocity in one visit, but
+                // the split happened once.
+                var x = Math.Clamp(p.X + (move.VelX * k) + biasX, -half + h, half - h);
+                var z = Math.Clamp(p.Z + (move.VelZ * k) + biasZ, -half + h, half - h);
                 var nb = default(PlayerPlacement);
                 var gy = GroundAt(cluster.Realm, x, z);
                 Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);

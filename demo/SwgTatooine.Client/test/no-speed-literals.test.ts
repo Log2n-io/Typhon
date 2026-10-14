@@ -53,7 +53,8 @@ function sources(dir: string): string[] {
 const MOCK_SPEEDS = ['PLAYER_RUN_SPEED_MPS', 'PLAYER_MOUNT_SPEED_MPS'];
 
 /** The names a speed constant would plausibly be given, as an identifier being DECLARED. */
-const SPEED_DECLARATION = /\b(?:const|let|var|readonly)\s+([A-Za-z_$][\w$]*(?:SPEED|Speed|speed|MPS|Mps|mps)[\w$]*)\s*(?::[^=]+)?=\s*[-\d.]/;
+const SPEED_DECLARATION =
+  /\b(?:const|let|var|readonly)\s+([A-Za-z_$][\w$]*(?:SPEED|Speed|speed|MPS|Mps|mps)[\w$]*)\s*(?::[^=]+)?=\s*[-\d.]/;
 
 describe('client source', () => {
   it('declares no movement speed of its own', () => {
@@ -99,7 +100,12 @@ describe('client source', () => {
    */
   it('reads the replicated speed stats', () => {
     const predictor = readFileSync(join(SRC, 'app', 'client-app.ts'), 'utf8');
-    expect(predictor).toContain("selfNumber('walkMps')");
-    expect(predictor).toContain("selfNumber('runMps')");
+    // Every gait Shift+1..4 can select, because a gait whose figure the client never reads is a gait it cannot predict —
+    // and the fallback it lands in is silent to the viewer, who just sees the body stutter at that one speed.
+    for (const stat of ['walkMps', 'runMps', 'burstMps', 'speederMps', 'speederFastMps']) {
+      expect(predictor, `the client predicts a gait without reading what the server grants for it`).toContain(
+        `selfNumber('${stat}')`,
+      );
+    }
   });
 });

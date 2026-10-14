@@ -25,7 +25,14 @@ const BACK = ['KeyS', 'ArrowDown'];
 const LEFT = ['KeyA', 'ArrowLeft'];
 const RIGHT = ['KeyD', 'ArrowRight'];
 
-/** Held with a direction, walks instead of running. */
+/**
+ * Held with a direction, walks instead of using the selected gait.
+ *
+ * <b>Shift is both the walk modifier and the gait shortcuts' prefix, and the two do not collide.</b> Shift+2 is a press
+ * that LATCHES a gait and is over; Shift held with W is a state that means "walk now". So selecting a speeder and then
+ * holding Shift+W walks, which is what a person who is holding shift is asking for, and letting go of shift returns to the
+ * speeder. Nothing is unreachable either way.
+ */
 const WALK = ['ShiftLeft', 'ShiftRight'];
 
 /** Whether any of a set of codes is held. */
@@ -44,6 +51,7 @@ function any(keys: ReadonlySet<string>, codes: readonly string[]): boolean {
  *
  * @param keys The key codes currently down.
  * @param yaw The camera's facing, radians, in the same frame as an entity's heading.
+ * @param gait The speed class Shift+1..4 last selected; a run when nothing has been.
  * @returns The intent, or `null` when nothing is held and nothing needs saying.
  *
  * @remarks
@@ -60,7 +68,11 @@ function any(keys: ReadonlySet<string>, codes: readonly string[]): boolean {
  * straight line. Summing two axis speeds would have made diagonal movement 1.41× faster, which is the oldest bug in this
  * genre.
  */
-export function movementIntent(keys: ReadonlySet<string>, yaw: number): MoveIntent | null {
+export function movementIntent(
+  keys: ReadonlySet<string>,
+  yaw: number,
+  gait: number = SpeedClass.run,
+): MoveIntent | null {
   const forward = (any(keys, FORWARD) ? 1 : 0) - (any(keys, BACK) ? 1 : 0);
   const right = (any(keys, RIGHT) ? 1 : 0) - (any(keys, LEFT) ? 1 : 0);
 
@@ -87,7 +99,7 @@ export function movementIntent(keys: ReadonlySet<string>, yaw: number): MoveInte
 
   return {
     heading: Math.atan2(dz, dx),
-    speedClass: any(keys, WALK) ? SpeedClass.walk : SpeedClass.run,
+    speedClass: any(keys, WALK) ? SpeedClass.walk : gait,
   };
 }
 
@@ -149,6 +161,40 @@ export function intentChanged(next: MoveIntent | null, last: MoveIntent | null):
   // difference of 2π, and a straight subtraction read that as the sharpest turn possible and re-sent an identical intent every
   // time the viewer happened to face that way.
   return next.speedClass !== last.speedClass || Math.abs(shortestAngle(next.heading - last.heading)) > HEADING_EPSILON;
+}
+
+/**
+ * The speed class an intent asks for, with "no opinion" read as a stop.
+ *
+ * @param intent The intent, or `null` when nothing is held.
+ * @returns The class.
+ */
+export function gaitOf(intent: MoveIntent | null): number {
+  return intent === null ? SpeedClass.stop : intent.speedClass;
+}
+
+/**
+ * Whether the GAIT changed — a start, a stop, or a change of speed class — as opposed to only the heading.
+ *
+ * @param next What the keys now mean, or `null` for "no opinion".
+ * @param last What was last sent, or `null` when nothing has been.
+ * @returns Whether this is a transition whose instant is worth measuring.
+ *
+ * @remarks
+ * <b>The distinction exists because only a gait change has an INSTANT anybody can use (A14b).</b> A start, a stop and a
+ * speed-class change are each caused by one key going down or up, so the client can say how far into the server's tick
+ * the intent changed and the server can split that tick between the old velocity and the new one — which is what makes
+ * the two sides integrate the same duration instead of differing by up to a tick of travel.
+ *
+ * A heading change is not of that kind: the yaw moves continuously with the mouse, and the server is told at most once
+ * per tick and coalesces everything in between, so there is no single moment to name. Those send no phase and both sides
+ * integrate whole steps, as they did before — the residual is a turn's worth of arc and not a gesture's worth of travel.
+ *
+ * Note that this is deliberately NOT {@link intentChanged}: that one decides whether to SEND, and a heading change is
+ * worth sending. This decides whether the send carries a phase.
+ */
+export function gaitChanged(next: MoveIntent | null, last: MoveIntent | null): boolean {
+  return gaitOf(next) !== gaitOf(last);
 }
 
 /** A difference of two headings, wrapped into [-π, π]. */

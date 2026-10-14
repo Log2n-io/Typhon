@@ -19,6 +19,8 @@ export interface RealmSwitchTargets {
   forgetSelectionCaches(): void;
   /** Drops the app's record of the region it last sent, which is in the old realm's coordinate frame. */
   forgetRegion(): void;
+  /** Drops the app's record of the view radius it last asked for, which the new session was never told. */
+  forgetViewRadius(): void;
 }
 
 /**
@@ -52,6 +54,15 @@ export function resetForSession(targets: RealmSwitchTargets): void {
   // The SDK's `RegionSender` forgets its half on `realmChanged`; this half was left holding "already sent this",
   // which suppresses the first region after the reset until the camera happens to move.
   targets.forgetRegion();
+
+  // The same hazard for the radius, and it had the same bug: `sendViewRadius` sends only on CHANGE, so a slider left at
+  // 1 280 m from the previous session matched what the app believed it had already asked for, and nothing was sent — while
+  // the new session was being served its profile's own 192 m. The slider then read 1 280 and the HUD read 192, which is
+  // #1075's failure (a control that lies about what the server is doing) reached by a different route.
+  //
+  // Not the slider's VALUE: that is the person's standing wish and survives deliberately (`setPlayerRadiusRange` keeps it).
+  // What cannot survive is the app's memory of having asked.
+  targets.forgetViewRadius();
 
   // Chat is fifty metres of earshot, routed within one realm. Carrying a shop's conversation onto another planet is
   // the visible form of this whole class of bug.

@@ -287,11 +287,16 @@ internal static class ClientSays
     /// <summary>The field values of a <c>MoveDir</c>.</summary>
     /// <param name="heading">Radians, 0 along +X.</param>
     /// <param name="speedClass">See <c>SpeedClasses</c>.</param>
+    /// <param name="changePhase">
+    /// How far into the tick the intent changed, in 255ths — <c>MoveDir.ChangePhase</c>. Defaults to 0, which is what a client that does not measure it
+    /// sends and what every case written before A14b means.
+    /// </param>
     /// <returns>The values.</returns>
-    public static RecordValues MoveDir(float heading, byte speedClass) => new()
+    public static RecordValues MoveDir(float heading, byte speedClass, byte changePhase = 0) => new()
     {
         ["heading"] = FieldValue.Of(heading),
         ["speedClass"] = FieldValue.Of(speedClass),
+        ["changePhase"] = FieldValue.Of(changePhase),
     };
 
     /// <summary>The field values of a <c>SetTarget</c>.</summary>

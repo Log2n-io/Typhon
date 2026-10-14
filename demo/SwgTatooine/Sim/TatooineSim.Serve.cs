@@ -104,7 +104,7 @@ public sealed partial class TatooineSim
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
 
-                // A third of the players' 192 m radius: an 11 x 11 window per session.
+                // The planet's own spatial cell, 1:1 (set in Initialize): a 9 x 9 window for a 192 m session, 15 x 15 for the slider's ceiling.
                 ReplicationCellM = TatooineReplication.ReplicationCellM,
 
                 // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.

@@ -78,6 +78,88 @@ public class MotionEvaluatorTests
         Assert.That(XAt(world, slot, 1002, 0.5), Is.EqualTo(125).Within(1e-9));
     }
 
+    /// <summary>
+    /// A velocity that does not continue is not extrapolated into the next tick — the stop, which is the case a player sees.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A linear segment's velocity is fitted over the run that ENDED at its <c>t0</c></b> (<c>MotionTracker</c> emits
+    /// <c>p0 = p_tick, v = (p_tick − p_runStart) / window</c>), so the pair says "this much travel has already been taken", not
+    /// "this much more is coming". Extrapolating it is correct dead reckoning while the motion continues and a phantom step the moment
+    /// it does not: measured on the live demo at 10 Hz, a player's stop drew 220 mm past where it had stopped and then snapped back,
+    /// while the client held the segment that said it had stopped the whole time.
+    /// </para>
+    /// <para>
+    /// So between two held segments the two origins are what is read. This is the shape that produced it: the entity arrives 2 m along
+    /// at 1001 and does not move again.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AVelocityThatDoesNotContinueIsNotExtrapolatedIntoTheNextTick()
+    {
+        var (world, slot) = MakeMover(1000);
+        var store = world.Archetypes[Mover];
+        store.PushSegment(slot, [102, 50], [2, 0], 1001, 0);
+        store.PushSegment(slot, [102, 50], [0, 0], 1002, 0);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(XAt(world, slot, 1001, 0), Is.EqualTo(102), "the origin itself");
+            Assert.That(XAt(world, slot, 1001, 0.5), Is.EqualTo(102), "half a tick on, the entity has not moved and must not appear to");
+            Assert.That(XAt(world, slot, 1001, 0.99), Is.EqualTo(102), "and not 103.98, which is the phantom");
+            Assert.That(At(world, Mover, slot, 1001, 0.5)[2], Is.Zero, "the velocity reported is the chord between the origins, which is zero");
+            Assert.That(XAt(world, slot, 1002, 0.5), Is.EqualTo(102), "and the newest segment extrapolates, at zero");
+        });
+    }
+
+    /// <summary>
+    /// Over a gap, the velocity carries every tick but the last, and the last crosses to the origin the server reported.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The emit rule is what makes the split here: the server sends nothing while <c>p0 + v·(τ − t0)</c> is within the declared
+    /// tolerance of the truth, so a gap of eight ticks is eight ticks of velocity the client should trust — and the tick the next
+    /// segment was emitted FOR is the one whose error triggered it, so it is exactly the tick not to trust.
+    /// </para>
+    /// <para>
+    /// Measured live at 10 Hz: an eight-tick gap ended with the entity's final step 0.135 m instead of the 0.5 m the segment's
+    /// velocity implied, and the client drew the 0.5 and then dropped 336 mm in one frame when render time crossed into the newer
+    /// segment. <b>No frame may step backwards here</b>, which is the assertion below that the position values alone do not make.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AGapIsExtrapolatedExceptForItsLastTickWhichCrossesToTheNextOrigin()
+    {
+        var (world, slot) = MakeMover(1000);
+        var store = world.Archetypes[Mover];
+
+        // 10 m/tick from (100, 50) at tick 1000, and eight ticks later the entity is at 178 — 2 m short of the 180 the velocity implies.
+        store.PushSegment(slot, [178, 50], [8, 0], 1008, 0);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(XAt(world, slot, 1006, 0.5), Is.EqualTo(165).Within(1e-9), "six ticks in, the velocity still carries it");
+            Assert.That(XAt(world, slot, 1007, 0), Is.EqualTo(170).Within(1e-9), "the last tick starts where extrapolation left off");
+            Assert.That(XAt(world, slot, 1007, 0.5), Is.EqualTo(174).Within(1e-9), "and crosses to 178 over that tick, not to 175");
+            Assert.That(XAt(world, slot, 1008, 0), Is.EqualTo(178).Within(1e-9), "landing exactly on the origin the server reported");
+            Assert.That(At(world, Mover, slot, 1007, 0.5)[2], Is.EqualTo(8).Within(1e-9), "the velocity reported over that tick is the crossing");
+
+            // Monotone through the join, which is the whole visible claim: 100 samples a frame apart over the gap and past it.
+            var previous = double.NegativeInfinity;
+            var worst = 0d;
+            for (var k = 0; k <= 100; k++)
+            {
+                var at = 1000 + (k * 0.09);
+                var tick = (long)Math.Floor(at);
+                var here = XAt(world, slot, tick, at - tick);
+                worst = Math.Min(worst, here - previous);
+                previous = here;
+            }
+
+            Assert.That(worst, Is.GreaterThanOrEqualTo(0), $"the rendered path stepped backwards by {-worst:F3} m");
+        });
+    }
+
     /// <summary>A segment that has not started yet is not used, and the switch to it is a jump, not a blend: it may be a teleport.</summary>
     [Test]
     public void AnOlderSegmentHoldsUntilRenderTimeReachesTheNextStart()

@@ -178,8 +178,14 @@ public static class TatooineHost
             // emits `1E+30` and a non-finite one emits `NaN` — neither is JSON, so the WHOLE document fails to parse and the
             // client loses the realm directory it also carries, with no error path. A ceiling that cannot be expressed is
             // reported as no ceiling, which is what a client already handles.
+            // A PLAYER's range, which is a different mechanism from the god region above: a sphere the session widens with
+            // SetViewRadius, between its profile's own radius and the cap the engine's window bound allows. Told here so the
+            // client's slider has both ends from the server and no figure of its own — a radius mirrored in the client would be
+            // a number the server can never correct, which is the shape of bug `no-speed-literals.test.ts` exists for.
+            var player = FormattableString.Invariant(
+                $",\"playerRadiusM\":{Json(TatooineReplication.PlayerRadiusM)},\"playerMaxRadiusM\":{Json(TatooineReplication.PlayerMaxRadiusM)}");
             return Results.Text(
-                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{realms}}}"),
+                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{realms}}}"),
                 "application/json");
         });
 

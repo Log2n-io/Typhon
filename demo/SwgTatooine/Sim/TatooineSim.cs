@@ -282,6 +282,11 @@ public sealed partial class TatooineSim : IDisposable
         // that way, and shifting them would put a transcription error between the source and the world.
         var half = _config.WorldEdgeM * 0.5f;
         var cell = _config.ResolveCellSize();
+
+        // The replication cell follows the spatial one, 1:1 (TatooineReplication.ReplicationCellM): delivering a replication cell queries the spatial index
+        // over that cell's box, so a finer replication grid opens the same spatial cell once per replication cell inside it. Measured at 2.4x on this demo's
+        // geometry. Set here rather than in StartReplication because the realms registered below carry it, and they are registered first.
+        TatooineReplication.ReplicationCellM = cell;
         var planetGrid = SpatialGridConfig.Flat(
             worldMin: new Vector2(-half, -half),
             worldMax: new Vector2(half, half),

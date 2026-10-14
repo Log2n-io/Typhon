@@ -85,11 +85,26 @@ const CORRECTION_TAU_S = 0.12;
 const HISTORY = 128;
 
 /**
+ * What the server granted this player for each speed class, in metres per second.
+ *
+ * <b>Every gait, read together, because prediction needs the figure BEFORE the server has been told which one is in
+ * use.</b> The person presses Shift+3 and the client has to integrate a speeder in that same frame; a single "current
+ * speed" stat would arrive a round trip later, and the predictor would spend the round trip integrating the previous gait
+ * and then being corrected for it.
+ */
+export interface GrantedSpeeds {
+  readonly walkMps: number;
+  readonly runMps: number;
+  readonly burstMps: number;
+  readonly speederMps: number;
+  readonly speederFastMps: number;
+}
+
+/**
  * Turns a speed CLASS into the metres per second the server granted this player.
  *
  * @param speedClass One of {@link SpeedClass}.
- * @param walkMps The player's replicated walk speed.
- * @param runMps The player's replicated run speed.
+ * @param speeds The player's replicated speeds.
  * @returns The speed, or `NaN` when the stat it needs has not arrived or is not a usable speed.
  *
  * @remarks
@@ -102,14 +117,35 @@ const HISTORY = 128;
  * path that forgets to write them, hands the client a finite 0. Treating that as a speed would hold the body still while the
  * server walked it, growing the error until it snapped, repeatedly, with the fallback counter reading zero. `NaN` routes it to
  * the documented no-prediction fallback instead, which is loud.
+ *
+ * <b>An unknown class is `NaN` and not the run speed.</b> A client asking for a class this build does not know about is
+ * refused on the wire, so predicting ANY speed for it would integrate a movement the server never makes — the drift the
+ * fallback exists to avoid, with no counter moving.
  */
-export function speedForClass(speedClass: number, walkMps: number, runMps: number): number {
+export function speedForClass(speedClass: number, speeds: GrantedSpeeds): number {
   if (speedClass === SpeedClass.stop) {
     return 0;
   }
 
-  const granted = speedClass === SpeedClass.walk ? walkMps : runMps;
+  const granted = grantedFor(speedClass, speeds);
   return Number.isFinite(granted) && granted > 0 ? granted : NaN;
+}
+
+function grantedFor(speedClass: number, speeds: GrantedSpeeds): number {
+  switch (speedClass) {
+    case SpeedClass.walk:
+      return speeds.walkMps;
+    case SpeedClass.run:
+      return speeds.runMps;
+    case SpeedClass.burst:
+      return speeds.burstMps;
+    case SpeedClass.speeder:
+      return speeds.speederMps;
+    case SpeedClass.speederFast:
+      return speeds.speederFastMps;
+    default:
+      return NaN;
+  }
 }
 
 /** The predicted position of one entity, integrated locally and reconciled against the authority. */
@@ -138,6 +174,12 @@ export class Predictor {
 
   private heading = 0;
   private speedMps = 0;
+
+  // The intent in force before the pending change, and when that change happened. A frame the intent changed inside is
+  // split at that instant, exactly as the server splits the tick its command lands in: see `step`.
+  private prevHeading = 0;
+  private prevSpeedMps = 0;
+  private changeAtMs = Number.NaN;
 
   // The pure integration, and the running total of every correction applied to it. `x = pure + corr`, kept apart so a past
   // sample can be read as `pure(then) + corr(now)` — see the module remarks.
@@ -180,6 +222,8 @@ export class Predictor {
   stop(): void {
     this.active = false;
     this.speedMps = 0;
+    this.prevSpeedMps = 0;
+    this.changeAtMs = Number.NaN;
     this.head = -1;
     this.count = 0;
   }
@@ -190,9 +234,11 @@ export class Predictor {
    *
    * @param heading Radians, 0 along +X toward +Z — the frame the server integrates in.
    * @param speedMps Metres per second, from {@link speedForClass}; `NaN` suspends prediction for this frame.
+   * @param changedAtMs When this intent came into force, for a frame that STARTS it; `NaN` for a re-send of one already
+   *   in force, which is the common case and integrates the whole frame. See {@link step}.
    * @returns Whether the intent was usable.
    */
-  setIntent(heading: number, speedMps: number): boolean {
+  setIntent(heading: number, speedMps: number, changedAtMs = Number.NaN): boolean {
     if (!Number.isFinite(speedMps)) {
       this.fallbacks++;
       this.speedMps = 0;
@@ -201,12 +247,26 @@ export class Predictor {
 
     this.heading = heading;
     this.speedMps = speedMps;
+
+    // A stamp REPLACES a pending one; `NaN` leaves it alone. The caller re-states the current intent every frame and only
+    // names an instant on the frame it changed, so clearing on `NaN` would throw away a change that has not come due yet.
+    if (Number.isFinite(changedAtMs)) {
+      this.changeAtMs = changedAtMs;
+    }
+
     return true;
   }
 
-  /** Stands still — the keys are up. Kept distinct from a failed {@link setIntent}, which is not a decision to stop. */
-  clearIntent(): void {
+  /**
+   * Stands still — the keys are up. Kept distinct from a failed {@link setIntent}, which is not a decision to stop.
+   *
+   * @param changedAtMs When the key came up, for the frame that ends the gesture; `NaN` for the frames after it.
+   */
+  clearIntent(changedAtMs = Number.NaN): void {
     this.speedMps = 0;
+    if (Number.isFinite(changedAtMs)) {
+      this.changeAtMs = changedAtMs;
+    }
   }
 
   /**
@@ -223,11 +283,33 @@ export class Predictor {
       return;
     }
 
-    if (this.speedMps > 0) {
+    // The share of this frame that still belongs to the PREVIOUS intent, because the key moved part way through it.
+    //
+    // <b>The frame is split at the key's instant, exactly as the server splits the tick its command lands in.</b> Both
+    // sides are then integrating from the same moment, which is the whole claim: a client that started at the frame it
+    // NOTICED the key and a server that starts at the key itself differ by up to a frame of travel at each end of a
+    // gesture — 8 cm at a 5 m/s run and 60 fps, which would be the dominant error left once the tick's own quantisation
+    // is gone. Zero for every frame of a held key, where this reduces to the plain integration it replaced.
+    // A change can be declared for an instant that has not arrived yet — the client tells the server the first boundary
+    // its command can actually reach, and then has to wait for it (see `ClientApp.declareChange`). Until then the intent in
+    // force is the OLD one, for the whole frame, and the stamp is kept rather than consumed.
+    const pending = Number.isFinite(this.changeAtMs) && this.changeAtMs > nowMs;
+    const held = pending ? 1 : this.shareBeforeChange(nowMs, dtSeconds);
+    if (this.speedMps > 0 || held !== 0) {
       // The server's own rule. `atan2(dz, dx)` is what produced this heading, so cos is the x axis and sin the z — the same
       // frame `MoveDir`'s destination is computed in.
-      this.pureX += Math.cos(this.heading) * this.speedMps * dtSeconds;
-      this.pureZ += Math.sin(this.heading) * this.speedMps * dtSeconds;
+      const vx = Math.cos(this.heading) * this.speedMps;
+      const vz = Math.sin(this.heading) * this.speedMps;
+      const px = Math.cos(this.prevHeading) * this.prevSpeedMps;
+      const pz = Math.sin(this.prevHeading) * this.prevSpeedMps;
+      this.pureX += (px * held + vx * (1 - held)) * dtSeconds;
+      this.pureZ += (pz * held + vz * (1 - held)) * dtSeconds;
+    }
+
+    if (!pending) {
+      this.prevHeading = this.heading;
+      this.prevSpeedMps = this.speedMps;
+      this.changeAtMs = Number.NaN;
     }
 
     this.record(nowMs);
@@ -261,10 +343,41 @@ export class Predictor {
     this.publish();
   }
 
+  /**
+   * How much of the frame ending at `nowMs` the intent in force before the pending change still held, in `[0, 1]`.
+   *
+   * @param nowMs The frame's timestamp.
+   * @param dtSeconds Seconds since the previous frame.
+   * @returns The share, or 0 when no change is pending.
+   *
+   * @remarks
+   * <b>Negative down to -1, which is the catch-up and not a sign error.</b> A key event is delivered between frames, so the
+   * frame that notices it usually contains it and the share is in `[0, 1]`. But the instant the server was told may sit
+   * just BEFORE this frame began — the handler that declared it ran while the previous frame was still being drawn — and
+   * the client then owes the travel between the two. A share of -0.3 pays the new velocity for 1.3 frames, which is that
+   * debt settled forward in the frame it is discovered.
+   *
+   * <b>Clamped at ±1 all the same.</b> A long frame, a backgrounded tab or a stamp from a clock the caller did not mean
+   * would otherwise scale one frame's integration by an arbitrary factor; the bound makes the worst case one frame of
+   * travel either way.
+   */
+  private shareBeforeChange(nowMs: number, dtSeconds: number): number {
+    if (!Number.isFinite(this.changeAtMs) || !(dtSeconds > 0)) {
+      return 0;
+    }
+
+    const frameMs = dtSeconds * 1000;
+    const share = (this.changeAtMs - (nowMs - frameMs)) / frameMs;
+    return share < -1 ? -1 : share > 1 ? 1 : share;
+  }
+
   /** Restarts the pure path at a known position, with nothing owed and no history to reconcile against. */
   private anchor(nowMs: number, x: number, z: number): void {
     this.pureX = x;
     this.pureZ = z;
+    this.prevHeading = this.heading;
+    this.prevSpeedMps = this.speedMps;
+    this.changeAtMs = Number.NaN;
     this.corrX = 0;
     this.corrZ = 0;
     this.head = -1;

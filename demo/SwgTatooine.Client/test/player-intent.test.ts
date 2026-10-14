@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { HEADING_EPSILON, intentChanged, movementIntent, stopAfter, type MoveIntent } from '../src/app/player-intent';
+import {
+  gaitChanged,
+  HEADING_EPSILON,
+  intentChanged,
+  movementIntent,
+  stopAfter,
+  type MoveIntent,
+} from '../src/app/player-intent';
 import { SpeedClass } from '../src/data/source';
 
 /** Degrees, for cases a reader can check against a compass rather than against a decimal. */
@@ -171,5 +178,46 @@ describe('heading wrap', () => {
     expect(
       intentChanged({ heading: past, speedClass: SpeedClass.run }, { heading: near, speedClass: SpeedClass.run }),
     ).toBe(true);
+  });
+});
+
+/**
+ * A14b's rule: which transitions have an INSTANT, and therefore carry a sub-tick phase.
+ *
+ * The phase is what makes the client's integration and the server's cover the same duration — the server splits the tick a
+ * command lands in between the old velocity and the new one — and it only means something for a change caused by one key
+ * going down or up. A heading change is a continuous thing the server is told about at most once a tick, so it carries no
+ * phase and both sides integrate whole steps.
+ */
+describe('gaitChanged', () => {
+  const run = (heading = 0): MoveIntent => ({ heading, speedClass: SpeedClass.run });
+
+  it('is a start, because no opinion reads as a stop', () => {
+    expect(gaitChanged(run(), null)).toBe(true);
+  });
+
+  it('is a stop, both as an explicit one and as the keys coming up', () => {
+    expect(gaitChanged({ heading: 0, speedClass: SpeedClass.stop }, run())).toBe(true);
+    expect(gaitChanged(null, run())).toBe(true);
+  });
+
+  it('is a change of speed class — Shift taken or released under a held key', () => {
+    expect(gaitChanged({ heading: 0, speedClass: SpeedClass.walk }, run())).toBe(true);
+  });
+
+  it('is NOT a change of heading, however large: a turn has no single instant to name', () => {
+    expect(gaitChanged(run(Math.PI), run(0))).toBe(false);
+  });
+
+  it('is not the same question as intentChanged, which decides whether to SEND', () => {
+    // A turn is worth sending and carries no phase. Stated together because conflating the two is the mistake available
+    // here: it would stamp every frame of a mouse turn with the instant of whatever key was last touched.
+    const turned = run(1);
+    expect(intentChanged(turned, run(0))).toBe(true);
+    expect(gaitChanged(turned, run(0))).toBe(false);
+  });
+
+  it('says nothing changed when nothing is held and nothing was', () => {
+    expect(gaitChanged(null, null)).toBe(false);
   });
 });

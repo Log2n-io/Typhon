@@ -21,8 +21,9 @@ namespace Typhon.Client.Tests;
 /// <b>What each entity is for.</b> <c>Buoy</c> 10 (<c>model: none</c>) takes a sample every frame for seventeen frames, so the depth-8 ring turns twice and
 /// the oldest segment held is far younger than the stream's start. Its samples follow <c>y = x²/4</c>, so no two intervals share a velocity and a straight
 /// line between samples is visibly wrong — an implementation that interpolated against the wrong pair, or extrapolated, lands somewhere else.
-/// <c>Buoy</c> 11 and <c>Drone</c> 100 both take a teleport mid-stream: the <c>none</c> model must hold its sample across the change rather than interpolate
-/// into the far side, and the <c>linear</c> model must keep extrapolating the segment in force rather than reach for the post-teleport one.
+/// <c>Buoy</c> 11 and <c>Drone</c> 100 both take a teleport mid-stream: neither model may reach across the change — the <c>none</c> model holds its sample
+/// rather than interpolate into the far side, and the <c>linear</c> model extrapolates the segment in force rather than aim at the post-teleport one. Within
+/// one epoch both interpolate between the two origins they hold; it is the epoch gate that stops them here, not the model.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -48,8 +49,8 @@ public class MotionWrapGoldenTests
         + "no events, no owner state. Buoy 10 (model: none) enters on frame 0 and takes a sample on every frame after it — seventeen segments over a ring "
         + "eight deep, so the head returns to 0 twice and the oldest segment held is seven ticks old, not the stream's start. Its samples walk y = x²/4, so "
         + "every interval has its own velocity and interpolation between two of them is visibly not the curve. Buoy 11 and Drone 100 enter on frame 12 and "
-        + "teleport on frame 14 (epoch 4 → 5 and 1 → 2), with samples either side: the none model must hold rather than interpolate across the change, and "
-        + "the linear model must keep extrapolating the segment in force.";
+        + "teleport on frame 14 (epoch 4 → 5 and 1 → 2), with samples either side: neither model may reach across the change — the none model holds rather "
+        + "than interpolate into the far side, and the linear model extrapolates the segment in force rather than aim at the post-teleport one.";
 
     private const string VectorDescription =
         "Motion evaluated over the committed stream-motion replay, in the schema of motion-eval: after frame `afterFrame`, every live entity of the "
@@ -57,7 +58,8 @@ public class MotionWrapGoldenTests
         + "cannot reach. The ring: a render time before the ring wrapped, one inside a ring entry that has been overwritten, one whose next sample is entry "
         + "0 reached from entry 7 (the modular step the wrap exists to exercise), one past the newest sample, and one older than the oldest segment the ring "
         + "still holds — meaningful only once a wrap has thrown older segments away. The epoch: just before a teleport, between the two epochs' samples, and "
-        + "just after it, for a none-model Buoy and a linear Drone at once. Render time is split into an integer tick and a fraction in [0, 1) — never one "
+        + "just after it, for a none-model Buoy and a linear Drone at once — where both interpolate between the two same-epoch origins they hold, since the "
+        + "gate is the epoch and not the model. Render time is split into an integer tick and a fraction in [0, 1) — never one "
         + "float — so evaluation stays exact however long the server has been running (03 § 6), and `epoch` is the motion epoch in force at renderTick. "
         + "Entities are named by archetype and netId, never by slot, ordered by catalog archetype then ascending netId; `position` and `velocity` each carry "
         + "`dims` values in axis order. segmentHistory is the ring depth the vector was generated with.";

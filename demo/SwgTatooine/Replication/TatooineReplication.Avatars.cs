@@ -663,6 +663,9 @@ public static partial class TatooineReplication
             // its first MoveDir to learn its own run speed would stutter on the first key press of every session.
             WalkMps = SpeedFor(SpeedClasses.Walk),
             RunMps = SpeedFor(SpeedClasses.Run),
+            BurstMps = SpeedFor(SpeedClasses.Burst),
+            SpeederMps = SpeedFor(SpeedClasses.Speeder),
+            SpeederFastMps = SpeedFor(SpeedClasses.SpeederFast),
         };
 
         var vitals = new PlayerVitals

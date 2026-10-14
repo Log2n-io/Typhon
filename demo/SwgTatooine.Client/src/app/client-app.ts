@@ -17,7 +17,7 @@ import {
   slotOf,
   WorldStore,
 } from '@typhondb/client';
-import { CameraInput } from '../camera/camera-input';
+import { CameraInput, isTyping } from '../camera/camera-input';
 import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { meanAndP95, regionDue } from './frame-policy';
@@ -52,7 +52,16 @@ import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../da
 import { advance, arrived } from './realm-transition';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
 import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
-import { intentChanged, movementIntent, REFRESH_MS, stopAfter, type MoveIntent } from './player-intent';
+import { DEFAULT_GAIT, gaitFor } from './gait';
+import {
+  gaitChanged,
+  gaitOf,
+  intentChanged,
+  movementIntent,
+  REFRESH_MS,
+  stopAfter,
+  type MoveIntent,
+} from './player-intent';
 import { Predictor, speedForClass } from './predictor';
 import { DEFAULT_THIRD_PERSON_M } from '../camera/eye-camera';
 import { useStats, type Inspection } from '../state/stats-store';
@@ -63,6 +72,16 @@ const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
 const ERROR_LOG_INTERVAL_MS = 5000;
+
+/**
+ * How much of a tick a gait change needs in front of it to name that tick, on top of the round trip (A14b).
+ *
+ * The socket write and the server's own drain are what this floor covers: measured on loopback at 10 Hz, a transition
+ * past about 0.96 of a tick still missed the boundary at an RTT of half a millisecond. Inside the margin the client names
+ * the next boundary instead and waits for it, which costs this many milliseconds of input lag on that fraction of presses
+ * and is the cheaper side of the trade against being one whole step wrong.
+ */
+const SEND_MARGIN_MS = 5;
 /**
  * Largest device pixel ratio rendered: a 1080p laptop at 150 % would otherwise shade the full-screen ground at 2880 × 1620.
  * Babylon applies its own `limitDeviceRatio` only at construction, so the client sets the scaling itself on every resize.
@@ -310,6 +329,22 @@ export class ClientApp {
   /** Whose eyes the eye camera is in; 0 for nobody. A change is a cut, not a glide. */
   private eyeSubject = 0;
 
+  /**
+   * The gait Shift+1..4 last selected, and the speed class every movement intent is sent at.
+   *
+   * <b>Latched here rather than derived from the held keys, because it is a MODE and not a chord.</b> `movementIntent` is
+   * pure in the keys currently down — which is what makes it testable — and a mode is by definition not in them. It is
+   * also why this is a key DOWN listener and not a per-frame poll of `heldKeys`: a tap shorter than a frame is a tap the
+   * person made, and a poll at 60 Hz would silently lose it.
+   *
+   * Per app, so it survives a logout and a realm crossing and is reset by a reload, which is the lifetime of everything
+   * else about how this session is being played.
+   */
+  private gait: number = DEFAULT_GAIT;
+
+  /** The gait shortcut's listener, which is this class's own and not the camera's. */
+  private readonly gaitKeys = new AbortController();
+
   /** The movement intent last sent, so an unchanged one is not re-sent every frame (A9). */
   private lastIntent: MoveIntent | null = null;
 
@@ -436,6 +471,38 @@ export class ClientApp {
       () => useUi.getState().cameraMode === 'eye',
     );
 
+    // The gait shortcuts. On `window` like the camera's keys, with the same typing guard — Shift+2 in the chat box is a
+    // quotation mark, not a speeder — and on this class's own AbortController so disposing the app takes it with it.
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (isTyping(e)) {
+          return;
+        }
+
+        const gait = gaitFor(e.code, e.shiftKey);
+        if (gait !== null) {
+          // The browser's own Shift+number does nothing on a canvas, but a page that has focus in the sidebar would
+          // otherwise type into it, and a repeat of a held digit would re-latch sixty times a second for no effect.
+          e.preventDefault();
+          this.gait = gait;
+        }
+
+        this.flushGaitNow(e.timeStamp);
+      },
+      { signal: this.gaitKeys.signal },
+    );
+
+    // The other half of A14b's send: letting go of the last direction key is a gait change too, and the stop it owes has to
+    // leave on the same terms as the start.
+    window.addEventListener(
+      'keyup',
+      (e) => {
+        this.flushGaitNow(e.timeStamp);
+      },
+      { signal: this.gaitKeys.signal },
+    );
+
     // Observer callbacks run after the frame's draw and before its paint: resizing the canvas there would paint it blank.
     this.resizeObserver = new ResizeObserver(() => {
       this.sizeDirty = true;
@@ -544,6 +611,7 @@ export class ClientApp {
     this.ratioQuery?.removeEventListener('change', this.onRatioChange);
     this.ratioQuery = null;
     this.unsubscribe();
+    this.gaitKeys.abort();
     this.input.dispose();
     this.source?.dispose();
     this.source = null;
@@ -772,6 +840,9 @@ export class ClientApp {
         this.regionRadius = Number.NaN;
         this.lastRegionMs = Number.NEGATIVE_INFINITY;
       },
+      forgetViewRadius: () => {
+        this.sentViewRadius = null;
+      },
     };
   }
 
@@ -864,17 +935,34 @@ export class ClientApp {
   private predictedSubject = 0;
 
   private sendMovementIntent(source: DataSource, nowMs: number, steering: boolean): void {
-    const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw) : null;
+    const intent = steering ? movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait) : null;
+
+    // A14b: when the gait changed, the instant it changed at — and `NaN` otherwise, which is every other frame. See
+    // `gaitChanged` for why a heading change is not one of these.
+    //
+    // Against the PREDICTOR's own record and not against `lastIntent`, because by the time this runs the key handler has
+    // already sent the change and moved `lastIntent` on. Comparing with that would hide every transition from the
+    // predictor, which would then integrate whole frames while the server integrated from the key — the error the split
+    // exists to remove, reintroduced at the frame scale.
+    const changedAtMs = this.predictedClass === gaitOf(intent) ? Number.NaN : this.takeDeclaredChange(nowMs);
+    this.predictedClass = gaitOf(intent);
 
     // A14: the predictor is driven by the CURRENT intent, whether or not this frame sends one. The send is coalesced and rate
     // limited (REFRESH_MS), so a predictor fed only on sends would stand still for up to a third of a second at a time.
     if (this.predictor.active) {
       if (intent === null || intent.speedClass === SpeedClass.stop) {
-        this.predictor.clearIntent();
+        this.predictor.clearIntent(changedAtMs);
       } else {
         this.predictor.setIntent(
           intent.heading,
-          speedForClass(intent.speedClass, source.selfNumber('walkMps'), source.selfNumber('runMps')),
+          speedForClass(intent.speedClass, {
+            walkMps: source.selfNumber('walkMps'),
+            runMps: source.selfNumber('runMps'),
+            burstMps: source.selfNumber('burstMps'),
+            speederMps: source.selfNumber('speederMps'),
+            speederFastMps: source.selfNumber('speederFastMps'),
+          }),
+          changedAtMs,
         );
       }
     }
@@ -882,15 +970,9 @@ export class ClientApp {
     if (intent === null) {
       // The keys are up. If the avatar was moving it must be TOLD to stop — the server is steering towards a destination a second
       // of travel ahead, so silence lets the character walk on for about five metres after the key came up.
-      const stop = stopAfter(this.lastIntent);
-      if (stop !== null) {
-        source.moveDir(stop.heading, stop.speedClass);
-        this.lastIntentMs = nowMs;
-      }
-
       // Cleared either way, so a standing session sends nothing at all and the next press reads as a change rather than as a
       // repeat the refresh window would have swallowed for up to a third of a second.
-      this.lastIntent = null;
+      this.emitIntent(source, null, this.changePhase(source, changedAtMs), nowMs);
       return;
     }
 
@@ -898,9 +980,156 @@ export class ClientApp {
       return;
     }
 
-    source.moveDir(intent.heading, intent.speedClass);
+    this.emitIntent(source, intent, this.changePhase(source, changedAtMs), nowMs);
+  }
+
+  /**
+   * Sends a gait change the instant the key moved, rather than on the frame that notices it.
+   *
+   * @param atMs The key event's own timestamp.
+   *
+   * @remarks
+   * <b>A frame of delay is a tick boundary one time in five, and that costs a whole tick of travel (A14b).</b> The phase
+   * tells the server which part of the tick the intent changed in, and the server splits THAT tick — so the command has to
+   * reach it before the tick ends. Sending from the frame loop meant a key in the last frame of a tick arrived after the
+   * boundary, the server split the following tick instead, and the gesture came out one step long or one step short:
+   * measured on loopback at 10 Hz, every transition past phase 0.8 was wrong by 0.498 m and nothing below it was wrong at
+   * all. Sending here cuts the window from a frame to the socket write.
+   *
+   * It also takes half a frame off the start latency, which A14 measures, and that is a side effect rather than the point.
+   *
+   * <b>The held set is already up to date.</b> `CameraInput` registers its own `keydown` on `window` in its constructor,
+   * which runs before this listener is added, and listeners on one target fire in registration order.
+   *
+   * <b>Gated more loosely than the frame loop.</b> That one also requires the avatar to have been LOCATED this frame,
+   * which is a frame-time fact this cannot see. The cost of the difference is an intent sent in the gap between a session
+   * gaining `selfNetId` and its avatar appearing in the view, which the server validates and refuses like any other.
+   */
+  private flushGaitNow(atMs: number): void {
+    const source = this.source;
+    if (source === null || !source.canPlay || source.selfNetId === 0 || useUi.getState().cameraMode !== 'eye') {
+      return;
+    }
+
+    const intent = movementIntent(this.input.heldKeys, this.eyeCamera.yaw, this.gait);
+    if (!gaitChanged(intent, this.lastIntent)) {
+      return;
+    }
+
+    // Declared once, here, and read by the frame loop for the predictor: both sides have to integrate from the SAME
+    // instant, and this is the only place that knows which one the server was told about.
+    const declared = this.declareChange(source, atMs);
+    this.declaredChangeAtMs = declared.atMs;
+    this.emitIntent(source, intent, declared.phase, atMs);
+  }
+
+  /**
+   * The instant the key handler told the server about, or `nowMs` for a change that came from somewhere else.
+   *
+   * @param nowMs This frame's timestamp.
+   * @returns The instant to integrate the change from.
+   *
+   * @remarks
+   * Consumed, because a declaration belongs to exactly one transition. The fallback covers a gait change with no key event
+   * behind it — the camera leaving eye mode, a session losing `canPlay` — where no phase was sent either.
+   */
+  private takeDeclaredChange(nowMs: number): number {
+    const declared = this.declaredChangeAtMs;
+    this.declaredChangeAtMs = Number.NaN;
+    return Number.isFinite(declared) ? declared : nowMs;
+  }
+
+  /** What the key handler told the server, for the frame loop to drive the predictor with. */
+  private declaredChangeAtMs = Number.NaN;
+
+  /**
+   * The instant this client will honour for a transition, and the phase that tells the server about it.
+   *
+   * @param source The live session, for its RTT.
+   * @param atMs When the key actually moved.
+   * @returns The instant to integrate from, and the wire phase in 255ths.
+   *
+   * @remarks
+   * <b>A phase names a tick, and a command that misses that tick costs a whole step.</b> The server splits the tick the
+   * phase belongs to; if the command arrives after that tick has ended it splits the next one instead, having already paid
+   * a full step of the old velocity — so the gesture comes out one step long or one step short. Measured on loopback at
+   * 10 Hz: with the send on the next frame every transition past phase 0.8 was wrong by 0.498 m; sending from the key
+   * handler moved that edge to 0.99, which is still one gesture in fourteen.
+   *
+   * <b>So the client declares a boundary it can still reach.</b> Inside the margin it gives up on the current tick, names
+   * the next boundary instead — phase 0, the whole of the next tick to the new velocity — and waits for it before
+   * integrating. The cost is the margin's worth of input lag on the small fraction of presses that land in it: 5 ms on
+   * loopback, which is a third of a frame and below what anyone can feel. The alternative is being exactly one step wrong,
+   * visibly, instead of a few milliseconds late, invisibly.
+   *
+   * <b>The margin is the round trip and not half of it.</b> What has to fit is the uplink plus however long the server
+   * takes to drain, and the floor is what loopback still needs: the measured dead zone there was about 4 ms with an RTT of
+   * half a millisecond, so the write and the drain are the term that does not scale with distance.
+   */
+  private declareChange(source: DataSource, atMs: number): { atMs: number; phase: number } {
+    const phase = this.clock.subTickPhase(atMs, source.rttMs / 2);
+    if (!Number.isFinite(phase)) {
+      // No grid yet: the server treats 0 as "the whole tick is mine", which is what it did before phases existed.
+      return { atMs, phase: 0 };
+    }
+
+    const toBoundaryMs = (1 - phase) * this.clock.tickPeriodMs;
+    if (toBoundaryMs < SEND_MARGIN_MS + source.rttMs) {
+      return { atMs: atMs + toBoundaryMs, phase: 0 };
+    }
+
+    return { atMs, phase: Math.round(phase * 255) };
+  }
+
+  /**
+   * Sends an intent — or the stop that ends one — and records it as what was last sent.
+   *
+   * @param source The live session.
+   * @param intent What to say, or `null` for "the keys are up", which owes a stop and then nothing.
+   * @param changePhase The sub-tick phase, in 255ths.
+   * @param atMs When this counts as having been sent, for the refresh window.
+   *
+   * @remarks
+   * One rule in one place, because there are now two callers — the key handler and the frame loop — and the half that is
+   * easy to get wrong is the `null` branch: the server aims at a destination a second of travel away, so a client that
+   * merely stopped talking would watch its character walk on for about five metres.
+   */
+  private emitIntent(source: DataSource, intent: MoveIntent | null, changePhase: number, atMs: number): void {
+    if (intent === null) {
+      const stop = stopAfter(this.lastIntent);
+      if (stop !== null) {
+        source.moveDir(stop.heading, stop.speedClass, changePhase);
+        this.lastIntentMs = atMs;
+      }
+
+      this.lastIntent = null;
+      return;
+    }
+
+    source.moveDir(intent.heading, intent.speedClass, changePhase);
     this.lastIntent = intent;
-    this.lastIntentMs = nowMs;
+    this.lastIntentMs = atMs;
+  }
+
+  /** The gait the PREDICTOR was last driven with, which is how a transition is still visible after the send took it. */
+  private predictedClass: number = SpeedClass.stop;
+
+  /**
+   * The wire's sub-tick phase for an intent that changed at `atMs`, in 255ths — `MoveDir.changePhase`.
+   *
+   * @param source The live session, for its RTT.
+   * @param atMs When the intent changed, or `NaN` for an intent that did not.
+   * @returns The phase, or 0 when there is nothing to measure against — which is what the server treats as "the whole
+   *   tick is mine", the behaviour it had before the phase existed.
+   *
+   * @remarks
+   * Half the RTT, because the clock's tick grid is anchored on the ARRIVAL of each tick's frame and therefore sits one
+   * downlink behind the server's own boundaries; uncorrected, every phase would be short by `delay / period` — nothing on
+   * loopback and a third of a step at 30 ms on a 100 ms tick. Half the round trip is the usual estimate of a one-way
+   * delay and the residual is the asymmetry between the two directions, which is a few milliseconds.
+   */
+  private changePhase(source: DataSource, atMs: number): number {
+    return Number.isFinite(atMs) ? this.declareChange(source, atMs).phase : 0;
   }
 
   /**
@@ -1204,6 +1433,7 @@ export class ClientApp {
 
     this.attacks.update(view);
     this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ);
+    this.sendViewRadius(ui.playerRadius);
     // `stats` builds a whole snapshot — objects, a template string, a pass over the byte window — so it is read four
     // times a second by `publishStats`, never once a frame. The radius the server is actually serving has its own cheap
     // accessor for exactly this reason.
@@ -1302,6 +1532,30 @@ export class ClientApp {
    * the eye is riding, which the store arranges on entering eye mode and nothing keeps true: turn following off and the eye
    * rides an NPC out of the served disc while the region stays where the map was left, so entities silently stop arriving.
    */
+  /**
+   * Asks the server for a wider sphere, when the slider has moved.
+   *
+   * <b>On CHANGE, not on a cadence, which is the opposite of {@link sendRegion}.</b> A region is a hull the server can
+   * clamp or reject and the client re-offers; a radius is a single number the server either grants until further notice
+   * or refuses, so re-sending an unchanged one is pure ingress. The command is coalesced latest-per-session, so a drag
+   * costs one command however many frames it spans.
+   *
+   * Null is "the server has not told us its range yet", not a radius: sending 0 would mean "back to the profile's own",
+   * which is a different statement and would fight a slider the person has already moved.
+   */
+  private sendViewRadius(radius: number | null): void {
+    const source = this.source;
+    if (source === null || radius === null || radius === this.sentViewRadius) {
+      return;
+    }
+
+    source.setViewRadius(radius);
+    this.sentViewRadius = radius;
+  }
+
+  /** The radius last asked for, so an unchanged slider sends nothing. */
+  private sentViewRadius: number | null = null;
+
   private sendRegion(now: number, radius: number, x: number, z: number): void {
     if (
       this.source === null ||
@@ -1494,6 +1748,19 @@ export class ClientApp {
       // The ACTIVE camera's, not the map's: in eye view the map camera is still smoothing along at its own altitude,
       // and reporting that read as "you are 1 474 m up" while standing in a street.
       altitude: this.activeAltitude,
+      gait: this.gait,
+      // What the server says that gait is worth. NaN before the owner block arrives, which the HUD shows as a dash
+      // rather than as a figure it made up.
+      gaitMps:
+        this.source === null
+          ? Number.NaN
+          : speedForClass(this.gait, {
+              walkMps: this.source.selfNumber('walkMps'),
+              runMps: this.source.selfNumber('runMps'),
+              burstMps: this.source.selfNumber('burstMps'),
+              speederMps: this.source.selfNumber('speederMps'),
+              speederFastMps: this.source.selfNumber('speederFastMps'),
+            }),
       groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
       terrainBakeMs: this.terrainBakeMs,
       terrainTriangles: this.profile.stats.triangles,

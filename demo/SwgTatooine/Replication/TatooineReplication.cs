@@ -75,13 +75,60 @@ public struct MoveDir
 
     /// <summary>See <see cref="SpeedClasses"/>. Anything higher is refused and counted.</summary>
     public byte SpeedClass;
+
+    /// <summary>
+    /// How far into the tick this intent CHANGED, in 255ths — the share of the boundary tick that still belongs to the velocity before it. 0 means "the
+    /// whole tick is mine", which is what a re-send of an unchanged intent says and what any client that does not measure it sends.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what makes the client's integration and the server's agree, and nothing else does.</b> A tick advances a player by one whole period of
+    /// whatever intent it held at the boundary, while a client that predicts moves on the key event. Both travel at the same speed, for different
+    /// DURATIONS: the two positions differ by <c>v x (startPhase - stopPhase)</c>, uniformly over a full tick of travel in either direction — 0.5 m at
+    /// 5 m/s and 10 Hz, mean 0.167 m, which is the back-step a player sees every time they let go of a key. With the phase the boundary tick is split
+    /// between the old velocity and the new one (<c>SteerTo</c>) and the two durations are equal exactly.
+    /// </para>
+    /// <para>
+    /// <b>It cannot be used to move faster than this server allows, which is why a client is trusted with it at all.</b> The split is a convex
+    /// combination of two velocities the server itself granted, so the step it produces is never longer than the longer of the two — a lying phase
+    /// redistributes one tick of travel and cannot manufacture any. That is a different thing from a client sending a SPEED, which is the speed hack.
+    /// </para>
+    /// <para>255ths rather than milliseconds, so it means the same thing at every <c>--hz</c> and costs one byte.</para>
+    /// </remarks>
+    public byte ChangePhase;
+}
+
+/// <summary>
+/// "Serve me this far." A player asking for a wider or narrower interest sphere than its profile's own.
+/// </summary>
+/// <remarks>
+/// <b>Metres, and the one place in this file where a client sends a magnitude rather than a class.</b> A speed class is a
+/// class because a speed from a client is the speed hack; a radius cannot be, because the whole point is a slider that
+/// chooses an arbitrary distance. What makes it safe is that it is not a speed or a position: the server declares the
+/// range its profile allows (<see cref="TatooineReplication.PlayerRadiusM"/>..<see cref="TatooineReplication.PlayerMaxRadiusM"/>),
+/// refuses anything outside it, and the engine sizes the session's window for the maximum at start-up — so the worst a
+/// client can do with this is ask for more of what it is already entitled to see, at its own bandwidth's expense.
+/// </remarks>
+public struct SetViewRadius
+{
+    /// <summary>The radius asked for, in metres. 0 returns the session to its profile's own.</summary>
+    public ushort RadiusM;
 }
 
 /// <summary>The speed classes a client may ask for, and what each is worth.</summary>
 /// <remarks>
+/// <para>
 /// <b>A class rather than a speed, because a speed from a client is the speed hack.</b> The server maps the class onto a figure the player is entitled to,
-/// and the mapping is the whole of the entitlement check. There is no mount state in this demo yet, so there is no class above <see cref="Run"/>: a client
-/// asking for one is refused rather than given 12 m/s, and the refusal is counted. When mounts exist, the class stays and the mapping learns about them.
+/// and the mapping is the whole of the entitlement check: a client says "speeder", never "24 m/s", so there is no number on the wire for it to inflate. A
+/// class this server does not grant is refused and counted rather than clamped, which is what makes an attempt visible instead of merely ineffective.
+/// </para>
+/// <para>
+/// <b>This server grants all of them to everyone, and that is a deliberate deviation from how SWG worked</b> (and from what this type said until the gait
+/// shortcuts were added: "there is no class above Run"). In SWG, Burst Run cost action from all three pools and sat on a five-minute cooldown, and a
+/// speeder needed a vehicle you called and mounted. None of that exists here — no action pools, no vehicle items, no mount state — so the ladder is
+/// offered directly as Shift+1..4 in the client. The ENTITLEMENT STRUCTURE is what is being kept: when a vehicle is a thing you own, the classes stay
+/// where they are and <see cref="TatooineReplication.SpeedFor"/> learns to ask whether this player owns one. Nothing above has to change.
+/// </para>
 /// </remarks>
 public static class SpeedClasses
 {
@@ -91,11 +138,20 @@ public static class SpeedClasses
     /// <summary>Half of <see cref="Run"/> — SWG had no separate walk figure worth quoting, so this is a fraction rather than a source.</summary>
     public const byte Walk = 1;
 
-    /// <summary>[CORE3] <c>TatooineData.PlayerRunSpeedMps</c>, the fastest anything on foot moves.</summary>
+    /// <summary>[WIKI] <c>TatooineData.PlayerRunSpeedMps</c> — 5 m/s, an unencumbered player on foot. Shift+1, and the default.</summary>
     public const byte Run = 2;
 
+    /// <summary>[CORE3] <c>TatooineData.PlayerBurstRunSpeedMps</c> — Burst Run's 1.822x, 9.11 m/s. Shift+2.</summary>
+    public const byte Burst = 3;
+
+    /// <summary>[WIKI] <c>TatooineData.PlayerMountSpeedMps</c> — a landspeeder, 12 m/s. Shift+3.</summary>
+    public const byte Speeder = 4;
+
+    /// <summary>Twice a speeder, 24 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
+    public const byte SpeederFast = 5;
+
     /// <summary>The first class this server does not grant.</summary>
-    public const byte Count = 3;
+    public const byte Count = 6;
 }
 
 /// <summary>
@@ -362,7 +418,35 @@ public static partial class TatooineReplication
     /// is a DISC rather than the world, and the exact figure only moves the constant. Tatooine's cells are 256 m, so a disc of this size spans a handful of
     /// them and the cluster index has something to reject.
     /// </remarks>
-    private const double PlayerRadiusM = 192d;
+    public const double PlayerRadiusM = 192d;
+
+    /// <summary>The widest a player may set its own sphere to, in metres (<c>SetViewRadius</c>).</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Five cells, because that is the most the engine's window bound allows and not because the number is a nice
+    /// one.</b> A sphere session's gather window is <c>2⌈R / c⌉ + 5</c> cells per axis and may be at most 15 in a flat
+    /// grid (<c>W² ≤ 2 809</c>, <c>ReplicationGrid.MaxWindowCells</c>), so <c>⌈R / c⌉ ≤ 5</c> — at
+    /// <see cref="ReplicationCellM"/>'s 256 m, <b>1 280 m</b>. Declaring more throws at <c>Start</c> with a message
+    /// naming the cell side it would need, which is the engine telling you to make this a deliberate decision rather
+    /// than a typo. Written as an expression so the two cannot drift.
+    /// </para>
+    /// <para>
+    /// <b>The ceiling is five of whatever <see cref="ReplicationCellM"/> is</b>, so it moved from 320 m to 1 280 m when
+    /// that cell went from 64 m to 256 m to match the spatial grid. <b>Measured, the wider ceiling is nearly free</b>
+    /// (<c>ReplicationWindowBench</c>, sweep F, 2026-10-14, same session served 192 m, only the declared maximum moving):
+    /// a 320 m ceiling is 81 window cells and 14.3 µs per tick of gather, 640 m is 121 cells and 14.5 µs, 1 280 m is 225
+    /// cells and 15.7 µs. The window's cells cost about 5 ns each; what costs is the cell SIZE, not how many.
+    /// </para>
+    /// <para>
+    /// <b>Declaring a max at all still has a price, paid by every human session.</b> <c>Sphere(..., max:)</c> sizes the
+    /// window at <c>Start</c> for the maximum, not for the current radius — 15 cells per axis instead of the 9 that
+    /// 192 m needs at this cell, so 225 window cells instead of 81, which the figures above price at 1.4 µs per tick.
+    /// It lands on <see cref="HumanProfile"/> and <see cref="SpectateProfile"/> only, never on
+    /// <see cref="PlayerProfile"/>, which is the one the demo's CPU numbers are taken on: a bot renders nothing and has
+    /// no slider.
+    /// </para>
+    /// </remarks>
+    public static double PlayerMaxRadiusM => ReplicationCellM * 5d;
 
     /// <summary>
     /// <c>ACKS</c> reason: a possessed player's session asked to look at another realm.
@@ -375,6 +459,17 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: the realm asked for is not registered — never was, or is a dungeon nobody is inside.</summary>
     public const byte NoSuchRealm = AckReasons.FirstApplicationReason + 1;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="SetViewRadius"/> outside the range this profile allows.
+    /// </summary>
+    /// <remarks>
+    /// Refused and told, never clamped — the same reasoning as a speed class this server does not grant. A clamp would
+    /// let a slider sit at 2 km while the session was served 320 m, with the client drawing a near-radius ring at a
+    /// figure nothing honours and no way to find out. The client reads the range from <c>/typhon/demo.json</c>, so a
+    /// refusal means the two disagree about the server, which is worth hearing about.
+    /// </remarks>
+    public const byte ViewRadiusRefused = AckReasons.FirstApplicationReason + 2;
 
     /// <summary>
     /// The reason a <see cref="ViewRealm"/> naming an unviewable realm is refused: <see cref="NoSuchRealm"/>, under the name its own callers read.
@@ -406,8 +501,39 @@ public static partial class TatooineReplication
     /// <summary>The realm kind of space (Realms G3): a deep realm at its own cell.</summary>
     public const string SpaceKind = "space";
 
-    /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
-    public const double ReplicationCellM = PlayerRadiusM / 3d;
+    /// <summary>
+    /// The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): the planet's own spatial cell, set from
+    /// <c>SimConfig.ResolveCellSize</c> before the realms are registered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A deliberate deviation from the engine's documented rule of thumb</b> (09 § 4: <c>c ≈ R′/3</c> of the profile with the most sessions, which would
+    /// be 64 m here), <b>because a replication cell smaller than the SPATIAL cell is paid for on every delivery.</b> Delivering a replication cell queries
+    /// the spatial index over that cell's box, so when four replication cells sit inside one spatial cell, that spatial cell is opened four times to answer
+    /// questions about a quarter of itself each.
+    /// </para>
+    /// <para>
+    /// Measured (<c>ReplicationWindowBench</c>, sweep E, 2026-10-14, 7950X, Release, two runs each in its own process, this demo's own geometry — a session
+    /// served 192 m with a 320 m ceiling, 113 entities held, 1.18 records per tick, identical in every row):
+    /// </para>
+    /// <list type="table">
+    /// <item><term>64 m (4:1)</term><description>33.4 µs per tick of gather</description></item>
+    /// <item><term>128 m (2:1)</term><description>20.8 µs</description></item>
+    /// <item><term>192 m (1.33:1)</term><description>16.1 µs</description></item>
+    /// <item><term>256 m (1:1)</term><description>13.8 µs</description></item>
+    /// <item><term>320 m (0.8:1)</term><description>14.2 µs — coarser than the spatial cell stops helping</description></item>
+    /// </list>
+    /// <para>
+    /// So the rule is <b>match the spatial cell</b>, not "as coarse as possible": past 1:1 one query straddles several spatial cells and the curve turns
+    /// back up. The window's own cell count is nearly free by comparison — 5 ns per cell per tick, measured on an empty world — which is why the wider
+    /// ceiling this buys (<see cref="PlayerMaxRadiusM"/>, five cells) costs 1.4 µs rather than the 2.4x the cell side itself is worth.
+    /// </para>
+    /// <para>
+    /// <b>Not a const, because the spatial cell is not one:</b> <c>SimConfig.ResolveCellSize</c> scales with <c>--content-scale</c> and is overridden by
+    /// <c>--cell</c>, which the sweeps move. Following it keeps the ratio at 1:1 in every configuration instead of only the default one.
+    /// </para>
+    /// </remarks>
+    public static double ReplicationCellM = 256d;
 
     /// <summary>The teleport threshold, in metres per second: the fastest anything on Tatooine moves, plus headroom.</summary>
     /// <remarks>
@@ -416,14 +542,27 @@ public static partial class TatooineReplication
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
     /// </para>
     /// <para>
-    /// <b>The 5 % headroom over <c>PlayerMountSpeedMps</c> (12 m/s) is not padding, and declaring the true maximum here is broken.</b> The engine's test is
+    /// <b>The 5 % headroom over the fastest gait is not padding, and declaring the true maximum here is broken.</b> The engine's test is
     /// <c>step² &gt; (TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions, with no margin — so an entity travelling at exactly the declared
     /// maximum sits on the boundary and the ~1 mm position quantum tips it over on about half its ticks. Every tip is reported to clients as a teleport,
     /// which forbids interpolation, so a mounted player stood still for 112 frames of 180 and then jumped at 86 m/s. Measured in the browser client, which is
-    /// how it was found. At 12.6 every mover is smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it lives here.
+    /// how it was found. At 5 % over the maximum every mover was smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it
+    /// lives here.
+    /// </para>
+    /// <para>
+    /// <b>It is COMPUTED from the ladder's top, and that is the whole point of the expression.</b> It was 12.6, a hand-written 5 % over the mount's 12 — so
+    /// the day a gait went past 12 m/s, every segment of a player using it would have read as a teleport and the symptom would have been the stutter above,
+    /// in a part of the code that says nothing about speeds. Shift+4 doubled the top gait, and this followed by arithmetic instead of by remembering.
+    /// </para>
+    /// <para>
+    /// <b>What it costs is real and is the price of the fastest gait.</b> The threshold sizes the velocity codec
+    /// (<c>ProjectionCompiler.VelocityCodec</c>: codes = maxSpeed × tickPeriod ÷ unit, then the next width up the ladder) and the teleport test's
+    /// sensitivity. Doubling it doubles the codes a velocity component may need, which can cost a width step for EVERY moving entity in the world, and
+    /// halves how sharp a jump has to be before the engine calls it a teleport rather than motion. A demo that wants to cross 16 km quickly pays that; a
+    /// server that wanted the detector tight would cap the ladder instead.
     /// </para>
     /// </remarks>
-    internal const double MaxSpeedMps = 12.6;
+    internal const double MaxSpeedMps = TatooineData.PlayerSpeederFastSpeedMps * 1.05;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -974,7 +1113,7 @@ public static partial class TatooineReplication
         subs.Profile(SpectateProfile, p =>
         {
             p.Detection(detection)
-                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
@@ -994,7 +1133,7 @@ public static partial class TatooineReplication
         subs.Profile(HumanProfile, p =>
         {
             p.Detection(detection)
-                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM, max: PlayerMaxRadiusM)
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
@@ -1058,11 +1197,26 @@ public static partial class TatooineReplication
             // system's refusal counter unreachable by any client — so the code claimed to count something it never could.
             .Precheck(static (in m) => float.IsFinite(m.Heading))
             .Field(m => m.Heading, Codec.F16, "heading")
-            .Field(m => m.SpeedClass, Codec.U8, "speedClass"));
+            .Field(m => m.SpeedClass, Codec.U8, "speedClass")
+            .Field(m => m.ChangePhase, Codec.U8, "changePhase"));
         subs.Command<SetTarget>(c => c
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(t => t.NetId, Codec.VarUInt, "netId"));
+
+        // How far this session wants to be served. Coalesced latest-per-session for the same reason MoveDir is: dragging a
+        // slider produces a stream of values of which only the last is wanted, and coalescing is what makes a drag cost one
+        // command instead of sixty. The rate is SetTarget's rather than MoveDir's — a radius is a decision, not a continuous
+        // state, and a client changing it four times a second is already more than a person can mean.
+        //
+        // Metres, not a class, and the pre-check is finiteness only for MoveDir's reason: the range this server allows is
+        // policy that lives with the profile declaration, and checking it on the transport thread would make the system's
+        // refusal counter unreachable by any client.
+        subs.Command<SetViewRadius>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(v => v.RadiusM, Codec.VarUInt, "radiusM"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -1348,6 +1502,35 @@ public static partial class TatooineReplication
             {
                 StopSpectating(subs, command.Session, wanted);
             }
+        }
+
+        // A7: how far a session asks to be served. A player's control, unlike ViewRealm — a human watching its own avatar is the one who wants a wider view,
+        // and the engine's SetRadius is built for exactly this ("a player boarding an aircraft").
+        //
+        // <b>Validated here and not by the engine's own throw, because this runs on the tick thread.</b> `SetRadius` raises
+        // ArgumentOutOfRangeException for a radius outside the profile's range, and a throw out of a system is not a refusal — it is a dead tick. So the range
+        // is tested first and a bad ask is refused with a reason the client can show.
+        foreach (var command in subs.Commands<SetViewRadius>())
+        {
+            var asked = (double)command.Value.RadiusM;
+
+            // 0 is "back to the profile's own", which the engine spells the same way. Anything else must land inside the declared range; the client is told
+            // both ends in /typhon/demo.json, so an ask outside it is a client and a server that disagree about which server this is.
+            if (asked != 0d && (asked < PlayerRadiusM || asked > PlayerMaxRadiusM))
+            {
+                subs.Reject(command, ViewRadiusRefused);
+                System.Threading.Interlocked.Increment(ref _radiusRefused);
+                continue;
+            }
+
+            // The session's own profile must be a Sphere, which a player's is and a god camera's is not — the role filter on the command already keeps
+            // spectators out, and this is the second half of that: a session whose profile has not been applied yet would make SetRadius throw.
+            if (!subs.SetRadius(command.Session, asked))
+            {
+                continue;   // closing or gone; nothing to answer to
+            }
+
+            System.Threading.Interlocked.Increment(ref _radiusApplied);
         }
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
@@ -1965,7 +2148,10 @@ public static partial class TatooineReplication
             move.DestX = Math.Clamp(command.Value.X, -half, half);
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
-            SteerTo(ref move, ref player, subs);
+
+            // No phase: a click names a destination, and nothing about WHEN the pointer went down changes where the server is asked to walk to. The split
+            // exists for a held key, whose duration is the whole of what it means.
+            SteerTo(ref move, ref player, subs, 0f, tick.TickNumber);
             player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
@@ -1991,7 +2177,10 @@ public static partial class TatooineReplication
             var reach = MathF.Max(speed, 1f);
             move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
             move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
-            SteerTo(ref move, ref player, subs);
+
+            // A14b. Clamped rather than refused: a phase is a measurement of the client's own clock against a grid it estimates, so a nonsensical one is a
+            // bad estimate and not a protocol violation — and 255ths cannot leave the range anyway. See MoveDir.ChangePhase for why it is safe to trust.
+            SteerTo(ref move, ref player, subs, command.Value.ChangePhase / 255f, tick.TickNumber);
             player.Set(Player.Move, move);
             System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
@@ -2098,17 +2287,44 @@ public static partial class TatooineReplication
     /// <param name="move">The player's motion, already carrying the destination and the speed.</param>
     /// <param name="player">The entity.</param>
     /// <param name="subs">This tick's replication surface, for the push mark.</param>
+    /// <param name="changePhase">
+    /// The share of this tick that still belongs to the velocity being replaced, in <c>[0, 1]</c> — <see cref="MoveDir.ChangePhase"/>. 0 gives the whole
+    /// tick to the new velocity, which is what every intent did before A14b.
+    /// </param>
+    /// <param name="tick">This tick's number, which stamps the bias so the move phase can tell it from a stale one.</param>
     /// <remarks>
+    /// <para>
     /// The same <c>Steer</c> the simulation uses, through the same <c>PlayerMove</c> integration: an intent is a destination and nothing else, and that is
     /// the whole of why a client cannot move faster than the server allows.
+    /// </para>
+    /// <para>
+    /// <b>A14b: the tick an intent changes in is SPLIT, and the share owed to the old velocity travels as a one-tick bias rather than as a velocity.</b>
+    /// Scaling the velocity itself would be wrong for every tick after this one: nothing re-steers a player between commands — a held key re-sends only
+    /// every <c>REFRESH_MS</c>, and a stop is sent exactly once — so a scaled velocity would persist as a speed error for a third of a second, or for
+    /// ever. The bias is stamped with the tick it is owed for and never cleared: the move phase applies it when the stamp matches and ignores it
+    /// afterwards, which costs one comparison and keeps <c>PlayerMove</c> a reader of <c>PlayerMotion</c> rather than a third writer of it.
+    /// </para>
     /// </remarks>
-    private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs)
+    private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs, float changePhase, long tick)
     {
         var place = player.Read(Player.Bounds);
+
+        // Captured before Steer overwrites them: this is the velocity the player held for the first `changePhase` of this tick.
+        var wasX = move.VelX;
+        var wasZ = move.VelZ;
 
         // The simulation's own integration, not a copy of it: one function, so "an intent cannot move a player faster than the server does" is a property of
         // the code rather than of two implementations happening to agree.
         var moving = SimBridge.Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTickForIntents, place.X, place.Z, move.DestX, move.DestZ);
+
+        // The velocity carries the WHOLE tick, so the bias is what the split owes on top of it: `was x p + now x (1 - p)` less `now`.
+        var phase = Math.Clamp(changePhase, 0f, 1f);
+        if (phase > 0f)
+        {
+            move.BiasX = (wasX - move.VelX) * phase;
+            move.BiasZ = (wasZ - move.VelZ) * phase;
+            move.BiasTick = tick;
+        }
 
         var state = player.Read(Player.State);
 
@@ -2156,8 +2372,23 @@ public static partial class TatooineReplication
         SpeedClasses.Stop => 0f,
         SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f,
         SpeedClasses.Run => TatooineData.PlayerRunSpeedMps,
+        SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps,
+        SpeedClasses.Speeder => TatooineData.PlayerMountSpeedMps,
+        SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps,
         _ => 0f,
     };
+
+    /// <summary>How many <see cref="SetViewRadius"/> asks were applied, and how many were refused as out of range.</summary>
+    /// <remarks>
+    /// The refusal is the number that says whether a client and this server disagree about the range — the same role the speed class's refusal count plays.
+    /// Both are reset by <see cref="ResetIntentAccounting"/>, so one check's numbers are its own.
+    /// </remarks>
+    public static (long Applied, long Refused) ViewRadiusAsks =>
+        (System.Threading.Interlocked.Read(ref _radiusApplied), System.Threading.Interlocked.Read(ref _radiusRefused));
+
+    private static long _radiusApplied;
+
+    private static long _radiusRefused;
 
     /// <summary>Clears the intent counters, so one check's refusals do not decide the next one's.</summary>
     /// <remarks>Called from a <c>SetUp</c>, for the reason <see cref="ResetSessionAccounting"/> is. Never from the demo.</remarks>
@@ -2168,6 +2399,8 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _intentsUnowned, 0);
         System.Threading.Interlocked.Exchange(ref _intentsRefusedSpeed, 0);
         System.Threading.Interlocked.Exchange(ref _targetsRefused, 0);
+        System.Threading.Interlocked.Exchange(ref _radiusApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _radiusRefused, 0);
         System.Threading.Interlocked.Exchange(ref _targetsSet, 0);
         System.Threading.Interlocked.Exchange(ref _possessions, 0);
         System.Threading.Interlocked.Exchange(ref _releases, 0);

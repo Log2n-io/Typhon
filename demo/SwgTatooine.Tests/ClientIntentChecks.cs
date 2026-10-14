@@ -102,6 +102,14 @@ public sealed class ClientIntentChecks
             return (place.X, place.Z, move.DestX, move.DestZ, move.VelX, move.VelZ, state.Activity, owner.Target);
         }
 
+        /// <summary>The one-tick split the intent path last left for the move phase (A14b), read outside the tick.</summary>
+        public (float X, float Z, long Tick) ReadBias()
+        {
+            using var tx = Sim.Dbe.CreateQuickTransaction();
+            var move = tx.For<Player>().Open(Entity).Read(Player.Move);
+            return (move.BiasX, move.BiasZ, move.BiasTick);
+        }
+
         /// <summary>Unhooks the harness from the keepalive before disposing the world, so no later wait can tick a disposed runtime.</summary>
         public void Dispose()
         {
@@ -203,6 +211,152 @@ public sealed class ClientIntentChecks
         });
     }
 
+    // ── A14b: the tick an intent changes in is split ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A run that starts half way into a tick is paid for half of that tick, not all of it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The claim is that both sides integrate the same DURATION, and this is the half of it the server owns.</b> A tick advances a player by one whole
+    /// period of whatever intent it held at the boundary, while a client that predicts moves on the key event — so without this the two differ by
+    /// <c>v x (startPhase - stopPhase)</c>, uniformly over a full tick of travel in either direction, which is the back-step a player sees on every
+    /// release. Measured before the fix at mean 0.164 m over twelve randomised stops at 10 Hz, against 0.167 m predicted for that distribution.
+    /// </para>
+    /// <para>
+    /// Asserted on the bias rather than on a distance, because the bias is state that persists: a position would have to be sampled between two ticks of a
+    /// runtime pacing itself on another thread, which is a race, and the existing cases above show what that costs in tolerance.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ARunThatStartsMidTickIsPaidForTheRestOfThatTick()
+    {
+        using var world = new Possessed(Config());
+
+        // From rest, and asserted rather than assumed: a pooled player arrives with whatever velocity its previous life left, and the whole point of the
+        // figure below is that it is the share of the NEW velocity that the old one (zero) displaces.
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the stop to be applied");
+        Assert.That(world.Read().VelX, Is.EqualTo(0f), "precondition: the player is standing still");
+
+        // 128/255 = 0.502: a key pressed a shade past the middle of a tick.
+        const byte Phase = 128;
+        const float Fraction = Phase / 255f;
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run, Phase));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the run to be applied");
+
+        var after = world.Read();
+        var bias = world.ReadBias();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.VelX, Is.EqualTo(StepM).Within(0.001f), "the velocity is the whole tick's, which is what the bias is subtracted from");
+            Assert.That(bias.X, Is.EqualTo(-StepM * Fraction).Within(0.001f), $"the first tick should move {1f - Fraction:F3} of a step, not all of it");
+            Assert.That(bias.Z, Is.EqualTo(0f).Within(0.001f));
+            Assert.That(bias.Tick, Is.EqualTo(world.Sim.Runtime.CurrentTickNumber).Within(2L), "the bias is owed for the tick that applied the intent");
+        });
+    }
+
+    /// <summary>
+    /// A stop that arrives part way into a tick still pays the run for the part before it — which is the half a player can see.
+    /// </summary>
+    /// <remarks>
+    /// The commonest case in the game and the one the move phase has to go out of its way for: the new velocity is exactly zero, so a move phase that tested
+    /// "standing still" before reading the bias would discard the last fraction of every run anyone ever makes.
+    /// </remarks>
+    [TestCase((byte)0, TestName = "AStopOnTheBoundaryPaysTheRunNothingMore")]
+    [TestCase((byte)64, TestName = "AStopAQuarterIntoATickPaysTheRunThatQuarter")]
+    [TestCase((byte)255, TestName = "AStopAtTheEndOfATickPaysTheRunTheWholeTick")]
+    public void AStopPaysTheRunForTheShareOfTheTickItHeld(byte phase)
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the run to be applied");
+        var running = world.Read();
+        Assert.That(running.VelX, Is.EqualTo(StepM).Within(0.001f), "precondition: the player is running along +X");
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop, phase));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the stop to be applied");
+
+        var after = world.Read();
+        var bias = world.ReadBias();
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.VelX, Is.EqualTo(0f), "the player is stopped from the next tick on, whatever the phase");
+            Assert.That(bias.X, Is.EqualTo(running.VelX * (phase / 255f)).Within(0.001f));
+        });
+    }
+
+    /// <summary>
+    /// A bias is paid ONCE, in metres, on the tick it is stamped for — and a standing player is paid it too.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The move-phase half, driven by writing the split directly rather than by sending an intent, because what is under test is the stamp: the bias is
+    /// never cleared — clearing it would make <c>PlayerMove</c> a third writer of <c>PlayerMotion</c> and need an edge in the DAG to say which writer wins —
+    /// so "applied once" is a property of comparing the stamp, and a stamp that compared wrongly would move a stopped player for ever.
+    /// </para>
+    /// <para>
+    /// The tolerance is a half and a half: it separates not-paid (0) from paid-once from paid-twice, which is the whole claim, and leaves room for terrain
+    /// rung (c), which can shorten a step that climbs and never lengthen one.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ABiasIsPaidOnceInMetresAndEvenToAStandingPlayer()
+    {
+        using var world = new Possessed(Config());
+        const float OwedX = 0.3f;
+        const float OwedZ = -0.2f;
+        var expected = MathF.Sqrt((OwedX * OwedX) + (OwedZ * OwedZ));
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the stop to be applied");
+        var before = world.Read();
+
+        // Three ticks of slack, so the stamp is still in the future by the time this commits.
+        long owedFor;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var player = tx.OpenMut(world.Entity);
+            var move = player.Read(Player.Move);
+            move.VelX = 0f;
+            move.VelZ = 0f;
+            move.BiasX = OwedX;
+            move.BiasZ = OwedZ;
+            owedFor = world.Sim.Runtime.CurrentTickNumber + 3;
+            move.BiasTick = owedFor;
+            player.Set(Player.Move, move);
+        }
+
+        world.Harness.Ticks(8);
+
+        var after = world.Read();
+        var moved = MathF.Sqrt(((after.X - before.X) * (after.X - before.X)) + ((after.Z - before.Z) * (after.Z - before.Z)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(moved, Is.GreaterThan(expected * 0.5f), "a standing player was not paid its bias at all — the standing-still test ran first");
+            Assert.That(moved, Is.LessThan(expected * 1.5f), $"moved {moved:F3} m over eight ticks for a {expected:F3} m bias — the stamp is not being compared");
+            Assert.That(after.VelX, Is.EqualTo(0f), "the bias is not a velocity and must not become one");
+        });
+    }
+
+    /// <summary>A phase of zero is the behaviour the server had before A14b: no bias, the whole tick to the new velocity.</summary>
+    /// <remarks>
+    /// Worth its own case because every intent in the game sends 0 except the two frames a gesture begins and ends on — a bot, a click, a re-send of a held
+    /// key — so this is the path almost all of the traffic takes, and it has to be exactly the old one.
+    /// </remarks>
+    [Test]
+    public void APhaseOfZeroLeavesNoBiasAtAll()
+    {
+        using var world = new Possessed(Config());
+        var stale = world.ReadBias();
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(1f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the run to be applied");
+
+        Assert.That(world.ReadBias(), Is.EqualTo(stale), "a phase of zero wrote a bias, so the commonest intent in the game no longer takes the old path");
+    }
+
     // ── Speed classes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A heading and a run class walk the player at the run speed and no faster.</summary>
@@ -242,34 +396,82 @@ public sealed class ClientIntentChecks
     {
         using var world = new Possessed(Config());
 
-        float walk;
-        float run;
+        // Every gait the client can select, in the order its shortcut does: Shift+1..4 after the walk.
+        var classes = new[] { SpeedClasses.Walk, SpeedClasses.Run, SpeedClasses.Burst, SpeedClasses.Speeder, SpeedClasses.SpeederFast };
+
+        float[] replicated;
         using (var tx = world.Sim.Dbe.CreateQuickTransaction())
         {
             var move = tx.For<Player>().Open(world.Entity).Read(Player.Move);
-            walk = move.WalkMps;
-            run = move.RunMps;
+            replicated = [move.WalkMps, move.RunMps, move.BurstMps, move.SpeederMps, move.SpeederFastMps];
         }
 
-        // What the command path actually grants, observed rather than asserted against a constant: a walk intent, then a run
-        // intent, each read back from the velocity the server set.
-        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Walk));
-        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the walk to be applied");
-        world.Harness.Ticks(1);
-        var walkPerTick = MathF.Abs(world.Read().VelX);
-
-        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
-        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the run to be applied");
-        world.Harness.Ticks(1);
-        var runPerTick = MathF.Abs(world.Read().VelX);
+        // What the command path actually grants, observed rather than asserted against a constant: one intent per gait, each
+        // read back from the velocity the server set.
+        var granted = new float[classes.Length];
+        for (var i = 0; i < classes.Length; i++)
+        {
+            var applied = i + 1;
+            world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, classes[i]));
+            SessionHarness.Until(() => TatooineReplication.Intents.Applied >= applied, $"intent {applied} to be applied");
+            world.Harness.Ticks(1);
+            granted[i] = MathF.Abs(world.Read().VelX);
+        }
 
         Assert.Multiple(() =>
         {
-            Assert.That(run, Is.GreaterThan(0f), "an avatar with no run speed leaves the client nothing to predict with");
-            Assert.That(walk, Is.GreaterThan(0f).And.LessThan(run), "a walk is slower than a run and not zero");
-            // Steer sets metres per TICK, so the stat is the per-tick step times the rate.
-            Assert.That(walkPerTick * TickRateHz, Is.EqualTo(walk).Within(0.01f), "the walk stat is not what a walk intent is granted");
-            Assert.That(runPerTick * TickRateHz, Is.EqualTo(run).Within(0.01f), "the run stat is not what a run intent is granted");
+            for (var i = 0; i < classes.Length; i++)
+            {
+                Assert.That(replicated[i], Is.GreaterThan(0f), $"class {classes[i]} has no replicated speed, so the client has nothing to predict with");
+
+                // Steer sets metres per TICK, so the stat is the per-tick step times the rate.
+                Assert.That(granted[i] * TickRateHz, Is.EqualTo(replicated[i]).Within(0.01f),
+                    $"the stat for class {classes[i]} is not what an intent at that class is granted");
+
+                // Strictly faster as the ladder rises, which is the only promise the four shortcuts make to the person
+                // pressing them. A pair that collapsed — a copy-paste in SpeedFor, or two classes mapped to one constant —
+                // would leave Shift+3 and Shift+4 indistinguishable and nothing else would notice.
+                if (i > 0)
+                {
+                    Assert.That(replicated[i], Is.GreaterThan(replicated[i - 1]), $"class {classes[i]} is not faster than {classes[i - 1]}");
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// The teleport threshold is above the fastest gait, with the margin the engine's test needs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the invariant that broke once and cost a session of debugging in the browser.</b> The engine compares
+    /// <c>step²</c> against <c>(TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions with no margin, so an entity at exactly the declared maximum
+    /// tips over the boundary on about half its ticks — and each tip is reported as a teleport, which forbids interpolation. The symptom is not an error: a
+    /// player stands still for most of a second and then jumps. It was found by watching a mounted player stutter, not by a test.
+    /// </para>
+    /// <para>
+    /// <b>Asserted here because the two numbers live apart and only arithmetic keeps them together.</b> The threshold is a replication constant and the gaits
+    /// are game data; adding a gait is an edit to the second that silently invalidates the first. <c>MaxSpeedMps</c> is computed from the ladder's top for
+    /// that reason, and this fails if anyone replaces it with a figure again.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TheTeleportThresholdClearsTheFastestGait()
+    {
+        var fastest = 0f;
+        for (byte speedClass = 0; speedClass < SpeedClasses.Count; speedClass++)
+        {
+            fastest = MathF.Max(fastest, TatooineReplication.SpeedFor(speedClass));
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(fastest, Is.EqualTo(TatooineData.PlayerSpeederFastSpeedMps),
+                "the fastest granted class is not the one the threshold is computed from");
+            Assert.That(TatooineReplication.MaxSpeedMps, Is.GreaterThan(fastest),
+                "an entity at the declared maximum reads as a teleport on about half its ticks");
+            Assert.That(TatooineReplication.MaxSpeedMps, Is.EqualTo(fastest * 1.05).Within(0.001),
+                "the margin is 5 %: more wastes a velocity width on every moving entity, less is the stutter");
         });
     }
 
@@ -301,8 +503,10 @@ public sealed class ClientIntentChecks
     /// </summary>
     /// <remarks>
     /// <para>
-    /// There is no mount state in the demo, so the run speed is the ceiling. <b>Refused rather than clamped</b> because a clamp lets a client ask for a mount's
-    /// 12 m/s on every tick and never learn it is not getting it, and the refusal count is the only number that says whether anything is trying.
+    /// <b>Refused rather than clamped</b> because a clamp lets a client ask for whatever it likes on every tick and never learn it is not getting it, and the
+    /// refusal count is the only number that says whether anything is trying. The ceiling is the ladder's top (<c>SpeedClasses.Count</c>) and not the run
+    /// speed any more — the four gait shortcuts grant up to 24 m/s — so what this case sends is a class far past the end of it, which is what a client
+    /// inventing a speed would look like.
     /// </para>
     /// <para>
     /// <b>The counter is asserted, and it took a fix to the wire declaration to make that possible.</b> The class bound was in the command's

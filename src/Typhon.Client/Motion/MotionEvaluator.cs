@@ -19,7 +19,10 @@ namespace Typhon.Client;
 /// <para>
 /// <b>Per model.</b>
 /// <list type="bullet">
-/// <item><description><c>linear</c>: <c>p(τ) = p0 + v · (τ − t0)</c>, extrapolated past the newest segment and backwards before the oldest.</description></item>
+/// <item><description><c>linear</c>: <c>p(τ) = p0 + v · (τ − t0)</c>, extrapolated past the newest segment and backwards before the oldest — except
+/// for the LAST TICK before a newer origin of the same epoch, which crosses to it. A segment's velocity is fitted over the run that ENDED at <c>t0</c>, so it
+/// describes travel already taken and predicts the next tick only while the motion continues; the tick a newer segment was emitted FOR is the one tick that
+/// velocity is known to be wrong about, since that tick's error is what triggered the emit. See <c>Evaluate</c>.</description></item>
 /// <item><description><c>none</c>: segments are position samples. Between a sample and the next one of the same epoch the position is interpolated and the
 /// velocity is the one between them; otherwise the sample holds, with zero velocity.</description></item>
 /// <item><description><c>static</c>: the position entered with, zero velocity.</description></item>
@@ -143,8 +146,48 @@ public static class MotionEvaluator
         var t0 = ring.T0(slot, entry);
         var dt = (renderTick - t0) + frac;
 
+        // Between two held segments of one epoch the newer origin is authoritative, and both models reach for it — <c>none</c> over the whole gap, because
+        // it has no velocity to offer, and <c>linear</c> over the LAST TICK of it only.
+        //
+        // A linear segment's velocity is fitted over the run that ENDED at t0, so it describes travel already taken and predicts the next tick only while
+        // the motion continues; the tick a newer segment was emitted FOR is by definition the one where it stopped doing so, since that tick's error is
+        // what triggered the emit. Drawing the old velocity through it put a player's stop 220 mm past where it had stopped on a 10 Hz server, and 336 mm
+        // past it at the end of an eight-tick gap, each followed by a snap back (design/SwgTatooine/15-client-prediction.md § A14b). Blending over the
+        // whole gap instead removes the bound the emit rule provides — 0.29 m against a 0.05 m tolerance on a path turning every three ticks.
+        //
+        // <b>Behind the <c>entry != Head</c> test, and that is a per-entity cost on the batch path.</b> A steady mover holds one segment for tens of ticks
+        // and is its own head, so it reads no neighbouring entry at all; only an entity mid-refit pays the tick and the epoch.
+        var crossing = false;
+        var span = 0L;
+        var next = 0;
+        if (entry != ring.Head(slot))
+        {
+            next = entry == ring.Depth - 1 ? 0 : entry + 1;
+
+            // Widened before subtracting: both ticks are u32, so their unsigned difference WRAPS, and <c>span > 0</c> would then be true for a newer entry
+            // whose t0 is below this one's — which is reachable across the u32 tick wrap and which the pair of them says nothing about.
+            span = (long)ring.T0(slot, next) - t0;
+            crossing = span > 0 && dt >= 0 && ring.Epoch(slot, next) == ring.Epoch(slot, entry);
+        }
+
         if (extrapolating)
         {
+            if (crossing && dt >= span - 1)
+            {
+                // Extrapolated to t1 − 1, then across the final tick to the origin the server reported for t1.
+                var u = dt - (span - 1);
+                var onto = ring.Position(slot, next);
+                for (var a = 0; a < dims; a++)
+                {
+                    var from = segment[a] + (segment[dims + a] * (span - 1));
+                    var delta = onto[a] - from;
+                    destination[a] = from + (delta * (u > 1 ? 1 : u));
+                    destination[dims + a] = delta;
+                }
+
+                return;
+            }
+
             for (var a = 0; a < dims; a++)
             {
                 var v = segment[dims + a];
@@ -155,12 +198,8 @@ public static class MotionEvaluator
             return;
         }
 
-        // Samples: interpolate toward the next newer sample of the same epoch, when one is held and render time has left t0.
-        var next = entry == ring.Depth - 1 ? 0 : entry + 1;
-        var t1 = ring.T0(slot, next);
-        if (entry != ring.Head(slot) && t1 > t0 && dt >= 0 && ring.Epoch(slot, next) == ring.Epoch(slot, entry))
+        if (crossing)
         {
-            var span = t1 - t0;
             var u = dt < span ? dt / span : 1;
             var to = ring.Position(slot, next);
             for (var a = 0; a < dims; a++)

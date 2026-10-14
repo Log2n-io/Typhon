@@ -12,6 +12,12 @@ import { Predictor, speedForClass } from '../src/app/predictor';
 const WALK = 2.5;
 const RUN = 5;
 
+/** The whole granted ladder, as a session's owner block carries it. The figures are the server's; these are its. */
+const GRANTED = { walkMps: WALK, runMps: RUN, burstMps: 9.11, speederMps: 12, speederFastMps: 24 };
+
+/** Before the owner block arrives, every one of them is NaN. */
+const UNKNOWN = { walkMps: NaN, runMps: NaN, burstMps: NaN, speederMps: NaN, speederFastMps: NaN };
+
 /** A frame at 60 Hz. */
 const FRAME_MS = 16;
 const FRAME_S = FRAME_MS / 1000;
@@ -51,11 +57,125 @@ function run(options: {
   return predictor;
 }
 
+/**
+ * The client's half of A14b: a frame is split at the instant the key moved, so the integral runs from the key and not from
+ * the frame that noticed it.
+ *
+ * The server does the same to the tick its command lands in, and the two together are what make "the same duration both
+ * sides" true rather than true on average. Driven here over a 60 fps frame train with the authority fed from the
+ * predictor's own path, so the corrector never acts and what is left is the integration.
+ */
+describe('the frame an intent changes in', () => {
+  /** Runs a gesture from `downMs` to `upMs` on a fixed 60 fps train and returns how far the pure path travelled. */
+  const gesture = (downMs: number, upMs: number): number => {
+    const predictor = new Predictor();
+    let now = 1000;
+    predictor.start(now, 0, 0);
+
+    for (let i = 0; i < 120; i++) {
+      now += FRAME_MS;
+      const down = now - FRAME_MS < downMs && downMs <= now;
+      const up = now - FRAME_MS < upMs && upMs <= now;
+      if (now >= upMs) {
+        predictor.clearIntent(up ? upMs : NaN);
+      } else if (now >= downMs) {
+        predictor.setIntent(0, RUN, down ? downMs : NaN);
+      } else {
+        predictor.clearIntent();
+      }
+
+      // A delay past the ring's own span, so `sampleAt` refuses every frame and NO correction is applied: what is left is
+      // the integration, which is what this case is about. Feeding an authority instead would let the corrector converge
+      // on it and pass the case for a predictor that integrated wrongly.
+      predictor.step(now, FRAME_S, 0, 0, 1e6);
+    }
+
+    return predictor.x;
+  };
+
+  it.each([
+    [1004, 1504],
+    [1007.3, 1511.9],
+    [1015.9, 1523.1],
+    [1000.4, 1600.6],
+  ])('travels exactly the held duration for a key down at %s and up at %s', (downMs, upMs) => {
+    // Sub-millimetre: the artefact the phase exists to remove is up to 500 mm at 10 Hz, and a frame of travel — what this
+    // half of it removes — is 83 mm at 60 fps.
+    expect(gesture(downMs, upMs)).toBeCloseTo((RUN * (upMs - downMs)) / 1000, 9);
+  });
+
+  it('is a plain whole-frame integration when no instant is given, which is every frame of a held key', () => {
+    const predictor = new Predictor();
+    let now = 1000;
+    predictor.start(now, 0, 0);
+    for (let i = 0; i < 60; i++) {
+      now += FRAME_MS;
+      predictor.setIntent(0, RUN);
+      predictor.step(now, FRAME_S, 0, 0, 1e6);
+    }
+
+    expect(predictor.x).toBeCloseTo(RUN * 60 * FRAME_S, 9);
+  });
+
+  it('pays at most one extra frame for an instant that predates the frame, and never a multiple of it', () => {
+    // A stamp before the frame began is the catch-up: the handler that declared it ran while the previous frame was still
+    // being drawn, so the client owes the travel between the two. Bounded at one frame, because a long frame, a
+    // backgrounded tab or a caller passing the wrong clock would otherwise scale one frame's integration arbitrarily.
+    const predictor = new Predictor();
+    predictor.start(1000, 0, 0);
+    predictor.setIntent(0, RUN, -1e9);
+    predictor.step(1016, FRAME_S, 0, 0, 1e6);
+
+    expect(predictor.x).toBeCloseTo(2 * RUN * FRAME_S, 12);
+  });
+
+  /**
+   * A change declared for an instant that has not arrived yet.
+   *
+   * The client tells the server the first tick boundary its command can actually reach, and then has to wait for it: a
+   * predictor that started early would be ahead of the authority by exactly the margin, every time, which is the error
+   * the declaration exists to avoid.
+   */
+  it('waits for an instant in the future, then integrates from it', () => {
+    const predictor = new Predictor();
+    let now = 1000;
+    predictor.start(now, 0, 0);
+
+    // Declared 30 ms out: two frames away at 60 fps.
+    const dueAt = now + 30;
+    for (let i = 0; i < 10; i++) {
+      now += FRAME_MS;
+      predictor.setIntent(0, RUN, i === 0 ? dueAt : NaN);
+      predictor.step(now, FRAME_S, 0, 0, 1e6);
+      if (now <= dueAt) {
+        expect(predictor.x).toBe(0);
+      }
+    }
+
+    expect(predictor.x).toBeCloseTo((RUN * (now - dueAt)) / 1000, 12);
+  });
+});
+
 describe('speedForClass', () => {
   it('maps each class onto the stat the server replicated', () => {
-    expect(speedForClass(SpeedClass.stop, WALK, RUN)).toBe(0);
-    expect(speedForClass(SpeedClass.walk, WALK, RUN)).toBe(WALK);
-    expect(speedForClass(SpeedClass.run, WALK, RUN)).toBe(RUN);
+    expect(speedForClass(SpeedClass.stop, GRANTED)).toBe(0);
+    expect(speedForClass(SpeedClass.walk, GRANTED)).toBe(WALK);
+    expect(speedForClass(SpeedClass.run, GRANTED)).toBe(RUN);
+    expect(speedForClass(SpeedClass.burst, GRANTED)).toBe(GRANTED.burstMps);
+    expect(speedForClass(SpeedClass.speeder, GRANTED)).toBe(GRANTED.speederMps);
+    expect(speedForClass(SpeedClass.speederFast, GRANTED)).toBe(GRANTED.speederFastMps);
+  });
+
+  /**
+   * Every gait reads its OWN stat, which is the mistake a switch like this invites: a case falling through to `runMps`
+   * predicts a run while the server moves a speeder, and the error grows at 7 m/s with nothing saying so.
+   */
+  it('reads a different stat for every gait', () => {
+    const speeds = [SpeedClass.walk, SpeedClass.run, SpeedClass.burst, SpeedClass.speeder, SpeedClass.speederFast].map(
+      (gait) => speedForClass(gait, GRANTED),
+    );
+
+    expect(new Set(speeds).size).toBe(speeds.length);
   });
 
   /**
@@ -63,7 +183,19 @@ describe('speedForClass', () => {
    * that substituted a guess would drift without bound, and one that substituted 0 would look frozen.
    */
   it('propagates NaN when the stat has not arrived', () => {
-    expect(speedForClass(SpeedClass.run, NaN, NaN)).toBeNaN();
+    expect(speedForClass(SpeedClass.run, UNKNOWN)).toBeNaN();
+    expect(speedForClass(SpeedClass.speederFast, UNKNOWN)).toBeNaN();
+  });
+
+  /**
+   * A class this build does not know about predicts NOTHING, rather than falling back to a run.
+   *
+   * The server refuses a class it does not grant, so the avatar does not move at all — and a client that predicted a run
+   * for it would walk the body forward while the server held it still, then be snapped back, for as long as the key was
+   * held.
+   */
+  it('refuses to predict a class it does not know', () => {
+    expect(speedForClass(200, GRANTED)).toBeNaN();
   });
 });
 
@@ -144,7 +276,9 @@ describe('Predictor', () => {
     // Settled: the last half-second varies by millimetres, not by the tens of centimetres a limit cycle shows.
     const tail = path.slice(-30);
     const spread = Math.max(...tail) - Math.min(...tail);
-    expect(spread, `oscillating at D=${delayMs}: spread ${spread.toFixed(3)} m over the last 30 frames`).toBeLessThan(0.02);
+    expect(spread, `oscillating at D=${delayMs}: spread ${spread.toFixed(3)} m over the last 30 frames`).toBeLessThan(
+      0.02,
+    );
 
     // And it settled where the physics says it must: the client cannot learn about the wall sooner than the render delay.
     const steady = wall + RUN * (delayMs / 1000 + 0.12);

@@ -116,6 +116,9 @@ export class MockSource implements DataSource, LatencyControl {
 
   spectate(): void {}
 
+  /** The mock owns the world it draws and serves all of it, so there is no sphere to widen. */
+  setViewRadius(): void {}
+
   /** The mock controls nothing: it has no sessions and no SELF block. */
   get selfNetId(): number {
     return 0;
@@ -152,6 +155,14 @@ export class MockSource implements DataSource, LatencyControl {
 
   /** @inheritdoc */
   moveDir(): void {}
+
+  /**
+   * Twice the simulated one-way delay, so the mock exercises the correction a live link needs rather than a zero that
+   * hides it.
+   */
+  get rttMs(): number {
+    return this.options.latencyMs * 2;
+  }
 
   /** @inheritdoc */
   setTarget(): void {}

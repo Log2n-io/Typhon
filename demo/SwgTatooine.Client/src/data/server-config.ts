@@ -37,6 +37,15 @@ export interface ServerConfig {
    * sends the smallest square containing its disc. 0 when the camera has no client-driven region at all.
    */
   readonly maxViewRadiusM: number;
+  /**
+   * The range a PLAYER's own interest sphere may be set over, metres, or `null` from a server that does not publish it.
+   *
+   * <b>A different mechanism from {@link maxViewRadiusM} above, which is a god camera's region.</b> A player session is a
+   * sphere the server widens in place (`SetViewRadius` → the engine's `SetRadius`), between its profile's own radius and
+   * the ceiling the replication grid's window bound allows. Both ends come from the server for the reason every speed
+   * does: a radius mirrored here would be a figure the server can never correct.
+   */
+  readonly player: { readonly radiusM: number; readonly maxRadiusM: number } | null;
   /** The realms a god camera may ask for, or `null` from a server that does not publish them. */
   readonly realms: RealmDirectory | null;
 }
@@ -108,12 +117,25 @@ export async function fetchServerConfig(): Promise<ServerConfig | null> {
       return null;
     }
 
-    const { godRegionMaxEdgeM, maxViewRadiusM } = body as Record<string, unknown>;
+    const { godRegionMaxEdgeM, maxViewRadiusM, playerRadiusM, playerMaxRadiusM } = body as Record<string, unknown>;
     if (!isFinitePositive(godRegionMaxEdgeM) || !isFinitePositive(maxViewRadiusM)) {
       return null;
     }
 
-    return { godRegionMaxEdgeM, maxViewRadiusM, realms: readRealms((body as Record<string, unknown>).realms) };
+    // Both ends or neither: a range with one end is a slider with one end, and the UI would have to invent the other —
+    // which is the figure of its own this exists to avoid. An older server publishes neither and gets `null`, which the
+    // panel renders as "this server does not say".
+    const player =
+      isFinitePositive(playerRadiusM) && isFinitePositive(playerMaxRadiusM) && playerMaxRadiusM >= playerRadiusM
+        ? { radiusM: playerRadiusM, maxRadiusM: playerMaxRadiusM }
+        : null;
+
+    return {
+      godRegionMaxEdgeM,
+      maxViewRadiusM,
+      player,
+      realms: readRealms((body as Record<string, unknown>).realms),
+    };
   } catch {
     // A page served from somewhere else, or an older server. Not knowing is a state the UI handles.
     return null;

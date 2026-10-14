@@ -80,6 +80,10 @@ export interface FrameStats {
   readonly latestTick: number;
   readonly renderDelayMs: number;
   readonly altitude: number;
+  /** The speed class Shift+1..4 selected: what the next movement intent will ask for. */
+  readonly gait: number;
+  /** What the server grants for {@link gait}, metres per second, or `NaN` before the owner stats arrive. */
+  readonly gaitMps: number;
   /** Ground height under the camera target, metres — 0 while the terrain is still baking. */
   readonly groundM: number;
   /** How long the heightfield bake took, milliseconds; 0 until it lands. */

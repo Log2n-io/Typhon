@@ -54,6 +54,11 @@ function cameraButtonTitle(playing: boolean, cameraMode: 'god' | 'eye', selected
 export function Toolbar() {
   const ui = useUi();
 
+  // A session that can play has a sphere to widen; one that cannot is a god camera with a region. Read as locals because
+  // the View section tests both and the names are what make that section readable.
+  const playing = ui.playing;
+  const range = ui.playerRadiusRange;
+
   // Narrowly selected, like the stats below: the session store changes on a login and a kick and nothing else, but the
   // toolbar re-renders often enough that subscribing to the whole store would be a needless dependency.
   const accountName = useSessionStore((s) => s.grant?.name ?? null);
@@ -226,7 +231,34 @@ export function Toolbar() {
 
       <section>
         <h3>View</h3>
-        {ui.maxViewRadius === 0 ? (
+        {/* How far the SERVER serves this session, which is the thing that decides whether a building exists at all —
+            distinct from the camera's far plane, which is 40 km and never the limit. A player's session is a sphere the
+            server widens in place; a god camera's is a region. Only one of the two is ever in play, so only one slider
+            is shown, and the player's takes precedence because a session that can play is being played. */}
+        {playing && range !== null ? (
+          <label className="slider">
+            Served radius {ui.playerRadius ?? range.min} m
+            <input
+              type="range"
+              // Both ends are the server's (`/typhon/demo.json`): its profile's own radius, and the ceiling the
+              // replication grid's window bound allows. Neither is a figure this client invents.
+              min={range.min}
+              max={range.max}
+              // A step the range chooses rather than a constant: the ceiling is five replication cells, so it moved from
+              // 320 m to 1 280 m when the demo matched its replication cell to its spatial one, and 16 m steps over a
+              // 1 km range is 68 drag positions of pointless precision. A 64th of the range, rounded to 8 m.
+              step={Math.max(8, Math.round((range.max - range.min) / 64 / 8) * 8)}
+              value={ui.playerRadius ?? range.min}
+              onChange={(e) => {
+                ui.setPlayerRadius(Number(e.target.value));
+              }}
+            />
+          </label>
+        ) : playing ? (
+          <div className="hint">
+            This server does not say what view radius a player may ask for, so the slider is off.
+          </div>
+        ) : ui.maxViewRadius === 0 ? (
           <div className="hint">
             This server serves its camera the whole world, so there is no view radius to set (it was started without{' '}
             <code>--god-region</code>).

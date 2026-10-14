@@ -1,3 +1,4 @@
+import { gaitDigit, gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useTerrain } from '../state/terrain-store';
@@ -70,6 +71,13 @@ export function Hud() {
           <tr>
             <td>Altitude</td>
             <td>{fmt(stats.altitude, 0)} m</td>
+          </tr>
+          <tr>
+            {/* Which of Shift+1..4 is selected, and what the SERVER says it is worth — the figure is replicated, so a
+                dash here means the owner block has not arrived and the predictor is in its no-prediction fallback,
+                which is worth being able to see. */}
+            <td>Gait</td>
+            <td>{`${gaitLabel(stats.gait)} (⇧${gaitDigit(stats.gait)}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
           </tr>
           <tr>
             {/* The terrain under the camera's target, and where it came from. The world no longer starts before the field

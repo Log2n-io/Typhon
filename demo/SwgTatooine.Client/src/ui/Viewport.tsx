@@ -184,6 +184,13 @@ export function Viewport() {
       void fetchServerConfig().then((config) => {
         if (!cancelled && config !== null) {
           useUi.getState().setMaxViewRadius(config.maxViewRadiusM);
+          // The player sphere's range, which is a different mechanism from the god region above. Null from a server that
+          // does not publish it, which leaves the panel saying so rather than offering a slider nothing honours.
+          useUi
+            .getState()
+            .setPlayerRadiusRange(
+              config.player === null ? null : { min: config.player.radiusM, max: config.player.maxRadiusM },
+            );
           useUi.getState().setRealms(config.realms);
         }
       });

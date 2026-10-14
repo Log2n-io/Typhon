@@ -46,6 +46,16 @@ export interface UiState {
    */
   readonly maxViewRadius: number | null;
   /**
+   * The radius a PLAYER session asks to be served over, metres, or `null` until the server states its range.
+   *
+   * Separate from {@link viewRadius}, which is a god camera's region: the two have different mechanisms, different
+   * ceilings and are never both in play for one session, so one number would have to mean whichever the session happens
+   * to be — and the first panel to read it would get the other one's bound.
+   */
+  readonly playerRadius: number | null;
+  /** The range {@link playerRadius} may be set over, metres, or `null` while the server has not said. */
+  readonly playerRadiusRange: { readonly min: number; readonly max: number } | null;
+  /**
    * Heatmap channels by archetype NAME. Which channels exist is the aggregate grid's to say, and the server's grid holds
    * three (`Creature`, `CityNpc`, `Player`) where the client's old constant assumed four in a different order — so a
    * channel is addressed by name and an unlisted one is off.
@@ -110,6 +120,10 @@ export interface UiState {
   readonly setSeed: (seed: number) => void;
   readonly setViewRadius: (radius: number) => void;
   readonly setMaxViewRadius: (radius: number | null) => void;
+  /** Asks for a player radius, clamped to the server's range. Ignored until the range is known. */
+  readonly setPlayerRadius: (radius: number) => void;
+  /** Adopts the server's range, and starts at its own radius — which is what the session is already being served. */
+  readonly setPlayerRadiusRange: (range: { min: number; max: number } | null) => void;
   readonly toggleHeatmap: (name: string) => void;
   readonly setShowGrid: (on: boolean) => void;
   readonly setShowDebug: (on: boolean) => void;
@@ -142,6 +156,8 @@ export const useUi = create<UiState>()((set) => ({
   seed: 20260916,
   viewRadius: 1500,
   maxViewRadius: null,
+  playerRadius: null,
+  playerRadiusRange: null,
   heatmap: { Creature: true },
   showGrid: true,
   showDebug: false,
@@ -178,6 +194,31 @@ export const useUi = create<UiState>()((set) => ({
     set((s) => ({
       maxViewRadius,
       viewRadius: maxViewRadius === null || maxViewRadius <= 0 ? s.viewRadius : Math.min(s.viewRadius, maxViewRadius),
+    }));
+  },
+
+  setPlayerRadius: (radius) => {
+    // Clamped here rather than at the slider, for the reason setViewRadius is: the server REFUSES a radius outside its
+    // range instead of clamping it, so an unclamped ask is a slider that moves and a session that is not widened.
+    set((s) => {
+      const range = s.playerRadiusRange;
+      if (range === null || !Number.isFinite(radius)) {
+        return {};
+      }
+
+      return { playerRadius: Math.min(Math.max(Math.round(radius), range.min), range.max) };
+    });
+  },
+
+  setPlayerRadiusRange: (playerRadiusRange) => {
+    set((s) => ({
+      playerRadiusRange,
+      // Starts at the profile's own radius, which is what the session is already served — so adopting the range changes
+      // nothing until the person moves the slider. An existing value is kept, clamped, so a re-fetch does not reset it.
+      playerRadius:
+        playerRadiusRange === null
+          ? null
+          : Math.min(Math.max(s.playerRadius ?? playerRadiusRange.min, playerRadiusRange.min), playerRadiusRange.max),
     }));
   },
   toggleHeatmap: (name) => {

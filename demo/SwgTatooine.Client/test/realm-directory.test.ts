@@ -89,20 +89,28 @@ describe('a directory it cannot trust', () => {
   it('is null when the interior layout is PRESENT but not a pair of numbers', async () => {
     // Distinct from the case above, and it has to be: an absent `interiors` is caught by the object check alone, so
     // without this the field-level validation is dead code that every test still passes over. Found by deleting it.
-    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":"three","perPlanet":617}}}');
+    serve(
+      '{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":"three","perPlanet":617}}}',
+    );
     expect((await fetchServerConfig())?.realms).toBeNull();
 
-    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":3}}}');
+    serve(
+      '{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":3}}}',
+    );
     expect((await fetchServerConfig())?.realms).toBeNull();
   });
 
   it('is null when a planet entry is malformed', async () => {
-    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":"nought"}],"interiors":{"first":1,"perPlanet":0}}}');
+    serve(
+      '{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":"nought"}],"interiors":{"first":1,"perPlanet":0}}}',
+    );
     expect((await fetchServerConfig())?.realms).toBeNull();
   });
 
   it('survives a server with no space realm', async () => {
-    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":1,"perPlanet":0}}}');
+    serve(
+      '{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"realms":{"planets":[{"id":0,"appTag":0}],"interiors":{"first":1,"perPlanet":0}}}',
+    );
     const realms = (await fetchServerConfig())?.realms;
     expect(realms?.space).toBeNull();
     expect(realms?.planets).toHaveLength(1);
@@ -114,5 +122,63 @@ describe('a directory it cannot trust', () => {
       vi.fn(() => Promise.reject(new Error('offline'))),
     );
     await expect(fetchServerConfig()).resolves.toBeNull();
+  });
+});
+
+/**
+ * The same document from a server that states a PLAYER's radius range, captured the same way.
+ *
+ * Kept apart from {@link LIVE_BODY} rather than added to it: that body is an older capture that still carries a
+ * `dungeons` key, which is what makes the "has no dungeons in it" case above test the parser's drop rather than an
+ * absence — and a server that publishes no player range is a case worth keeping too, which is exactly what it is now.
+ *
+ * `--serve 8099 --planets 3 --interiors --space --dungeons 2`
+ */
+const PLAYER_BODY =
+  '{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"playerRadiusM":192,"playerMaxRadiusM":320,"realms":{"planets":' +
+  '[{"id":0,"appTag":0},{"id":1,"appTag":1048577},{"id":2,"appTag":2097154}],"interiors":{"first":3,"perPlanet":617},' +
+  '"space":{"id":1854,"appTag":536870912}}}';
+
+/**
+ * The range a player's own interest sphere may be set over.
+ *
+ * <b>Both ends or neither, because a range with one end is a slider the UI has to finish inventing.</b> The whole point
+ * of publishing it is that the client holds no radius of its own — the profile's own radius and the ceiling the
+ * replication grid's window bound allows are both the server's to know — so half a range is worse than none.
+ */
+describe("the player's radius range", () => {
+  it('is read from a server that states it', async () => {
+    serve(PLAYER_BODY);
+    const config = await fetchServerConfig();
+    expect(config?.player).toEqual({ radiusM: 192, maxRadiusM: 320 });
+  });
+
+  it('is null from a server that does not state it, leaving the rest of the config readable', async () => {
+    serve(LIVE_BODY);
+    const config = await fetchServerConfig();
+    expect(config?.player).toBeNull();
+    expect(config?.realms, 'the rest of the document still parses').not.toBeNull();
+  });
+
+  it('is null when only one end is published', async () => {
+    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"playerRadiusM":192}');
+    expect((await fetchServerConfig())?.player).toBeNull();
+
+    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"playerMaxRadiusM":320}');
+    expect((await fetchServerConfig())?.player).toBeNull();
+  });
+
+  it('is null when an end is not a number', async () => {
+    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"playerRadiusM":"192","playerMaxRadiusM":320}');
+    expect((await fetchServerConfig())?.player).toBeNull();
+  });
+
+  /**
+   * An inverted range would make the slider's `min` exceed its `max`, which browsers resolve by pinning the thumb to
+   * `min` — a control that looks live and cannot move. Refusing it leaves the panel saying the server does not state one.
+   */
+  it('is null when the range is inverted', async () => {
+    serve('{"godRegionMaxEdgeM":0,"maxViewRadiusM":0,"playerRadiusM":320,"playerMaxRadiusM":192}');
+    expect((await fetchServerConfig())?.player).toBeNull();
   });
 });

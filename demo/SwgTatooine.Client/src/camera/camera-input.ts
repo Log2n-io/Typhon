@@ -118,12 +118,15 @@ export class CameraInput {
       { capture: true },
     );
     on(window, 'keydown', (e) => {
-      if (!isTyping(e)) {
+      if (!isTyping(e) && !this.keys.has(e.code)) {
         this.keys.add(e.code);
+        this.changedAtMs = e.timeStamp;
       }
     });
     on(window, 'keyup', (e) => {
-      this.keys.delete(e.code);
+      if (this.keys.delete(e.code)) {
+        this.changedAtMs = e.timeStamp;
+      }
     });
     on(window, 'blur', () => {
       this.keys.clear();
@@ -149,6 +152,26 @@ export class CameraInput {
   get heldKeys(): ReadonlySet<string> {
     return this.keys;
   }
+
+  /**
+   * When the held set last changed, on the renderer's own clock — `NaN` until a key has been pressed.
+   *
+   * <b>The key's instant, not the frame's, and the difference is the whole accuracy of a sub-tick intent.</b> A frame
+   * notices a press up to a frame after it happened, and both the predictor and the server are told how far into their
+   * own step the intent changed — so a frame-rounded instant puts a sixteenth of a second of travel back into the
+   * figure this exists to make exact. `KeyboardEvent.timeStamp` is a `DOMHighResTimeStamp` on the same origin as
+   * `performance.now()` and `requestAnimationFrame`, which is the clock everything else here measures in.
+   *
+   * <b>Only on a real change.</b> Auto-repeat delivers `keydown` every few tens of milliseconds for a key that is
+   * already down, and taking those would re-stamp a held key for ever — so a press that adds nothing and a release of
+   * something that was not held both leave this alone.
+   */
+  get keysChangedAtMs(): number {
+    return this.changedAtMs;
+  }
+
+  /** See {@link keysChangedAtMs}. */
+  private changedAtMs = Number.NaN;
 
   /** Applies held keys for `dt` seconds. */
   update(dt: number): void {
@@ -272,7 +295,7 @@ export class CameraInput {
   }
 }
 
-function isTyping(e: KeyboardEvent): boolean {
+export function isTyping(e: KeyboardEvent): boolean {
   const target = e.target;
   return (
     target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement

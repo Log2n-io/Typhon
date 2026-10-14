@@ -129,6 +129,46 @@ export class Clock {
     return this.renderTick + this.renderFrac;
   }
 
+  /**
+   * How far into the server's tick a local instant fell, as a fraction of the tick period in `[0, 1)`.
+   *
+   * @param atMs The instant, on the same monotonic clock {@link update} is driven with.
+   * @param oneWayDelayMs The estimated downlink delay to take off the grid's anchor — see the remarks. Half the RTT is
+   *   the usual estimate; 0 leaves the bias in, which is what loopback wants.
+   * @returns The fraction, or `NaN` before the first frame has anchored the grid.
+   *
+   * @remarks
+   * <b>This is the grid a client has to quantise an INTENT against, and the reason is that the server's own integration
+   * is quantised.</b> A tick advances an entity by one whole period's worth of whatever intent it held at the boundary,
+   * so a client that changes velocity on a key event and a server that changes it on a boundary integrate for different
+   * DURATIONS — the stop position differs by `v x (startPhase - stopPhase)`, up to a full tick's travel in either
+   * direction, which is a back-step a player sees every time they let go of a key. Sending the phase with the intent
+   * lets the server split the boundary tick between the old velocity and the new one, after which both sides have
+   * integrated the same duration exactly. Nothing else closes it: predicting instantly means being ahead of what the
+   * server has committed, and no client-side correction law can un-spend that.
+   *
+   * <b>The anchor carries the downlink delay, which is why the estimate is a parameter.</b> {@link offsetMs} is the
+   * smallest `recvMs - serverMs(tick)` over the window — the local instant a tick's frame ARRIVED, not the instant the
+   * boundary happened, so the grid read here sits one downlink behind the server's. Uncorrected, the phase is short by
+   * `delay / period`, which on loopback is nothing and at 30 ms on a 100 ms tick is a third of a step. The caller owns
+   * the estimate because the SDK does not know whether the ping is being measured.
+   */
+  subTickPhase(atMs: number, oneWayDelayMs = 0): number {
+    if (this.pieceCount === 0 || this.sampleCount === 0) {
+      return NaN;
+    }
+
+    const ms = atMs - this.minOffsetMs + oneWayDelayMs;
+    const p = this.pieceAt(ms);
+    const rel = (ms - this.pieceMs[p]!) / this.piecePeriod[p]!;
+
+    // `rel - floor(rel)` can land on exactly 1: a `rel` a hair below an integer from below — `-1e-17` floors to -1, and
+    // `1 - 1e-17` has no float64 neighbour short of 1. The range this promises is half-open, and a caller quantising it to a
+    // byte would send "a whole tick" where it means "none of it".
+    const fraction = rel - Math.floor(rel);
+    return fraction < 1 ? fraction : 0;
+  }
+
   /** Records a frame for `tick`, received at local time `recvMs`. Frames must be passed in arrival order. */
   onFrame(tick: number, recvMs: number): void {
     if (this.pieceCount === 0) {
@@ -227,12 +267,23 @@ export class Clock {
     return this.pieceMs[p]! + (tick - this.pieceTick[p]!) * this.piecePeriod[p]!;
   }
 
-  private toTick(ms: number): void {
+  /**
+   * The piece of the tick -> server-time map that `ms` falls in.
+   *
+   * <b>Requires a non-empty map</b> — it returns -1 for an empty one, which indexes to `undefined`. Both callers test
+   * `pieceCount` first, and a third has to.
+   */
+  private pieceAt(ms: number): number {
     let p = this.pieceCount - 1;
     while (p > 0 && ms < this.pieceMs[p]!) {
       p--;
     }
 
+    return p;
+  }
+
+  private toTick(ms: number): void {
+    const p = this.pieceAt(ms);
     const rel = (ms - this.pieceMs[p]!) / this.piecePeriod[p]!;
     const whole = Math.floor(rel);
     this.renderTick = this.pieceTick[p]! + whole;

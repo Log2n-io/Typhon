@@ -126,11 +126,23 @@ export const SpeedClass = {
   stop: 0,
   walk: 1,
   run: 2,
+  burst: 3,
+  speeder: 4,
+  speederFast: 5,
 } as const;
 
 export interface DataSource {
   start(): void;
   dispose(): void;
+  /**
+   * Round trip from the `PING` loop in milliseconds, or 0 before the first `PONG`.
+   *
+   * <b>On the source rather than only inside {@link cost}, because a sub-tick intent needs it to mean anything.</b> The
+   * clock's tick grid is anchored on the ARRIVAL of each tick's frame, so it sits one downlink behind the server's own
+   * boundaries; half of this is the usual estimate of that downlink, and without it every phase a client sends is short
+   * by `delay / period`. {@link cost} is a display surface that may be absent, and this is arithmetic.
+   */
+  readonly rttMs: number;
   /** Whether {@link setPaused} does anything a viewer can see. */
   readonly canPause: boolean;
   /**
@@ -238,16 +250,35 @@ export interface DataSource {
    *
    * @param heading Radians, measured from +X towards +Z — the same frame the server integrates in.
    * @param speedClass One of {@link SpeedClass}; anything else is refused and counted by the server.
+   * @param changePhase
+   *   How far into the server's tick this intent CHANGED, in 255ths — the share of the tick the server drains it in that
+   *   still belongs to the velocity before it. 0 for a re-send of an unchanged intent, and for a client that cannot
+   *   measure it.
    *
    * <b>A CLASS, not a speed.</b> Same reason as {@link moveTo}: the client says "run", the server decides what running is.
+   *
+   * <b>The phase is what makes prediction and authority agree, rather than agree on average.</b> A tick advances a player
+   * by one whole period of whatever intent it held at the boundary, while this client moves on the key event — so the two
+   * integrate the same speed for different DURATIONS, and the stop positions differ by `v x (startPhase - stopPhase)`,
+   * uniformly over a full tick of travel in either direction. With the phase the server splits the boundary tick between
+   * the old velocity and the new one and the durations are equal. It is not a speed and cannot be used as one: the split
+   * is a convex combination of two velocities the server itself granted.
    */
-  moveDir(heading: number, speedClass: number): void;
+  moveDir(heading: number, speedClass: number, changePhase?: number): void;
   /**
    * Names the entity the avatar is attacking, or 0 to clear (`SetTarget`).
    *
    * An ask, not a change: the server refuses a netId this session was never shown, and one whose entity is dead.
    */
   setTarget(netId: number): void;
+  /**
+   * Asks to be served over `radiusM` metres (`SetViewRadius`), or 0 for the profile's own.
+   *
+   * <b>An ask the server REFUSES rather than clamps</b> when it is outside the range `/typhon/demo.json` states, so a
+   * caller that sends an unclamped slider value gets a session that was not widened and an `ACKS` reason. Growing it
+   * sweeps the shell between the two radii and the client keeps everything it already holds — nothing resets.
+   */
+  setViewRadius(radiusM: number): void;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -311,6 +342,11 @@ export class TyphonSource implements DataSource {
   private moveDirCommand: MessagePlan | null = null;
 
   private setTargetCommand: MessagePlan | null = null;
+
+  private setViewRadiusCommand: MessagePlan | null = null;
+
+  /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
+  private askedViewRadiusM = 0;
   /** The sequence of the `Spectate` still awaiting an answer, or -1. */
   private pendingSpectateSeq = -1;
   /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
@@ -428,6 +464,11 @@ export class TyphonSource implements DataSource {
    * for a session with no `DEBUG` cap, and it is the number that was previously shown always — so the ground's
    * near-radius ring and the heatmap fade were drawn at the radius the camera **asked for**, which is exactly the
    * quantity #1075 says the server silently shrinks.
+   *
+   * <b>The fallback asks the SPHERE first.</b> A player session has no region, so `sendRegion` sends nothing for it —
+   * but the caller still offers one, and a pending region's radius was therefore the fallback for a session that has a
+   * sphere: the HUD read "1500 m" (the god camera's default) beside a panel that said the session was served 192.
+   * `SetViewRadius` is what a sphere session asked for, and it is the right last resort for one.
    */
   get effectiveRadiusM(): number {
     const g = this.debugGeometrySeen ? this.debugGeometry : null;
@@ -444,7 +485,9 @@ export class TyphonSource implements DataSource {
       }
     }
 
-    return this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0;
+    return this.askedViewRadiusM > 0
+      ? this.askedViewRadiusM
+      : (this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0);
   }
 
   get stats(): SourceStats {
@@ -568,12 +611,12 @@ export class TyphonSource implements DataSource {
   }
 
   /** @inheritdoc */
-  moveDir(heading: number, speedClass: number): void {
+  moveDir(heading: number, speedClass: number, changePhase = 0): void {
     if (this.moveDirCommand === null) {
       return;
     }
 
-    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass });
+    this.commands?.enqueue(this.moveDirCommand, { heading, speedClass, changePhase });
     this.sendPending();
   }
 
@@ -624,6 +667,19 @@ export class TyphonSource implements DataSource {
     }
 
     this.commands?.enqueue(this.setTargetCommand, { netId });
+    this.sendPending();
+  }
+
+  setViewRadius(radiusM: number): void {
+    // Absent from the catalog on a server that does not declare it, which is a server whose sessions have a fixed
+    // radius: the panel reads the same catalog and offers no slider, so this is the belt to that braces.
+    if (this.setViewRadiusCommand === null) {
+      return;
+    }
+
+    const asked = Math.max(0, Math.round(radiusM));
+    this.commands?.enqueue(this.setViewRadiusCommand, { radiusM: asked });
+    this.askedViewRadiusM = asked;
     this.sendPending();
   }
 
@@ -745,6 +801,7 @@ export class TyphonSource implements DataSource {
     this.moveToCommand = plan.commandByName('MoveTo');
     this.moveDirCommand = plan.commandByName('MoveDir');
     this.setTargetCommand = plan.commandByName('SetTarget');
+    this.setViewRadiusCommand = plan.commandByName('SetViewRadius');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
