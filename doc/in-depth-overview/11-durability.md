@@ -248,7 +248,7 @@ A **flush-only cycle** (`FlushOnlyCycle` — capture + write + DC-decrement, *no
 
 ### A/B slot-pairing — the doublewrite-free torn-write net (CK-05)
 
-The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This is what protects the structural pages that rebuild ([§6](#6-torn-page-safety-no-fpi)) can't re-derive.
+The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly — except on the crash path for a segment root at `PairGeneration` 1, which the engine treats as a root never written and replaces from the WAL window (#936). This is what protects the structural pages that rebuild ([§6](#6-torn-page-safety-no-fpi)) can't re-derive.
 
 ### [`DurabilityWatermarks`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/DurabilityWatermarks.cs)
 

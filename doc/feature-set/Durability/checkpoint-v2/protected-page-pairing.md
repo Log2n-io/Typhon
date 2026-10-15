@@ -15,7 +15,7 @@ Most data pages survive a torn write because they're either rebuilt from primary
 
 ## ⚙️ How it works (in brief)
 
-Every protected page — the meta page and each segment's directory pages — is backed by two physical slots. A write always lands on whichever slot isn't the currently-trusted one, tagged with a higher generation number and its own checksum; only after that write is confirmed durable does Typhon start treating it as current. The previously-current slot is never touched by the write, so a crash can tear at most the *other* copy. At open, or whenever a torn write is suspected, both slots are read and the highest-generation one that passes its checksum is trusted; if neither does, the open fails loudly rather than risk silently serving corrupt structure.
+Every protected page — the meta page and each segment's directory pages — is backed by two physical slots. A write always lands on whichever slot isn't the currently-trusted one, tagged with a higher generation number and its own checksum; only after that write is confirmed durable does Typhon start treating it as current. The previously-current slot is never touched by the write, so a crash can tear at most the *other* copy. At open, or whenever a torn write is suspected, both slots are read and the highest-generation one that passes its checksum is trusted; if neither does, the open fails loudly rather than risk silently serving corrupt structure — with one exception on the crash path: a segment *root* page whose both slots are invalid and whose first sector records `PairGeneration` 1 means the pair's first persist tore before it completed, so the root never had a durable copy. The engine replaces the segment from the WAL window instead of failing (see **Guarantees & limits** below for the full carve-out).
 
 ## 💻 Usage
 
@@ -40,7 +40,7 @@ t.Commit();
 ## ⚠️ Guarantees & limits
 
 - **At least one valid copy always exists** — the trusted slot is never overwritten by a protected-page write, so torn-write exposure is limited to the alternate slot only.
-- **Both-slots-corrupt is a loud failure, never a silent fallback** — unlike ordinary data pages, these have no primary data to rebuild from; a confirmed double failure means restoring from backup.
+- **Both-slots-corrupt is a loud failure, never a silent fallback** — with one carve-out: on the crash path only, a segment *root* page with both slots invalid at `PairGeneration` 1 is treated as a root whose first persist tore before completing (not as corruption). The engine replaces the segment from the WAL window and continues; no backup is required. A root at any other generation, a map-extension page, and any page on the clean-open path still fail loudly — those have no WAL window to recover from.
 - **Doublewrite-free** — this costs one extra page write only when a protected page actually changes (segment creation/growth, schema mutation), not on every checkpoint cycle regardless of change.
 - **Cold path only** — segment-directory writes happen at segment create/grow time, not on steady-state entity reads/writes, so normal-operation hot paths pay zero extra cost from this mechanism.
 - **Generation is monotonic** — selection at open/recovery is unambiguous: the highest valid generation number wins, never a heuristic or timestamp comparison.
