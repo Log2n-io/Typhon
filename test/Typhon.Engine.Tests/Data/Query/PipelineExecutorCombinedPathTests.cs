@@ -234,13 +234,12 @@ class PipelineExecutorCombinedPathTests : TestBase<PipelineExecutorCombinedPathT
         }
     }
 
-    // The value half of snapshot isolation, still open as #674. ScanClusterSoa evaluates predicates against the cluster slot column, which holds the committed
-    // Versioned HEAD, so a value committed after this reader's snapshot changes its result — a non-repeatable read, which 04-data.md "Isolation guarantees"
-    // says the fixed snapshot prevents. The BornTSN/DiedTSN gate added alongside this test fixes the PHANTOM half (Versioned_ConcurrentSnapshot_IsolatedView
-    // below) but cannot fix this one: it decides whether an entity is visible, not which version of its data the predicate should see. Ignored rather than
-    // deleted so the gap stays visible in the suite; #674 carries the design decision (candidate-filter + chain verify vs routing vs amending the spec).
+    // The value half of snapshot isolation (#674, VIS-12). ScanClusterSoa evaluated predicates against the cluster slot column, which holds the committed
+    // Versioned HEAD, so a value committed after this reader's snapshot changed its result — a non-repeatable read, which 04-data.md "Isolation guarantees"
+    // says the fixed snapshot prevents. The BornTSN/DiedTSN gate fixes the PHANTOM half (Versioned_ConcurrentSnapshot_IsolatedView below); this half needs the
+    // value at the snapshot: a cluster an update newer than it rewrote is read at the snapshot.
     [Test]
-    [Ignore("#674 — cluster SoA scan evaluates the committed HEAD, not the snapshot-visible version")]
+    [VerifiesRule("VIS-12")]
     public void Versioned_SnapshotHidesLaterUpdate()
     {
         using var dbe = SetupEngine();

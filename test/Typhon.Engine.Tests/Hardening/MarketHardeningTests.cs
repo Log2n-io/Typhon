@@ -136,7 +136,10 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// a consume crafted. The storage integrity check is clean. After reopen, the state equals the one before the close.</para>
 /// <para><b>Coordination.</b> Concurrent writes to one entity resolve last-writer-wins in Typhon, and a commit cannot be refused by a conflict
 /// handler. So, like a game server, the storm serialises per item and per trader with ordered application locks: the engine is asked for isolation
-/// and durability, never to arbitrate. Any drift is then an engine fault.</para>
+/// and durability, never to arbitrate. Any drift is then an engine fault. With <c>TYPHON_MKT_ARBITRATE</c> the desks — 64 traders that nearly every
+/// transfer pays or is paid by — are left unlocked: transfers race on their wallets and item counts, and every commit passes a handler that merges the
+/// committed value with its own change (<see cref="MergeDeltas"/>). Conservation and the exact replay then hold only if the engine finds every such
+/// conflict, hands the handler the newest committed value, and publishes what it resolved.</para>
 /// <para><b>Size.</b> An item takes roughly 0.6–0.7 KiB on disk with its lore and index entry; about 75 M items make a 50 GiB database. The test prints
 /// the measured size after the build. Memory: about 40 bytes per item for ids and state arrays (3 GiB at 75 M), plus the page caches.</para>
 /// <para><b>Configuration</b> (environment variables, all optional):
@@ -154,7 +157,13 @@ class MkAuditArch : Archetype<MkAuditArch>
 /// see <i>Crashes</i>), <c>TYPHON_MKT_ROLLBACK_ONE_IN</c> (20: one transfer in that many rolls back after all its writes; 0 for none),
 /// <c>TYPHON_MKT_RECOVERY_MUTANT</c> (0; 1 replays the recovery verification without one of the last run's surviving transfers, so it must
 /// fail — the proof that it can), <c>TYPHON_MKT_TRACE</c> (a profiler capture of the run to that file; see <see cref="TraceCapture"/> for the
-/// profiler variables it needs).</para>
+/// profiler variables it needs), <c>TYPHON_MKT_ARBITRATE</c> (0; 1 leaves the desks unlocked — see <i>Coordination</i>), <c>TYPHON_MKT_QUERY_AUDIT</c>
+/// (0; 1: the owner auditor also asks the query engine for the player's items, and a query auditor counts every item and audit entry at successive
+/// snapshots during the storm — see <see cref="CheckPlayerQueries"/> and <see cref="QueryAuditor"/>. Like a long reader, a broad count holds one epoch
+/// for its whole scan, so the cache must hold what the writers touch meanwhile: a 64 MiB cache under 4 threads times out on back-pressure),
+/// <c>TYPHON_MKT_SKEW_TENTHS</c> (10: items and players picked uniformly; above, a pick is <c>N·u^(value/10)</c>, so the low numbers are hot — 30 puts
+/// a third of the picks in the first 4 % of the items), <c>TYPHON_MKT_OWNED_PERMILLE</c> (0: that share of the operations picks a player, then one of
+/// its items through the owner index, so sells, trades and consumes keep their share at a scale where nearly every random item is the market's).</para>
 /// <para><b>Long readers.</b> While the storm writes, each long reader holds one snapshot and sweeps every trader in it, again and again: each sweep
 /// finds the credits and the item counts conserved — a transfer is whole or absent — and reads every trader, and a growing sample of items, exactly as
 /// the first sweep did. The writers' revision chains grow behind the snapshot (the desks', written by most transfers, the most), and are cleaned up
@@ -210,6 +219,10 @@ public class MarketHardeningTests
         public int LongReadSeconds;
         public int RollbackOneIn;
         public bool RecoveryMutant;
+        public bool Arbitrate;
+        public bool QueryAudit;
+        public double Skew;
+        public int OwnedPermille;
 
         public int TraderCount => Desks + Players;   // trader numbers 1..TraderCount
 
@@ -254,6 +267,10 @@ public class MarketHardeningTests
             LongReadSeconds = (int)Env("LONG_READ_SECONDS", 20),
             RollbackOneIn = (int)Env("ROLLBACK_ONE_IN", 20),
             RecoveryMutant = Env("RECOVERY_MUTANT", 0) != 0,
+            Arbitrate = Env("ARBITRATE", 0) != 0,
+            QueryAudit = Env("QUERY_AUDIT", 0) != 0,
+            Skew = Math.Max(1.0, Env("SKEW_TENTHS", 10) / 10.0),
+            OwnedPermille = (int)Math.Clamp(Env("OWNED_PERMILLE", 0), 0, 1000),
         };
 
         private static long Env(string name, long fallback) =>
@@ -262,7 +279,7 @@ public class MarketHardeningTests
         public override string ToString() =>
             $"items={Items:N0} players={Players:N0} desks={Desks} cache={CacheMiB} MiB build-cache={BuildCacheMiB} MiB threads={Threads} " +
             $"operations={Operations:N0} seed={Seed} crash={Crash} discipline={Discipline} long-readers={LongReaders}x{LongReadSeconds}s " +
-            $"dir={Directory}";
+            $"arbitrate={Arbitrate} query-audit={QueryAudit} skew={Skew} owned-permille={OwnedPermille} dir={Directory}";
     }
 
     /// <summary>What a build produced and every run since has added: the totals each run checks against.</summary>
@@ -329,6 +346,30 @@ public class MarketHardeningTests
 
     private static int DeskOf(Config c, long itemNo) => 1 + (int)(itemNo % c.Desks);
 
+    /// <summary>A number in [0, <paramref name="n"/>): uniform, or skewed toward 0 by <c>TYPHON_MKT_SKEW_TENTHS</c>.</summary>
+    private int Pick(Random rng, int n) => _c.Skew <= 1.0 ? rng.Next(n) : Math.Min(n - 1, (int)(n * Math.Pow(rng.NextDouble(), _c.Skew)));
+
+    /// <summary>
+    /// One of a player's items, through the owner index (<c>TYPHON_MKT_OWNED_PERMILLE</c>): a player picked as buyers are, then one of the first items the
+    /// index holds under it; -1 when it holds none. Its owner is read again under the item's lock, as for any pick.
+    /// </summary>
+    private int PickOwned(DatabaseEngine dbe, IndexRef ownerIndex, Random rng)
+    {
+        var player = _c.Desks + 1 + Pick(rng, _c.Players);
+        Span<int> found = stackalloc int[16];
+        var n = 0;
+        using var tx = dbe.CreateReadOnlyTransaction();
+        using (var e = tx.EnumerateIndex<MkItem, long>(ownerIndex, player, player))
+        {
+            while (n < found.Length && e.MoveNext())
+            {
+                found[n++] = (int)e.CurrentComponent.ItemNo;
+            }
+        }
+
+        return n == 0 ? -1 : found[rng.Next(n)];
+    }
+
     /// <summary>The trader whose item count an owner value moves: the item's desk while it is at the market.</summary>
     private static int CountSlot(Config c, long owner, long itemNo) => owner == 0 ? DeskOf(c, itemNo) : (int)owner;
 
@@ -373,6 +414,44 @@ public class MarketHardeningTests
     private Config _c;
     private ConcurrentQueue<string> _errors;
     private Sampler _sampler;
+
+    // TYPHON_MKT_ARBITRATE: the conflicts the engine found on a desk's wallet and count, and the handler merged; the desks' entities, the only ones a
+    // conflict may name.
+    private long _walletMerges, _countMerges;
+    private ConcurrencyConflictHandler _merge;
+    private HashSet<long> _deskEntities;
+
+    /// <summary>
+    /// The handler of a storm that does not lock the desks (<c>TYPHON_MKT_ARBITRATE</c>): two transfers through one desk race, the engine finds the conflict
+    /// on its wallet or count, and this merges the committed value with this commit's own change — what a game server does with a shared balance. Nothing
+    /// else races: items and players stay locked, so a conflict on anything else is a failure.
+    /// </summary>
+    private void MergeDeltas(ref ConcurrencyConflictSolver solver)
+    {
+        // A player is locked by every transfer it is in: a conflict on one means a commit was handed a stale snapshot, which merging would quietly repair.
+        if (!_deskEntities.Contains(solver.PrimaryKey))
+        {
+            Fail($"a conflict on {solver.ComponentType.Name} of entity {solver.PrimaryKey:X}, which is not a desk: only the desks are left to the engine");
+            return;
+        }
+
+        if (solver.ComponentType == typeof(MkWallet))
+        {
+            solver.ToCommitData<MkWallet>().Credits =
+                solver.CommittedData<MkWallet>().Credits + solver.CommittingData<MkWallet>().Credits - solver.ReadData<MkWallet>().Credits;
+            Interlocked.Increment(ref _walletMerges);
+        }
+        else if (solver.ComponentType == typeof(MkTrader))
+        {
+            solver.ToCommitData<MkTrader>().ItemsOwned =
+                solver.CommittedData<MkTrader>().ItemsOwned + solver.CommittingData<MkTrader>().ItemsOwned - solver.ReadData<MkTrader>().ItemsOwned;
+            Interlocked.Increment(ref _countMerges);
+        }
+        else
+        {
+            Fail($"a conflict on {solver.ComponentType.Name} of entity {solver.PrimaryKey:X}: only the desks are left to the engine to arbitrate");
+        }
+    }
 
     private void Fail(string message)
     {
@@ -446,6 +525,7 @@ public class MarketHardeningTests
     public void AMarketLargerThanItsCache_StaysExactlyCoherent_ThroughAStormAndAReopen()
     {
         _c = Config.FromEnvironment();
+        _merge = _c.Arbitrate ? MergeDeltas : null;
 
         // TYPHON_MKT_NO_QUARANTINE=1: frees reused at once, as before CK-17 — the A/B switch of its measurements, on the same binary.
         DatabaseEngine.DisableFreeQuarantineForTest = Environment.GetEnvironmentVariable("TYPHON_MKT_NO_QUARANTINE") == "1";
@@ -1499,7 +1579,8 @@ public class MarketHardeningTests
 
     /// <summary>
     /// Grants <paramref name="player"/> credits from <paramref name="desk"/> when it holds fewer than <paramref name="amount"/>: its starting credits, or the
-    /// amount if that is more, in one committed transaction with an audit entry of <see cref="KindGrant"/>. The caller holds both traders' locks. A desk
+    /// amount if that is more, in one committed transaction with an audit entry of <see cref="KindGrant"/>. The caller holds both traders' locks — the
+    /// player's only under TYPHON_MKT_ARBITRATE, whose merge handler resolves a race on the desk. A desk
     /// that cannot pay grants nothing, and the transfer is skipped as before. False only when the commit failed. A grant's commit counts toward
     /// <c>TYPHON_MKT_FAIL_PUBLISH_AT</c> like any other.
     /// </summary>
@@ -1540,7 +1621,7 @@ public class MarketHardeningTests
         bool committed;
         try
         {
-            committed = tx.Commit();
+            committed = tx.Commit(_merge);
         }
         catch (CommitPublishIncompleteException)
         {
@@ -1598,6 +1679,13 @@ public class MarketHardeningTests
         }
 
         var seq = firstSeq - 1;
+        _walletMerges = _countMerges = 0;
+        _deskEntities = [];
+        for (var d = 1; d <= _c.Desks; d++)
+        {
+            _deskEntities.Add((long)traderIds[d]);
+        }
+
         long started = 0, done = 0, skipped = 0, buys = 0, sells = 0, trades = 0, consumes = 0, rollbacks = 0, ownerAudits = 0, grants = 0;
         var stop = 0;
         var stormOver = 0;
@@ -1608,6 +1696,8 @@ public class MarketHardeningTests
         var committedBy = new List<long>[_c.Threads];   // the sequences each worker committed, for the crash oracle
         var threads = new Thread[_c.Threads];
         _sampler.CountOperations(() => Interlocked.Read(ref done));
+        var pickIndex = _c.OwnedPermille > 0 ? dbe.GetIndexRef<MkItem, long>(x => x.OwnerNo) : default;
+        long ownedPicks = 0;
 
         // The crasher's pause: workers park at the top of their loop, outside every lock, until it has listed what they committed.
         var pause = 0;
@@ -1640,7 +1730,12 @@ public class MarketHardeningTests
                             resume.Wait();
                         }
 
-                        var itemNo = rng.Next(_c.Items);
+                        var owned = _c.OwnedPermille > 0 && rng.Next(1000) < _c.OwnedPermille ? PickOwned(dbe, pickIndex, rng) : -1;
+                        var itemNo = owned >= 0 ? owned : Pick(rng, _c.Items);
+                        if (owned >= 0)
+                        {
+                            Interlocked.Increment(ref ownedPicks);
+                        }
                         lock (itemLocks[itemNo & (itemLocks.Length - 1)])
                         {
                             // Under the lock: a consume replaces the item's entity, and rewrites this slot before releasing it.
@@ -1662,7 +1757,7 @@ public class MarketHardeningTests
                             if (owner == 0)
                             {
                                 kind = KindBuy;
-                                to = _c.Desks + 1 + rng.Next(_c.Players);
+                                to = _c.Desks + 1 + Pick(rng, _c.Players);
                                 payer = to;
                                 payee = desk;
                                 amount = price;
@@ -1690,7 +1785,7 @@ public class MarketHardeningTests
                                 kind = KindTrade;
                                 do
                                 {
-                                    to = _c.Desks + 1 + rng.Next(_c.Players);
+                                    to = _c.Desks + 1 + Pick(rng, _c.Players);
                                 } while (to == owner);
 
                                 payer = to;
@@ -1703,10 +1798,15 @@ public class MarketHardeningTests
                             var toSlot = CountSlot(_c, to, itemNo);
 
                             // The traders involved, and the item's desk, which may grant the payer credits: locked in stripe order (an item lock is always
-                            // taken first and alone: no cycle).
+                            // taken first and alone: no cycle). Under TYPHON_MKT_ARBITRATE the desks are not locked: the engine arbitrates their races.
                             var n = 0;
                             foreach (var t in new[] { payer, payee, fromSlot, toSlot, desk })
                             {
+                                if (_c.Arbitrate && t <= _c.Desks)
+                                {
+                                    continue;
+                                }
+
                                 var stripe = (int)(t & (traderLocks.Length - 1));
                                 if (Array.IndexOf(stripes, stripe, 0, n) < 0)
                                 {
@@ -1817,7 +1917,7 @@ public class MarketHardeningTests
                                 bool committed;
                                 try
                                 {
-                                    committed = tx.Commit();
+                                    committed = tx.Commit(_merge);
                                 }
                                 catch (CommitPublishIncompleteException)
                                 {
@@ -2007,7 +2107,7 @@ public class MarketHardeningTests
                     var player = _c.Desks + 1 + rng.Next(_c.Players);
                     lock (traderLocks[player & (traderLocks.Length - 1)])
                     {
-                        CheckPlayerItems(dbe, ownerIndex, traderIds, itemIds, player, "during the storm");
+                        CheckPlayerItems(dbe, ownerIndex, traderIds, itemIds, player, "during the storm", (Interlocked.Read(ref ownerAudits) & 15) == 0);
                     }
 
                     Interlocked.Increment(ref ownerAudits);
@@ -2148,6 +2248,23 @@ public class MarketHardeningTests
         }
 
         auditor.Start();
+        long querySnapshots = 0;
+        var queryAuditor = new Thread(() =>
+        {
+            try
+            {
+                if (_c.QueryAudit)
+                {
+                    querySnapshots = QueryAuditor(dbe, ref stormOver, ref stop);
+                }
+            }
+            catch (Exception e)
+            {
+                Fail($"query auditor: {e.GetType().Name}: {e.Message}\n{e.StackTrace}");
+                Volatile.Write(ref stop, 1);
+            }
+        }) { IsBackground = true, Name = "market-query-auditor" };
+        queryAuditor.Start();
         crasher?.Start();
         foreach (var t in longReaders)
         {
@@ -2191,6 +2308,17 @@ public class MarketHardeningTests
             AbandonIfStuck([auditor]);
         }
 
+        if (!queryAuditor.Join(TimeSpan.FromSeconds(120)))
+        {
+            Fail("the query auditor did not stop within 120 s of the storm's end");
+            AbandonIfStuck([queryAuditor]);
+        }
+
+        if (_c.QueryAudit)
+        {
+            Log($"query auditor: {querySnapshots:N0} snapshot(s) counted");
+        }
+
         if (crasher != null && !crasher.Join(TimeSpan.FromSeconds(90)))
         {
             Fail("the crasher did not finish within 90 s of the storm's end");
@@ -2231,6 +2359,20 @@ public class MarketHardeningTests
             $"trades {trades:N0}, consumed {consumes:N0}, rolled back {rollbacks:N0}, skipped for lack of credits {skipped:N0}, " +
             $"credit grants {grants:N0}; " +
             $"{ownerAudits:N0} owner audits");
+        if (_c.OwnedPermille > 0)
+        {
+            Log($"owned picks: {ownedPicks:N0} operation(s) picked a player's item through the owner index");
+        }
+
+        if (_c.Arbitrate)
+        {
+            Log($"arbitration: {_walletMerges:N0} wallet and {_countMerges:N0} count conflict(s) found by the engine and merged");
+            if (_walletMerges == 0 && done >= 50_000)
+            {
+                Fail("arbitration: the engine reported no conflict on a desk's wallet, so nothing was arbitrated");
+            }
+        }
+
         if (_c.OwnerAudit && ownerAudits == 0)
         {
             Log("note: the storm ended before the owner auditor completed an audit");
@@ -2309,8 +2451,9 @@ public class MarketHardeningTests
             }
 
             // Each trader's sequences are taken under its lock, so in sequence order its balance is what it was when it paid: never short. A lost grant
-            // shows here, where the item checks below cannot see it.
-            if (s.Credits[a.Payer] < a.Amount)
+            // shows here, where the item checks below cannot see it. Not a desk's under TYPHON_MKT_ARBITRATE: unlocked, its sequences are not taken in
+            // its commit order.
+            if (s.Credits[a.Payer] < a.Amount && !(_c.Arbitrate && a.Payer <= _c.Desks))
             {
                 Fail($"audit {a.Seq}: trader {a.Payer} pays {a.Amount}, but the replay has it at {s.Credits[a.Payer]}");
             }
@@ -2384,7 +2527,10 @@ public class MarketHardeningTests
         for (var t = 1; t <= _c.TraderCount; t++)
         {
             credits += s.Credits[t];
-            if (s.Credits[t] < 0)
+
+            // An unlocked desk (TYPHON_MKT_ARBITRATE) checks its balance on its snapshot, and a merge cannot refuse: two payments from one desk may overdraw
+            // it — snapshot isolation's write skew, which the merge reproduces exactly. Conservation still holds.
+            if (s.Credits[t] < 0 && !(_c.Arbitrate && t <= _c.Desks))
             {
                 Fail($"{phase}: trader {t} has {s.Credits[t]} credits");
             }
@@ -2475,11 +2621,12 @@ public class MarketHardeningTests
     /// player, and the item's current entity. Read through the index itself — a query may scan the clusters instead, which tests nothing here and sweeps
     /// the whole cache — in one transaction, so both sides are one snapshot; the caller makes sure no transfer of the player's is in flight.
     /// </summary>
-    private void CheckPlayerItems(DatabaseEngine dbe, IndexRef ownerIndex, ulong[] traderIds, ulong[] itemIds, long player, string phase)
+    private void CheckPlayerItems(DatabaseEngine dbe, IndexRef ownerIndex, ulong[] traderIds, ulong[] itemIds, long player, string phase, bool ordered)
     {
         using var tx = dbe.CreateReadOnlyTransaction();
         var counted = tx.Open(EntityId.FromRawValue(traderIds[player])).Read(MkTraderArch.Trader).ItemsOwned;
         var found = 0;
+        var indexed = _c.QueryAudit ? new HashSet<ulong>() : null;
         using (var e = tx.EnumerateIndex<MkItem, long>(ownerIndex, player, player))
         {
             while (e.MoveNext())
@@ -2487,6 +2634,7 @@ public class MarketHardeningTests
                 found++;
                 var item = e.CurrentComponent;
                 var id = (ulong)e.CurrentEntityPK;
+                indexed?.Add(id);
                 if (item.OwnerNo != player)
                 {
                     Fail($"{phase}: the owner index finds item {item.ItemNo} under player {player}, but it names owner {item.OwnerNo}");
@@ -2503,6 +2651,97 @@ public class MarketHardeningTests
         {
             Fail($"{phase}: the owner index finds {found} item(s) under player {player}, who counts {counted}");
         }
+
+        if (indexed != null)
+        {
+            CheckPlayerQueries(tx, player, indexed, phase, ordered);
+        }
+    }
+
+    /// <summary>
+    /// The query engine's answer for a player's items, in the same snapshot as the owner index's walk (<c>TYPHON_MKT_QUERY_AUDIT</c>): a field query's
+    /// <c>Count</c> and <c>Execute</c> find exactly the entities the index holds, and the same query ordered by the item's last trade — a unique index every
+    /// trade re-keys — returns them once each, in that order. The ordered query is asked only when <paramref name="ordered"/>: filtered on one field and
+    /// ordered by another, it sorts after reading the ordering field's whole tree, so it costs a pass over every item.
+    /// </summary>
+    private void CheckPlayerQueries(Transaction tx, long player, HashSet<ulong> indexed, string phase, bool ordered)
+    {
+        var count = tx.Query<MkItemArch>().WhereField<MkItem>(x => x.OwnerNo == player).Count();
+        var executed = tx.Query<MkItemArch>().WhereField<MkItem>(x => x.OwnerNo == player).Execute();
+        var executedIds = new HashSet<ulong>();
+        foreach (var id in executed)
+        {
+            executedIds.Add(id.RawValue);
+        }
+
+        if (count != indexed.Count || !executedIds.SetEquals(indexed))
+        {
+            Fail($"{phase}: player {player}: the owner index holds {indexed.Count} item(s); a field query counts {count}, executes {executed.Count} " +
+                 $"({executedIds.Except(indexed).Count()} not in the index, {indexed.Except(executedIds).Count()} missing)");
+        }
+
+        if (!ordered)
+        {
+            return;
+        }
+
+        var byLastTrade = tx.Query<MkItemArch>().WhereField<MkItem>(x => x.OwnerNo == player).OrderByField<MkItem, long>(x => x.LastTradeSeq)
+            .ExecuteOrdered();
+        var lastKey = long.MinValue;
+        var orderedIds = new HashSet<ulong>();
+        foreach (var id in byLastTrade)
+        {
+            var key = tx.Open(id).Read(MkItemArch.Item).LastTradeSeq;
+            if (!orderedIds.Add(id.RawValue) || key <= lastKey)
+            {
+                Fail($"{phase}: player {player}: the query ordered by last trade returns entity {id} twice or out of order ({key} after {lastKey})");
+                return;   // the set check below would only repeat this, short of the rows not walked
+            }
+
+            lastKey = key;
+        }
+
+        if (!orderedIds.SetEquals(indexed))
+        {
+            Fail($"{phase}: player {player}: the query ordered by last trade returns {byLastTrade.Count} item(s), the owner index holds {indexed.Count} " +
+                 $"({orderedIds.Except(indexed).Count()} not in the index, {indexed.Except(orderedIds).Count()} missing)");
+        }
+    }
+
+    /// <summary>
+    /// The query auditor (<c>TYPHON_MKT_QUERY_AUDIT</c>): at successive snapshots during the storm, a broad <c>Count</c> of the items is exactly the
+    /// configured number — a consume destroys an item and crafts it anew in one transaction, so no snapshot sees one more or one less — and the audit
+    /// entries never count fewer than at an earlier snapshot. Small worlds also check a broad <c>Execute</c> against the count. Returns the snapshots
+    /// checked.
+    /// </summary>
+    private long QueryAuditor(DatabaseEngine dbe, ref int stormOver, ref int stop)
+    {
+        long snapshots = 0, lastAudits = 0;
+        while (Volatile.Read(ref stormOver) == 0 && Volatile.Read(ref stop) == 0)
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            var items = tx.Query<MkItemArch>().Count();
+            if (items != _c.Items)
+            {
+                Fail($"query auditor: a broad count finds {items:N0} item(s) at snapshot {tx.TSN}, not {_c.Items:N0}");
+            }
+
+            if (_c.Items <= 2_000_000 && (snapshots & 7) == 0 && tx.Query<MkItemArch>().Execute().Count != _c.Items)
+            {
+                Fail($"query auditor: a broad execute does not find {_c.Items:N0} item(s) at snapshot {tx.TSN}");
+            }
+
+            var audits = tx.Query<MkAuditArch>().Count();
+            if (audits < lastAudits)
+            {
+                Fail($"query auditor: {audits:N0} audit entries at snapshot {tx.TSN}, {lastAudits:N0} at an earlier one");
+            }
+
+            lastAudits = audits;
+            snapshots++;
+        }
+
+        return snapshots;
     }
 
     /// <summary>

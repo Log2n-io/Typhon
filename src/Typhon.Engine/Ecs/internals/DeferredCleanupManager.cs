@@ -305,10 +305,12 @@ internal class DeferredCleanupManager
         if (chunksToFree != null)
         {
             using var chunkFreeGuard = EpochGuard.Enter(dbe.EpochManager);
+            var epochYield = new EpochYield(dbe.EpochManager);
             try
             {
                 foreach (var entry in chunksToFree)
                 {
+                    epochYield.BetweenEntries();
                     FreeDeferred(entry);
                 }
             }
@@ -346,9 +348,10 @@ internal class DeferredCleanupManager
                     }
                 }
 
+                var epochYield = new EpochYield(dbe.EpochManager);
                 if (allSameTable)
                 {
-                    CleanupEntityRevisionsBatched(cleanupSpan, nextMinTSN, changeSet, collectedChunkFrees, ref cleanedCount);
+                    CleanupEntityRevisionsBatched(cleanupSpan, nextMinTSN, changeSet, collectedChunkFrees, ref cleanedCount, ref epochYield);
                 }
                 else
                 {
@@ -364,7 +367,7 @@ internal class DeferredCleanupManager
                             groupEnd++;
                         }
                         CleanupEntityRevisionsBatched(cleanupSpan.Slice(groupStart, groupEnd - groupStart), nextMinTSN, changeSet,
-                            collectedChunkFrees, ref cleanedCount);
+                            collectedChunkFrees, ref cleanedCount, ref epochYield);
                         groupStart = groupEnd;
                     }
                 }
@@ -401,6 +404,41 @@ internal class DeferredCleanupManager
 
         return cleanedCount;
     }
+
+    /// <summary>
+    /// Moves a long drain's epoch between its entries (#1230, EP-02): the tail's drain runs every transaction's cleanups, and refreshed only where it began, a
+    /// batch of thousands held its pin while every other thread's pages piled up behind it — the oldest pin on a 64 MiB market, 6,800 to 15,700 epochs
+    /// behind. Between two entries the drain holds only its accessors' slot-reference pins: a call boundary (EP-03). At most every
+    /// <see cref="EntityAccessor.ScanEpochRefreshInterval"/>, never under a live index cursor.
+    /// </summary>
+    internal struct EpochYield
+    {
+        private readonly EpochManager _epochManager;
+        private long _refreshedAt;
+
+        internal EpochYield(EpochManager epochManager)
+        {
+            _epochManager = epochManager;
+            _refreshedAt = Stopwatch.GetTimestamp();
+        }
+
+        /// <summary>Between two entries: refreshes the thread's epoch if the interval has passed.</summary>
+        internal void BetweenEntries()
+        {
+            if (_epochManager == null || EntityAccessor.LiveIndexCursors != 0
+                || Stopwatch.GetElapsedTime(_refreshedAt) < EntityAccessor.ScanEpochRefreshInterval)
+            {
+                return;
+            }
+
+            ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            _refreshedAt = Stopwatch.GetTimestamp();
+            Interlocked.Increment(ref DrainEpochRefreshes);
+        }
+    }
+
+    /// <summary>Epoch refreshes taken between drain entries (<see cref="EpochYield"/>). Diagnostic.</summary>
+    internal static long DrainEpochRefreshes;
 
     private static void FreeDeferred(DeferredChunkFreeEntry entry)
     {
@@ -527,7 +565,7 @@ internal class DeferredCleanupManager
     /// Caller must be inside an epoch scope.
     /// </summary>
     private void CleanupEntityRevisionsBatched(Span<CleanupEntry> entries, long nextMinTSN, ChangeSet changeSet,
-        List<DeferredChunkFreeEntry> collectedChunkFrees, ref int cleanedCount)
+        List<DeferredChunkFreeEntry> collectedChunkFrees, ref int cleanedCount, ref EpochYield epochYield)
     {
         Debug.Assert(entries.Length > 0);
 
@@ -541,6 +579,7 @@ internal class DeferredCleanupManager
         {
             for (var i = 0; i < entries.Length; i++)
             {
+                epochYield.BetweenEntries();
                 ref var entry = ref entries[i];
                 Debug.Assert(ReferenceEquals(entry.Table, table));
 

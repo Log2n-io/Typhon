@@ -1639,10 +1639,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // that no record names: FreesLost asks the close for the next open's orphan sweep (#1268). What the entities before it released is queued.
         var processed = 0;
         var faulted = true;
+        var epochYield = new DeferredCleanupManager.EpochYield(EpochManager);   // between entries: the tail's drain must not age its pin (#1230)
         try
         {
             for (; processed < toProcess.Count; processed++)
             {
+                epochYield.BetweenEntries();
                 var freesBefore = frees?.Count ?? 0;
                 try
                 {

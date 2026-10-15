@@ -138,6 +138,45 @@ internal static class QueryPathProbe
     [ThreadStatic]
     internal static Action OrderedBeforeStreamsHook;
 
+    /// <summary>
+    /// Invoked on the query thread by an ordered query right after it read an archetype's updates, before its streams read their trees (VIS-12). Null in
+    /// production; set by tests only, to publish an update that read did not see and the tree reads will.
+    /// </summary>
+    [ThreadStatic]
+    internal static Action OrderedAfterUpdateReadHook;
+
+    /// <summary>
+    /// Invoked on the query thread by a snapshot scan before it evaluates a cluster's HEAD, after it read the cluster's update watermark (VIS-12). Null in
+    /// production; set by tests only, to publish an update the watermark read did not see and the HEAD read will.
+    /// </summary>
+    /// <remarks>Read per cluster, so the scans test <see cref="BeforeHeadEvaluateArmed"/> first: a plain static, where a thread-static read on every cluster
+    /// cost the no-update scan ~8 %.</remarks>
+    internal static Action BeforeHeadEvaluateHook
+    {
+        get => t_beforeHeadEvaluateHook;
+        set
+        {
+            t_beforeHeadEvaluateHook = value;
+            BeforeHeadEvaluateArmed |= value != null;
+        }
+    }
+
+    [ThreadStatic]
+    private static Action t_beforeHeadEvaluateHook;
+
+    /// <summary>Whether any thread ever set <see cref="BeforeHeadEvaluateHook"/>: never in production, so the scans skip the thread-static read.</summary>
+    internal static bool BeforeHeadEvaluateArmed;
+
+    /// <summary>Clusters this thread's queries read at their snapshot because an update newer than it rewrote their HEAD or tree keys (VIS-12).</summary>
+    [ThreadStatic]
+    internal static int SnapshotReadClusters;
+
+    /// <summary>
+    /// Walks of every active cluster's update watermark on this thread: an index path whose snapshot is older than its archetype's newest update (VIS-12).
+    /// </summary>
+    [ThreadStatic]
+    internal static int UpdateWatermarkWalks;
+
     /// <summary>Refreshes of a membership view short-circuited by the structural-epoch gate on this thread since the last <see cref="Reset"/>.</summary>
     /// <remarks>
     /// The gate is the whole point of the membership channel at realistic view counts — most archetypes are untouched on most ticks — and "it was fast" is not
@@ -163,6 +202,8 @@ internal static class QueryPathProbe
         PrePublishAppendHook = null;
         SelectiveAfterTreeScanHook = null;
         OrderedBeforeStreamsHook = null;
+        OrderedAfterUpdateReadHook = null;
+        BeforeHeadEvaluateHook = null;
         MembershipGateHits = 0;
         MembershipDrains = 0;
         ViewRequeries = 0;
@@ -172,5 +213,7 @@ internal static class QueryPathProbe
         ForcedCount = ClusterCountPath.Planner;
         OccupancyCounts = 0;
         MapProbeCounts = 0;
+        SnapshotReadClusters = 0;
+        UpdateWatermarkWalks = 0;
     }
 }

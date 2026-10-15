@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
@@ -406,6 +407,52 @@ public partial class EntityAccessor : IDisposable
     /// <remarks>A cursor disposed twice (a <c>foreach</c> over a <c>using</c> copy) would decrement twice, so the decrement clamps at zero.</remarks>
     [ThreadStatic]
     internal static int LiveIndexCursors;
+
+    /// <summary>
+    /// How often a long broad walk moves its transaction's epoch (<see cref="BeginScanYield"/>): the commit-card wait's interval. Tests change it.
+    /// </summary>
+    internal static TimeSpan ScanEpochRefreshInterval = TimeSpan.FromMilliseconds(1);
+
+    /// <summary>
+    /// The cluster count past which an occupancy count arms its epoch yield and its refreshable back-pressure wait (#1364, #1230): about 65 k entities,
+    /// tens of microseconds of popcounts. Below it the walk is too short for either to matter, and arming them cost a measured 7 %. Tests lower it.
+    /// </summary>
+    internal static int LongWalkClusters = 1024;
+
+    /// <summary>Invoked at every yield point of a broad walk, after the refresh decision (tests).</summary>
+    internal static Action ScanYieldProbe;
+
+    private long _scanRefreshedAt;
+    private Action _scanYield;
+
+    /// <summary>
+    /// A long broad walk's yield point (#1364): the entity-map walks call it between buckets, the cluster scans between clusters. There the walk holds only
+    /// the slot-reference pins of its own scan accessor (EP-02), so it is a call boundary (EP-03) and the epoch may move. Held for the whole walk, the epoch
+    /// kept every page the writers tagged meanwhile protected: a count over 12M entities stalled every writer with the whole cache epoch-protected and
+    /// nothing dirty. Refreshed at most every <see cref="ScanEpochRefreshInterval"/> of the walk, never under a live index cursor.
+    /// </summary>
+    /// <remarks>Called once, at the walk's start: the interval runs from there. Run from the transaction's previous refresh instead, a count of a few
+    /// microseconds paid a full epoch refresh at its first yield whenever a millisecond had passed since the last one — on most calls.</remarks>
+    internal Action BeginScanYield()
+    {
+        _scanRefreshedAt = Stopwatch.GetTimestamp();
+        return _scanYield ??= YieldDuringScan;
+    }
+
+    private void YieldDuringScan()
+    {
+        if (LiveIndexCursors == 0)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (Stopwatch.GetElapsedTime(_scanRefreshedAt, now) >= ScanEpochRefreshInterval)
+            {
+                FlushAndRefreshEpoch();
+                _scanRefreshedAt = Stopwatch.GetTimestamp();
+            }
+        }
+
+        ScanYieldProbe?.Invoke();
+    }
 
     /// <summary>
     /// Unconditionally refresh the epoch scope for this accessor. Flushes all dirty ChunkAccessor state and advances the pinned epoch, allowing pages from

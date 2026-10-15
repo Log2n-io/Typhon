@@ -333,9 +333,29 @@ lock ordering and deadlock prevention are still to come.
   invariant an address a scan accessor returns is valid only until its next window miss, not for the epoch scope: the clock hand may reclaim any slot
             but the most recently used one. A hash-map bucket read therefore validates against its head's latch resolved again after the chain walk
             (RawValuePagedHashMap.HeadLatch), never a reference taken before it
+  invariant a long broad walk does not hold its transaction's epoch for its whole length (#1364): the entity-map walks call a yield point every
+            256 buckets, the SoA scan and the occupancy count every 64 clusters (EntityAccessor.BeginScanYield, the interval counted from the walk's start), where the walk holds only its scan accessors' pins — a call
+            boundary (EP-03) — and the epoch is refreshed at most every millisecond, never under a live index cursor. Held for the whole walk, the
+            reader's epoch kept every page the writers tagged meanwhile protected: at 12M entities a count stalled every writer with the cache
+            epoch-held and nothing dirty
+  invariant a back-pressure wait inside such a walk moves the waiting thread's epoch, with its warm accessors' (#1230): PagedMMF.RefreshableWaitDepth,
+            entered by the walks a query passes a yield point to. Every page such a walk holds is a scan accessor's slot-reference pin, so the epoch
+            protects none of them; left at the minimum, it protected every page every other thread tagged while it waited, until nothing could be
+            evicted and all of them timed out together. A wait outside such a walk — a point read, a commit — still holds its epoch: its frames may keep
+            an address the epoch alone protects (#1199). So does a point read INSIDE such a walk — a chain walk through the transaction's accessors,
+            a regular accessor's map read — which sets the depth to 0 for its length (EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
+            EntityVisibility.IsVisiblePendingInScan)
+  invariant the tail transaction refreshes its epoch before it drains the deferred cleanups (Transaction.RefreshEpochBeforeDrain), at the call
+            boundary its dispose is (EP-03), and between the drain's entries at most every millisecond (DeferredCleanupManager.EpochYield — a
+            batch of thousands outlived the first refresh, its pin 6,800 to 15,700 epochs behind): the drain runs every transaction's cleanups, and the tail's pin is the oldest there is — a back-pressure
+            wait under it held every page touched since the tail began (#1230: 16 threads over 64 MiB, every worker timed out with 8,190 of 8,192
+            slots epoch-held; refreshed, the same seeds pass)
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
+         EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
+         RawValuePagedHashMap.AnyEntry, EcsQuery.ScanClusterSoa, EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
+         EntityVisibility.IsVisiblePendingInScan, Transaction.RefreshEpochBeforeDrain, DeferredCleanupManager.EpochYield,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
          LogicalSegment.VerifyDirectoryAgainst, ChunkBasedSegment.PageHasFreeChunkFrom, ChunkBasedSegment.FreeAllChunksFrom,
          ChunkBasedSegment.ScanForAllocatorState, ChunkBasedSegment.AllocatedChunks, ChunkBasedSegment.IsChunkAllocatedUnpinned,
@@ -367,6 +387,11 @@ lock ordering and deadlock prevention are still to come.
             one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
             [VerifiesRule]; the same fixture pins the pair's semantics (not evicted until released, no epoch tag, no clock bump, readers
             racing eviction always get their page)
+  verified: QueryScanCacheBoundTests.PagesAWriterTagsDuringALongWalk_AreNotHeldByTheWalksEpoch [VerifiesRule] — a writer commits 8 000 updates at
+            a walk's second yield; by its fourth, fewer than 16 pages are epoch-protected, the entity-map count and the SoA scan alike (604 with the
+            yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer
+            fills the cache (1 012 of 1 024 pages epoch-held) and stalls; the walk's next miss waits, moves its epoch, and both finish (with the wait's
+            refresh removed: the back-pressure timeout, nothing dirty, 1 012 epoch-protected)
   verified: QueryScanCacheBoundTests — the occupancy count, the entity-map count and existence check, the SoA scan, the index range scan and the
             unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
             epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page

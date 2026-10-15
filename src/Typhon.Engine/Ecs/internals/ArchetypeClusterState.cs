@@ -2575,6 +2575,47 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
+    // The archetype's update stamp and count on ONE padded line: every Versioned update of the archetype writes both, every index-path query reads both.
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct PaddedUpdateWords
+    {
+        [FieldOffset(64)] public long MaxStamp;
+        [FieldOffset(72)] public long Count;
+    }
+
+    private PaddedUpdateWords _updates;
+
+    /// <summary>
+    /// The highest stamp a Versioned update of this archetype has published (VIS-12), by acquire; 0 before the first. Only rises. A reader whose snapshot is
+    /// at or above it finds no cluster whose HEAD or tree keys an update newer than its snapshot moved, so an index path needs no look at the watermarks.
+    /// </summary>
+    internal long MaxUpdateStamp => Volatile.Read(ref _updates.MaxStamp);
+
+    /// <summary>
+    /// How many Versioned updates of this archetype have published, by acquire. The ordered merge reads it before its lazy tree reads and after them: a
+    /// change means an update may have moved a key under its streams — the stamp alone cannot say, since an older commit can publish after a newer one.
+    /// </summary>
+    internal long UpdateCount => Volatile.Read(ref _updates.Count);
+
+    /// <summary>
+    /// A Versioned update's publish, recorded BEFORE it moves the entity's index entries or copies its value into the HEAD (VIS-12): its cluster's update
+    /// watermark, the archetype's <see cref="MaxUpdateStamp"/>, then <see cref="UpdateCount"/>. A reader that finds either moved reads all three after it.
+    /// </summary>
+    internal void NoteUpdatePublished(int clusterChunkId, long stamp)
+    {
+        NoteClusterUpdated(clusterChunkId, stamp);
+        while (true)
+        {
+            var current = Volatile.Read(ref _updates.MaxStamp);
+            if (stamp <= current || Interlocked.CompareExchange(ref _updates.MaxStamp, stamp, current) == current)
+            {
+                break;
+            }
+        }
+
+        Interlocked.Increment(ref _updates.Count);
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Write-time spatial bookkeeping. Populated by ClusterRef.WriteSpatial(...) at the write site. Consumed by the fence-time sparse-iteration pass — only
     // clusters with bits set here do any work at fence time. See claude/design/spatial/write-time-spatial.md.

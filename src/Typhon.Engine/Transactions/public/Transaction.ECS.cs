@@ -100,6 +100,29 @@ public unsafe partial class Transaction
     /// <summary>Native staging for spawned-but-unpublished payloads. Created on first spawn; rewound on reset; freed on dispose.</summary>
     private SpawnStagingArena _spawnArena;
 
+    // The snapshot column (VIS-12): one per transaction, from the engine's allocator, made on the first query that needs one and kept across pooled uses.
+    private PinnedMemoryBlock _snapshotColumn;
+    private static int s_snapshotColumnIds;
+
+    /// <summary>
+    /// A buffer of at least <paramref name="bytes"/> for a cluster's component column at this snapshot (VIS-12), reused by every query of the transaction:
+    /// asked for only when a cluster an update newer than the snapshot touched is met, so a query that meets none allocates and clears nothing. Native and
+    /// never moved (the evaluators address it by pointer); contents are left as the last query wrote them — every slot read is written first.
+    /// </summary>
+    internal unsafe byte* SnapshotColumn(int bytes)
+    {
+        if (_snapshotColumn == null || _snapshotColumn.MemoryBlockSize < bytes)
+        {
+            _snapshotColumn?.Dispose();
+            _snapshotColumn = null;
+            // A resource id of its own: the tree registers a child by id, so a shared one registered only the first transaction's column.
+            _snapshotColumn = _dbe.MemoryAllocator.AllocatePinned($"SnapshotColumn#{Interlocked.Increment(ref s_snapshotColumnIds)}", _dbe.TransactionChain,
+                Math.Max(bytes, 4096), false, 64);
+        }
+
+        return _snapshotColumn.DataAsPointer;
+    }
+
     /// <summary>The spawn payload arena, created on first use. Only a transaction can spawn, so only a transaction owns one.</summary>
     internal SpawnStagingArena SpawnArena => _spawnArena ??= new SpawnStagingArena();
 
@@ -115,6 +138,8 @@ public unsafe partial class Transaction
     {
         _spawnArena?.Dispose();
         _spawnArena = null;
+        _snapshotColumn?.Dispose();   // its native column too: kept across pooled uses like the arena's block, freed with it
+        _snapshotColumn = null;
     }
     // ═══════════════════════════════════════════════════════════════════════
     // ECS State
@@ -335,7 +360,7 @@ public unsafe partial class Transaction
         };
         try
         {
-            engineState.EntityMap.ForEachEntry(ref accessor, ref action);
+            engineState.EntityMap.ForEachEntry(ref accessor, ref action, BeginScanYield());
         }
         finally
         {

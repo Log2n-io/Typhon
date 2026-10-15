@@ -1575,7 +1575,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// </para>
     /// </summary>
     /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
-    internal int ForEachEntry<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action) where TAction : struct, IEntryAction<TKey>
+    internal int ForEachEntry<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action, Action yield = null) where TAction : struct, IEntryAction<TKey>
     {
         int visited = 0;
         var scan = BeginScan();
@@ -1593,10 +1593,21 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         byte* valBuf = stackalloc byte[bufCap * _valueSize];
         byte* spilled = null;
 
+        // A walk given a yield point holds only its accessor's pins: its back-pressure waits may move the epoch too (#1230).
+        if (yield != null)
+        {
+            PagedMMF.RefreshableWaitDepth++;
+        }
+
         try
         {
             for (int b = 0; b < BucketCount; b++)
             {
+                if (yield != null && (b & (YieldBuckets - 1)) == YieldBuckets - 1)
+                {
+                    yield();
+                }
+
                 if (scan.AlreadyVisited(b))
                 {
                     continue;
@@ -1693,6 +1704,10 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         {
             NativeMemory.Free(spilled);   // Free(null) is a no-op: most scans never spill
             scan.Dispose();
+            if (yield != null)
+            {
+                PagedMMF.RefreshableWaitDepth--;
+            }
         }
 
         return visited;
@@ -1756,6 +1771,12 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     }
 
     /// <summary>
+    /// How many buckets a walk reads between two calls of its yield point: the walk's caller may move its epoch there (#1364), holding only the walk's own
+    /// scan-accessor pins.
+    /// </summary>
+    private const int YieldBuckets = 256;
+
+    /// <summary>
     /// Side-effect-free predicate for the optimistic in-place aggregation paths (<see cref="CountEntries{TPred}"/> / <see cref="AnyEntry{TPred}"/>).
     /// </summary>
     internal interface IEntryPredicate<in TK> where TK : unmanaged
@@ -1775,14 +1796,24 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// version validation discards before it reaches the running total. Snapshot semantics match ForEachEntry: an entry present for the whole scan is counted
     /// exactly once, across splits; an entry inserted or removed during the scan may or may not be counted.
     /// </summary>
-    internal int CountEntries<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
+    internal int CountEntries<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred, Action yield = null) where TPred : struct, IEntryPredicate<TKey>
     {
         int total = 0;
         var scan = BeginScan();
+        if (yield != null)
+        {
+            PagedMMF.RefreshableWaitDepth++;
+        }
+
         try
         {
             for (int b = 0; b < BucketCount; b++)
             {
+                if (yield != null && (b & (YieldBuckets - 1)) == YieldBuckets - 1)
+                {
+                    yield();
+                }
+
                 if (scan.AlreadyVisited(b))
                 {
                     continue;
@@ -1852,6 +1883,10 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         finally
         {
             scan.Dispose();
+            if (yield != null)
+            {
+                PagedMMF.RefreshableWaitDepth--;
+            }
         }
 
         return total;
@@ -1862,12 +1897,36 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// protocol as <see cref="CountEntries{TPred}"/>; a candidate seen on a torn read is only trusted once the bucket version validates, so a false positive can
     /// never escape. Short-circuits the walk on the first candidate and the scan on the first validated match.
     /// </summary>
-    internal bool AnyEntry<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred) where TPred : struct, IEntryPredicate<TKey>
+    internal bool AnyEntry<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred, Action yield = null) where TPred : struct, IEntryPredicate<TKey>
+    {
+        if (yield == null)
+        {
+            return AnyEntryCore(ref accessor, ref pred, null);
+        }
+
+        // A walk given a yield point holds only its accessor's pins: its back-pressure waits may move the epoch too (#1230).
+        PagedMMF.RefreshableWaitDepth++;
+        try
+        {
+            return AnyEntryCore(ref accessor, ref pred, yield);
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth--;
+        }
+    }
+
+    private bool AnyEntryCore<TPred>(ref ChunkAccessor<TStore> accessor, ref TPred pred, Action yield) where TPred : struct, IEntryPredicate<TKey>
     {
         // To the live bucket count, so an entry a split moves past the count read at the start is still reached (#1351). An existence check does not
         // mind reading a moved entry twice, so it needs no SplitTolerantScan.
         for (int b = 0; b < BucketCount; b++)
         {
+            if (yield != null && (b & (YieldBuckets - 1)) == YieldBuckets - 1)
+            {
+                yield();
+            }
+
             while (true)   // OLC retry for this bucket
             {
                 int chunkCapacity = Segment.ChunkCapacity;

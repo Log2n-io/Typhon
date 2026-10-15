@@ -54,7 +54,10 @@ internal static unsafe class EntityVisibility
             return visible;
         }
 
+        // A regular accessor holds its pages by the epoch alone: a back-pressure wait inside it must not move the epoch, even inside a broad walk (#1230).
         byte* record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        var refreshable = PagedMMF.RefreshableWaitDepth;
+        PagedMMF.RefreshableWaitDepth = 0;
         var accessor = map.Segment.CreateChunkAccessor();
         try
         {
@@ -63,6 +66,7 @@ internal static unsafe class EntityVisibility
         finally
         {
             accessor.Dispose();
+            PagedMMF.RefreshableWaitDepth = refreshable;
         }
     }
 }

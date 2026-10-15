@@ -93,6 +93,142 @@ public class BTreeDescentHopAtomicityTests
         });
     }
 
+    /// <summary>
+    /// #1237: a node on the path write-latched by a writer that is waiting — a multi-value buffer read under its leaf's latch, a page of it faulting in
+    /// under page-cache back-pressure — is waited out, not counted as a modification on every pass. Counted, the pessimistic descent's 10 000 restarts
+    /// ran out in ~380 ms and it threw IXW-01, past the WAL append in a commit, halting the engine. The root is held here, on every descent's path, for a
+    /// second.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IXW-01")]
+    public unsafe void ADescentMeetingANodeAWriterHoldsForASecond_WaitsItOut()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (int i = 1; i <= 2000; i++)
+            {
+                tree.Add(i * 10, i, ref accessor);
+            }
+
+            var latch = tree.DiagnosticRoot.GetLatch(ref accessor);
+            Assert.That(latch.TryWriteLock(), Is.True, "premise: the root is held");
+            Exception failure = null;
+            var found = -1;
+            var reader = new Thread(() =>
+            {
+                var readerDepth = epochManager.EnterScope();
+                var readerAccessor = segment.CreateChunkAccessor();
+                try
+                {
+                    foreach (var kv in tree.EnumerateRange(12_340, 12_340))
+                    {
+                        found = kv.Value;
+                    }
+                }
+                catch (Exception e)
+                {
+                    failure = e;
+                }
+                finally
+                {
+                    readerAccessor.Dispose();
+                    epochManager.ExitScope(readerDepth);
+                }
+            });
+            reader.Start();
+            bool waitedPastTheBudget;
+            try
+            {
+                // The holder's wait — a page fault under back-pressure, here simply time: past the ~380 ms the restart budget allowed.
+                waitedPastTheBudget = !reader.Join(500);
+            }
+            finally
+            {
+                tree.DiagnosticRoot.GetLatch(ref accessor).WriteUnlock();
+            }
+
+            reader.Join();
+            Assert.That(waitedPastTheBudget, Is.True, $"premise: the descent was still waiting when the holder let go ({failure?.Message})");
+
+            Assert.That(failure, Is.Null, $"the descent gave up on a held node: {failure?.Message}");
+            Assert.That(found, Is.EqualTo(1234), "the key, once the holder let go");
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>A hold past <see cref="BTreeHeldNode.MaxWait"/> is still named: the descent throws IXW-01.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IXW-01")]
+    public unsafe void ADescentMeetingANodeHeldPastTheBound_ThrowsIxw01()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        var bound = BTreeHeldNode.MaxWait;
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (int i = 1; i <= 2000; i++)
+            {
+                tree.Add(i * 10, i, ref accessor);
+            }
+
+            BTreeHeldNode.MaxWait = TimeSpan.FromMilliseconds(100);
+            Assert.That(tree.DiagnosticRoot.GetLatch(ref accessor).TryWriteLock(), Is.True, "premise: the root is held");
+            Exception failure = null;
+            try
+            {
+                var reader = new Thread(() =>
+                {
+                    var readerDepth = epochManager.EnterScope();
+                    try
+                    {
+                        foreach (var _ in tree.EnumerateRange(12_340, 12_340))
+                        {
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        failure = e;
+                    }
+                    finally
+                    {
+                        epochManager.ExitScope(readerDepth);
+                    }
+                });
+                reader.Start();
+                Assert.That(reader.Join(5_000), Is.True, "the descent waited past its bound");
+            }
+            finally
+            {
+                tree.DiagnosticRoot.GetLatch(ref accessor).WriteUnlock();
+            }
+
+            Assert.That(failure, Is.InstanceOf<InvalidOperationException>());
+            Assert.That(failure.Message, Does.Contain("write-latched for over").And.Contain("IXW-01"));
+            accessor.Dispose();
+        }
+        finally
+        {
+            BTreeHeldNode.MaxWait = bound;
+            epochManager.ExitScope(depth);
+        }
+    }
+
     private unsafe int Descend(bool injectVersionBump, out Result<int, BTreeLookupStatus> found)
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();

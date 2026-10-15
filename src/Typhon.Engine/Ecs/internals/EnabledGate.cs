@@ -199,5 +199,24 @@ internal unsafe struct EnabledGate
     }
 
     /// <summary>Whether the chain at <paramref name="root"/> holds a revision this reader sees — the component exists at its snapshot.</summary>
-    private readonly bool IsPresentAtSnapshot(int root) => root != 0 && _tx.ResolveVersionedContentChunk(_meta, _presenceSlot, root) != 0;
+    private readonly bool IsPresentAtSnapshot(int root)
+    {
+        if (root == 0)
+        {
+            return false;
+        }
+
+        // A chain walk through the transaction's accessors holds its pages by the epoch alone: a back-pressure wait inside it must not move the epoch, even
+        // inside a broad walk (#1230, EP-02).
+        var refreshable = PagedMMF.RefreshableWaitDepth;
+        PagedMMF.RefreshableWaitDepth = 0;
+        try
+        {
+            return _tx.ResolveVersionedContentChunk(_meta, _presenceSlot, root) != 0;
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth = refreshable;
+        }
+    }
 }
