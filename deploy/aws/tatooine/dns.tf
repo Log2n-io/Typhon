@@ -37,40 +37,28 @@ variable "acme_email" {
   EOT
 }
 
-resource "aws_route53_zone" "stack" {
-  count = var.dns_zone_name == "" ? 0 : 1
+variable "dns_zone_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    The hosted zone this stack writes its records into — `deploy/aws/tatooine-shared`'s `zone_id` output. Required with
+    dns_zone_name.
 
-  name    = var.dns_zone_name
-  comment = "SWG Tatooine ${var.name}. Delegated from the parent domain by hand; records are written by the instance."
-
-  # <b>Because the instance writes the records, not Terraform.</b> The A records follow the public IP across every stop and
-  # start, so Terraform cannot own them without fighting the boot-time update on each apply. It owns the ZONE; the instance
-  # owns what is in it. force_destroy is what then lets an ephemeral stack actually be destroyed, since a zone holding records
-  # Terraform never created would otherwise refuse to go.
-  force_destroy = true
-
-  tags = {
-    Name = "tatooine-${var.name}"
-  }
+    This stack does NOT create the zone, deliberately. The zone's four nameservers are written by hand at the registrar, and
+    a `terraform destroy` that took the zone would hand out four new ones and silently invalidate that delegation — so the
+    workflow this module exists for, turning a stack on and destroying it afterwards, would cost a registrar edit per cycle.
+    The zone lives in a stack that is never destroyed; this one only writes into it.
+  EOT
 }
 
-output "delegation" {
-  value = var.dns_zone_name == "" ? "no DNS zone in this stack (dns_zone_name is empty)" : join("\n", concat([
-    "Add these to the PARENT zone at the registrar, as NS records on the '${split(".", var.dns_zone_name)[0]}' label:",
-    "",
-    ], aws_route53_zone.stack[0].name_servers, [
-    "",
-    "Add NO DS record. An unsigned child under a signed parent is a valid insecure delegation;",
-    "a DS record for an unsigned child breaks every name under ${var.dns_zone_name} for validating resolvers.",
-    "",
-    "Verify before going further:",
-    "  dig NS ${var.dns_zone_name} @8.8.8.8      # should list the four names above",
-    "  dig DS ${var.dns_zone_name} @8.8.8.8      # should return nothing",
-  ]))
-  description = "The one manual step: the NS records to add at the registrar, and the DS record not to."
-}
+# <b>Nothing DNS-shaped is created here.</b> The records are written by the INSTANCE at boot, because they follow the public
+# IP across every stop and start and Terraform cannot own them without fighting that update on each apply. The zone itself
+# belongs to the shared stack, for the reason above.
+#
+# The id is needed for exactly two things: the IAM policy that scopes the instance's write permission to that one zone, and
+# the cloud-init script that performs the write.
 
-output "dns_zone_id" {
-  value       = var.dns_zone_name == "" ? "" : aws_route53_zone.stack[0].zone_id
-  description = "The hosted zone the instance writes its own A records into."
+output "dns_names" {
+  value       = local.dns_names
+  description = "The names the instance publishes at boot and that the certificate covers."
 }

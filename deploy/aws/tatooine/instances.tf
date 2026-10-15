@@ -59,7 +59,7 @@ resource "aws_instance" "server" {
 
     # DNS and TLS. Empty strings when this stack has no zone, which the scripts check for: the box then serves plain HTTP on
     # the game port and says so, rather than failing to boot.
-    dns_zone_id = var.dns_zone_name == "" ? "" : aws_route53_zone.stack[0].zone_id
+    dns_zone_id = var.dns_zone_id
     dns_names   = join(" ", local.dns_names)
     acme_email  = var.acme_email
     tls_chain   = local.tls_chain
@@ -83,6 +83,13 @@ resource "aws_instance" "server" {
     precondition {
       condition     = !var.public_tls || var.dns_zone_name != ""
       error_message = "public_tls serves a certificate for a name, so it needs dns_zone_name (e.g. \"demo.typhondb.io\")."
+    }
+
+    precondition {
+      # The two go together: the name is what the certificate covers, the id is where the records are written. One without
+      # the other produces a box that either certifies a name it cannot publish, or publishes into a zone it cannot name.
+      condition     = (var.dns_zone_name == "") == (var.dns_zone_id == "")
+      error_message = "dns_zone_name and dns_zone_id go together. Get the id from deploy/aws/tatooine-shared's zone_id output."
     }
 
     precondition {

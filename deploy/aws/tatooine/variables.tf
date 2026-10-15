@@ -84,8 +84,14 @@ variable "server_root_gb" {
 
 variable "data_gb" {
   type        = number
-  default     = 100
-  description = "Prod's world volume. Only created when persistent_data is true."
+  default     = 50
+  description = <<-EOT
+    Prod's world volume, in GB. Only created when persistent_data is true.
+
+    Fifty rather than a round hundred: the demo rebuilds its world from a seed and writes little until player mode, and gp3
+    bills per PROVISIONED gigabyte ($0.088/GB-month in eu-west-1, so each 50 GB is ~$4.40/month whether or not the instance
+    is running). Growing a gp3 volume later is an online operation; shrinking one is not, so the cheap direction is up.
+  EOT
 }
 
 variable "ttl_hours" {

@@ -6,6 +6,25 @@
 # Normally created by .github/workflows/tatooine-ephemeral.yml, which also tags the deadline the sweep reads. Applying
 # by hand is for when something has gone wrong with the workflow; the TTL backstop below still fires either way.
 
+# ── THIS IS THE SHAPE FOR "turn it on, test, turn it off or destroy" ──────────────────────────────────────────────────
+#
+# Measured costs, eu-west-1, 2026-10-15 (gp3 from the pricing API, spot from describe-spot-price-history):
+#
+#   running, both on demand   $1.21/hour   (c6id.4xlarge $0.916 + c7g.2xlarge ~$0.29)
+#   running, both spot        $0.54/hour   (c6id.4xlarge $0.386 + c7g.2xlarge $0.153)
+#   STOPPED                   ~$5.28/month  two root volumes, 60 GB of gp3 at $0.088/GB-month
+#   DESTROYED                 ~$0.51/month  the shared DNS zone, and pennies of state
+#
+# <b>Destroying is about ten times cheaper than stopping</b>, which inverts the usual instinct: instance hours go to zero
+# when a box is stopped and its public IP is released, but EBS is billed in full. So the intended cycle is apply, test,
+# destroy -- not apply, test, stop.
+#
+# <b>And that is why persistent_data stays false here.</b> With it true, prod's world volume carries prevent_destroy and a
+# `terraform destroy` REFUSES while it exists. That setting is for the long-lived world that tests schema evolution; it is
+# the opposite of what this file is for.
+#
+# The DNS zone survives every destroy because it lives in deploy/aws/tatooine-shared: its four nameservers are written by
+# hand at the registrar, and recreating the zone would hand out four new ones.
 name            = "pr-1372"
 persistent_data = false
 ttl_hours       = 4
@@ -21,6 +40,16 @@ server_instance_type = "c6id.2xlarge"
 # No front door. A private soak reaches the server from the bot box over the private IP, and a distribution takes about
 # fifteen minutes to come up and as long to go away.
 enable_front_door = false
+
+# A public URL, served by the instance itself. Comment these three out for a stack that only needs to be reachable from
+# inside the VPC -- the certificate step is then skipped and the box serves plain HTTP on the game port.
+public_tls    = true
+dns_zone_name = "demo.typhondb.io"
+dns_zone_id   = "Z063620936HA3DRPWS2DE"
+acme_email    = "contact@log2n.io"
+
+# Spot for the bot box: a reclaim costs a run and nothing else, since the accounts file is reproducible from SWG_BOT_KEY.
+# At the live price that is $0.153/hour against $0.29 on demand.
 
 alert_email        = "you@example.com"
 monthly_budget_usd = 200

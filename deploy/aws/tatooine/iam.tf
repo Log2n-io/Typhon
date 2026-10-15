@@ -131,7 +131,7 @@ resource "aws_iam_instance_profile" "instance" {
 # Had the records stayed at the registrar, both jobs would need a long-lived API key on a public-facing game server. The
 # instance role replaces it.
 data "aws_iam_policy_document" "route53_write" {
-  count = var.dns_zone_name == "" ? 0 : 1
+  count = var.dns_zone_id == "" ? 0 : 1
 
   statement {
     sid     = "WriteThisStacksRecords"
@@ -139,7 +139,7 @@ data "aws_iam_policy_document" "route53_write" {
 
     # Scoped to this stack's zone. A compromise of the game process can rewrite demo.typhondb.io and nothing else -- not the
     # parent domain, which is not in this account at all, and not another stack's zone.
-    resources = ["arn:aws:route53:::hostedzone/${aws_route53_zone.stack[0].zone_id}"]
+    resources = ["arn:aws:route53:::hostedzone/${var.dns_zone_id}"]
   }
 
   statement {
@@ -152,7 +152,7 @@ data "aws_iam_policy_document" "route53_write" {
 }
 
 resource "aws_iam_role_policy" "route53_write" {
-  count = var.dns_zone_name == "" ? 0 : 1
+  count = var.dns_zone_id == "" ? 0 : 1
 
   name   = "route53-write"
   role   = aws_iam_role.instance.id

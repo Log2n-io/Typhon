@@ -15,7 +15,7 @@
 
 name            = "prod"
 persistent_data = true
-data_gb         = 200
+data_gb         = 50
 
 # No TTL: prod is stopped by default and started on demand, which is the cost control. A TTL would stop it mid-demo.
 ttl_hours     = 0
@@ -38,6 +38,7 @@ bot_spot  = false
 # under a signed parent is a valid insecure delegation, while a DS for an unsigned child breaks every name under it.
 public_tls    = true
 dns_zone_name = "demo.typhondb.io"
+dns_zone_id   = "Z063620936HA3DRPWS2DE" # deploy/aws/tatooine-shared's zone_id; this stack writes into it, never creates it
 acme_email    = "contact@log2n.io"
 
 # --origin is DERIVED from dns_zone_name; client_origin is only for a front door this module did not create.

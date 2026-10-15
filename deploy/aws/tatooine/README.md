@@ -40,6 +40,32 @@ The other is the CDN, for when egress or abuse justifies $15/month (`enable_fron
 | Created by | `tatooine-ephemeral.yml` (a button, a branch, a mandatory TTL) | once, by hand, updated in place |
 | Schema gate | skipped — no previous world to open | **required** |
 
+## Two stacks, and why
+
+| | |
+|---|---|
+| `deploy/aws/tatooine-shared/` | **Created once, never destroyed.** Holds the DNS zone, which carries `prevent_destroy`. Its four nameservers are written by hand at the registrar, so recreating the zone would hand out four new ones and silently break the delegation |
+| `deploy/aws/tatooine/` | The game. Created, tested and **destroyed** as often as you like. It writes into the shared zone and creates nothing DNS-shaped |
+
+That split exists because of the cost shape. Measured in eu-west-1 on 2026-10-15 — gp3 from the pricing API, spot from
+`describe-spot-price-history`:
+
+| | |
+|---|---:|
+| Running, both instances on demand | **$1.21/hour** |
+| Running, both spot | **$0.54/hour** |
+| **Stopped** (two root volumes, 60 GB of gp3 at $0.088/GB-month) | **~$5.28/month** |
+| **Destroyed** (the shared zone, plus pennies of state) | **~$0.51/month** |
+
+**Destroying is about ten times cheaper than stopping.** Instance hours go to zero when a box is stopped and its public IP
+is released — but EBS is billed in full, whether the volume is attached to a running instance or not. So the cycle this is
+built for is apply, test, **destroy** — and that only works without a registrar edit each time because the zone is in the
+other stack.
+
+Note the corollary: **`persistent_data = true` makes a stack undestroyable on purpose.** Prod's world volume carries
+`prevent_destroy`, because prod exists to accumulate a world with history for schema-evolution testing. Use
+`ephemeral.tfvars.example` for anything you intend to throw away.
+
 ## Applying it
 
 ```bash
