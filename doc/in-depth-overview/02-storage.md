@@ -332,7 +332,7 @@ internal interface IPageCacheBackpressureStrategy : IDisposable
 }
 ```
 
-[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled when a page is left with no marks and no writeback debt — by `PagedMMF.MarkCaptured` after a checkpoint write, or by `DecrementDirty` releasing a page's last mark. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
+[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled when a page is left with no marks and no writeback debt — by `PagedMMF.MarkCaptured` after a checkpoint write, or by `DecrementDirtyByDelta` (`ChangeSet.ReleaseDirtyMarks`) releasing a page's last mark. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
 
 The factory hook on `PagedMMFOptions`:
 

@@ -244,7 +244,7 @@ The cycle never persists never-durable bytes (CK-02) and never advances past a p
 
 There is **no FPI-bitmap reset step**, because Typhon writes no full-page images ([§6](#6-torn-page-safety-no-fpi)). The cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` ([§8](#8-uow-state-machine)).
 
-A planned **flush-only cycle** (`FlushOnlyCycle` — capture + write + `MarkCaptured`, *no* barrier/gate/meta-flip/recycle) would keep the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08). **This feature is not yet implemented** (CK-08 is `[UNBUILT]` — see `rules/durability.md`).
+A **flush-only cycle** (`FlushOnlyCycle` — capture + write + `MarkCaptured`, *no* barrier/gate/meta-flip/recycle) keeps the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08).
 
 ### A/B slot-pairing — the doublewrite-free torn-write net (CK-05)
 
