@@ -255,3 +255,54 @@ below names the invariant that proves it.
   on_violation: tagged with the writer's TSN, a view refreshed at a snapshot between that TSN and the stamp applies a change
                 committed after the snapshot
   requires: VIS-01
+
+### VIS-12: A field query evaluates every entity at its snapshot's value, on every path `[fatal]` `[silent]`
+  invariant ∀ field query Q at snapshot S on a Versioned component T, ∀ entity e: Q evaluates its predicates on the value of e's T committed at
+            or below S, never on one committed after S — not the cluster HEAD's bytes, not the index tree's keys, which both hold the newest
+            committed value — and never on Q's transaction's own unpublished write (QENABLE-01)
+  invariant an update publishing a new newest value (one that moves the entity's index entries or copies its HEAD) says so first, under the
+            entity's chain lock and before either move (ArchetypeClusterState.NoteUpdatePublished, from Transaction.NoteVersionedUpdate): its
+            cluster's update watermark (a CAS max of the commit stamp), the archetype's MaxUpdateStamp (a CAS max), then its UpdateCount
+            (an increment) — once per update, not per commit: a merge whose first read falls between two updates of one commit must see the second
+  invariant a cluster whose update watermark is above S is evaluated on a snapshot column: each slot's value at S copied into a column laid out
+            as the HEAD's (EcsQuery.FillSnapshotColumn, EntityAccessor.TryCopyCommittedAtSnapshot), a slot with no value at S dropped. The column
+            is the transaction's (Transaction.SnapshotColumn): taken from the engine's allocator at the first cluster that needs one, kept across
+            pooled uses, never cleared — every slot read is written first. The SoA scan and the selective scan validate their HEAD read AFTER it,
+            seqlock-style — the watermark re-read (behind a full barrier on arm64) and the cluster evaluated again on the snapshot column when it
+            moved above S — because an update can fold its watermark after the first read and copy its HEAD before the evaluation
+  invariant the index paths find the clusters from the archetype (EcsQuery.ClustersUpdatedAfterSnapshot): its UpdateCount first (the mark), then
+            its MaxUpdateStamp; at or below S, no cluster — one load for every reader newer than the archetype's last update; above it, a walk
+            of every active cluster's watermark (EcsQuery.WatermarksAbove). The selective scan reads them after its tree read and reads each
+            listed cluster whole at S. The ordered merge reads them before its lazy streams open, reads each listed cluster whole into the side
+            stream whose entities the tree stream drops — every entity of the cluster, matching or not — and after the merge compares the count
+            with its mark (EcsQuery.UpdatedSince): changed, it walks the watermarks again and answers again when a cluster it did not read whole
+            is above S. The count, not the stamp: an older commit can publish after a newer one and leave the stamp where it was
+  invariant every path that moves an entity's HEAD to another cluster carries the update watermark with it: a fence migration folds the source
+            cluster's watermark into the destination's, and the archetype's stamp and count, before it copies the entity's bytes
+            (DatabaseEngine.ExecuteMigrations)
+  invariant a cluster above S is never pruned by its zone maps: the fence re-tightens them from the HEAD, so they may exclude S's value. The SoA
+            scan re-reads the watermark after a prune verdict (behind a full barrier on arm64) and keeps the cluster when it is above S
+  scope: Transaction.NoteVersionedUpdate, Transaction.SnapshotColumn, ArchetypeClusterState.NoteUpdatePublished, ArchetypeClusterState.NoteClusterUpdated,
+         ArchetypeClusterState.MaxUpdatedOf, ArchetypeClusterState.MaxUpdateStamp, ArchetypeClusterState.UpdateCount,
+         EcsQuery.ClustersUpdatedAfterSnapshot, EcsQuery.WatermarksAbove, EcsQuery.UpdatedSince,
+         EcsQuery.FillSnapshotColumn, EcsQuery.MatchingSlots, EcsQuery.ScanClusterSoa, EcsQuery.ScanPerArchetypeBTreeSelective,
+         EcsQuery.MergeOrderedClustered, EcsQuery.ReadClustersWhole, EntityAccessor.TryCopyCommittedAtSnapshot, DatabaseEngine.ExecuteMigrations
+  note an update stamped at or below S but not yet published when the query runs (between VIS-03's stamp and its publish) is not covered: the
+       query reads the HEAD and tree as they were before it, while a point read finds the new value through the commit card — the same window
+       VIS-08's note leaves open for spawns. Closing it needs a per-cluster pending-update count read as PendingDeaths is
+  note point reads (EntityRef) always walked the chain at S; only the bulk paths read HEAD or tree keys. The SoA scan's watermark check before
+       the evaluation is an economy, not a guard: the validation after it answers alone (mutant: survives, by design). The walk is O(active
+       clusters) per index-path query of a reader older than an update: a selective point lookup over a very large archetype under constant
+       updates pays it on every query. An engine-wide update log once listed the clusters instead; dropped as unmeasured weight (352 KB per
+       engine, a global interlocked head per update) until a measurement says the walk costs more
+  on_violation: a reader older than an update matched the entity by its newer value — counted, listed and ordered by a value committed after
+                its snapshot, and its predicate on another field verified on the newer bytes (#674); field queries disagreed with point reads
+  requires: VIS-05, VIS-06, QENABLE-01
+  verified: QueryUpdateSnapshotTests [VerifiesRule] — an older reader on every path and terminal; a predicate on a second field; the own write in a
+            cluster read at the snapshot; updated then destroyed; an update after the merge's first read; an update between the watermark read and
+            the HEAD read; the watermark walk only for a reader older than an update; an entity updated then migrated at the fence; a cluster the
+            fence re-tightened after the update. PipelineExecutorCombinedPathTests.Versioned_SnapshotHidesLaterUpdate; OrderedQueryByAnotherFieldTests
+            ...OrdersByTheValueItSees_OnTheMerge. Mutants: no watermark fold (nine red), no stamp fold, the walk skipped (eight each), no count, the
+            merge's second read removed (the merge case), either validation removed (the between-reads case), the merge dropping only matching rows,
+            a migration that does not carry the watermark, a prune that ignores it — each red. Under load: QueryStressOracleTests
+            ...UnderConcurrentChurnAndTierMoves, quarantined on #1369/#1370 (pre-existing, reproduced without this rule's code)

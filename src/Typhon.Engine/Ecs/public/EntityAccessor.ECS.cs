@@ -110,6 +110,25 @@ public unsafe partial class EntityAccessor
         GetComponentInfoByTypeId(componentTypeId, componentType);
 
     /// <summary>
+    /// Copies the value of <paramref name="slot"/>'s Versioned component committed at this snapshot into <paramref name="destination"/> (VIS-12): the newest
+    /// revision stamped at or below it, never this transaction's own unpublished write — a field query does not see those (QENABLE-01). False when the
+    /// snapshot holds no value for it.
+    /// </summary>
+    internal unsafe bool TryCopyCommittedAtSnapshot(ArchetypeMetadata meta, int slot, int chainRoot, byte* destination, int size)
+    {
+        var chunk = ResolveVersionedContentChunk(meta, slot, chainRoot);
+        if (chunk == 0)
+        {
+            return false;
+        }
+
+        var info = GetComponentInfoByTypeId(meta._componentTypeIds[slot], meta._slotToComponentType[slot]);
+        System.Runtime.CompilerServices.Unsafe.CopyBlock(destination, info.CompContentAccessor.GetChunkAddress(chunk) + info.ComponentTable.ComponentOverhead,
+            (uint)size);
+        return true;
+    }
+
+    /// <summary>
     /// Walk <paramref name="slot"/>'s revision chain from <paramref name="chainRoot"/> and return the content chunk visible at this accessor's
     /// <see cref="TSN"/>, or 0 when the chain yields nothing visible.
     /// <para>

@@ -500,6 +500,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
+        RefreshEpochBeforeDrain();
         if (_dbe.DeferredCleanupManager.QueueSize > 0)
         {
             _dbe.DeferredCleanupManager.ProcessDeferredCleanups(TSN, nextMinTSN, _dbe, _changeSet);
@@ -574,7 +575,23 @@ public unsafe partial class Transaction : EntityAccessor
 
         if (isTail)
         {
+            RefreshEpochBeforeDrain();
             DrainEcsCleanups(nextMinTSN);
+        }
+    }
+
+    /// <summary>
+    /// The tail drains every transaction's queued cleanups, and as the tail its epoch is the oldest pinned (#1230): a back-pressure wait in the drain held
+    /// every page any thread had touched since this transaction began — 5,000 epochs of them on a 64 MiB market — until all of them timed out together.
+    /// The drain starts at a call boundary (EP-03): this transaction's reads are done, its accessors pin what they cache, so its epoch is refreshed first.
+    /// Like the per-operation refresh, it releases the dirty marks of this transaction's ChangeSet — a shared UoW one too: the release is exact, the drain
+    /// marks what it dirties again, and the owner releases the rest on its own dispose.
+    /// </summary>
+    private void RefreshEpochBeforeDrain()
+    {
+        if (LiveIndexCursors == 0)
+        {
+            FlushAndRefreshEpoch();
         }
     }
 
@@ -2262,6 +2279,13 @@ public unsafe partial class Transaction : EntityAccessor
 
             var becomesNewest = _commitStamp > newestStamp;
 
+            // VIS-12 (#674): an update that moves this entity's index entries or its HEAD says so first — its cluster's watermark, then its archetype's stamp
+            // and count — so a reader older than it that finds either moved reads the cluster at its snapshot instead.
+            if (becomesNewest && (e.SlotIndexed || e.ClusterCopyPending))
+            {
+                NoteVersionedUpdate(in e);
+            }
+
             // Phase A (#1262, #1263): the indexes and views, under the chain lock and before the stamp, so the index never lags a visible revision. They
             // move from the newest published value, not the one this transaction read: another update may have committed in between, and its publish moved
             // the entry off the read key — moving from it then found nothing and changed nothing, and the index kept the other writer's key for good. A
@@ -2546,6 +2570,9 @@ public unsafe partial class Transaction : EntityAccessor
         ReconcileClusterIndexAndViews(es, clusterState, e.CompSlot, e.ClusterChunkId, e.ClusterChunkId * 64 + e.SlotIndex, EntityId.FromRaw(e.Pk), oldComp,
             newComp);
     }
+
+    /// <summary>The update's cluster watermark, its archetype's update stamp and count, at this commit's stamp (VIS-12).</summary>
+    private void NoteVersionedUpdate(in PublishEntry e) => _dbe._stateByRouting[e.ArchId].ClusterState.NoteUpdatePublished(e.ClusterChunkId, _commitStamp);
 
     /// <summary>
     /// PUBLISH half of the cluster commit (AP-01): copies the committed HEAD value into the entity's cluster slot (visible to bulk iteration) and marks

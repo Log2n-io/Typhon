@@ -9,7 +9,7 @@
   "src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs": 4,
   "src/Typhon.Engine/Ecs/public/DatabaseEngine.SpatialTelemetry.cs": 1,
   "src/Typhon.Engine/Ecs/public/DatabaseEngine.cs": 3,
-  "src/Typhon.Engine/Ecs/public/EcsQuery.cs": 2,
+  "src/Typhon.Engine/Ecs/public/EcsQuery.cs": 1,
   "src/Typhon.Engine/Ecs/public/EcsView.cs": 1,
   "src/Typhon.Engine/Ecs/public/EntityAccessor.ECS.cs": 1,
   "src/Typhon.Engine/Foundation/Collections/internals/RawValueHashMap.cs": 1,

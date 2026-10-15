@@ -634,6 +634,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// </para>
     /// </remarks>
     internal const int MaxPessimisticRestarts = 10_000;
+
     internal const int ContentionSplitThreshold = 3;
 
     #region OLC Path Buffers
@@ -2897,9 +2898,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         }
 
         PureSpin spin = default;
-        for (var attempt = 0; ; attempt++)
+        SpinWait heldSpin = default;
+        long heldSince = 0;
+        for (var attempt = 0; ;)
         {
-            var (leafChunkId, _, keyIndex) = OptimisticDescendToLeaf(key, ref accessor, followRightLink);
+            var (leafChunkId, stoppedAt, keyIndex) = OptimisticDescendToLeaf(key, ref accessor, followRightLink);
             if (leafChunkId != 0)
             {
                 index = keyIndex;
@@ -2912,7 +2915,51 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             }
 
             Interlocked.Increment(ref _pessimisticRestarts);
-            if (attempt >= MaxPessimisticRestarts)
+
+            // A node on the path write-latched by a writer that is working, not a node modified on every pass: the writer may be waiting on page-cache
+            // back-pressure under its latch — a multi-value buffer is read under its leaf's latch (IXW-06), and on a small cache a page of it can take
+            // seconds to admit. Counted against the restart budget, 10 000 passes of at most 38 us each named that wait a liveness defect after ~380 ms and
+            // threw, past the WAL append in a commit, halting the engine (#1237). It is waited out instead, yielding, under a bound far past any wait the
+            // holder's own deadlines allow: a latch held longer than that is the defect IXW-01 still names.
+            // Only when this thread holds no latch itself: waiting while holding one could close a cycle the counted bound used to break.
+            // The pass names the node it stopped at in the version slot (OptimisticDescendToLeaf): held now — locked, not obsolete — means a writer has it.
+            // Re-resolved by chunk id, as every latch read after other reads must be; a node reused since only answers the question wrong, never unsafely.
+            var heldNode = false;
+            if (stoppedAt != 0 && OlcLatchHeld.Count == 0)
+            {
+                var stoppedLatch = _storage.LoadNode(stoppedAt).GetLatch(ref accessor);
+                heldNode = stoppedLatch.IsLocked && !stoppedLatch.IsObsolete;
+            }
+
+            if (heldNode)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (heldSince == 0)
+                {
+                    heldSince = now;
+                }
+                else if (Stopwatch.GetElapsedTime(heldSince, now) > BTreeHeldNode.MaxWait)
+                {
+                    ThrowHelper.ThrowInvalidOp(
+                        $"B+Tree descent for key {key}: a node on the path has been write-latched for over {BTreeHeldNode.MaxWait.TotalSeconds:0} s. "
+                        + "A writer holds it without making progress — a liveness defect in the tree, not contention (IXW-01).");
+                }
+
+                // A hold past a few milliseconds is an I/O wait, not an OLC handoff: sleep rather than burn a core descending for up to BTreeHeldNode.MaxWait.
+                if (Stopwatch.GetElapsedTime(heldSince, now) > BTreeHeldNode.SleepAfter)
+                {
+                    Thread.Sleep(1);
+                }
+                else
+                {
+                    heldSpin.SpinOnce(-1);
+                }
+
+                continue;
+            }
+
+            heldSince = 0;
+            if (attempt++ >= MaxPessimisticRestarts)
             {
                 ThrowHelper.ThrowInvalidOp(
                     $"B+Tree descent for key {key} could not complete a validated root-to-leaf walk in {MaxPessimisticRestarts} attempts: a node on the "
@@ -3049,7 +3096,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         int version = latch.ReadVersion();
         if (version == 0)
         {
-            return (0, 0, -1); // locked or obsolete — restart
+            return (0, node.ChunkId, -1); // locked or obsolete — restart (the version slot names the node: see FindLeaf)
         }
 
         // Descend through internal nodes
@@ -3067,7 +3114,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             // Validate parent version after reading child pointer
             if (!latch.ValidateVersion(version))
             {
-                return (0, 0, -1); // parent was modified — restart
+                return (0, node.ChunkId, -1); // parent was modified — restart
             }
 
             // Move to child
@@ -3085,7 +3132,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             version = latch.ReadVersion();
             if (version == 0)
             {
-                return (0, 0, -1); // locked or obsolete — restart
+                return (0, node.ChunkId, -1); // locked or obsolete — restart
             }
 
             // The OLC protocol's readUnlockOrRestart, and the half this descent was missing. The validation above answers "was the child pointer I read still
@@ -3103,7 +3150,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             // (see the leaf re-validation in TryGetValue), which costs an accessor lookup and is correct under eviction.
             if (!parent.GetLatch(ref accessor).ValidateVersion(parentVersion))
             {
-                return (0, 0, -1); // parent changed while we were taking the child's version — the hop was not atomic, restart
+                return (0, parent.ChunkId, -1); // parent changed while we were taking the child's version — the hop was not atomic, restart
             }
         }
 
@@ -3170,7 +3217,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
                 int nextVersion = nextLatch.ReadVersion();
                 if (nextVersion == 0)
                 {
-                    return (0, 0, -1);
+                    return (0, nextNode.ChunkId, -1);
                 }
 
                 node = nextNode;
@@ -3193,7 +3240,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         // Validate final leaf version after reading
         if (!latch.ValidateVersion(version))
         {
-            return (0, 0, -1); // leaf was modified during search — restart
+            return (0, node.ChunkId, -1); // leaf was modified during search — restart
         }
 
         return (node.ChunkId, version, keyIndex);
@@ -3203,3 +3250,20 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 }
 
 #endregion
+
+/// <summary>
+/// The held-node wait of <c>BTree.FindLeaf</c> (IXW-01, #1237): its bounds, outside the generic tree. The descent itself records nothing — a
+/// thread-static store on its failure branches alone cost a lookup 100 ns → 118 ns, measured; a failed pass names the node it stopped at instead.
+/// </summary>
+internal static class BTreeHeldNode
+{
+    /// <summary>
+    /// How long a descent waits out a node a writer holds before it names the hold a liveness defect. Six page-cache back-pressure timeouts: a holder
+    /// faulting a page in under its latch either gets it or fails and releases the latch well within that. Settable: tests shorten it.
+    /// </summary>
+    internal static TimeSpan MaxWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long a descent spins on a held node before it sleeps between passes: past it, the holder is waiting on I/O.</summary>
+    internal static readonly TimeSpan SleepAfter = TimeSpan.FromMilliseconds(5);
+
+}

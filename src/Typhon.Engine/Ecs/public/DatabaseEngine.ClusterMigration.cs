@@ -1092,6 +1092,14 @@ public partial class DatabaseEngine
                     }
                 }
 
+                // 2b. VIS-12: the entity's HEAD moves to the destination, an update newer than an older snapshot with it. The destination says so before the
+                //     copy below — its watermark, the archetype's stamp and count — as the update said so for the source; once per destination.
+                var srcUpdated = clusterState.ClusterMaxUpdated(srcChunkId);
+                if (srcUpdated > clusterState.ClusterMaxUpdated(dstChunkId))
+                {
+                    clusterState.NoteUpdatePublished(dstChunkId, srcUpdated);
+                }
+
                 // 3. Re-fetch source / destination bases after potential segment growth inside ClaimSlotInCell.
                 byte* srcBase;
                 byte* dstBase;

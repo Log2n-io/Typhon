@@ -1926,6 +1926,23 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     [ThreadStatic] private static long t_publishSince;
 
+    /// <summary>
+    /// Non-zero on a thread inside a walk whose every page reference is a scan accessor's slot-reference pin (EP-02) — the entity-map walks and the SoA scan
+    /// a query passes a yield point to (#1364). A back-pressure wait there moves the thread's epoch (#1230): pins hold its pages, the epoch holds none of
+    /// them, and left at the minimum it protected every page every other thread tagged while it waited, until the whole cache was epoch-held and all of
+    /// them timed out together. Never under a live index cursor, whose node only the epoch keeps.
+    /// </summary>
+    internal static int RefreshableWaitDepth
+    {
+        get => t_refreshableWaitDepth;
+        set => t_refreshableWaitDepth = value;
+    }
+
+    [ThreadStatic] private static int t_refreshableWaitDepth;
+
+    /// <summary>How many back-pressure waits moved their thread's epoch (<see cref="RefreshableWaitDepth"/>).</summary>
+    internal static long RefreshedWaits;
+
     /// <summary>How many times a publish's allocation outlasted <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> and went on waiting.</summary>
     internal long PublishBackpressureExtensions => Interlocked.Read(ref _publishBackpressureExtensions);
 
@@ -2119,6 +2136,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
                             LogBackpressure(Logger, _metrics.BackpressureWaitCount, dirtyCount, epochCount, bpCtx.RetryCount,
                                 bpCtx.WaitContext.Remaining.TotalMilliseconds);
+                        }
+
+                        // #1230: a walk holding only slot-reference pins waits with its epoch moved on, so it no longer protects what others tag meanwhile.
+                        if (t_refreshableWaitDepth > 0 && EntityAccessor.LiveIndexCursors == 0)
+                        {
+                            ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(EpochManager.RefreshScope());
+                            Interlocked.Increment(ref RefreshedWaits);
                         }
 
                         // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →

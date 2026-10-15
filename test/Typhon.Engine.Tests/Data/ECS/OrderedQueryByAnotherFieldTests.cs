@@ -186,11 +186,11 @@ class OrderedQueryByAnotherFieldTests : TestBase<OrderedQueryByAnotherFieldTests
     public void AReaderOlderThanAnUpdateOfTheOrderedField_OrdersByTheValueItSees() => OrdersAnOlderReaderByTheValueItSees(filterOnTheOrderedField: false);
 
     /// <summary>
-    /// The same, filtered on the ordered field itself, so the merge streams its tree. Red: the tree holds the committed HEAD's keys, so the row comes at its
-    /// newer value — the ordered face of #674, where the predicates evaluate the HEAD too.
+    /// The same, filtered on the ordered field itself, so the merge streams its tree. The tree holds the committed HEAD's keys, so the row came at its newer
+    /// value (#674): the cluster an update newer than the snapshot touched is now read whole at the snapshot, its rows dropped from the tree stream (VIS-12).
     /// </summary>
     [Test]
-    [Category("Quarantine")]
+    [VerifiesRule("VIS-12")]
     public void AReaderOlderThanAnUpdateOfTheOrderedField_OrdersByTheValueItSees_OnTheMerge() => OrdersAnOlderReaderByTheValueItSees(filterOnTheOrderedField: true);
 
     private void OrdersAnOlderReaderByTheValueItSees(bool filterOnTheOrderedField)

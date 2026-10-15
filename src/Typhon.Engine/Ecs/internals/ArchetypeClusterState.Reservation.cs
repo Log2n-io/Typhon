@@ -38,11 +38,12 @@ internal sealed unsafe partial class ArchetypeClusterState
 {
     private const int ClaimBlockShift = 10;
     private const int ClaimBlockSize = 1 << ClaimBlockShift;
-    private const int ClusterWordsShift = 2;   // four words a cluster
+    private const int ClusterWords = 5;   // five words a cluster
     private const int ClaimWordIndex = 0;
     private const int PendingDeathWordIndex = 1;
     private const int MaxBornWordIndex = 2;
     private const int MaxDiedWordIndex = 3;
+    private const int MaxUpdatedWordIndex = 4;
     private long[][] _slotWordBlocks = [];
     private readonly Lock _claimGrowLock = new();
 
@@ -71,7 +72,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return ref Unsafe.NullRef<long>();
         }
 
-        return ref block[((clusterChunkId & (ClaimBlockSize - 1)) << ClusterWordsShift) + ClaimWordIndex];
+        return ref block[(clusterChunkId & (ClaimBlockSize - 1)) * ClusterWords + ClaimWordIndex];
     }
 
     /// <summary>The claim word at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire.</summary>
@@ -88,6 +89,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>The died watermark at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire; 0 without a block, where the born side denies.</summary>
     internal static long MaxDiedOf(ref long words) =>
         Unsafe.IsNullRef(ref words) ? 0 : Volatile.Read(ref Unsafe.Add(ref words, MaxDiedWordIndex - ClaimWordIndex));
+
+    /// <summary>
+    /// The update watermark at <paramref name="words"/> (<see cref="SlotWords"/>), by acquire: the highest stamp of a Versioned update that moved an index
+    /// entry or the HEAD of an entity in the cluster (#674, VIS-12); 0 for none, or without a block — a cluster with no block holds nothing an update wrote.
+    /// </summary>
+    internal static long MaxUpdatedOf(ref long words) =>
+        Unsafe.IsNullRef(ref words) ? 0 : Volatile.Read(ref Unsafe.Add(ref words, MaxUpdatedWordIndex - ClaimWordIndex));
 
     /// <summary>
     /// The cluster gate's watermark half at <paramref name="words"/>: every entity born at or before <paramref name="txTsn"/> and every recorded death visible
@@ -137,6 +145,30 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </para>
     /// </remarks>
     internal long ClusterMaxDied(int clusterChunkId) => MaxDiedOf(ref SlotWords(SlotWordTable, clusterChunkId));
+
+    /// <summary>
+    /// Per-cluster highest stamp of a Versioned update that moved an entity's index entries or HEAD (#674, VIS-12). A reader whose snapshot is at or above it
+    /// reads the cluster's HEAD bytes and tree keys as its own; below it, it reads the cluster's entities at its snapshot. Only rises; in memory only — a
+    /// reopen starts every reader above every update.
+    /// </summary>
+    internal long ClusterMaxUpdated(int clusterChunkId) => MaxUpdatedOf(ref SlotWords(SlotWordTable, clusterChunkId));
+
+    /// <summary>
+    /// Folds a Versioned update's stamp into its cluster's update watermark (VIS-12), BEFORE the publish moves the entity's index entries or copies its value
+    /// into the HEAD: a reader that finds either moved reads the watermark above its snapshot.
+    /// </summary>
+    internal void NoteClusterUpdated(int clusterChunkId, long stamp)
+    {
+        ref var word = ref BlockWord(clusterChunkId, MaxUpdatedWordIndex);
+        while (true)
+        {
+            var current = Volatile.Read(ref word);
+            if (stamp <= current || Interlocked.CompareExchange(ref word, stamp, current) == current)
+            {
+                return;
+            }
+        }
+    }
 
     /// <summary>The born watermark's word, its block created if absent — for the folds and for fixtures that stage a summary.</summary>
     internal ref long MaxBornWord(int clusterChunkId) => ref BlockWord(clusterChunkId, MaxBornWordIndex);
@@ -204,8 +236,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     // Every born watermark starts unestablished — 0 would read as "visible to everyone" — and the block is release-stored filled: a reader that
                     // finds it must find the sentinels.
-                    var fresh = new long[ClaimBlockSize << ClusterWordsShift];
-                    for (var i = MaxBornWordIndex; i < fresh.Length; i += 1 << ClusterWordsShift)
+                    var fresh = new long[ClaimBlockSize * ClusterWords];
+                    for (var i = MaxBornWordIndex; i < fresh.Length; i += ClusterWords)
                     {
                         fresh[i] = VisibilityUnknown;
                     }
@@ -217,7 +249,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
         }
 
-        return ref blocks[b][((clusterChunkId & (ClaimBlockSize - 1)) << ClusterWordsShift) + wordIndex];
+        return ref blocks[b][(clusterChunkId & (ClaimBlockSize - 1)) * ClusterWords + wordIndex];
     }
 
     /// <summary>

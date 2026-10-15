@@ -1057,8 +1057,8 @@ both fast and exact inside the window; this rule fixes what it does promise.
                 EntityKey: silently unordered rows (found by MarketHardeningTests' query auditor, which orders a player's items by their last trade).
                 A not-equal on another field let the merge through untyped, and it answered nothing; one on F was re-checked only on rows written since
                 the last fence, so the excluded rows came back. The fallback read F's whole tree — every entry, whatever the result — at the HEAD's keys
-  note: the merge still orders by F's tree, which holds the committed HEAD's keys: a reader older than an update of F, filtered on F alone, gets that row
-        at its newer value — the ordered face of #674 (OrderedQueryByAnotherFieldTests...OrdersByTheValueItSees_OnTheMerge, quarantined)
+  note: the merge orders by F's tree, which holds the committed HEAD's keys; a reader older than an update of F gets that row at the key its snapshot
+        holds through VIS-12's side stream (#674, OrderedQueryByAnotherFieldTests...OrdersByTheValueItSees_OnTheMerge)
   verified: OrderedQueryByAnotherFieldTests [VerifiesRule] — filtered on another field, ascending and descending, whole and paged; a unique 64-bit
             sequence other rows' updates and a destroy re-key around; a not-equal on another field, alone or beside a range on F, and on F itself; an
             older reader on the fallback; a string order refused. Mutants: the key type borrowed again (seven cases red), the not-equal let through

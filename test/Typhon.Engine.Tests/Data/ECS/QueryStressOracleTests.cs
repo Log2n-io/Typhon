@@ -16,8 +16,10 @@ namespace Typhon.Engine.Tests;
 /// indexes do not share — so a path that disagrees with it is wrong at that snapshot.
 /// </summary>
 /// <remarks>
-/// <para>A field predicate evaluates the slot's current value, so an entity's indexed tier never changes: the value is fixed per entity, and two concurrent
-/// first supplies of it supply the same one. What changes is everything else — presence, enabled state, life, the non-indexed score.</para>
+/// <para>The writers keep each entity's indexed tier — two concurrent first supplies of it then supply the same one — and change everything else: presence,
+/// enabled state, life, the non-indexed score. A mover moves tiers (VIS-12, #674): a field predicate read the slot's current value, and an index its
+/// current key, so a reader older than a move answered by the newer tier. It never checks its own pending state, whose own writes field queries do not
+/// see while point reads do.</para>
 /// <para>A reader queries once every commit in flight at its snapshot has published: between a commit's append and its publish the index paths read HEAD,
 /// a documented non-goal (VIS-08), which a check at that instant would report.</para>
 /// </remarks>
@@ -68,7 +70,7 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
     private sealed class Shared
     {
         public readonly EntityPool Ever = new();
-        public readonly long[] Committing = new long[WriterCount];   // the writer's commit number while it commits, else 0
+        public readonly long[] Committing = new long[WriterCount + 1];   // the writer's commit number while it commits, else 0; the mover's last
         public readonly ConcurrentQueue<string> Failures = new();
         public readonly ConcurrentDictionary<string, int> Errors = new();
         public volatile bool Stop;
@@ -78,7 +80,19 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
     [Test]
     [VerifiesRule("QENABLE-01")]
     [VerifiesRule("VIS-09")]
-    public void EveryPathAndTerminal_AgreeWithPointReads_UnderConcurrentChurn([Values(2_000)] int milliseconds)
+    public void EveryPathAndTerminal_AgreeWithPointReads_UnderConcurrentChurn([Values(2_000)] int milliseconds) => Run(milliseconds, false);
+
+    /// <summary>
+    /// The same churn with a mover changing the indexed tier: the value half of snapshot isolation (VIS-12, #674) under load. Known-red on two pre-existing
+    /// defects the mover exposed, #1370 (an index entry left at an old key, the QUIET check below) and #1369 (an access violation in the ordered merge's
+    /// row admission), about one run in ten between them.
+    /// </summary>
+    [Test]
+    [Category("Quarantine")]   // #1369, #1370
+    [VerifiesRule("VIS-12")]
+    public void EveryPathAndTerminal_AgreeWithPointReads_UnderConcurrentChurnAndTierMoves([Values(2_000)] int milliseconds) => Run(milliseconds, true);
+
+    private void Run(int milliseconds, bool moves)
     {
         var seed = int.TryParse(Environment.GetEnvironmentVariable("QSO_SEED"), out var fixedSeed) ? fixedSeed : Environment.TickCount;
         milliseconds = int.TryParse(Environment.GetEnvironmentVariable("QSO_MS"), out var ms) ? ms : milliseconds;
@@ -107,6 +121,10 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
             threads.Add(new Thread(() => Guard(shared, () => Write(dbe, shared, writer, new Random(seed + writer)))));
         }
 
+        if (moves)
+        {
+            threads.Add(new Thread(() => Guard(shared, () => Move(dbe, shared, new Random(seed + 50)))));
+        }
         for (var r = 0; r < ReaderCount; r++)
         {
             var reader = r;
@@ -127,6 +145,38 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
 
         // The quiet end state: every path exact for a fresh reader, no claim left, storage sound.
         Check(dbe, shared, new Random(seed), dbe.CreateQuickTransaction(), true);
+        using (var quiet = dbe.CreateQuickTransaction())
+        {
+            foreach (var disabled in new[] { false, true })
+            {
+                for (var k = 0; k < Tiers; k++)
+                {
+                    var tier = k;
+                    HashSet<EntityId> On(ClusterScanPath path)
+                    {
+                        QueryPathProbe.Forced = path;
+                        try
+                        {
+                            var q = quiet.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == tier);
+                            return (disabled ? q.Disabled<StatsRanked>() : q).Execute();
+                        }
+                        finally
+                        {
+                            QueryPathProbe.Forced = ClusterScanPath.Planner;
+                        }
+                    }
+
+                    var byIndex = On(ClusterScanPath.Selective);
+                    var byScan = On(ClusterScanPath.FullScan);
+                    if (!byIndex.SetEquals(byScan))
+                    {
+                        shared.Failures.Enqueue($"QUIET index diverges at tier {tier}{(disabled ? " Disabled" : "")}: index extra "
+                                                + $"{string.Join(",", byIndex.Except(byScan).Take(3))}, "
+                                                + $"index misses {string.Join(",", byScan.Except(byIndex).Take(3))}");
+                    }
+                }
+            }
+        }
         TestContext.Out.WriteLine($"checks {shared.Checks}, errors {string.Join(", ", shared.Errors.Select(e => $"{e.Key}={e.Value}"))}");
         foreach (var kind in shared.Failures.GroupBy(f => System.Text.RegularExpressions.Regex.Replace(f, @"\d+|Entity\([^)]*\)", "#")))
         {
@@ -266,9 +316,52 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
         {
             tx.OpenMut(id).Enable(StatsArch.Ranked);
         }
-        else if (enabled)
+        else if (enabled && entity.TryReadForPredicate<StatsRanked>(false, out var current))
         {
-            tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(TierOf(id), rng.Next(1000)));   // the score churns; the tier stays
+            // The score churns; the tier stays as this transaction reads it — the mover's, maybe. Writing TierOf back would move it in this transaction's own
+            // pending state, which its field queries do not see and its point reads do: the own checks would report the difference.
+            tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(current.Tier, rng.Next(1000)));
+        }
+    }
+
+    /// <summary>Moves entities between tiers, a few at a commit: the indexed key the snapshot paths must read at the reader's snapshot (VIS-12).</summary>
+    private static void Move(DatabaseEngine dbe, Shared shared, Random rng)
+    {
+        long commitNumber = 0;
+        while (!shared.Stop)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var ever = shared.Ever.Snapshot();
+            for (var k = 0; k < 4; k++)
+            {
+                var id = ever[rng.Next(ever.Length)];
+                try
+                {
+                    if (tx.TryOpen(id, out var entity) && entity.IsEnabled(StatsArch.Ranked) && entity.TryReadForPredicate<StatsRanked>(false, out var value))
+                    {
+                        tx.OpenMut(id).Set(StatsArch.Ranked, new StatsRanked(rng.Next(Tiers), value.Score));
+                    }
+                }
+                catch (Exception e) when (e is InvalidOperationException or TyphonException)
+                {
+                    // Counted by message, as the writers count theirs.
+                    shared.Errors.AddOrUpdate($"move {e.GetType().Name}: {e.Message}", 1, (_, n) => n + 1);
+                }
+            }
+
+            Volatile.Write(ref shared.Committing[WriterCount], ++commitNumber);
+            try
+            {
+                tx.Commit();
+            }
+            catch (Exception e) when (e is TimeoutException or TyphonTimeoutException)
+            {
+                shared.Errors.AddOrUpdate("move:" + e.GetType().Name, 1, (_, n) => n + 1);
+            }
+            finally
+            {
+                Volatile.Write(ref shared.Committing[WriterCount], 0);
+            }
         }
     }
 
@@ -281,8 +374,8 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
             {
                 WaitForInFlightCommits(shared);
 
-                // Older than what commits next, now and then: the snapshot paths (#1347).
-                var spins = rng.Next(3) == 0 ? rng.Next(20_000) : 0;
+                // Older than what commits next, now and then — once in a while much older: the snapshot paths (#1347, VIS-12).
+                var spins = rng.Next(3) == 0 ? rng.Next(rng.Next(6) == 0 ? 400_000 : 20_000) : 0;
                 for (var s = 0; s < spins; s++)
                 {
                     Thread.SpinWait(1);
@@ -299,13 +392,13 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
 
     private static void WaitForInFlightCommits(Shared shared)
     {
-        var seen = new long[WriterCount];
-        for (var w = 0; w < WriterCount; w++)
+        var seen = new long[WriterCount + 1];
+        for (var w = 0; w <= WriterCount; w++)
         {
             seen[w] = Volatile.Read(ref shared.Committing[w]);
         }
 
-        for (var w = 0; w < WriterCount; w++)
+        for (var w = 0; w <= WriterCount; w++)
         {
             var spin = new SpinWait();
             while (seen[w] != 0 && Volatile.Read(ref shared.Committing[w]) == seen[w] && !shared.Stop)
@@ -322,6 +415,38 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
         return fresh.TryOpen(id, out var e)
             ? $"HEAD: alive enabled={e.IsEnabled(StatsArch.Ranked)} present={e.TryReadForPredicate<StatsRanked>(true, out var v)} tier={v.Tier}"
             : "HEAD: not alive";
+    }
+
+    /// <summary>The tiers the transaction's field queries place <paramref name="id"/> in, on each forced path.</summary>
+    private static string QueryTiers(Transaction tx, EntityId id, bool disabled)
+    {
+        var parts = new List<string>();
+        var saved = QueryPathProbe.Forced;
+        try
+        {
+            foreach (var path in new[] { ClusterScanPath.Selective, ClusterScanPath.FullScan })
+            {
+                QueryPathProbe.Forced = path;
+                var tiers = new List<int>();
+                for (var k = 0; k < Tiers; k++)
+                {
+                    var tier = k;
+                    var q = tx.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == tier);
+                    if ((disabled ? q.Disabled<StatsRanked>() : q).Execute().Contains(id))
+                    {
+                        tiers.Add(k);
+                    }
+                }
+
+                parts.Add($"{path}:[{string.Join(",", tiers)}]");
+            }
+        }
+        finally
+        {
+            QueryPathProbe.Forced = saved;
+        }
+
+        return "query tiers " + string.Join(" ", parts);
     }
 
     private static string Describe(Transaction tx, EntityId id)
@@ -394,7 +519,7 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
                     {
                         foreach (var x in executed.Except(expectedIds).Take(1))
                         {
-                            shared.Failures.Enqueue($"OWNDIAG {shape} extra {Describe(tx, x)}");
+                            shared.Failures.Enqueue($"OWNDIAG {shape} extra {Describe(tx, x)} {Head(dbe, x)} {QueryTiers(tx, x, disabled)}");
                         }
 
                         foreach (var x in expectedIds.Except(executed).Take(1))

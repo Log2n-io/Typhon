@@ -183,6 +183,127 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
     }
 
     /// <summary>
+    /// #1230: the tail drains every transaction's queued cleanups, and as the tail its epoch is the oldest pinned — a back-pressure wait in the drain held
+    /// every page any thread had touched since the tail began, and on a 64 MiB market all of them timed out together. The drain starts at a call
+    /// boundary, so the tail's epoch is refreshed before it — and between its entries, since a drain of thousands outlives any one refresh.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // the refresh interval is process-wide
+    public void TheTailsDrain_RunsUnderARefreshedEpoch_NotTheOneItBeganWith([Values] bool betweenEntries)
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        var tail = dbe.CreateQuickTransaction();
+        var pinnedAtBegin = dbe.EpochManager.CurrentThreadPinnedEpoch;
+
+        // Other threads' transactions: their revisions wait for the tail, and their scopes move the global epoch past its pin.
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var rng = new Random(1);
+            for (var k = 0; k < Traders; k++)
+            {
+                Transfer(dbe, ids, rng);
+            }
+        }).Wait();
+        Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.GreaterThan(0), "premise: cleanups wait for the tail");
+
+        long pinnedInDrain = 0, pinnedAtLast = 0;
+        var entries = 0;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ =>
+        {
+            entries++;
+            pinnedAtLast = dbe.EpochManager.CurrentThreadPinnedEpoch;
+            if (pinnedInDrain == 0)
+            {
+                pinnedInDrain = pinnedAtLast;
+            }
+        };
+        // Never between entries: only the refresh before the drain can move the pin. At every entry: the pin moves as the drain goes.
+        var interval = EntityAccessor.ScanEpochRefreshInterval;
+        EntityAccessor.ScanEpochRefreshInterval = betweenEntries ? TimeSpan.Zero : TimeSpan.MaxValue;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            EntityAccessor.ScanEpochRefreshInterval = interval;
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        Assert.That(entries, Is.GreaterThan(2), "premise: the tail drained several entries");
+        Assert.That(pinnedInDrain, Is.GreaterThan(pinnedAtBegin + Traders / 2), "the drain's pin: refreshed before the drain, not the tail's first");
+        if (betweenEntries)
+        {
+            Assert.That(pinnedAtLast, Is.GreaterThan(pinnedInDrain), "the drain's pin moved between its entries");
+        }
+        else
+        {
+            Assert.That(pinnedAtLast, Is.EqualTo(pinnedInDrain), "premise: nothing refreshed between entries");
+        }
+    }
+
+    /// <summary>
+    /// #1230, the read-only tail: its dispose drains the ECS cleanup queue — the destroyed entities other threads queued behind it — under a pin refreshed
+    /// first, then between entries.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // the refresh interval is process-wide
+    public void AReadOnlyTailsEcsDrain_RunsUnderARefreshedEpoch([Values] bool betweenEntries)
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        var tail = dbe.CreateReadOnlyTransaction();
+        var pinnedAtBegin = dbe.EpochManager.CurrentThreadPinnedEpoch;
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            for (var i = 0; i < Traders / 2; i++)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                tx.Destroy(ids[i]);
+                tx.Commit();
+            }
+        }).Wait();
+        Assert.That(dbe.EcsCleanupQueueSize, Is.GreaterThan(0), "premise: destroyed entities wait for the tail");
+
+        long pinnedInDrain = 0, pinnedAtLast = 0;
+        var entries = 0;
+        dbe.EcsCleanupProbeForTest = _ =>
+        {
+            entries++;
+            pinnedAtLast = dbe.EpochManager.CurrentThreadPinnedEpoch;
+            if (pinnedInDrain == 0)
+            {
+                pinnedInDrain = pinnedAtLast;
+            }
+        };
+        var interval = EntityAccessor.ScanEpochRefreshInterval;
+        EntityAccessor.ScanEpochRefreshInterval = betweenEntries ? TimeSpan.Zero : TimeSpan.MaxValue;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            EntityAccessor.ScanEpochRefreshInterval = interval;
+            dbe.EcsCleanupProbeForTest = null;
+        }
+
+        Assert.That(entries, Is.GreaterThan(2), "premise: the tail drained several entries");
+        Assert.That(pinnedInDrain, Is.GreaterThan(pinnedAtBegin + Traders / 4), "the drain's pin: refreshed before the drain, not the tail's first");
+        if (betweenEntries)
+        {
+            Assert.That(pinnedAtLast, Is.GreaterThan(pinnedInDrain), "the drain's pin moved between its entries");
+        }
+    }
+
+    /// <summary>
     /// #1268: a cleanup batch that throws midway — a back-pressure timeout on a small cache — dropped the frees it had collected from the entities it
     /// compacted before: their chains named those chunks no more, and nothing else did. They are queued even so.
     /// </summary>
