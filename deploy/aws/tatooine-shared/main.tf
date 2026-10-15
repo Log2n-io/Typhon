@@ -79,7 +79,7 @@ output "zone_id" {
 
 output "zone_name" {
   value       = aws_route53_zone.stack.name
-  description = "Pass this to the game stack as dns_zone_name."
+  description = "Pass this to the game stack as base_domain. Every stack name becomes a label under it."
 }
 
 output "delegation" {

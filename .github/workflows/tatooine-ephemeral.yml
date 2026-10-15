@@ -102,6 +102,11 @@ jobs:
       BOT_COUNT: ${{ inputs.bots }}
       STATE_BUCKET: ${{ secrets.TATOOINE_STATE_BUCKET }}
       ALERT_EMAIL: ${{ secrets.TATOOINE_ALERT_EMAIL }}
+      # The delegated zone every stack's name hangs under. Absent, the stack still comes up -- reachable by IP and from
+      # inside the VPC -- so an account without the DNS secrets set is a degraded stack rather than a failed run.
+      BASE_DOMAIN: ${{ secrets.TATOOINE_BASE_DOMAIN }}
+      DNS_ZONE_ID: ${{ secrets.TATOOINE_DNS_ZONE_ID }}
+      ACME_EMAIL: ${{ secrets.TATOOINE_ACME_EMAIL }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,12 +130,32 @@ jobs:
             -backend-config="key=stacks/$NAME.tfstate" \
             -backend-config="region=$AWS_REGION"
 
+          # The public URL is derived from the stack name: name=temp01 under base_domain=demo.typhondb.io serves
+          # https://temp01.demo.typhondb.io. Nothing here names it, which is the point -- the dispatch input is the only
+          # place a stack is named, so the URL cannot disagree with the resources it belongs to.
+          #
+          # All three or none. public_tls with no name fails a precondition at plan time, and a half-set of secrets is the
+          # configuration most likely to exist, so it is checked rather than assumed.
+          dns=()
+          if [ -n "$BASE_DOMAIN" ] && [ -n "$DNS_ZONE_ID" ] && [ -n "$ACME_EMAIL" ]; then
+            dns=(-var="public_tls=true"
+                 -var="base_domain=$BASE_DOMAIN"
+                 -var="dns_zone_id=$DNS_ZONE_ID"
+                 -var="acme_email=$ACME_EMAIL")
+          else
+            # Explicitly false rather than left empty: an empty array under `set -u` is an unbound expansion on bash 4.3,
+            # and this file should not depend on the runner image's bash being newer than that.
+            dns=(-var="public_tls=false")
+            echo "::warning::TATOOINE_BASE_DOMAIN / _DNS_ZONE_ID / _ACME_EMAIL not all set; this stack gets no public URL"
+          fi
+
           terraform apply -input=false -auto-approve \
             -var="name=$NAME" \
             -var="persistent_data=false" \
             -var="ttl_hours=$TTL" \
             -var="bot_count=$BOT_COUNT" \
-            -var="alert_email=$ALERT_EMAIL"
+            -var="alert_email=$ALERT_EMAIL" \
+            "${dns[@]}"
 
       - name: Record the deadline and the outputs
         id: out
@@ -149,7 +174,13 @@ jobs:
             [ -n "$instance" ] && aws ec2 create-tags --resources "$instance" \
               --tags "Key=tatooine:expires,Value=$deadline" "Key=tatooine:stack,Value=$NAME"
           done
-          echo "::notice::stack $NAME up; expires $deadline"
+          url=$(terraform output -raw url 2>/dev/null || true)
+          if [ -n "$url" ]; then
+            echo "::notice::stack $NAME up at $url; expires $deadline"
+            echo "$url - expires $deadline" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::stack $NAME up (no public URL); expires $deadline"
+          fi
 
   deploy:
     needs: apply

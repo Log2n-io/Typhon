@@ -11,10 +11,12 @@ bootcmd:
 
 package_update: true
 packages:
+  # No awscli here: see the CLI install in runcmd. unzip and curl are what that install needs, and both are in main.
   - unzip
-  - awscli
+  - curl
   # certbot and its Route 53 plugin, from the distribution rather than snap: one package manager in cloud-init, and the
-  # distribution's packaging installs certbot.timer, which is what owns renewal. No cron of ours to forget.
+  # distribution's packaging installs certbot.timer, which is what owns renewal. No cron of ours to forget. The plugin
+  # also brings boto3, which is why the certificate still worked on the run where the CLI was missing.
   - certbot
   - python3-certbot-dns-route53
 
@@ -73,7 +75,21 @@ write_files:
       # The payload is read-only to the service and the world is the one thing it writes. A compromise through the game
       # protocol then cannot rewrite the binary it is running, which is the cheapest containment available here.
       ProtectSystem=strict
-      ReadWritePaths=${data_dir}
+
+      # <b>systemd creates /run/tatooine, not the fetch script.</b> ProtectSystem=strict makes the whole hierarchy
+      # read-only apart from what is listed, /run included, so the script's own `mkdir` failed with "Read-only file
+      # system" -- the third layer of the same lesson, after the namespace one below: this sandbox was never exercised
+      # until a real boot. RuntimeDirectory is the mechanism for exactly this: systemd makes the directory with the right
+      # owner and mode before the unit runs, and removes it on stop, so a secret written there cannot outlive the service.
+      RuntimeDirectory=tatooine
+      RuntimeDirectoryMode=0750
+
+      # <b>The `-` matters.</b> ReadWritePaths needs its target to exist before the unit starts -- systemd builds the mount
+      # namespace per command and answers 226/NAMESPACE when a path is missing, before any ExecStartPre could create it,
+      # and a `+`-prefixed one does not escape that either. The directory is therefore created by runcmd below, once; the
+      # `-` is so that a box where that somehow did not happen fails with the engine's own message about an unwritable
+      # database rather than with a namespace error that explains nothing.
+      ReadWritePaths=-${data_dir}
       PrivateTmp=true
       NoNewPrivileges=true
 
@@ -100,7 +116,23 @@ write_files:
       TLS_KEY=${tls_key}
       TLS_PORT=443
       REDIRECT_PORT=80
-      AUTH_LOCAL_ONLY=1
+
+      # <b>AUTH_LOCAL_ONLY and AUTH_ITERATIONS are one decision, not two.</b> Hiding /auth from the internet was the answer
+      # to a signup costing ~51 ms of a core at the default 600 000 iterations: on a box also running a 50 Hz tick, a few
+      # hundred junk attempts a second starve the loop, and the WAF that was to rate-limit it went away with the CDN.
+      #
+      # Lowering the work factor changes that arithmetic. Measured on a 7950X: 600 000 is 50.75 ms and about 79 attempts a
+      # second across the four gated cores; 100 000 is 8.32 ms and about 481. Six times the headroom, which with the per-/24
+      # limiter in front is enough to let a browser reach /auth at all -- and a demo has to be playable.
+      #
+      # What it costs: resistance to OFFLINE cracking if the hash table ever leaked. These accounts hold no PII, no email
+      # and no payment, so the honest residual risk is somebody reusing a password they use elsewhere. 100 000 is still a
+      # serious hash; the floor in PasswordHash refuses anything that would be decorative.
+      #
+      # Set AUTH_LOCAL_ONLY=1 again for a box that should be look-only, and raise AUTH_ITERATIONS back to the default for
+      # anything holding credentials somebody would mind losing.
+      AUTH_LOCAL_ONLY=
+      AUTH_ITERATIONS=100000
 
   # --- The fetched half ------------------------------------------------------------------------------------------------
   #
@@ -113,23 +145,25 @@ write_files:
     content: |
       #!/bin/sh
       set -eu
-      mkdir -p /run/tatooine
-      chmod 0750 /run/tatooine
-      chown root:tatooine /run/tatooine
+
+      # /run/tatooine is created by the unit's RuntimeDirectory=, not here: under ProtectSystem=strict this script cannot
+      # write to /run at all, which is how that was discovered.
 
       # --with-decryption because the parameter is a SecureString. A failure here is NOT fatal: a stack with no front door
       # has nothing to fetch, and the unit's EnvironmentFile for this file is optional. A stack that DOES need it fails
       # visibly instead, when the server refuses a reachable bind with no --origin.
+      # NO chown anywhere below. This runs as the unit's User=, which is `tatooine` and not root, so a chown fails with
+      # "Operation not permitted" and takes the whole unit with it. It is also unnecessary: RuntimeDirectory= creates
+      # /run/tatooine owned by that same user, so a file written here already belongs to it. The umask is what keeps the
+      # secret off every other account, and it is set before either branch so both get it.
+      umask 027
       if value=$(aws ssm get-parameter --with-decryption --name "${env_parameter}" \
                      --region "${region}" --query 'Parameter.Value' --output text 2>/dev/null); then
-          umask 027
           printf '%s\n' "$value" > /run/tatooine/fetched.env
-          chown root:tatooine /run/tatooine/fetched.env
           echo "tatooine: fetched runtime configuration from ${env_parameter}"
       else
           echo "tatooine: no runtime configuration at ${env_parameter}; starting without ORIGIN" >&2
           : > /run/tatooine/fetched.env
-          chown root:tatooine /run/tatooine/fetched.env
       fi
 
   # --- The DNS record (M6) ---------------------------------------------------------------------------------------------
@@ -280,8 +314,36 @@ write_files:
       chown tatooine:tatooine ${data_dir}
 
 runcmd:
+  # <b>The AWS CLI, from AWS, because Ubuntu 24.04 does not package it.</b> `awscli` was in the package list above and
+  # `apt-cache policy awscli` on 24.04 answers `Candidate: (none)` -- the distro dropped it. apt then failed the whole
+  # install, cloud-init reported `status: error`, and every script here that shells to `aws` died with `aws: not found`:
+  # the DNS record was never published, and only the certificate survived because certbot's route53 plugin talks to the
+  # API through boto3 rather than the CLI.
+  #
+  # Found by applying, not by reading: nothing in `terraform validate` or a YAML render can know what is in an archive.
+  #
+  # Architecture-aware because the bot box is Graviton and the server is x86_64. Installed BEFORE the units below are
+  # started, since all of them need it.
+  - |
+    set -eu
+    case "$(uname -m)" in
+        aarch64) url=https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip ;;
+        x86_64)  url=https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip ;;
+        *) echo "tatooine: no AWS CLI build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    tmp=$(mktemp -d)
+    curl -fsSL "$url" -o "$tmp/awscliv2.zip"
+    unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+    "$tmp/aws/install" --update
+    rm -rf "$tmp"
+    /usr/local/bin/aws --version
+
   # The service account is created in bootcmd above, before write_files needs it.
-  - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine ]
+  #
+  # ${data_dir} is created HERE, before anything starts, for the reason the unit's ReadWritePaths comment gives. On prod it
+  # is the mount point tatooine-mount-data then mounts the volume over; on an ephemeral stack it is the world itself.
+  - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, '${data_dir}' ]
+  - [ chown, '-R', 'tatooine:tatooine', '${data_dir}' ]
   - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine ]
   - [ /usr/local/sbin/tatooine-mount-data ]
   - [ systemctl, daemon-reload ]

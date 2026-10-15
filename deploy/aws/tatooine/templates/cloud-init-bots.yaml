@@ -9,8 +9,10 @@ bootcmd:
 
 package_update: true
 packages:
+  # No awscli here: see the CLI install in runcmd. Ubuntu 24.04 does not package it, and asking for it fails the whole
+  # apt step -- which on the server box meant nothing that shells to `aws` worked at all.
   - unzip
-  - awscli
+  - curl
   # tc, for the netem shaping the panel applies. iproute2 is usually present; naming it makes the dependency explicit
   # rather than inherited from whatever the AMI happened to ship.
   - iproute2
@@ -105,6 +107,30 @@ write_files:
       ACCOUNTS_FILE=/var/lib/tatooine/bots.jsonl
 
 runcmd:
+  # <b>The AWS CLI, from AWS, because Ubuntu 24.04 does not package it.</b> `awscli` was in the package list above and
+  # `apt-cache policy awscli` on 24.04 answers `Candidate: (none)` -- the distro dropped it. apt then failed the whole
+  # install, cloud-init reported `status: error`, and every script here that shells to `aws` died with `aws: not found`:
+  # the DNS record was never published, and only the certificate survived because certbot's route53 plugin talks to the
+  # API through boto3 rather than the CLI.
+  #
+  # Found by applying, not by reading: nothing in `terraform validate` or a YAML render can know what is in an archive.
+  #
+  # Architecture-aware because the bot box is Graviton and the server is x86_64. Installed BEFORE the units below are
+  # started, since all of them need it.
+  - |
+    set -eu
+    case "$(uname -m)" in
+        aarch64) url=https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip ;;
+        x86_64)  url=https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip ;;
+        *) echo "tatooine: no AWS CLI build for $(uname -m)" >&2; exit 1 ;;
+    esac
+    tmp=$(mktemp -d)
+    curl -fsSL "$url" -o "$tmp/awscliv2.zip"
+    unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+    "$tmp/aws/install" --update
+    rm -rf "$tmp"
+    /usr/local/bin/aws --version
+
   # The service account is created in bootcmd above, before write_files needs it.
   - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, /var/lib/tatooine ]
   - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine, /var/lib/tatooine ]

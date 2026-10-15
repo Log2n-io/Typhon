@@ -41,12 +41,15 @@ server_instance_type = "c6id.2xlarge"
 # fifteen minutes to come up and as long to go away.
 enable_front_door = false
 
-# A public URL, served by the instance itself. Comment these three out for a stack that only needs to be reachable from
+# A public URL, served by the instance itself. Comment these four out for a stack that only needs to be reachable from
 # inside the VPC -- the certificate step is then skipped and the box serves plain HTTP on the game port.
-public_tls    = true
-dns_zone_name = "demo.typhondb.io"
-dns_zone_id   = "Z063620936HA3DRPWS2DE"
-acme_email    = "contact@log2n.io"
+#
+# The name comes from `name` at the top of this file: name = "temp01" serves https://temp01.demo.typhondb.io. Nothing here
+# repeats it, so the URL cannot drift from the stack it belongs to, and `terraform output url` prints the result.
+public_tls  = true
+base_domain = "demo.typhondb.io"
+dns_zone_id = "Z063620936HA3DRPWS2DE"
+acme_email  = "contact@log2n.io"
 
 # Spot for the bot box: a reclaim costs a run and nothing else, since the accounts file is reproducible from SWG_BOT_KEY.
 # At the live price that is $0.153/hour against $0.29 on demand.

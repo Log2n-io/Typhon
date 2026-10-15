@@ -66,6 +66,21 @@ function Invoke-Checked
     & $Body
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
+# <b>Written with LF endings and no BOM, and that is not cosmetic.</b> Set-Content on Windows PowerShell writes CRLF,
+# so the generated script began with a shebang ending in a carriage return -- and the Linux kernel then looks for an
+# interpreter literally named '/bin/sh' plus that CR, fails to find it, and reports ENOENT. systemd surfaces it as
+#
+#     Failed to execute /opt/tatooine/current/run.sh: No such file or directory
+#
+# on a file that is plainly there and executable, which is about as misleading as an error gets. A BOM before the
+# shebang breaks it the same way. Every payload built on a Windows box was unrunnable until this.
+function Write-ShellScript
+{
+    param([string] $Path, [string] $Content)
+    $lf = $Content -replace "`r`n", "`n"
+    [System.IO.File]::WriteAllText($Path, $lf, [System.Text.UTF8Encoding]::new($false))
+}
+
 
 if (Test-Path $OutDir)
 {
@@ -147,12 +162,12 @@ exec "$here/__EXE__" \
     ${TLS_KEY:+--tls-key "$TLS_KEY"} \
     ${TLS_CHAIN:+--tls-port "${TLS_PORT:-443}"} \
     ${TLS_CHAIN:+--redirect-port "${REDIRECT_PORT:-80}"} \
-    ${AUTH_LOCAL_ONLY:+--auth-local-only} \
+    ${AUTH_LOCAL_ONLY:+--auth-local-only}     ${AUTH_ITERATIONS:+--auth-iterations "$AUTH_ITERATIONS"} \
     --client-dir "$here/client" \
     --db-dir "${DB_DIR:-$here/data}" \
     --persist \
     "$@"
-'@.Replace('__EXE__', $exeName) | Set-Content -Path (Join-Path $OutDir 'run.sh') -Encoding utf8 -NoNewline:$false
+'@.Replace('__EXE__', $exeName) | ForEach-Object { Write-ShellScript -Path (Join-Path $OutDir 'run.sh') -Content $_ }
 
 $bytes = (Get-ChildItem -Recurse -File $OutDir | Measure-Object -Property Length -Sum).Sum
 Write-Host ''

@@ -517,6 +517,22 @@ public sealed class SimConfig
     /// </remarks>
     public bool AuthLocalOnly;
 
+    /// <summary>
+    /// <c>--auth-iterations N</c>: the PBKDF2 work factor for NEW passwords; 0 keeps <see cref="PasswordHash.DefaultIterations"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>A throwaway demo may reasonably buy speed with it; nothing that holds real credentials should.</b> 600 000 is
+    /// OWASP's current recommendation and costs ~51 ms of a core per attempt, which on a box also running a 50 Hz tick IS
+    /// the denial-of-service surface. Lowering it cuts that proportionally and weakens only resistance to offline cracking
+    /// of a stolen hash table -- online guessing is the rate limiter's job, not the work factor's.
+    /// <para>
+    /// Safe for existing accounts: the work factor is stored per account and verification uses the stored one, so only new
+    /// passwords are affected. Floor of <see cref="PasswordHash.MinimumIterations"/>, because below that the hashing reads
+    /// as protection without being any.
+    /// </para>
+    /// </remarks>
+    public int AuthIterations;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 

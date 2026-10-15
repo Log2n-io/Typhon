@@ -192,6 +192,75 @@ internal sealed class PublicTlsChecks
         }
     }
 
+    /// <summary>
+    /// <b>Kestrel actually completes a TLS handshake with the certificate — the wiring, not just the loader.</b>
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the regression test for a bug that every other test here missed.</b> The host wired the selector as
+    /// <c>listen.UseHttps(_ =&gt; tls.Current())</c>, which compiles: it binds to the
+    /// <c>Action&lt;HttpsConnectionAdapterOptions&gt;</c> overload, where the lambda is a CONFIGURE callback and its return
+    /// value is thrown away. So nothing was configured, Kestrel fell back to the ASP.NET developer certificate, and the
+    /// deployed server died at startup with "No server certificate was specified" — while the five cases above, which all
+    /// exercise <see cref="TlsCertificate"/> directly, passed happily.
+    /// <para>
+    /// Two overloads, one of which silently does nothing, is not a mistake a loader test can see. Only a handshake can.
+    /// </para>
+    /// <para>
+    /// The client is told to accept this specific self-signed certificate rather than any certificate: a handler that
+    /// accepted everything would also pass if Kestrel presented something else entirely, which is most of what is being
+    /// checked here.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task KestrelPresentsTheCertificateOverARealHandshake()
+    {
+        var (chain, key) = Write("kestrel.test", days: 60);
+        var tls = new TlsCertificate(chain, key);
+        var expected = tls.Current().Thumbprint;
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.SetMinimumLevel(LogLevel.Error);
+
+        // The SAME shape as TatooineHost.ServeAsync. If that moves, this has to move with it.
+        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0, listen => listen.UseHttps(https =>
+        {
+            https.ServerCertificateSelector = (_, _) => tls.Current();
+        })));
+
+        var app = builder.Build();
+        app.MapGet("/probe", () => Results.Text("over tls"));
+        await app.StartAsync();
+        try
+        {
+            string presented = null;
+            using var handler = new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+                {
+                    presented = certificate?.Thumbprint;
+                    return string.Equals(presented, expected, StringComparison.OrdinalIgnoreCase);
+                },
+            };
+
+            using var client = new HttpClient(handler) { BaseAddress = new Uri(BoundAddress(app)) };
+            var response = await client.GetAsync("/probe");
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK), "the handshake did not complete");
+                Assert.That(body, Is.EqualTo("over tls"));
+                Assert.That(presented, Is.EqualTo(expected).IgnoreCase, "Kestrel presented a different certificate than the one configured");
+            });
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
     /// <summary>Writes a self-signed PEM pair in the shape certbot leaves behind.</summary>
     /// <param name="commonName">The subject name.</param>
     /// <param name="days">How long until it expires.</param>

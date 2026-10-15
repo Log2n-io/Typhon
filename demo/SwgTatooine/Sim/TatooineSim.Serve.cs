@@ -171,6 +171,22 @@ public sealed partial class TatooineSim
             ? $"  auth: tokens signed with {Accounts.AuthToken.KeyVariable} — they survive a restart"
             : $"  auth: tokens signed with a key generated for this process — every token stops working on restart. "
               + $"Set {Accounts.AuthToken.KeyVariable} (openssl rand -base64 32) for an instance that is kept.");
+
+        // The work factor, and LOUDLY when it has been lowered. A cheaper hash is a legitimate trade for a throwaway demo
+        // and an indefensible one for anything holding real credentials, so the difference must be visible in the log
+        // rather than buried in a command line nobody re-reads. Applied here, once, before any signup can run.
+        if (_config.AuthIterations > 0 && _config.AuthIterations != Accounts.PasswordHash.DefaultIterations)
+        {
+            Accounts.PasswordHash.Iterations = _config.AuthIterations;
+            Console.WriteLine(
+                $"  !! password hashing LOWERED to {_config.AuthIterations:N0} iterations from the default "
+                + $"{Accounts.PasswordHash.DefaultIterations:N0}. Cheaper to attack offline if the hash table ever leaks — "
+                + "acceptable for throwaway accounts, not for real credentials. Existing accounts keep their own work factor.");
+        }
+        else
+        {
+            Console.WriteLine($"  auth: passwords hashed with {Accounts.PasswordHash.Iterations:N0} PBKDF2 iterations");
+        }
     }
 
     /// <summary>The simulation's own schedule, plus the two systems a server needs that a benchmark does not.</summary>

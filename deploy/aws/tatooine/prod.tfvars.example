@@ -33,15 +33,18 @@ bot_spot  = false
 # IAM role, so there is no API credential on the box) and publishes its own A records at every boot, so nothing bills while
 # the stack is stopped. Standing cost: the $0.50/month hosted zone.
 #
-# ONE MANUAL STEP, once: after the first apply, `terraform output delegation` prints four nameservers to add as NS records on
-# the `demo` label in the typhondb.io zone at OVH. Add NO DS record -- typhondb.io is DNSSEC-signed, and an unsigned child
-# under a signed parent is a valid insecure delegation, while a DS for an unsigned child breaks every name under it.
-public_tls    = true
-dns_zone_name = "demo.typhondb.io"
-dns_zone_id   = "Z063620936HA3DRPWS2DE" # deploy/aws/tatooine-shared's zone_id; this stack writes into it, never creates it
-acme_email    = "contact@log2n.io"
+# THE ONE MANUAL STEP IS NOT HERE AND HAPPENS ONCE, EVER: `deploy/aws/tatooine-shared` creates the zone and prints the four
+# nameservers to add as NS records on the `demo` label in the typhondb.io zone at OVH. Add NO DS record -- typhondb.io is
+# DNSSEC-signed, and an unsigned child under a signed parent is a valid insecure delegation, while a DS for an unsigned child
+# breaks every name under it. Every stack after that, prod included, is just another name inside the delegated zone.
+#
+# With name = "prod" at the top of this file, this serves https://prod.demo.typhondb.io.
+public_tls  = true
+base_domain = "demo.typhondb.io"
+dns_zone_id = "Z063620936HA3DRPWS2DE" # deploy/aws/tatooine-shared's zone_id; this stack writes into it, never creates it
+acme_email  = "contact@log2n.io"
 
-# --origin is DERIVED from dns_zone_name; client_origin is only for a front door this module did not create.
+# --origin is DERIVED from the hostname; client_origin is only for a front door this module did not create.
 
 # ── The CDN, deliberately off ─────────────────────────────────────────────────────────────────────────────────────────
 #

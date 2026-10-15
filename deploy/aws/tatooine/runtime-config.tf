@@ -17,6 +17,13 @@
 # the distribution's hostname at create time. A parameter the instance reads AT BOOT can depend on the distribution freely,
 # because nothing in the instance's own graph points at it.
 
+# 32 bytes of signing key. `random_password` rather than `random_string` so the value is marked sensitive and never shows
+# up in a plan or an output.
+resource "random_password" "auth_key" {
+  length  = 44
+  special = false
+}
+
 resource "aws_ssm_parameter" "server_env" {
   name = "/tatooine/${var.name}/server-env"
   type = "SecureString"
@@ -26,9 +33,15 @@ resource "aws_ssm_parameter" "server_env" {
   value = join("\n", compact([
     "ORIGIN=${local.client_origin}",
     var.origin_header_secret == "" ? null : "TATOOINE_ORIGIN_SECRET=${var.origin_header_secret}",
+
+    # The token signing key. Without it the server generates one per process, so EVERY token a browser holds stops working
+    # the moment the service restarts -- which a deploy does. The accounts survive; the sessions do not, and a user
+    # experiences it as being silently logged out. Generated once and kept in state, which is part of why the state bucket
+    # is private and encrypted.
+    "SWG_AUTH_KEY=${random_password.auth_key.result}",
   ]))
 
-  description = "ORIGIN and the front-door secret for the ${var.name} game server. Read at service start; update and restart to rotate."
+  description = "ORIGIN, the signing key and the front-door secret for the ${var.name} game server. Read at service start; update and restart to rotate."
 
   tags = {
     Name = "tatooine-${var.name}-server-env"
@@ -42,7 +55,7 @@ locals {
   #
   #   1. an explicit override, for a front door this module did not create;
   #   2. the CDN's own hostname (or its first alias) when there is a distribution;
-  #   3. the subzone's name when the instance serves TLS itself -- the cheap path.
+  #   3. the stack's own derived hostname when the instance serves TLS itself -- the cheap path.
   #
   # Empty otherwise, which is right for a private soak: loopback, or callers only from inside the VPC.
   client_origin = (
@@ -50,7 +63,7 @@ locals {
     var.enable_front_door ? (
       length(var.front_door_aliases) > 0 ? "https://${var.front_door_aliases[0]}" : "https://${aws_cloudfront_distribution.front_door[0].domain_name}"
     ) :
-    var.public_tls && var.dns_zone_name != "" ? "https://${var.dns_zone_name}" : ""
+    var.public_tls && local.hostname != "" ? "https://${local.hostname}" : ""
   )
 }
 
@@ -59,7 +72,7 @@ variable "client_origin" {
   default     = ""
   description = <<-EOT
     What the server accepts as `--origin` — the URL the browser client is served from. Normally left empty and derived: the
-    distribution's hostname when there is a front door, `https://<dns_zone_name>` when the instance serves TLS itself.
+    distribution's hostname when there is a front door, `https://<name>.<base_domain>` when the instance serves TLS itself.
 
     Set it only for a front door this module did not create. It reaches the instance through SSM Parameter Store, so it can be
     corrected without replacing the box.

@@ -377,6 +377,73 @@ internal sealed class BotAccountChecks
         }
     }
 
+    /// <summary>
+    /// Lowering the work factor does not invalidate accounts that already exist.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the property that makes the knob safe, and it is worth a test because the alternative is silent.</b> The
+    /// work factor is stored per account and verification uses the STORED one, so a run that lowers it still logs in every
+    /// account made before. Had <c>Verify</c> used the current setting instead, lowering it would have locked out every
+    /// existing user with a wrong-password error and no explanation.
+    /// </remarks>
+    [Test]
+    public void LoweringTheWorkFactorStillVerifiesOlderAccounts()
+    {
+        var original = PasswordHash.Iterations;
+        try
+        {
+            // Heap arrays, not stackalloc: a ref local cannot be captured by the Assert.Multiple lambda.
+            var hash = new byte[PasswordHash.HashBytes];
+            var salt = new byte[PasswordHash.SaltBytes];
+
+            // Hashed at the strong default...
+            PasswordHash.Iterations = PasswordHash.DefaultIterations;
+            PasswordHash.Create("a-representative-password", hash, salt, out var stored);
+
+            // ...then the run lowers it, as a throwaway demo may.
+            PasswordHash.Iterations = 100_000;
+
+            var verified = PasswordHash.Verify("a-representative-password", hash, salt, stored);
+            var rejected = PasswordHash.Verify("the-wrong-password", hash, salt, stored);
+            PasswordHash.Create("another-password", hash, salt, out var now);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(stored, Is.EqualTo(PasswordHash.DefaultIterations), "the work factor used must be reported for storage");
+                Assert.That(verified, Is.True, "an account hashed before the change must still log in");
+                Assert.That(rejected, Is.False);
+                Assert.That(now, Is.EqualTo(100_000), "a new password must use the current work factor");
+            });
+        }
+        finally
+        {
+            PasswordHash.Iterations = original;
+        }
+    }
+
+    /// <summary>A work factor below the floor is refused, so "faster" cannot become "decorative".</summary>
+    [Test]
+    public void AWorkFactorBelowTheFloorIsRefused()
+    {
+        var original = PasswordHash.Iterations;
+        try
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(() => PasswordHash.Iterations = PasswordHash.MinimumIterations - 1, Throws.InstanceOf<ArgumentOutOfRangeException>());
+                Assert.That(() => PasswordHash.Iterations = 0, Throws.InstanceOf<ArgumentOutOfRangeException>());
+                Assert.That(PasswordHash.Iterations, Is.EqualTo(original), "a refused assignment must not change anything");
+
+                // The floor itself is accepted.
+                Assert.That(() => PasswordHash.Iterations = PasswordHash.MinimumIterations, Throws.Nothing);
+            });
+        }
+        finally
+        {
+            PasswordHash.Iterations = original;
+        }
+    }
+
     /// <summary>The game endpoint's HTTP side, which is where <c>/auth</c> lives.</summary>
     /// <param name="endpoint">The game endpoint.</param>
     /// <param name="expected">The expected HTTP base, or <see langword="null"/>.</param>

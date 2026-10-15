@@ -190,6 +190,8 @@ public static class CommandLine
         c.TlsPort = r.Int("--tls-port", c.TlsPort, "port https is served on; 443 needs CAP_NET_BIND_SERVICE", min: 1, max: 65535);
         c.RedirectPort = r.Int("--redirect-port", c.RedirectPort, "port that serves only a redirect to https; 0 maps none", min: 0, max: 65535);
         c.AuthLocalOnly = r.Switch("--auth-local-only", "answer /auth only for callers on a private address; required on a public bind with no CDN");
+        c.AuthIterations = r.Int(
+            "--auth-iterations", c.AuthIterations, "PBKDF2 work factor for new passwords; 0 keeps the default 600000", min: 0);
         c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
@@ -260,6 +262,13 @@ public static class CommandLine
         if (c.ServePort == 0 && (c.BindAddress != null || c.Origins.Length > 0 || c.ClientDirectory != null))
         {
             throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>.");
+        }
+
+        if (c.AuthIterations > 0 && c.AuthIterations < Accounts.PasswordHash.MinimumIterations)
+        {
+            throw new ArgumentException(
+                $"--auth-iterations {c.AuthIterations} is below the floor of {Accounts.PasswordHash.MinimumIterations}. Below that a leaked hash table is "
+                + "crackable on one laptop, so the hashing would read as protection without being any.");
         }
 
         if (c.ServePort == 0 && (c.TlsChainPath.Length > 0 || c.TlsKeyPath.Length > 0 || c.RedirectPort > 0 || c.AuthLocalOnly))

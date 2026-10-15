@@ -287,7 +287,16 @@ public static class TatooineHost
             {
                 // ServerCertificateSelector rather than a certificate handed over once: it is consulted per connection, which
                 // is what lets a renewal be picked up without restarting and dropping every session. See TlsCertificate.
-                k.Listen(address, tlsPort, listen => listen.UseHttps(_ => tls.Current()));
+                //
+                // <b>Set on the options object, NOT passed to UseHttps directly.</b> `UseHttps(_ => tls.Current())` compiles —
+                // it binds to the `Action<HttpsConnectionAdapterOptions>` overload, where the lambda is a CONFIGURE callback
+                // whose return value is discarded. So it configured nothing, Kestrel found no certificate, fell back to the
+                // ASP.NET developer certificate, and the server died at startup with "No server certificate was specified"
+                // while every unit test of the certificate loader passed. Two overloads, one of which silently does nothing.
+                k.Listen(address, tlsPort, listen => listen.UseHttps(https =>
+                {
+                    https.ServerCertificateSelector = (_, _) => tls.Current();
+                }));
 
                 if (redirectPort > 0)
                 {

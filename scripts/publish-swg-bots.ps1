@@ -69,6 +69,21 @@ function Invoke-Checked
     & $Body
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
+# <b>Written with LF endings and no BOM, and that is not cosmetic.</b> Set-Content on Windows PowerShell writes CRLF,
+# so the generated script began with a shebang ending in a carriage return -- and the Linux kernel then looks for an
+# interpreter literally named '/bin/sh' plus that CR, fails to find it, and reports ENOENT. systemd surfaces it as
+#
+#     Failed to execute /opt/tatooine/current/run.sh: No such file or directory
+#
+# on a file that is plainly there and executable, which is about as misleading as an error gets. A BOM before the
+# shebang breaks it the same way. Every payload built on a Windows box was unrunnable until this.
+function Write-ShellScript
+{
+    param([string] $Path, [string] $Content)
+    $lf = $Content -replace "`r`n", "`n"
+    [System.IO.File]::WriteAllText($Path, $lf, [System.Text.UTF8Encoding]::new($false))
+}
+
 
 # One expression, used by both the post-publish assertion and the generated scripts. It was computed twice, in two
 # different variables, which is how they drift.
@@ -159,7 +174,7 @@ exec "$here/SwgTatooine.Bots__EXE__" \
     --connect-rate "${CONNECT_RATE:-200}" \
     --accounts-file "${ACCOUNTS_FILE:-$here/data/bots.jsonl}" \
     "$@"
-'@.Replace('__EXE__', $exeName) | Set-Content -Path (Join-Path $OutDir 'run-fleet.sh') -Encoding utf8
+'@.Replace('__EXE__', $exeName) | ForEach-Object { Write-ShellScript -Path (Join-Path $OutDir 'run-fleet.sh') -Content $_ }
 
 @'
 #!/bin/sh
@@ -186,7 +201,7 @@ exec "$here/SwgTatooine.BotConsole__EXE__" \
     --bind "${BIND:-127.0.0.1}" \
     --endpoint "${ENDPOINT:-ws://127.0.0.1:9100/ws}" \
     "$@"
-'@.Replace('__EXE__', $exeName) | Set-Content -Path (Join-Path $OutDir 'run-console.sh') -Encoding utf8
+'@.Replace('__EXE__', $exeName) | ForEach-Object { Write-ShellScript -Path (Join-Path $OutDir 'run-console.sh') -Content $_ }
 
 $bytes = (Get-ChildItem -Recurse -File $OutDir | Measure-Object -Property Length -Sum).Sum
 Write-Host ''

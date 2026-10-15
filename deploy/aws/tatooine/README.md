@@ -80,10 +80,16 @@ terraform apply -var-file=ephemeral.tfvars
 The backend is a **partial configuration** — the key is one per stack, so it cannot be hard-coded. `terraform init
 -backend=false` is enough to `validate` or `fmt` without touching S3, which is all that has been done so far.
 
-**On a stack with `dns_zone_name`, there is one manual step and it is load-bearing.** After the first apply:
+**A stack gets its public name from `name` + `base_domain`.** `name = "temp01"` with `base_domain = "demo.typhondb.io"`
+serves `https://temp01.demo.typhondb.io`; `terraform output url` prints it. Set `hostname` only for a name that does not
+follow that pattern. One input names the resources, the state key, the SSM path and the URL, so they cannot drift apart.
+
+**The delegation is a one-time step, and it belongs to `deploy/aws/tatooine-shared`, not here.** That stack owns the zone
+and carries `prevent_destroy` precisely so this one can be created and destroyed without ever costing another registrar
+edit. After its first apply:
 
 ```bash
-terraform output delegation       # prints four nameservers, and the DS record NOT to add
+cd ../tatooine-shared && terraform output delegation    # four nameservers, and the DS record NOT to add
 ```
 
 Add those as `NS` records on the subzone's label in the parent zone at the registrar — for `demo.typhondb.io`, that is the

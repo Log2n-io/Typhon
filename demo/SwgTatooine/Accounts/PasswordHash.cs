@@ -54,6 +54,56 @@ public static class PasswordHash
     /// </remarks>
     public const int DefaultIterations = 600_000;
 
+    /// <summary>The smallest work factor this will accept, so "faster" cannot become "no protection at all".</summary>
+    /// <remarks>
+    /// Twenty thousand. Below that a leaked table is crackable on one laptop and the hashing is theatre -- which is worse
+    /// than no hashing, because it reads as protection in a code review.
+    /// </remarks>
+    public const int MinimumIterations = 20_000;
+
+    /// <summary>
+    /// The work factor NEW passwords are hashed with. <see cref="DefaultIterations"/> unless a run lowers it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is settable at all.</b> 600 000 is OWASP's current PBKDF2-SHA256 recommendation and the right default
+    /// for anything holding real credentials. What it buys is resistance to OFFLINE cracking of a stolen hash table; it
+    /// does nothing against online guessing, which <see cref="AuthRateLimiter"/> handles. It costs this process about
+    /// 51 ms of a core per attempt, and on a box that is also running a 50 Hz tick that cost is the attack surface: a few
+    /// hundred junk attempts a second starve the loop.
+    /// </para>
+    /// <para>
+    /// A throwaway demo whose accounts hold no PII, no email and no payment can reasonably trade some of that away. The
+    /// honest residual risk is password REUSE -- somebody signing up with a password they use elsewhere -- which is why
+    /// the signup path should say so rather than rely on the work factor to cover it.
+    /// </para>
+    /// <para>
+    /// <b>Lowering it is safe for accounts that already exist.</b> The work factor is stored per account and
+    /// <see cref="Verify"/> uses the stored one, so old hashes keep verifying at whatever they were made with. Only new
+    /// passwords use this.
+    /// </para>
+    /// <para>
+    /// The DEFAULT does not move. An engine-adjacent default must not be weakened because one demo found it
+    /// inconvenient; a run that wants cheaper hashing says so on its command line, where the choice stays visible.
+    /// </para>
+    /// </remarks>
+    public static int Iterations
+    {
+        get => Volatile.Read(ref _iterations);
+        set
+        {
+            if (value < MinimumIterations)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(value), value, $"the work factor must be at least {MinimumIterations}; below that the hashing is decorative");
+            }
+
+            Volatile.Write(ref _iterations, value);
+        }
+    }
+
+    private static int _iterations = DefaultIterations;
+
     /// <summary>
     /// How many password derivations may run at once across this process.
     /// </summary>
@@ -98,7 +148,10 @@ public static class PasswordHash
         }
 
         RandomNumberGenerator.Fill(salt);
-        iterations = DefaultIterations;
+
+        // The CURRENT work factor, which the caller stores beside the hash. That is what lets this be lowered without
+        // invalidating a single existing account.
+        iterations = Iterations;
         Derive(password, salt, iterations, hash);
     }
 

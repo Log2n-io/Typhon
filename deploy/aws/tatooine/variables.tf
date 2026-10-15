@@ -138,7 +138,7 @@ variable "public_tls" {
     only for callers inside the VPC. Do NOT turn that off while this is true: a signup is a 600 000-iteration PBKDF2 behind a
     semaphore of ProcessorCount/4, so a few hundred junk attempts a second starve the tick loop.
 
-    Requires dns_zone_name and acme_email.
+    Requires base_domain (or hostname) and acme_email.
   EOT
 }
 

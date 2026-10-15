@@ -6,19 +6,29 @@
 # property of the deploy and becomes a property of the last reboot.
 
 locals {
-  # The world lives on the data volume when there is one, and on the root volume when there is not. The unit file reads
-  # this, so an ephemeral stack needs no volume and prod's world is never on a disk that dies with the instance.
-  data_dir = var.persistent_data ? "/mnt/tatooine" : "/opt/tatooine/current/data"
+  # The world lives on the data volume when there is one, and under /var/lib when there is not. Prod's is never on a disk
+  # that dies with the instance; an ephemeral stack's dies with the instance, which is the whole distinction.
+  #
+  # <b>NOT inside the release directory, and that was a real failure.</b> It was /opt/tatooine/current/data, which moves
+  # with every deploy and does not exist until one has happened -- and the unit's `ReadWritePaths` needs its target to
+  # exist BEFORE the unit starts. systemd sets the mount namespace up per command and fails it with 226/NAMESPACE when a
+  # path is missing, before any ExecStartPre runs, so nothing inside the unit can create it. A `+`-prefixed ExecStartPre
+  # does not help either: the prefix drops the privilege restrictions, not the namespace. A fixed path that cloud-init
+  # creates once is the only shape that works.
+  #
+  # Consequence worth stating: an ephemeral world now survives a REDEPLOY within one instance's life, where it used to be
+  # discarded with the release directory. It still dies with the instance, which is what "ephemeral" means here.
+  data_dir = var.persistent_data ? "/mnt/tatooine" : "/var/lib/tatooine/world"
 
   # BOTH names on one certificate, from the first issue. The apex is what a viewer types; `origin.` exists so that putting a
   # CDN in front later changes only the apex to an ALIAS -- no re-issue, no rename, no second manual step. Let's Encrypt
   # charges nothing for the extra SAN.
-  dns_names = var.dns_zone_name == "" ? [] : [var.dns_zone_name, "origin.${var.dns_zone_name}"]
+  dns_names = local.hostname == "" ? [] : [local.hostname, "origin.${local.hostname}"]
 
   # certbot's layout under the --cert-name we pass. Empty when there is no certificate to ask for, which is what makes the
   # server fall back to plain HTTP instead of binding a port it cannot complete a handshake on.
-  tls_chain = var.dns_zone_name == "" || var.acme_email == "" ? "" : "/etc/letsencrypt/live/tatooine/fullchain.pem"
-  tls_key   = var.dns_zone_name == "" || var.acme_email == "" ? "" : "/etc/letsencrypt/live/tatooine/privkey.pem"
+  tls_chain = local.hostname == "" || var.acme_email == "" ? "" : "/etc/letsencrypt/live/tatooine/fullchain.pem"
+  tls_key   = local.hostname == "" || var.acme_email == "" ? "" : "/etc/letsencrypt/live/tatooine/privkey.pem"
 }
 
 # --- The game server -------------------------------------------------------------------------------------------------
@@ -44,7 +54,11 @@ resource "aws_instance" "server" {
     encrypted   = true
   }
 
-  user_data = templatefile("${path.module}/templates/cloud-init-server.yaml", {
+  # <b>GZIPPED, because user_data is capped at 16 KB and this template is past it.</b> EC2 enforces that limit on the raw
+  # value and cloud-init decompresses a gzipped one transparently, so base64gzip is the standard way out rather than a
+  # trick -- 20 KB of template becomes about 7.7 KB. The alternative was deleting the comments that explain why each of
+  # these units is shaped the way it is, which is the wrong thing to trade for headroom.
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/cloud-init-server.yaml", {
     payload_bucket = aws_s3_bucket.payload.id
     stack          = var.name
     game_port      = var.game_port
@@ -64,7 +78,7 @@ resource "aws_instance" "server" {
     acme_email  = var.acme_email
     tls_chain   = local.tls_chain
     tls_key     = local.tls_key
-  })
+  }))
 
   tags = {
     Name = "tatooine-${var.name}-server"
@@ -75,21 +89,21 @@ resource "aws_instance" "server" {
     # The AMI moves whenever Canonical publishes, and a plan that silently replaces the server -- taking prod's attached
     # volume through a detach -- is not something to discover during a deploy. Upgrading the AMI is a deliberate act:
     # taint the instance, or remove this line for a stack you intend to recreate.
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data_base64]
 
     # Checked at PLAN time, because every one of these fails on the box instead: a missing zone means no name to certify, a
     # missing email means certbot declines to register, and either leaves a stack that boots, serves plain HTTP, and looks
     # like a TLS bug. A plan that refuses costs seconds; the alternative costs a debugging session on a live instance.
     precondition {
-      condition     = !var.public_tls || var.dns_zone_name != ""
-      error_message = "public_tls serves a certificate for a name, so it needs dns_zone_name (e.g. \"demo.typhondb.io\")."
+      condition     = !var.public_tls || local.hostname != ""
+      error_message = "public_tls serves a certificate for a name, so it needs base_domain (e.g. \"demo.typhondb.io\") or an explicit hostname."
     }
 
     precondition {
       # The two go together: the name is what the certificate covers, the id is where the records are written. One without
       # the other produces a box that either certifies a name it cannot publish, or publishes into a zone it cannot name.
-      condition     = (var.dns_zone_name == "") == (var.dns_zone_id == "")
-      error_message = "dns_zone_name and dns_zone_id go together. Get the id from deploy/aws/tatooine-shared's zone_id output."
+      condition     = (local.hostname == "") == (var.dns_zone_id == "")
+      error_message = "base_domain and dns_zone_id go together. Get both from deploy/aws/tatooine-shared's outputs."
     }
 
     precondition {
@@ -105,8 +119,8 @@ resource "aws_instance" "server" {
     }
 
     precondition {
-      condition     = var.acme_email == "" || var.dns_zone_name != ""
-      error_message = "acme_email is only used to obtain a certificate for dns_zone_name, which is empty."
+      condition     = var.acme_email == "" || local.hostname != ""
+      error_message = "acme_email is only used to obtain a certificate for this stack's hostname, and it has none (base_domain is empty)."
     }
   }
 }
@@ -216,12 +230,16 @@ resource "aws_instance" "bots" {
     }
   }
 
-  user_data = templatefile("${path.module}/templates/cloud-init-bots.yaml", {
+  # <b>GZIPPED, because user_data is capped at 16 KB and this template is past it.</b> EC2 enforces that limit on the raw
+  # value and cloud-init decompresses a gzipped one transparently, so base64gzip is the standard way out rather than a
+  # trick -- 20 KB of template becomes about 7.7 KB. The alternative was deleting the comments that explain why each of
+  # these units is shaped the way it is, which is the wrong thing to trade for headroom.
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/cloud-init-bots.yaml", {
     payload_bucket  = aws_s3_bucket.payload.id
     stack           = var.name
     server_endpoint = "ws://${aws_instance.server.private_ip}:${var.game_port}/ws"
     console_port    = var.console_port
-  })
+  }))
 
   tags = {
     Name = "tatooine-${var.name}-bots-${count.index}"
@@ -229,6 +247,6 @@ resource "aws_instance" "bots" {
   }
 
   lifecycle {
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data_base64]
   }
 }
