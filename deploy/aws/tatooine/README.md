@@ -44,7 +44,7 @@ The other is the CDN, for when egress or abuse justifies $15/month (`enable_fron
 
 | | |
 |---|---|
-| `deploy/aws/tatooine-shared/` | **Created once, never destroyed.** Holds the DNS zone, which carries `prevent_destroy`. Its four nameservers are written by hand at the registrar, so recreating the zone would hand out four new ones and silently break the delegation |
+| `deploy/aws/tatooine-shared/` | **Created once, never destroyed.** The DNS zone, which carries `prevent_destroy` — its four nameservers are written by hand at the registrar, so recreating it would hand out four new ones and silently break the delegation. Also the certificate archive, which is worthless unless it outlives the stack, and the GitHub OIDC deploy role, which every workflow needs before it can reach the account at all |
 | `deploy/aws/tatooine/` | The game. Created, tested and **destroyed** as often as you like. It writes into the shared zone and creates nothing DNS-shaped |
 
 That split exists because of the cost shape. Measured in eu-west-1 on 2026-10-15 — gp3 from the pricing API, spot from
@@ -107,6 +107,50 @@ mistake. Verify with `dig NS demo.typhondb.io @8.8.8.8` and `dig DS demo.typhond
 
 Until that delegation exists, certbot cannot issue and the box serves plain HTTP on the game port with a loud line. That
 is deliberate: a half-configured stack stays diagnosable instead of crash-looping.
+
+## Driving it from GitHub: the secrets, in the order they can exist
+
+`tatooine-ephemeral.yml` and `tatooine-deploy.yml` both open with `configure-aws-credentials` and
+`role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}`, so **that secret is the gate on everything else** — without it both
+workflows fail on their first AWS step, whatever the other secrets say. The role lives in `tatooine-shared`
+(`github-oidc.tf`), because it must outlive every stack.
+
+| Secret | Where the value comes from | Missing |
+|---|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | `tatooine-shared` → `terraform output deploy_role_arn` | **Both workflows fail immediately** |
+| `TATOOINE_STATE_BUCKET` | the backend bucket you `init` against | **`terraform init` has no backend** |
+| `TATOOINE_BASE_DOMAIN` | `tatooine-shared` → `zone_name` | warns; stack is IP-only |
+| `TATOOINE_DNS_ZONE_ID` | `tatooine-shared` → `zone_id` | warns; stack is IP-only |
+| `TATOOINE_ACME_EMAIL` | yours | warns; stack is IP-only |
+| `TATOOINE_CERT_BUCKET` | `tatooine-shared` → `cert_bucket` | warns; **each create spends one of five weekly certificates** |
+| `TATOOINE_ALERT_EMAIL` | yours; becomes an SNS subscription you confirm by mail | budget alerts go nowhere |
+
+The three DNS secrets are **all-or-none** in the workflow, because a half-set is the configuration most likely to exist
+and `public_tls` with no name fails a precondition at plan time rather than on the box.
+
+**Do not set `TATOOINE_CERT_BUCKET` before `tatooine-shared` has been applied.** Unset is handled — both halves of
+`tatooine-certificate` test it and skip cleanly. A name whose bucket does not exist is *not*: the `--deploy-hook` archive
+script runs under `set -eu`, so its `aws s3 cp` fails, `certbot` exits non-zero, and `tatooine-certificate.service` goes
+red on a stack that is in fact serving a valid certificate. The unit is `Wants=`, not `Requires=`, so the game still
+comes up — which makes it the most misleading of the available failures.
+
+**The deploy role's trust policy names refs explicitly, and that refuses the first run.** A `workflow_dispatch` token's
+`sub` claim names the branch the *workflow* ran from, not the branch it deploys — `tatooine-ephemeral.yml` checks out
+`inputs.ref` separately — so `github_refs` defaults to `["refs/heads/main"]`. Before these workflows are on main, add the
+branch for bring-up and remove it afterwards:
+
+```bash
+cd ../tatooine-shared
+terraform apply -var 'zone_name=demo.typhondb.io' -var 'github_refs=["refs/heads/main","refs/heads/my-branch"]'
+terraform output github_secrets      # the gh commands for the two secrets only this stack can produce
+```
+
+Widening it to a wildcard instead would also match `pull_request` and `environment` subjects, which is how a fork's pull
+request ends up holding a deploy role.
+
+**The payload bucket is not a secret.** It is per stack (`tatooine-payload-<account>-<name>`, see `iam.tf`), so
+`tatooine-deploy.yml` derives it from the account and the stack name. A single secret cannot name a per-stack bucket, and
+when it tried, the upload went to one bucket while the instance's IAM policy granted read on another.
 
 Then, from the outputs:
 

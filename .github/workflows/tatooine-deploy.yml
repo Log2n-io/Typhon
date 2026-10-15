@@ -77,6 +77,7 @@ jobs:
     outputs:
       key: ${{ steps.publish.outputs.key }}
       commit: ${{ steps.publish.outputs.commit }}
+      bucket: ${{ steps.bucket.outputs.bucket }}
     env:
       # Through the environment, never spliced into a `run:` body. A workflow input is attacker-controlled in the general
       # case, and `${{ }}` is substituted textually BEFORE bash parses the script -- so a value containing a quote ends
@@ -122,9 +123,21 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: eu-west-1
 
+      # DERIVED, not a secret, and it has to be: iam.tf makes the payload bucket PER STACK
+      # (`tatooine-payload-<account>-<name>`) because one bucket shared by every stack meant an ephemeral destroy
+      # targeted prod's payload history. A single TATOOINE_PAYLOAD_BUCKET secret cannot name a per-stack bucket, so this
+      # job uploaded to whatever one bucket the secret held while the instance's IAM policy granted it read on its own --
+      # a deploy that succeeds here and then cannot be fetched on the box.
+      - name: Name this stack's payload bucket
+        id: bucket
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          echo "bucket=tatooine-payload-$account-$STACK" >> "$GITHUB_OUTPUT"
+
       - name: Upload both payloads
         env:
-          BUCKET: ${{ secrets.TATOOINE_PAYLOAD_BUCKET }}
+          BUCKET: ${{ steps.bucket.outputs.bucket }}
           KEY: ${{ steps.publish.outputs.key }}
         run: |
           set -euo pipefail
@@ -136,7 +149,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      BUCKET: ${{ secrets.TATOOINE_PAYLOAD_BUCKET }}
+      BUCKET: ${{ needs.build.outputs.bucket }}
       KEY: ${{ needs.build.outputs.key }}
       COMMIT: ${{ needs.build.outputs.commit }}
       SERVER: ${{ inputs.server_instance }}
