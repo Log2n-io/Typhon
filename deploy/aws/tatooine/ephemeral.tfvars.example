@@ -51,6 +51,11 @@ base_domain = "demo.typhondb.io"
 dns_zone_id = "Z063620936HA3DRPWS2DE"
 acme_email  = "contact@log2n.io"
 
+# Keeps /etc/letsencrypt between stacks, which is what makes reusing a name free: Let's Encrypt allows five certificates per
+# week per exact set of names, so without this the sixth create of "temp01" in a week boots with no certificate. From
+# deploy/aws/tatooine-shared's cert_bucket output.
+cert_bucket = "tatooine-certs-940864285707"
+
 # Spot for the bot box: a reclaim costs a run and nothing else, since the accounts file is reproducible from SWG_BOT_KEY.
 # At the live price that is $0.153/hour against $0.29 on demand.
 

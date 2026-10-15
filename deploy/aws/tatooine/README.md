@@ -80,6 +80,13 @@ terraform apply -var-file=ephemeral.tfvars
 The backend is a **partial configuration** — the key is one per stack, so it cannot be hard-coded. `terraform init
 -backend=false` is enough to `validate` or `fmt` without touching S3, which is all that has been done so far.
 
+**Set `cert_bucket` whenever `public_tls` is on.** It keeps `/etc/letsencrypt` in a bucket that outlives the stack, so a
+re-created stack restores the certificate it already had rather than asking for a new one. Let's Encrypt allows five
+certificates per week per exact set of names — no override, one slot back every 34 hours — and reusing a stack name is
+exactly what spends them, so without this the sixth create of one hostname in a week serves plain HTTP. The restore is
+skipped when the instance already has a certificate on disk, and the archive is refreshed from certbot's `--deploy-hook`,
+so a boot that changed nothing uploads nothing.
+
 **A stack gets its public name from `name` + `base_domain`.** `name = "temp01"` with `base_domain = "demo.typhondb.io"`
 serves `https://temp01.demo.typhondb.io`; `terraform output url` prints it. Set `hostname` only for a name that does not
 follow that pattern. One input names the resources, the state key, the SSM path and the URL, so they cannot drift apart.

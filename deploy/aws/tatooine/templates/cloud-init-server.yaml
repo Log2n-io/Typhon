@@ -230,8 +230,17 @@ write_files:
   # box. That is the payoff for delegating the subzone to Route 53 rather than driving the registrar's own API.
   #
   # Renewal is certbot.timer's, installed by the package. It runs twice a day, renews inside thirty days of expiry, and the
-  # server picks the new files up without restarting (TlsCertificate watches their write time), so there is no deploy hook and
-  # no scheduled interruption.
+  # server picks the new files up without restarting (TlsCertificate watches their write time), so there is no scheduled
+  # interruption.
+  #
+  # <b>And /etc/letsencrypt is restored from S3 before certbot is asked for anything.</b> Without that, every create of a
+  # stack is a fresh issuance, and Let's Encrypt allows FIVE per week per exact set of names -- no override, one slot back
+  # every 34 hours. Reusing a hostname, which is the whole point of naming stacks, is exactly what spends them: the sixth
+  # `temp01` of a week gets no certificate and serves plain HTTP. With the archive, a re-created stack finds a certificate
+  # that is not due for renewal and asks for nothing at all.
+  #
+  # The archive goes back up from `--deploy-hook`, so it is refreshed on the initial issuance and on every timer renewal,
+  # and not on a boot that changed nothing.
   - path: /usr/local/sbin/tatooine-certificate
     permissions: '0755'
     content: |
@@ -245,6 +254,28 @@ write_files:
           domains="$domains -d $name"
       done
 
+      # Restore first, and only when there is nothing local to lose. A reboot of the same instance still has its certificate
+      # on disk and must not have it replaced by whatever was last uploaded; a brand-new instance has an empty
+      # /etc/letsencrypt and is the case this exists for.
+      #
+      # tar, not `aws s3 sync`: /etc/letsencrypt/live/<name>/*.pem are SYMLINKS into ../../archive, and sync would follow
+      # them and restore four regular files -- which certbot then refuses to renew, because it expects symlinks there. tar
+      # also carries the file modes and the ACME account key, so the same account is reused rather than a new one registered
+      # on every create.
+      if [ -n "${cert_bucket}" ] && [ ! -d /etc/letsencrypt/live/tatooine ]; then
+          saved=$(mktemp /tmp/letsencrypt.XXXXXX.tgz)
+          if aws s3 cp "s3://${cert_bucket}/${cert_prefix}/letsencrypt.tgz" "$saved" --only-show-errors; then
+              mkdir -p /etc/letsencrypt
+              tar -xzf "$saved" -C /etc/letsencrypt
+              echo "tatooine: restored the certificate archive for ${cert_prefix}"
+          else
+              # Expected for the first stack to use this hostname. The ListBucket grant is what makes a real denial look
+              # different from this one in CloudTrail.
+              echo "tatooine: no certificate archive for ${cert_prefix}; asking Let's Encrypt for one"
+          fi
+          rm -f "$saved"
+      fi
+
       # --keep-until-expiring so a restart does not spend a rate-limit slot: Let's Encrypt allows five duplicate
       # certificates per week, and a crash-looping unit would burn that in minutes and then be locked out for days.
       #
@@ -253,7 +284,8 @@ write_files:
       certbot certonly --non-interactive --agree-tos --keep-until-expiring \
           --dns-route53 --dns-route53-propagation-seconds 30 \
           --email '${acme_email}' $domains \
-          --cert-name tatooine
+          --cert-name tatooine \
+          --deploy-hook /usr/local/sbin/tatooine-certificate-archive
 
       # The service runs as `tatooine` and ProtectSystem=strict leaves /etc/letsencrypt read-only to it, so it needs to be
       # able to traverse and read. 0750 on the directories plus group ownership is the narrowest thing that works; the key
@@ -261,6 +293,25 @@ write_files:
       chgrp -R tatooine /etc/letsencrypt/live /etc/letsencrypt/archive
       chmod -R g+rX /etc/letsencrypt/live /etc/letsencrypt/archive
       echo "tatooine: certificate ready for ${dns_names}"
+
+  # Run by certbot's --deploy-hook: on the initial issuance, and from certbot.timer on every renewal. Never from a boot that
+  # changed nothing, which is why it is a hook and not a line at the end of the script above.
+  - path: /usr/local/sbin/tatooine-certificate-archive
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      [ -n "${cert_bucket}" ] || exit 0
+      [ -d /etc/letsencrypt/archive ] || exit 0
+
+      # Built in /tmp and then copied, rather than streamed: a `tar | aws s3 cp -` whose tar fails midway still uploads a
+      # truncated object and exits 0 through the pipe, and the only copy of the certificate would then be the broken one.
+      # The bucket is versioned as a second line of defence against exactly that.
+      saved=$(mktemp /tmp/letsencrypt.XXXXXX.tgz)
+      tar -czf "$saved" -C /etc/letsencrypt .
+      aws s3 cp "$saved" "s3://${cert_bucket}/${cert_prefix}/letsencrypt.tgz" --only-show-errors
+      rm -f "$saved"
+      echo "tatooine: certificate archive saved for ${cert_prefix}"
 
   - path: /etc/systemd/system/tatooine-certificate.service
     permissions: '0644'

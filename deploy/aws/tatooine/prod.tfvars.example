@@ -44,6 +44,10 @@ base_domain = "demo.typhondb.io"
 dns_zone_id = "Z063620936HA3DRPWS2DE" # deploy/aws/tatooine-shared's zone_id; this stack writes into it, never creates it
 acme_email  = "contact@log2n.io"
 
+# Prod wants this for a different reason than an ephemeral stack does: a stack that is re-created after an AMI upgrade, or
+# recovered from a lost state file, keeps the certificate it already had instead of spending one of five weekly slots.
+cert_bucket = "tatooine-certs-940864285707"
+
 # --origin is DERIVED from the hostname; client_origin is only for a front door this module did not create.
 
 # ── The CDN, deliberately off ─────────────────────────────────────────────────────────────────────────────────────────

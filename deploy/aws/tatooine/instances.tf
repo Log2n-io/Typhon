@@ -78,6 +78,11 @@ resource "aws_instance" "server" {
     acme_email  = var.acme_email
     tls_chain   = local.tls_chain
     tls_key     = local.tls_key
+
+    # Where /etc/letsencrypt is kept between stacks, and under what prefix. Empty bucket disables both halves; the prefix is
+    # the hostname rather than the stack name, because the rate limit Let's Encrypt applies is per set of NAMES.
+    cert_bucket = var.cert_bucket
+    cert_prefix = local.hostname
   }))
 
   tags = {

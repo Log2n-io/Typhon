@@ -88,12 +88,54 @@ variable "dns_zone_id" {
   EOT
 }
 
-# <b>Nothing DNS-shaped is created here.</b> The records are written by the INSTANCE at boot, because they follow the public
-# IP across every stop and start and Terraform cannot own them without fighting that update on each apply. The zone itself
-# belongs to the shared stack, for the reason above.
+variable "cert_bucket" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    The bucket that keeps /etc/letsencrypt across the life of a stack — `deploy/aws/tatooine-shared`'s `cert_bucket` output.
+
+    Without it, a re-created stack asks Let's Encrypt for a new certificate, and Let's Encrypt allows five per week per exact
+    set of names with no override: the sixth create of one hostname in a week boots with no certificate. With it, the stack
+    restores the certificate it already had and reuses a name for free.
+
+    Empty disables the restore and the backup, which is correct for a stack with no certificate at all.
+  EOT
+}
+
+# <b>The records are written TWICE, by two owners, and that is deliberate.</b>
 #
-# The id is needed for exactly two things: the IAM policy that scopes the instance's write permission to that one zone, and
-# the cloud-init script that performs the write.
+# The instance publishes them at boot from IMDS, because the public address changes on every stop and start and there is no
+# Elastic IP to pin it -- an allocated EIP bills while the instance is stopped, which is the cost this deployment is built to
+# avoid. Nothing but the box itself knows the new address, and no apply is running when it changes.
+#
+# Terraform owns the RESOURCE anyway, with `ignore_changes = [records]` so it never fights that update. The reason is
+# `destroy`: when the instance owned the records outright, every destroyed stack left an A record behind pointing at a public
+# address AWS had already released and would hand to somebody else. That was cleaned up by hand twice on 2026-10-15, which
+# does not scale to a zone full of ephemeral stacks -- and a stale record is worse than a missing one, because it resolves.
+#
+# `destroy` deletes a Route 53 record by VALUE, so the delete only succeeds if state agrees with the live record. It does:
+# destroy refreshes first, which reads back whatever the instance last published. A `destroy -refresh=false` would fail
+# here, loudly, which is the right way for that mistake to present.
+resource "aws_route53_record" "stack" {
+  for_each = toset(local.dns_names)
+
+  zone_id = var.dns_zone_id
+  name    = each.value
+  type    = "A"
+  ttl     = 60
+
+  # The address at create time. The instance overwrites this with the same value at its first boot, and with a different one
+  # after any stop and start -- hence ignore_changes below.
+  records = [aws_instance.server.public_ip]
+
+  # The instance's own UPSERT may well have landed first: after a stop and start, or on an apply that lost its state. Without
+  # this, Terraform's create fails with "already exists" on a record it is about to set to the right value anyway.
+  allow_overwrite = true
+
+  lifecycle {
+    ignore_changes = [records]
+  }
+}
 
 output "dns_names" {
   value       = local.dns_names

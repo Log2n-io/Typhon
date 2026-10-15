@@ -107,6 +107,7 @@ jobs:
       BASE_DOMAIN: ${{ secrets.TATOOINE_BASE_DOMAIN }}
       DNS_ZONE_ID: ${{ secrets.TATOOINE_DNS_ZONE_ID }}
       ACME_EMAIL: ${{ secrets.TATOOINE_ACME_EMAIL }}
+      CERT_BUCKET: ${{ secrets.TATOOINE_CERT_BUCKET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -141,7 +142,11 @@ jobs:
             dns=(-var="public_tls=true"
                  -var="base_domain=$BASE_DOMAIN"
                  -var="dns_zone_id=$DNS_ZONE_ID"
-                 -var="acme_email=$ACME_EMAIL")
+                 -var="acme_email=$ACME_EMAIL"
+                 -var="cert_bucket=$CERT_BUCKET")
+            # Not fatal, but worth a line in the log: without the archive, every create of this hostname spends one of the
+            # five certificates Let's Encrypt allows per week for it, and the sixth serves plain HTTP.
+            [ -n "$CERT_BUCKET" ] || echo "::warning::TATOOINE_CERT_BUCKET not set; this stack will issue a new certificate instead of restoring one"
           else
             # Explicitly false rather than left empty: an empty array under `set -u` is an unbound expansion on bash 4.3,
             # and this file should not depend on the runner image's bash being newer than that.

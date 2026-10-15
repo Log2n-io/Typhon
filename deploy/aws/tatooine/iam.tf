@@ -158,3 +158,41 @@ resource "aws_iam_role_policy" "route53_write" {
   role   = aws_iam_role.instance.id
   policy = data.aws_iam_policy_document.route53_write[0].json
 }
+
+# --- The certificate archive, for the stack's own hostname only --------------------------------------------------------
+#
+# <b>Get and Put under one prefix, and no Delete.</b> The prefix is the hostname, so a stack cannot read another stack's
+# private key, and the absence of Delete means a compromise of the game process can overwrite this stack's own backup but
+# cannot destroy the archive. The bucket lives in `tatooine-shared` because it has to outlive the stack to be worth
+# anything -- see the comment on cert_bucket.
+data "aws_iam_policy_document" "cert_archive" {
+  count = var.cert_bucket == "" || local.hostname == "" ? 0 : 1
+
+  statement {
+    sid       = "RestoreAndBackUpThisHostnamesCertificate"
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["arn:aws:s3:::${var.cert_bucket}/${local.hostname}/*"]
+  }
+
+  statement {
+    # To tell "no backup yet" from "the call was denied" -- without List, the first create of a hostname is indistinguishable
+    # from a broken policy, and the script would mask a real misconfiguration as a cache miss.
+    sid       = "SeeWhetherThereIsOne"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.cert_bucket}"]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${local.hostname}/*"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "cert_archive" {
+  count = var.cert_bucket == "" || local.hostname == "" ? 0 : 1
+
+  name   = "cert-archive"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.cert_archive[0].json
+}

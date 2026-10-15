@@ -4,6 +4,13 @@
 *.service  text eol=lf
 *.timer    text eol=lf
 
+# cloud-init templates carry shell scripts, shebangs and all, that `templatefile()` embeds verbatim into user_data. With
+# core.autocrlf=true a Windows clone checks these out as CRLF, cloud-init writes the scripts out as it received them, and
+# the kernel looks for /bin/sh -- "No such file or directory", from a file that is plainly there. That is not
+# hypothetical: it is the run.sh bug of the previous commit, which the publish scripts now avoid by writing LF explicitly.
+# These files are read straight off the working copy by whoever runs the apply, so the attribute is the only guard.
+deploy/aws/**/templates/*.yaml  text eol=lf
+
 # Golden vectors are byte-exact witnesses, so a checkout that rewrote their line endings would corrupt the very bytes
 # they exist to pin — and it would surface as a cross-platform test failure rather than as a diff anyone reads. Today's
 # canonical catalog happens to contain no newline at all, which is luck, not a property: a frame vector will.
