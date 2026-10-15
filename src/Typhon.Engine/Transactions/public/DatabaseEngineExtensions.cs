@@ -45,7 +45,19 @@ public static class DatabaseEngineExtensions
     {
         var uow = dbe.CreateUnitOfWork(durabilityMode);
         dbe.LogUowLifecycle("CreateQuickTransaction: UoW created, calling CreateTransaction");
-        var tx = uow.CreateTransaction(discipline);
+        Transaction tx;
+        try
+        {
+            tx = uow.CreateTransaction(discipline);
+        }
+        catch
+        {
+            // A refusal (the active-transaction guard, TSN exhaustion) must give the registry slot back (#1267): nothing else holds this UoW, and a caller
+            // retrying the refusal would otherwise leak one slot per attempt. Without the durability flush: it hosted nothing (DisposeUnused).
+            uow.DisposeUnused();
+            throw;
+        }
+
         dbe.LogQuickTxCreated(tx.TSN);
         tx.OwnsUnitOfWork = true;
         return tx;

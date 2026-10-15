@@ -426,6 +426,8 @@ internal sealed class RecoveryDriver
             }
         }
 
+        RefuseUnregisteredArchetypes(dbe, entities);
+
         var sinceBatchPoint = 0;
         foreach (var (entityIdRaw, agg) in entities)
         {
@@ -543,6 +545,45 @@ internal sealed class RecoveryDriver
 
         applier.ApplyCollectionFolds(entityIdRaw, folded);
         return folded.Count;
+    }
+
+    /// <summary>
+    /// Fails the open, before any record is applied, when the window holds records of an archetype this process does not register (#1309).
+    /// </summary>
+    /// <remarks>
+    /// Failing is the right outcome: skipping those records would lose them for good once the seal checkpoint moves CheckpointLSN past the window. What this
+    /// adds is the cause — the applier used to reach the missing archetype state mid-replay and throw a NullReferenceException that named nothing — and the
+    /// guarantee that nothing was applied first, because every entity is checked before the first apply.
+    /// </remarks>
+    private static void RefuseUnregisteredArchetypes(DatabaseEngine dbe, Dictionary<long, EntityAgg> entities)
+    {
+        var states = dbe._stateByRouting;
+        foreach (var (entityIdRaw, agg) in entities)
+        {
+            // A spawn applies under its record's archetype id; every other record resolves the archetype from the entity id's routing bits.
+            var routing = agg.HasSpawn ? agg.ArchetypeId : EntityId.FromRaw(entityIdRaw).ArchetypeId;
+            if (routing < states.Length && states[routing] != null)
+            {
+                continue;
+            }
+
+            var name = "an archetype the data file does not name";
+            if (dbe._persistedArchetypes != null)
+            {
+                foreach (var (persistedName, persisted) in dbe._persistedArchetypes)
+                {
+                    if (persisted.Arch.RoutingId == routing)
+                    {
+                        name = $"'{persistedName}'";
+                        break;
+                    }
+                }
+            }
+
+            throw new DurabilityException(TyphonErrorCode.RecoveryArchetypeNotRegistered,
+                $"Crash recovery cannot replay the WAL: it holds records of {name} (routing id {routing}, entity 0x{entityIdRaw:X}), which this process does " +
+                "not register. No record was applied. Register that archetype and open again; skipping its records would lose them for good.");
+        }
     }
 
     /// <summary>Whether <paramref name="slotIndex"/> of <paramref name="entityIdRaw"/>'s archetype is a Versioned component, by its table.</summary>

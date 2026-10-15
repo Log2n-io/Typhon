@@ -26,11 +26,16 @@ namespace SwgTatooine;
 /// <see cref="Help"/> is generated from the same list the parse walked. A flag cannot exist without appearing in <c>--help</c>, which is the property that
 /// matters: the previous generation had no <c>--help</c> at all and the only way to learn a flag's name was to read the parser.
 /// </para>
+/// <para>
+/// <b>Shared by source with <c>SwgTatooine.Bots</c></b> (#1072), which links this file rather than referencing the server: the load generator references
+/// <c>Typhon.Client</c> and nothing else on purpose. So it depends on the BCL alone, and the program-specific text of <see cref="Help"/> is the caller's.
+/// </para>
 /// </remarks>
 internal sealed class ArgReader
 {
     private readonly string[] _args;
     private readonly bool[] _used;
+    private readonly string _usage;
     private readonly List<Entry> _declared = [];
 
     /// <summary>
@@ -49,10 +54,12 @@ internal sealed class ArgReader
 
     /// <summary>Wraps a command line.</summary>
     /// <param name="args">The tokens, as the process received them.</param>
-    public ArgReader(string[] args)
+    /// <param name="usage">The text <see cref="Help"/> prints before the flags: what the program is and how it is invoked.</param>
+    public ArgReader(string[] args, string usage)
     {
         _args = args ?? [];
         _used = new bool[_args.Length];
+        _usage = usage ?? string.Empty;
 
         // `--help` anywhere, `-h` only as the FIRST token. Leniency has to be decided before anything is parsed, so it cannot know which tokens are values —
         // and `--db-dir -h` would otherwise print the flag list instead of running, because `-h` is a legitimate path. `--help` is safe anywhere because a
@@ -322,14 +329,7 @@ internal sealed class ArgReader
         }
 
         var text = new StringBuilder();
-        text.AppendLine("SwgTatooine — a server-side Star Wars Galaxies workload for the Typhon engine.");
-        text.AppendLine();
-        text.AppendLine("  usage: SwgTatooine [flags]          measure a fixed number of ticks and report");
-        text.AppendLine("         SwgTatooine --serve <port>    serve the same world over WebSocket, forever");
-        text.AppendLine("         SwgTatooine --sweep           run the partitioning matrix and write a report");
-        text.AppendLine();
-        text.AppendLine("  --serve now REQUIRES its port. A bare --serve used to mean 8080, and so did a malformed one:");
-        text.AppendLine("  `--serve 808O` listened on 8080 and said nothing. Every flag names its value or is refused.");
+        text.Append(_usage);
         foreach (var e in _declared)
         {
             if (e.Name == null)

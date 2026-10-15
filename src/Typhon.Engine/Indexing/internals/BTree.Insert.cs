@@ -234,7 +234,10 @@ internal abstract partial class BTree<TKey, TStore>
         // just-published _rootChunkId and races through TryInsertOlc's general path can acquire newRoot's latch (initial OlcVersion=4 reports unlocked) and
         // concurrently mutate the chunk, producing torn writes / out-of-order keys. SpinWriteLock takes newRoot's bit-0 lock; ReadVersion observes 0 for any
         // concurrent reader, who restarts; WriteUnlock at the end bumps the version so the next op sees the new state.
-        if (IsEmpty())
+        //
+        // Gated on the root, not the count, like the pessimistic twin: since #1322 an emptied tree keeps its leaf root (and reloads it, #1332), so a count
+        // gate allocated and dirtied a node on every first insert into it only to lose the CAS and free it.
+        if (_rootChunkId == 0)
         {
             var newRoot = AllocNode(NodeStates.IsLeaf, ref accessor);
             newRoot.PreDirtyForWrite(ref accessor);

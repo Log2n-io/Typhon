@@ -273,6 +273,84 @@ class QueryPathEquivalenceTests : TestBase<QueryPathEquivalenceTests>
     }
 
     /// <summary>
+    /// An ordered query returns exactly the rows the predicate admits, for every operator and threshold sign (#1185).
+    /// </summary>
+    /// <remarks>
+    /// The K-way merge evaluates no predicate — a row comes back because the scan range admitted it — so a predicate the range widens must send the query
+    /// to the sort fallback. <c>!=</c> was exempted from that check and so never evaluated: <c>Key != 10</c> came back with key 10 in it. The strict
+    /// inequalities on floating types and the saturating integer ones are the other widenings, and this loop runs them all.
+    /// </remarks>
+    [TestCaseSource(nameof(AxisCases))]
+    public void OrderedQuery_ReturnsExactlyThePredicatesRows_ForEveryOperator(KeyAxis axis)
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnAll(dbe);
+
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            foreach (var op in Ops)
+            {
+                foreach (var (label, threshold) in new[] { ("neg", axis.Negative), ("zero", axis.Zero), ("pos", axis.Positive) })
+                {
+                    var ordered = tx.Query<QPathUnit>().WhereField(Compare(axis.Field, op, threshold)).OrderByField<QPathData, int>(d => d.I)
+                        .ExecuteOrdered();
+                    Assert.That(ordered, Is.EquivalentTo(Expected(ids, axis.Field, op, threshold)), $"{axis} {op} {label}: the predicate's rows");
+
+                    var keys = new List<int>(ordered.Count);
+                    foreach (var id in ordered)
+                    {
+                        keys.Add(tx.Open(id).Read(QPathUnit.Data).I);
+                    }
+
+                    Assert.That(keys, Is.Ordered, $"{axis} {op} {label}: sorted by I");
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// The widenings ordered by the predicate's OWN field, where the merge would stream the very tree the range was widened on (#1185): a strict
+    /// inequality on a float at a threshold the data holds, the integer bounds that saturate at the type's extent, and a NaN threshold.
+    /// </summary>
+    [Test]
+    public void OrderedQuery_OnTheWidenedField_ReturnsExactlyThePredicatesRows()
+    {
+        using var dbe = SetupEngine();
+        var ids = SpawnAll(dbe);
+        using var tx = dbe.CreateQuickTransaction();
+
+        List<EntityId> Oracle(Func<QPathData, bool> holds)
+        {
+            var rows = new List<EntityId>();
+            for (var i = 0; i < EntityCount; i++)
+            {
+                if (holds(ValuesFor(i)))
+                {
+                    rows.Add(ids[i]);
+                }
+            }
+
+            return rows;
+        }
+
+        var nan = float.NaN;
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Query<QPathUnit>().WhereField<QPathData>(d => d.F > 0f).OrderByField<QPathData, float>(d => d.F).ExecuteOrdered(),
+                Is.EqualTo(Oracle(d => d.F > 0f)).AsCollection, "F > 0, ordered by F: 0 itself is held by the data and excluded");
+            Assert.That(tx.Query<QPathUnit>().WhereField<QPathData>(d => d.F < 0f).OrderByField<QPathData, float>(d => d.F).ExecuteOrdered(),
+                Is.EquivalentTo(Oracle(d => d.F < 0f)), "F < 0, ordered by F");
+            Assert.That(tx.Query<QPathUnit>().WhereField<QPathData>(d => d.F > nan).OrderByField<QPathData, float>(d => d.F).ExecuteOrdered(),
+                Is.Empty, "a NaN threshold matches nothing");
+            Assert.That(tx.Query<QPathUnit>().WhereField<QPathData>(d => d.I > int.MaxValue).OrderByField<QPathData, int>(d => d.I).ExecuteOrdered(),
+                Is.Empty, "I > int.MaxValue saturates at the extent and must still match nothing");
+            Assert.That(tx.Query<QPathUnit>().WhereField<QPathData>(d => d.I < int.MinValue).OrderByField<QPathData, int>(d => d.I).ExecuteOrdered(),
+                Is.Empty, "I < int.MinValue likewise");
+        });
+    }
+
+    /// <summary>
     /// A non-streamable key type must still answer correctly rather than empty, whichever path is forced.
     /// </summary>
     /// <remarks>

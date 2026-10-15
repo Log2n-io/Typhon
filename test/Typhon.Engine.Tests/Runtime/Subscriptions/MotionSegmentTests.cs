@@ -470,6 +470,51 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
         });
     }
 
+    /// <summary>
+    /// An entity moving at exactly its declared speed is motion, never a teleport (#1074).
+    /// </summary>
+    /// <remarks>
+    /// The step is measured between quantized positions, so a true step of exactly the threshold lands on either side of it by a quantum. With no margin
+    /// half those ticks bumped the epoch, which tells every client not to interpolate: a mounted SWG player at its declared 12 m/s stood still for 112 frames
+    /// of 180. The start sits off the quantum grid so the measured step genuinely alternates, on both axes.
+    /// </remarks>
+    [Test]
+    public void MotionAtExactlyTheDeclaredSpeed_IsNeverATeleport()
+    {
+        using var harness = Harness.Create(ServiceProvider);
+        var perAxis = (TeleportMps * TickPeriodSeconds) / Math.Sqrt(2);
+        const double offGrid = PositionStepM * 0.37;
+
+        harness.PlaceAt(0, 10 + offGrid, 20 + offGrid);
+        harness.Tick(1);
+        var epoch = harness.Epoch(0);
+
+        for (uint t = 2; t <= 60; t++)
+        {
+            harness.PlaceAt(0, 10 + offGrid + (perAxis * (t - 1)), 20 + offGrid + (perAxis * (t - 1)));
+            harness.Tick(t);
+            Assert.That(harness.Epoch(0), Is.EqualTo(epoch), $"tick {t}: a step of exactly the declared speed was reported as a teleport");
+        }
+    }
+
+    /// <summary>
+    /// The margin is a few quanta and no more: a step one centimetre past the declared speed plus the margin is still a teleport (#1074).
+    /// </summary>
+    [Test]
+    public void AStepJustPastTheMargin_IsStillATeleport()
+    {
+        using var harness = Harness.Create(ServiceProvider);
+        harness.PlaceAt(0, 100, 200);
+        harness.Tick(1);
+        var epoch = harness.Epoch(0);
+
+        var margin = MotionPolicy.TeleportQuantumMargin * PositionStepM * Math.Sqrt(2);
+        harness.PlaceAt(0, 100 + (TeleportMps * TickPeriodSeconds) + margin + 0.01, 200);
+        harness.Tick(2);
+
+        Assert.That(harness.Epoch(0), Is.EqualTo((byte)(epoch + 1)), "a step past threshold + margin is a discontinuity");
+    }
+
     /// <summary>A stationary entity cannot drift, so it gets no heartbeat: its enter segment stands for as long as it stands still.</summary>
     [Test]
     public void AStationaryEntityNeverGetsAHeartbeat()
@@ -607,7 +652,8 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
             $"the codec is {position.Vel.Bits} bits at 2^{position.Vel.UnitExp} m, carrying {carried} m per tick against a teleport step of "
           + $"{teleportStep} m — W5 derives the width from exactly this number");
 
-        // Run at just under the threshold on both axes, which is the fastest thing the rule will ever measure without calling it a teleport.
+        // Run at just under the declared speed on both axes: the fastest legitimate motion. The rule admits a few quanta more (TeleportQuantumMargin), which
+        // is quantization noise and is what the codec's clamp absorbs at its limit.
         var step = (teleportStep * 0.99) / Math.Sqrt(2);
         var worst = 0;
         for (uint t = 1; t <= 40; t++)

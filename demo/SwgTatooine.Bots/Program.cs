@@ -1,3 +1,4 @@
+using SwgTatooine;
 using SwgTatooine.Bots;
 using System;
 using System.Threading;
@@ -14,39 +15,67 @@ using System.Threading.Tasks;
 // default read plausibly and connected to nothing: the swarm printed its first line and exited zero, having measured a server it
 // never reached. The scheme and the port have to name what the server actually serves.
 
-var endpoint = Arg("--endpoint") ?? "ws://127.0.0.1:9100/ws";
-var bots = int.Parse(Arg("--bots") ?? "100");
-var seconds = int.Parse(Arg("--seconds") ?? "60");
-var hz = int.Parse(Arg("--hz") ?? "4");
-var kind = Arg("--kind") ?? "god";
-var connectBatch = int.Parse(Arg("--connect-batch") ?? "1");
-// A god camera's region edge, metres: what a ClientRegion god profile (the server's --god-region) observes. The default is the swarm's own.
-var regionM = Arg("--region-m");
+// The flags are the knobs an A/B moves, so they are parsed as strictly as the server's (#1072): an unknown, misspelt, repeated or malformed flag exits 2
+// naming the token, instead of running the default — a mistyped --bots used to give two identical arms under a report that said otherwise.
+string endpoint, kind, fuzzMode;
+Uri endpointUri;
+int bots, seconds, hz, connectBatch, tourSeconds, planets, fuzz, fuzzRate;
+double regionM;
+try
+{
+    var defaults = new BotSwarmOptions();
+    var r = new ArgReader(args, Usage);
+    r.Group("swarm");
+    r.Switch("--help", "print this list and exit (or -h as the first argument)");
+    endpoint = r.Str("--endpoint", "ws://127.0.0.1:9100/ws", "the server's WebSocket endpoint (`SwgTatooine --serve <port>` listens at ws://host:<port>/ws)",
+        "<uri>");
+    bots = r.Int("--bots", defaults.Count, "sessions to open", min: 1);
+    seconds = r.Int("--seconds", 60, "the measured window, from the moment every session is open", min: 1);
+    hz = r.Int("--hz", defaults.TickHz, "the driver's tick rate", min: 1);
+    kind = r.Str("--kind", defaults.Kind, "the session kind the server's admission expects", "<kind>");
+    connectBatch = r.Int("--connect-batch", defaults.ConnectBatch, "sessions opened per connect step", min: 1);
+    // A god camera's region edge: what a ClientRegion god profile (the server's --god-region) observes.
+    regionM = r.Dbl("--region-m", defaults.RegionRadiusM, "a god camera's region edge, metres", min: 1);
+    // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
+    tourSeconds = r.Int("--god-tour", defaults.TourEverySeconds, "seconds between planet switches; 0 never tours", min: 0);
+    planets = r.Int("--planets", defaults.Planets, "planets a touring camera cycles through", min: 1);
+    r.Group("fuzz — hostile connections instead of a swarm (AC-17's live half)");
+    fuzz = r.Int("--fuzz", 0, "hostile clients to open; 0 runs the swarm", min: 0);
+    fuzzRate = r.Int("--fuzz-rate", 500, "messages per second per fuzz client; 0 is the control arm", min: 0);
+    fuzzMode = r.Choice("--fuzz-mode", "mixed", ["mixed", "valid", "churn", "mixed-slow"], "what the fuzz clients send");
+    if (r.WantsHelp)
+    {
+        Console.Write(r.Help());
+        return 0;
+    }
 
-// --god-tour <seconds> --planets <n>: every god camera moves to the next planet on that period (Realms G3), and the report counts the switches applied
-// and the RealmNews announcements heard.
-var tourSeconds = int.Parse(Arg("--god-tour") ?? "0");
-var planets = int.Parse(Arg("--planets") ?? "1");
+    r.RejectUnknown();
+    if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri))
+    {
+        throw new ArgumentException($"'--endpoint' takes an absolute URI such as ws://127.0.0.1:9100/ws, not '{endpoint}'.");
+    }
+}
+catch (ArgumentException e)
+{
+    Console.Error.WriteLine(e.Message);
+    return 2;
+}
 
-// --fuzz <clients> [--fuzz-rate <msgs/s per client>] [--fuzz-mode mixed|valid|churn|mixed-slow]: hostile connections instead of a swarm, for
-// AC-17's live half (Fuzzer). Rate 0 is the control arm.
-var fuzz = Arg("--fuzz");
-if (fuzz != null)
+if (fuzz > 0)
 {
     using var fuzzStop = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-    await new Fuzzer(new Uri(endpoint), int.Parse(fuzz), int.Parse(Arg("--fuzz-rate") ?? "500"), Arg("--fuzz-mode") ?? "mixed")
-        .RunAsync(fuzzStop.Token);
+    await new Fuzzer(endpointUri, fuzz, fuzzRate, fuzzMode).RunAsync(fuzzStop.Token);
     return 0;
 }
 
 var options = new BotSwarmOptions
 {
-    Endpoint = new Uri(endpoint),
+    Endpoint = endpointUri,
     Count = bots,
     TickHz = hz,
     ConnectBatch = connectBatch,
     Kind = kind,
-    RegionRadiusM = regionM == null ? new BotSwarmOptions().RegionRadiusM : double.Parse(regionM, System.Globalization.CultureInfo.InvariantCulture),
+    RegionRadiusM = regionM,
     TourEverySeconds = tourSeconds,
     Planets = planets,
 };
@@ -233,16 +262,15 @@ static string Describe(ushort code) => code switch
     _ => code.ToString(),
 };
 
-static string Arg(string name)
+partial class Program
 {
-    var args = Environment.GetCommandLineArgs();
-    for (var i = 0; i < args.Length - 1; i++)
-    {
-        if (string.Equals(args[i], name, StringComparison.Ordinal))
-        {
-            return args[i + 1];
-        }
-    }
+    /// <summary>What <c>--help</c> prints before the flags.</summary>
+    private const string Usage =
+        """
+        SwgTatooine.Bots — scripted sessions against a running SwgTatooine server, and a report of what happened to them.
 
-    return null;
+          usage: SwgTatooine.Bots [flags]                 a swarm of sessions for --seconds, then the report
+                 SwgTatooine.Bots --fuzz <clients> [...]  hostile connections instead of a swarm
+
+        """;
 }

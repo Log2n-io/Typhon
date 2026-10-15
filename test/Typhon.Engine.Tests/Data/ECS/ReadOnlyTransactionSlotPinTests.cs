@@ -210,7 +210,9 @@ class ReadOnlyTransactionSlotPinTests : TestBase<ReadOnlyTransactionSlotPinTests
         try
         {
             var accessor = segment.CreateChunkAccessor();
+#pragma warning disable TYPHON003 // The copy IS the mutant: the leak PS-19 must detect is what TYPHON003 exists to prevent
             var copy = accessor;
+#pragma warning restore TYPHON003
             _ = copy.GetChunkAddress(1);   // loaded into the copy's slot, which takes the reference; the copy is then dropped
             accessor.Dispose();
         }

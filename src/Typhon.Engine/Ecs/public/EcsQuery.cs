@@ -1304,11 +1304,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var descending = plan.Descending;
         var primaryFieldIdx = plan.PrimaryFieldIndex >= 0 ? plan.PrimaryFieldIndex : orderByFieldIdx;
 
-        // If there are evaluators on fields OTHER than the scan field, the B+Tree scan won't filter them.
-        // Fall back to ExecuteTargeted (which verifies all evaluators) + sort for correctness.
+        // The merge evaluates no predicate: a row is returned because the scan range admitted it (the streams re-check only entities written since the last
+        // fence, QFENCE-01). So every predicate must be one the range enforces exactly, or the query falls back to ExecuteTargeted (which verifies all
+        // evaluators) + sort. A predicate on another field never is, and neither is one ComputeBounds widens on the scan field — `!=` above all, which used to
+        // be exempted here and was then never evaluated (#1185).
         for (var e = 0; e < evaluators.Length; e++)
         {
-            if (evaluators[e].FieldIndex != primaryFieldIdx && evaluators[e].CompareOp != CompareOp.NotEqual)
+            if (evaluators[e].FieldIndex != primaryFieldIdx || !KeyRange.AdmitsOnlyMatches(ref evaluators[e], evaluators[e].KeyType))
             {
                 ArrayPool<ArchetypeSortedStream>.Shared.Return(streams, true);
                 ArrayPool<ArchetypeClusterState>.Shared.Return(stampStates, true);

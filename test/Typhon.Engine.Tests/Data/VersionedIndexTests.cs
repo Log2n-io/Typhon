@@ -260,8 +260,9 @@ class VersionedIndexTests : TestBase<VersionedIndexTests>
 
                 // Ordered BY THE CORRUPTED FIELD — the ordered path merges the tree belonging to the OrderBy field, so ordering by B here would read B's intact
                 // tree and prove nothing. Both entities under the dropped key vanish together, which is also why the write path must never use Remove(key) to
-                // unlink a single entity from an AllowMultiple index.
-                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A > 0.0f).OrderByField<CompD, float>(d => d.A).ExecuteOrdered(),
+                // unlink a single entity from an AllowMultiple index. `>=`, not `>`: a strict float inequality is a range the merge cannot enforce, so it
+                // answers from the SoA scan instead (#1185) and would see nothing missing.
+                Assert.That(t.Query<CompDArch>().WhereField<CompD>(d => d.A >= 0.0f).OrderByField<CompD, float>(d => d.A).ExecuteOrdered(),
                     Is.EquivalentTo(new[] { alone }),
                     "the ordered path lost both entities whose shared key buffer was dropped, and kept the untouched key");
             });

@@ -125,6 +125,12 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryCheckpointFailed        = 7011,
 
+    /// <summary>
+    /// A crash open's WAL window holds records of an archetype the opening process does not register. The open fails before applying any record;
+    /// registering the archetype and opening again recovers them.
+    /// </summary>
+    RecoveryArchetypeNotRegistered  = 7012,
+
     // 8xxx — Runtime / Scheduler
 
     /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>

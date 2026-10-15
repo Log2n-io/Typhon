@@ -421,6 +421,8 @@ internal sealed class CellClusterTree
         _tree.QueryFrustum(planes, planeCount, null, 0);
 
     /// <summary>Create an accessor over this cell tree's segment, for a caller that will run several queries against it.</summary>
+    [AllowCopy]
+    [return: TransfersOwnership]
     internal ChunkAccessor<TransientStore> CreateAccessor() => _segment.CreateChunkAccessor();
 
     /// <summary>

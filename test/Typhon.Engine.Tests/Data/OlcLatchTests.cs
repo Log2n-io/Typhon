@@ -54,6 +54,30 @@ public class OlcLatchTests
         Assert.That(version, Is.EqualTo(4));
     }
 
+    /// <summary>
+    /// The 30-bit counter wraps after 2³⁰ unlocks. Landing on 0 would read as "locked" to every optimistic reader until the next write (#1214), so the
+    /// unlock skips it; the obsolete bit, when set, survives the wrap.
+    /// </summary>
+    [Test]
+    [CancelAfter(1000)]
+    public void WriteUnlock_AtTheCounterWrap_SkipsZero()
+    {
+        int version = unchecked((int)0xFFFFFFFC);   // counter all ones, unlocked, live
+        var latch = new OlcLatch(ref version);
+
+        Assert.That(latch.TryWriteLock(), Is.True);
+        latch.WriteUnlock();
+        Assert.That(version, Is.EqualTo(4), "the wrap skips 0 and lands on the first non-zero version");
+        Assert.That(latch.ReadVersion(), Is.Not.Zero, "an unlocked live latch never reads as locked");
+
+        int obsolete = unchecked((int)0xFFFFFFFE);  // counter all ones, obsolete
+        var obsoleteLatch = new OlcLatch(ref obsolete);
+        Assert.That(obsoleteLatch.TryWriteLockOnSmoPath(out var wasObsolete), Is.True);
+        Assert.That(wasObsolete, Is.True);
+        obsoleteLatch.WriteUnlock();
+        Assert.That(obsolete, Is.EqualTo(0b10), "an obsolete latch wraps to its counter's 0 and keeps its obsolete bit");
+    }
+
     [Test]
     [CancelAfter(1000)]
     public void WriteUnlock_MultipleCycles_VersionIncrements()

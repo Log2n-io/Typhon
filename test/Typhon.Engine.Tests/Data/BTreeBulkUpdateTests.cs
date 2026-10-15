@@ -637,8 +637,17 @@ public class BTreeBulkUpdateTests
                 new BTreeValueUpdate<int>(300, 3),
             };
 
-            var localAccessor = accessor;
-            Assert.Throws<InvalidOperationException>(() => tree.UpdateValues(batch, ref localAccessor, out _));
+            Exception refusal = null;
+            try
+            {
+                tree.UpdateValues(batch, ref accessor, out _);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "the call is refused");
         });
     }
 #endif
@@ -653,10 +662,17 @@ public class BTreeBulkUpdateTests
         WithTree(static (IntSingleBTree<PersistentStore> tree, ref ChunkAccessor<PersistentStore> accessor) =>
         {
             var multi = new[] { new BTreeMultiValueUpdate<int>(100, 1, 10, 20) };
-            var localAccessor = accessor;
-            Assert.Throws<InvalidOperationException>(
-                () => tree.UpdateValues(multi, ref localAccessor, out _),
-                "a unique index has no element buffers, so the AllowMultiple overload must refuse it");
+            Exception refusal = null;
+            try
+            {
+                tree.UpdateValues(multi, ref accessor, out _);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "a unique index has no element buffers, so the AllowMultiple overload must refuse it");
         });
     }
 
@@ -668,10 +684,17 @@ public class BTreeBulkUpdateTests
         {
             tree.Add(42, 1001, ref accessor);
             var unique = new[] { new BTreeValueUpdate<int>(42, 7777) };
-            var localAccessor = accessor;
-            Assert.Throws<InvalidOperationException>(
-                () => tree.UpdateValues(unique, ref localAccessor, out _),
-                "the leaf slot holds a bufferId on this tree, so the unique overload must refuse it rather than overwrite it");
+            Exception refusal = null;
+            try
+            {
+                tree.UpdateValues(unique, ref accessor, out _);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "the leaf slot holds a bufferId on this tree, so the unique overload must refuse it rather than overwrite it");
 
             // And the refusal must leave the buffer intact, which is the half that would have failed before the guard existed.
             var seen = new List<int>();

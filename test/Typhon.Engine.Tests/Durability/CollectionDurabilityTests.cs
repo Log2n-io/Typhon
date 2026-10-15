@@ -431,6 +431,53 @@ internal sealed class CollectionDurabilityTests
         }
     }
 
+    /// <summary>
+    /// #1309: a crash open whose window holds records of an archetype the process does not register fails with an error naming it, before anything is
+    /// applied — not with a NullReferenceException mid-replay — and the next open that registers it recovers those records.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    public void ACrashOpen_WithRecordsOfAnUnregisteredArchetype_RefusesByName_AndTheNextOpenRecovers(
+        [Values(false, true)] bool hostDisposesTheRefusedOpen)
+    {
+        EntityId[] single;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            (_, single) = SeedBoth(dbe);
+
+            // Not checkpointed: both archetypes' spawns are only in the WAL window.
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CcVersioned>();
+            var ex = Assert.Throws<DurabilityException>(() => dbe.InitializeArchetypes());
+            Assert.That(ex.ErrorCode, Is.EqualTo(TyphonErrorCode.RecoveryArchetypeNotRegistered));
+            Assert.That(ex.Message, Does.Contain(nameof(CcSingleArch)), "the refusal names the archetype the process must register");
+
+            // A host disposes the engine it failed to open, which must not seal the window (CK-08); a crash is the other way out.
+            if (!hostDisposesTheRefusedOpen)
+            {
+                dbe.SimulateHardCrash();
+            }
+        }
+
+        using (var scope3 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope3.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            RegisterBoth(dbe);
+            Assert.That(dbe.LastOpenRanCrashRecovery, Is.True, "premise: the refused open sealed nothing, so this one recovers the window");
+
+            using var tx = dbe.CreateQuickTransaction();
+            Assert.That(tx.Open(single[EntityCount - 1]).Read(CcSingleArch.C).Seq, Is.EqualTo(EntityCount - 1),
+                "the refused archetype's records were kept for the open that registers it");
+        }
+    }
+
     // A Versioned entity's collection with a chunk on its free chain, durable and checkpointed: the window replays nothing of it. Returns that chunk.
     private static unsafe int StageANamedBufferWithAFreeChain(DatabaseEngine dbe)
     {

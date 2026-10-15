@@ -601,8 +601,17 @@ public class BTreeUpdateValueTests
             tree.Add(Key, 1001, ref accessor);
             tree.Add(Key, 1002, ref accessor);
 
-            var localAccessor = accessor;
-            Assert.Throws<InvalidOperationException>(() => tree.TryUpdateValue(Key, 7777, ref localAccessor));
+            Exception refusal = null;
+            try
+            {
+                tree.TryUpdateValue(Key, 7777, ref accessor);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "the call is refused");
 
             var seen = new System.Collections.Generic.List<int>();
             using var e = tree.EnumerateRangeMultiple(Key, Key);
@@ -631,8 +640,17 @@ public class BTreeUpdateValueTests
             EpochManager epochs,
             ref ChunkAccessor<PersistentStore> accessor) =>
         {
-            var localAccessor = accessor;
-            Assert.Throws<InvalidOperationException>(() => tree.TryUpdateValueAt(100, 1, 10, 20, ref localAccessor));
+            Exception refusal = null;
+            try
+            {
+                tree.TryUpdateValueAt(100, 1, 10, 20, ref accessor);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "the call is refused");
         });
     }
 

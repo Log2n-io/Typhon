@@ -542,12 +542,11 @@ public static partial class TatooineReplication
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
     /// </para>
     /// <para>
-    /// <b>The 5 % headroom over the fastest gait is not padding, and declaring the true maximum here is broken.</b> The engine's test is
-    /// <c>step² &gt; (TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions, with no margin — so an entity travelling at exactly the declared
-    /// maximum sits on the boundary and the ~1 mm position quantum tips it over on about half its ticks. Every tip is reported to clients as a teleport,
-    /// which forbids interpolation, so a mounted player stood still for 112 frames of 180 and then jumped at 86 m/s. Measured in the browser client, which is
-    /// how it was found. At 5 % over the maximum every mover was smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it
-    /// lives here.
+    /// <b>The 5 % headroom over the fastest gait dates from when declaring the true maximum was broken.</b> The engine's test compared
+    /// <c>step²</c> against <c>(TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions with no margin, so an entity at exactly the declared maximum
+    /// tipped over the boundary on about half its ticks; every tip was reported as a teleport, and a mounted player stood still for 112 frames of 180 and then
+    /// jumped at 86 m/s. The engine now adds two position-quantum diagonals to the threshold (#1074), so the true maximum is safe; the headroom stays until a
+    /// browser-client run confirms dropping it.
     /// </para>
     /// <para>
     /// <b>It is COMPUTED from the ladder's top, and that is the whole point of the expression.</b> It was 12.6, a hand-written 5 % over the mount's 12 — so

@@ -395,9 +395,18 @@ public class BTreeLeafPartitionTests
         WithTree(static (IntSingleBTree<PersistentStore> tree, ref ChunkAccessor<PersistentStore> accessor) =>
         {
             var batch = new[] { new BTreeValueUpdate<int>(10, 1), new BTreeValueUpdate<int>(20, 2) };
-            var localAccessor = accessor;
             var boundaries = new int[4];    // 8 parts need 9 slots
-            Assert.Throws<InvalidOperationException>(() => tree.PartitionByLeafBoundaries(batch, 8, boundaries, ref localAccessor));
+            Exception refusal = null;
+            try
+            {
+                tree.PartitionByLeafBoundaries(batch, 8, boundaries, ref accessor);
+            }
+            catch (Exception thrown)
+            {
+                refusal = thrown;
+            }
+
+            Assert.That(refusal, Is.TypeOf<InvalidOperationException>(), "the call is refused");
         });
     }
 

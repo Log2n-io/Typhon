@@ -230,7 +230,7 @@ unsafe class SharedSegmentRTreeHarnessTests
                     tree.PayloadBackPointers[id] = SpatialRTree<PersistentStore>.PackHandle(leaf, slot);
                 }
 
-                int afterInserts = CountCorrectHandles(tree, accessor, desc, 1, Count);
+                int afterInserts = CountCorrectHandles(tree, ref accessor, desc, 1, Count);
                 TestContext.Out.WriteLine($"CLAIM1 afterInserts correct={afterInserts}/{Count} nodes={tree.NodeCount} depth={tree.Depth}");
                 Assert.That(afterInserts, Is.EqualTo(Count), "every handle must name its own payload after the split storm");
 
@@ -252,7 +252,7 @@ unsafe class SharedSegmentRTreeHarnessTests
                 {
                     if (removed.Contains(id)) { continue; }
                     survivors++;
-                    if (HandleNames(tree, accessor, desc, id)) { correct++; }
+                    if (HandleNames(tree, ref accessor, desc, id)) { correct++; }
                 }
 
                 TestContext.Out.WriteLine($"CLAIM1 afterRemovals correct={correct}/{survivors} removed={removed.Count} nodes={tree.NodeCount}");
@@ -269,19 +269,19 @@ unsafe class SharedSegmentRTreeHarnessTests
         }
     }
 
-    private static int CountCorrectHandles(SpatialRTree<PersistentStore> tree, ChunkAccessor<PersistentStore> accessor,
+    private static int CountCorrectHandles(SpatialRTree<PersistentStore> tree, ref ChunkAccessor<PersistentStore> accessor,
         in SpatialNodeDescriptor desc, long firstId, long lastId)
     {
         int correct = 0;
         for (long id = firstId; id <= lastId; id++)
         {
-            if (HandleNames(tree, accessor, desc, id)) { correct++; }
+            if (HandleNames(tree, ref accessor, desc, id)) { correct++; }
         }
         return correct;
     }
 
     /// <summary>True when the payload's recorded handle still addresses the entry holding that payload.</summary>
-    private static bool HandleNames(SpatialRTree<PersistentStore> tree, ChunkAccessor<PersistentStore> accessor, in SpatialNodeDescriptor desc, long id)
+    private static bool HandleNames(SpatialRTree<PersistentStore> tree, ref ChunkAccessor<PersistentStore> accessor, in SpatialNodeDescriptor desc, long id)
     {
         var (leaf, slot) = SpatialRTree<PersistentStore>.UnpackHandle(tree.PayloadBackPointers[id]);
         byte* nodeBase = accessor.GetChunkAddress(leaf);
