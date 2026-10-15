@@ -15,7 +15,7 @@ Application code routinely needs "find the entity with key X" or "give me all en
 
 ## ⚙️ How it works (in brief)
 
-`Transaction.EnumerateIndex<T, TKey>` takes an `IndexRef` plus a `[minKey, maxKey]` bound and streams matching entities in ascending key order; pass `minKey == maxKey` for a point lookup. Internally it walks the index's leaf chain using per-leaf optimistic version validation — no lock is held while reading, and only a leaf that was concurrently modified during the read is re-read. For `AllowMultiple` (non-unique) indexes, each key's value set is expanded transparently; you iterate `(EntityPK, Key, Component)` triples regardless of uniqueness. Every candidate is checked against the entity's revision chain at the transaction's snapshot TSN, so deleted or not-yet-committed versions are filtered out before you ever see them. The same range-scan machinery also backs the fluent `Query<T>()` pipeline when a predicate or ordering can be served by a secondary index.
+`Transaction.EnumerateIndex<T, TKey>` takes an `IndexRef` plus a `[minKey, maxKey]` bound and streams matching entities in ascending key order; pass `minKey == maxKey` for a point lookup. Internally it walks the index's leaf chain using per-row optimistic version validation — no lock is held while reading, and a row whose leaf version changed between the seek and the emit triggers a re-descent from the last key emitted rather than a re-read of the same leaf (IXS-09). For `AllowMultiple` (non-unique) indexes, each key's value set is expanded transparently; you iterate `(EntityPK, Key, Component)` triples regardless of uniqueness. Every candidate is checked against the entity's revision chain at the transaction's snapshot TSN, so deleted or not-yet-committed versions are filtered out before you ever see them. The same range-scan machinery also backs the fluent `Query<T>()` pipeline when a predicate or ordering can be served by a secondary index.
 
 ## 💻 Usage
 
@@ -43,7 +43,7 @@ if (point.MoveNext())
 
 ## ⚠️ Guarantees & limits
 
-- Reads are lock-free (optimistic lock coupling): a concurrent writer never blocks a scan, and a scan never blocks a writer. A version conflict triggers a re-read of only the affected leaf, not a tree-wide restart.
+- Reads are lock-free (optimistic lock coupling): a concurrent writer never blocks a scan, and a scan never blocks a writer. A version conflict triggers a re-descent from the last key emitted — not a re-read of the same leaf, and not a tree-wide restart.
 - Results are MVCC-correct: only revisions committed and visible at the transaction's snapshot TSN are yielded; uncommitted writes from other transactions and tombstoned entities are skipped transparently.
 - `EnumerateIndex` only accepts secondary `IndexRef`s — passing a primary-key `IndexRef` throws `InvalidOperationException` (use ECS entity APIs for PK lookups).
 - Iteration order from `EnumerateIndex` is ascending by key; the fluent `Query<T>()` pipeline can request descending order when an `OrderBy` plan selects the same index.
