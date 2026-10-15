@@ -38,8 +38,31 @@ public sealed class BotSwarmOptions
     /// <summary>How long to spread the connects over, so a hundred handshakes do not arrive in one tick.</summary>
     public TimeSpan ConnectStagger { get; init; } = TimeSpan.FromMilliseconds(20);
 
-    /// <summary>How many connects go out between two staggers. One by default; a measurement run raises it to shorten a thousand-bot ramp.</summary>
-    public int ConnectBatch { get; init; } = 1;
+    /// <summary>How many connects go out between two staggers; <c>0</c>, the default, means "unset".</summary>
+    /// <remarks>
+    /// Prefer <see cref="ConnectRatePerSecond"/>, which says the thing a run actually cares about. This stays because it is what existing command lines
+    /// pass, and an explicit value still wins — which is why the default is <c>0</c> and not <c>1</c>. With <c>1</c> as the default, an operator who
+    /// deliberately passed <c>--connect-batch 1</c> was indistinguishable from one who passed nothing, so the rate quietly overrode a batch that HAD been
+    /// asked for. A sentinel is the only way a setting of "the same as the default" can still win.
+    /// </remarks>
+    public int ConnectBatch { get; init; }
+
+    /// <summary>
+    /// Sessions to open per second during the ramp; <c>0</c>, the default, leaves <see cref="ConnectBatch"/> in charge.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A rate, because the batch alone could not express one.</b> Each handshake used to be awaited before the next began, so the ramp's real ceiling was
+    /// one session per round trip whatever the stagger said — about sixty seconds for a thousand sessions over a sixty-millisecond link, where the stagger
+    /// implied five. The batch now opens concurrently, which makes a rate meaningful: <c>batch = rate x stagger</c>.
+    /// </para>
+    /// <para>
+    /// <b>It is a rail, not a target to maximise.</b> A server admitting sessions faster than it can bind them pays on the tick, not on the socket:
+    /// <c>BindAvatars</c> spawns each avatar serially inside the tick's own transaction, and a just-admitted session is also what #1024 stalls the
+    /// replication track on. Two hundred a second is the figure 07-bots § 3 names; the reason to keep it low is on the server's side.
+    /// </para>
+    /// </remarks>
+    public int ConnectRatePerSecond { get; init; }
 
     /// <summary>
     /// Every this many seconds each god camera asks for the next planet (<c>ViewRealm</c>, Realms G3); 0, the default, never. Needs a server that
@@ -49,6 +72,33 @@ public sealed class BotSwarmOptions
 
     /// <summary>How many planets the tour cycles through: the server's <c>--planets</c>.</summary>
     public int Planets { get; init; } = 1;
+
+    /// <summary>
+    /// The bearer token bot <c>i</c> presents on <c>HELLO</c>, or <see langword="null"/> for an anonymous session.
+    /// </summary>
+    /// <remarks>
+    /// <b>A function of the index rather than one token for the swarm, because a player session IS its account.</b> The server's
+    /// admission hook validates the token and carries the account through as the thing that decides WHICH avatar to bind, so a
+    /// thousand player bots are a thousand identities and not one identity a thousand times. God sessions stay anonymous and leave
+    /// this null, which is why <c>--kind god</c> needs no accounts file at all.
+    /// </remarks>
+    public Func<int, string> TokenFor { get; init; }
+
+    /// <summary>The resume token bot <c>i</c> presents, or <see langword="null"/> for a cold session.</summary>
+    /// <remarks>
+    /// Set from the accounts file, so a bot box that was restarted resumes the sessions it had rather than cold-logging a thousand
+    /// avatars the server is still holding for their absent clients — 07-bots § 3's churn-storm distinction, and the reason the
+    /// resume work came before the fleet work.
+    /// </remarks>
+    public Func<int, byte[]> ResumeFor { get; init; }
+
+    /// <summary>Told the resume token the server minted for bot <c>i</c>, so the next run can present it.</summary>
+    /// <remarks>
+    /// Called on the connect loop's thread once a batch is in, never from the connect tasks: its implementation writes to the
+    /// accounts file, and a thousand tasks appending to one store would be the contended thing in a generator whose whole job is
+    /// not to be the expensive part.
+    /// </remarks>
+    public Action<int, byte[]> OnResumeToken { get; init; }
 }
 
 /// <summary>
@@ -76,7 +126,21 @@ public sealed class BotSwarmOptions
 public sealed class BotSwarm : IAsyncDisposable
 {
     private readonly BotSwarmOptions _options;
-    private readonly List<Bot> _bots = [];
+
+    /// <summary>
+    /// The population, pre-sized, with <see cref="_botCount"/> saying how much of it has been published.
+    /// </summary>
+    /// <remarks>
+    /// <b>An array and a count rather than a <c>List</c>, because the readers are on other threads.</b> Every counter this class
+    /// exposes walks this collection, and the bot console calls them from a UI thread while the ramp is still appending — a plain
+    /// <c>List</c> being enumerated while <c>Add</c> grows it throws "collection was modified", so watching a thousand-bot ramp
+    /// crashed the page at exactly the moment an operator is looking at it. Pre-sized means an append can never reallocate, and
+    /// publishing the count with a release store after writing the slot means a reader either sees a bot or does not see it,
+    /// and never sees a slot that has not been filled.
+    /// </remarks>
+    private readonly Bot[] _bots;
+
+    private int _botCount;
     private readonly CancellationTokenSource _stopping = new();
     private Task _driver;
 
@@ -89,7 +153,21 @@ public sealed class BotSwarm : IAsyncDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.Count, nameof(options.Count));
 
         _options = options;
+        _bots = new Bot[options.Count];
     }
+
+    /// <summary>How many sessions the ramp has published so far.</summary>
+    private int BotCount => Volatile.Read(ref _botCount);
+
+    /// <summary>
+    /// The published population, as a span whose length is fixed at the moment it is taken.
+    /// </summary>
+    /// <remarks>
+    /// Taking the length once is what makes a concurrent append harmless: the span covers only slots whose write happened before
+    /// the count was published, so a ramp that adds a bot during an enumeration is simply not in that enumeration. It cannot be
+    /// used across an <c>await</c>, which is why the two asynchronous walks index the array directly instead.
+    /// </remarks>
+    private ReadOnlySpan<Bot> Bots => _bots.AsSpan(0, Volatile.Read(ref _botCount));
 
     /// <summary>How many sessions are open right now.</summary>
     public int Connected
@@ -97,7 +175,7 @@ public sealed class BotSwarm : IAsyncDisposable
         get
         {
             var live = 0;
-            foreach (var bot in _bots)
+            foreach (var bot in Bots)
             {
                 if (bot.Client.IsConnected)
                 {
@@ -129,7 +207,7 @@ public sealed class BotSwarm : IAsyncDisposable
         get
         {
             var total = 0L;
-            foreach (var bot in _bots)
+            foreach (var bot in Bots)
             {
                 total += bot.Client.BytesReceived;
             }
@@ -143,7 +221,7 @@ public sealed class BotSwarm : IAsyncDisposable
         get
         {
             var total = 0L;
-            foreach (var bot in _bots)
+            foreach (var bot in Bots)
             {
                 total += bot.Client.MessagesReceived;
             }
@@ -171,7 +249,7 @@ public sealed class BotSwarm : IAsyncDisposable
         // have nothing to do with the server.
         Bot freshest = null;
         var best = -1L;
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             if (blocks > best)
@@ -212,7 +290,7 @@ public sealed class BotSwarm : IAsyncDisposable
     {
         Bot freshest = null;
         var best = -1L;
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             if (blocks > best)
@@ -263,7 +341,7 @@ public sealed class BotSwarm : IAsyncDisposable
         var max = 0L;
         var unserved = 0;
 
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             var frames = bot.Client.Store?.Frames ?? 0;
             total += frames;
@@ -285,7 +363,7 @@ public sealed class BotSwarm : IAsyncDisposable
         {
             var records = 0L;
             var frames = 0L;
-            foreach (var bot in _bots)
+            foreach (var bot in Bots)
             {
                 records += bot.Client.Store?.Records ?? 0;
                 frames += bot.Client.Store?.Frames ?? 0;
@@ -298,13 +376,16 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <summary>Frames applied by the first and the last tenth of the population, which says whether being served depends on WHEN a session connected.</summary>
     public (double Head, double Tail) FramesByJoinOrder()
     {
-        var tenth = Math.Max(1, _bots.Count / 10);
+        // The count once, so head and tail are measured against ONE population rather than two reads of a growing
+        // one.
+        var live = BotCount;
+        var tenth = Math.Max(1, live / 10);
         var head = 0L;
         var tail = 0L;
-        for (var i = 0; i < tenth; i++)
+        for (var i = 0; i < tenth && i < live; i++)
         {
             head += _bots[i].Client.Store?.Frames ?? 0;
-            tail += _bots[_bots.Count - 1 - i].Client.Store?.Frames ?? 0;
+            tail += _bots[live - 1 - i].Client.Store?.Frames ?? 0;
         }
 
         return ((double)head / tenth, (double)tail / tenth);
@@ -320,7 +401,7 @@ public sealed class BotSwarm : IAsyncDisposable
         get
         {
             var granted = 0;
-            foreach (var bot in _bots)
+            foreach (var bot in Bots)
             {
                 if ((bot.Client.CapsGranted & Capabilities.Stats) != 0)
                 {
@@ -347,7 +428,7 @@ public sealed class BotSwarm : IAsyncDisposable
         var max = 0L;
         var starved = 0;
 
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             total += blocks;
@@ -377,7 +458,7 @@ public sealed class BotSwarm : IAsyncDisposable
         var max = double.NegativeInfinity;
         var atMax = 0;
 
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             var plan = bot.Client.Plan;
             var store = bot.Client.Store;
@@ -423,7 +504,7 @@ public sealed class BotSwarm : IAsyncDisposable
     {
         long asked = 0, switches = 0, news = 0;
         var inRealm = 0;
-        foreach (var bot in _bots)
+        foreach (var bot in Bots)
         {
             asked += Volatile.Read(ref bot.ToursAsked);
             switches += Volatile.Read(ref bot.RealmSwitches);
@@ -438,6 +519,70 @@ public sealed class BotSwarm : IAsyncDisposable
     private readonly Lock _reportLock = new();
     private int _faults;
 
+    /// <summary>Distinct protocol faults this run produced, by message, and how many times each fired.</summary>
+    /// <remarks>
+    /// <b>Separate from <c>_faults</c>, which counts the network's failures.</b> These are this program asking the server for something the catalog does not
+    /// describe — a field name that does not exist, a command that does not, a value of the wrong shape — and they are OUR bug, every time. Kept by message
+    /// so that one typo firing ten times a second for a whole run reports as one line with a count rather than a flood, and so that the exit summary can say
+    /// the run was not measuring what it claimed to.
+    /// </remarks>
+    private readonly Dictionary<string, int> _protocolFaults = [];
+
+    /// <summary>Protocol faults seen this run: the distinct messages, and the total.</summary>
+    public (int Distinct, int Total) ProtocolFaults()
+    {
+        lock (_reportLock)
+        {
+            var total = 0;
+            foreach (var n in _protocolFaults.Values)
+            {
+                total += n;
+            }
+
+            return (_protocolFaults.Count, total);
+        }
+    }
+
+    /// <summary>Writes the protocol faults to the console, or nothing when there were none.</summary>
+    public void ReportProtocolFaults()
+    {
+        lock (_reportLock)
+        {
+            if (_protocolFaults.Count == 0)
+            {
+                return;
+            }
+
+            Console.WriteLine($"  !! {_protocolFaults.Count} PROTOCOL FAULT(S) — this run did not send what it believed it was sending:");
+            foreach (var (message, count) in _protocolFaults)
+            {
+                Console.WriteLine($"     x{count}  {message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records a fault caused by what this program sent, printing the first of each kind.
+    /// </summary>
+    /// <param name="e">The encoder's complaint.</param>
+    private void NoteProtocolFault(Exception e)
+    {
+        var message = $"{e.GetType().Name}: {e.Message}";
+        lock (_reportLock)
+        {
+            if (_protocolFaults.TryGetValue(message, out var seen))
+            {
+                _protocolFaults[message] = seen + 1;
+                return;
+            }
+
+            _protocolFaults[message] = 1;
+        }
+
+        // The FIRST of each kind, immediately: a fleet that hides its own send bug until the summary has already spent the run measuring nothing.
+        Console.WriteLine($"  !! protocol fault (this is our bug, not the server's): {message}");
+    }
+
     /// <summary>Connects every bot and starts the shared driver.</summary>
     /// <param name="ct">Cancels the start.</param>
     /// <returns>How many sessions opened.</returns>
@@ -447,31 +592,67 @@ public sealed class BotSwarm : IAsyncDisposable
         var rampPingPeriod = _options.TickHz > 0 ? TimeSpan.FromSeconds(0.5 / _options.TickHz) : TimeSpan.FromMilliseconds(125);
         var rampPing = Stopwatch.StartNew();
 
-        for (var i = 0; i < _options.Count; i++)
+        // `batch = rate x stagger` when a rate was asked for, so --connect-rate says sessions per second and the stagger stays the quantum it always was.
+        // An explicit --connect-batch wins, which keeps every existing command line meaning what it meant.
+        var batch = Math.Max(1, _options.ConnectBatch);
+        if (_options.ConnectBatch <= 0 && _options.ConnectRatePerSecond > 0 && _options.ConnectStagger > TimeSpan.Zero)
         {
-            var bot = new Bot(i, _options);
-            bot.Client.Disconnected += (code, _) => Note(code);
-            // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
-            // read-modify-write that silently loses updates. The report is the product here, so a counter that undercounts is the report lying.
-            bot.Client.Fault += _ => Interlocked.Increment(ref _faults);
+            batch = Math.Max(1, (int)Math.Ceiling(_options.ConnectRatePerSecond * _options.ConnectStagger.TotalSeconds));
+        }
 
-            try
+        // The deadline the pacing above is measured against. `perBatch` is what the operator asked for expressed as a period:
+        // at --connect-rate 200 and a batch of 4 that is 20 ms, and a batch that took longer than that simply does not wait.
+        var stopwatch = Stopwatch.StartNew();
+        var perBatch = _options.ConnectRatePerSecond > 0
+            ? TimeSpan.FromSeconds((double)batch / _options.ConnectRatePerSecond)
+            : _options.ConnectStagger;
+        var nextBatchDue = TimeSpan.Zero;
+
+        for (var i = 0; i < _options.Count; i += batch)
+        {
+            nextBatchDue += perBatch;
+
+            // CONCURRENTLY within the batch. Awaited one at a time — as this loop did until now — the ramp's ceiling is one session per handshake round
+            // trip, which no stagger can lift: a thousand sessions over a 60 ms link took a minute while --connect-batch 25 claimed to ask for 1250/s.
+            var size = Math.Min(batch, _options.Count - i);
+            var opening = new Task<Bot>[size];
+            for (var k = 0; k < size; k++)
             {
-                await bot.Client.ConnectAsync(ct).ConfigureAwait(false);
-                bot.WatchRealm();
-                _bots.Add(bot);
-            }
-            catch (Exception)
-            {
-                // A handshake that failed is a disconnect with no code: counted as zero so a run that could not open its population is visible in the same
-                // table as one that lost it later.
-                Note(0);
-                await bot.Client.DisposeAsync().ConfigureAwait(false);
+                opening[k] = OpenOneAsync(i + k, ct);
             }
 
-            if (_options.ConnectStagger > TimeSpan.Zero && i + 1 < _options.Count && (i + 1) % Math.Max(1, _options.ConnectBatch) == 0)
+            var opened = await Task.WhenAll(opening).ConfigureAwait(false);
+
+            // Appended on THIS thread, after the batch, and the slot is written before the count is published so a reader on the
+            // control panel's thread never sees an unfilled one.
+            foreach (var bot in opened)
             {
-                await Task.Delay(_options.ConnectStagger, ct).ConfigureAwait(false);
+                if (bot != null)
+                {
+                    bot.WatchRealm();
+
+                    // After the handshake, because the token arrives in WELCOME: asking before the connect would persist the token
+                    // the LAST run was given, which is the one that has just been spent.
+                    _options.OnResumeToken?.Invoke(bot.Index, bot.Client.ResumeToken);
+
+                    var at = _botCount;
+                    _bots[at] = bot;
+                    Volatile.Write(ref _botCount, at + 1);
+                }
+            }
+
+            if (i + size < _options.Count)
+            {
+                // PACED AGAINST A DEADLINE, not slept for after the fact. Delaying a fixed stagger after awaiting the batch makes
+                // the period `handshake + stagger` rather than `max(handshake, stagger)`, so the achieved rate was
+                // `size / (stagger + RTT)`: on the 60 ms link this tool exists to measure over, `--connect-rate 200` delivered
+                // about fifty a second while reporting that it had asked for two hundred. For a load generator whose report IS
+                // the product, a knob that overstates by four times is worse than no knob.
+                var remaining = nextBatchDue - stopwatch.Elapsed;
+                if (remaining > TimeSpan.Zero)
+                {
+                    await Task.Delay(remaining, ct).ConfigureAwait(false);
+                }
             }
 
             // Ping everyone already up, because the ramp is long enough to matter: a hundred sessions at this stagger take seconds, and a session that
@@ -488,21 +669,81 @@ public sealed class BotSwarm : IAsyncDisposable
             }
 
             rampPing.Restart();
-            foreach (var connected in _bots)
-            {
-                try
-                {
-                    await connected.Client.SendPingAsync(ct).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Counted by the disconnect handler; one bot must not stop the ramp.
-                }
-            }
+            await SweepRampPingsAsync(ct).ConfigureAwait(false);
         }
 
         _driver = Task.Run(() => DriveAsync(_stopping.Token), CancellationToken.None);
-        return _bots.Count;
+        return BotCount;
+    }
+
+    /// <summary>Opens one bot's session, or answers <see langword="null"/> when the handshake failed.</summary>
+    /// <param name="index">The bot's index in the population.</param>
+    /// <param name="ct">Cancels the connect.</param>
+    /// <returns>The connected bot, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// Separated out so a batch of these can run at once. It does NOT touch <c>_bots</c>: the caller appends, on its own thread, once the batch is in.
+    /// </remarks>
+    private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
+    {
+        var bot = new Bot(index, _options);
+        bot.Client.Disconnected += (code, _) => Note(code);
+
+        // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
+        // read-modify-write that silently loses updates. The report is the product here, so a counter that undercounts is the report lying.
+        bot.Client.Fault += _ => Interlocked.Increment(ref _faults);
+
+        try
+        {
+            await bot.Client.ConnectAsync(ct).ConfigureAwait(false);
+            return bot;
+        }
+        catch (Exception)
+        {
+            // A handshake that failed is a disconnect with no code: counted as zero so a run that could not open its population is visible in the same
+            // table as one that lost it later.
+            Note(0);
+            await bot.Client.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
+    }
+
+    /// <summary>Pings every session already up, so none crosses the server's silence bound while its neighbours are still connecting.</summary>
+    /// <param name="ct">Cancels the sweep.</param>
+    /// <remarks>
+    /// <b>Concurrently.</b> Awaited one at a time this is O(n) round trips per cadence, and at the thousand sessions this class exists to reach the sweep
+    /// took longer than the cadence it was supposed to fit inside — so the ramp spent its time pinging rather than connecting, and the population the
+    /// generator was measuring arrived late for reasons that were entirely its own.
+    /// </remarks>
+    private async Task SweepRampPingsAsync(CancellationToken ct)
+    {
+        var live = BotCount;
+        if (live == 0)
+        {
+            return;
+        }
+
+        var pings = new Task[live];
+        for (var i = 0; i < live; i++)
+        {
+            pings[i] = PingOneAsync(_bots[i], ct);
+        }
+
+        await Task.WhenAll(pings).ConfigureAwait(false);
+    }
+
+    /// <summary>Pings one session, swallowing its failure.</summary>
+    /// <param name="bot">The bot.</param>
+    /// <param name="ct">Cancels the send.</param>
+    private static async Task PingOneAsync(Bot bot, CancellationToken ct)
+    {
+        try
+        {
+            await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Counted by the disconnect handler; one bot must not stop the ramp.
+        }
     }
 
     /// <inheritdoc />
@@ -521,12 +762,15 @@ public sealed class BotSwarm : IAsyncDisposable
             }
         }
 
-        foreach (var bot in _bots)
+        // Indexed, not a span: a ref struct cannot live across an await.
+        var live = BotCount;
+        for (var i = 0; i < live; i++)
         {
-            await bot.Client.DisposeAsync().ConfigureAwait(false);
+            await _bots[i].Client.DisposeAsync().ConfigureAwait(false);
         }
 
-        _bots.Clear();
+        Volatile.Write(ref _botCount, 0);
+        Array.Clear(_bots);
         _stopping.Dispose();
     }
 
@@ -556,8 +800,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var touring = _options.TourEverySeconds > 0 && _options.Planets > 1 && _options.Kind != "player";
             var index = 0;
 
-            foreach (var bot in _bots)
+            // Indexed for the same reason DisposeAsync is: the body awaits.
+            var live = BotCount;
+            for (var b = 0; b < live; b++)
             {
+                var bot = _bots[b];
                 index++;
                 if (!bot.Client.IsConnected)
                 {
@@ -583,6 +830,17 @@ public sealed class BotSwarm : IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     return;
+                }
+                catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or FormatException)
+                {
+                    // <b>OUR OWN bug, not the network's, and it must not be survivable in silence.</b> These are what the encoder throws when this program
+                    // asks for something the catalog does not describe: a field name that does not exist (RecordValues.For), a command name that does not
+                    // (SendCommandAsync), a value of the wrong shape. The blanket catch below used to take them too, so --god-tour sent nothing for its whole
+                    // life while every counter said the run was healthy. At a thousand bots that is the difference between a load test and a screensaver.
+                    //
+                    // Counted and printed once per distinct message rather than thrown: one bot cannot be allowed to stop the fleet, and a fleet that stops
+                    // on the first typo tells you less than one that reports it and keeps load on the server. The run's exit summary carries the count.
+                    NoteProtocolFault(e);
                 }
                 catch (Exception)
                 {
@@ -662,10 +920,15 @@ public sealed class BotSwarm : IAsyncDisposable
             _centreY = Math.Sin(index * golden) * radius;
             _phase = index * golden;
 
+            Index = index;
             Client = new TyphonClient(new ClientOptions
             {
                 Endpoint = options.Endpoint,
                 Kind = options.Kind,
+
+                // Empty, not null: ClientOptions.Token defaults to "" and the handshake writes it unconditionally.
+                Token = options.TokenFor?.Invoke(index) ?? string.Empty,
+                ResumeToken = options.ResumeFor?.Invoke(index),
 
                 // The swarm's own timer drives the cadence; see the class remarks.
                 PingHz = 0,
@@ -683,6 +946,9 @@ public sealed class BotSwarm : IAsyncDisposable
         }
 
         public TyphonClient Client { get; }
+
+        /// <summary>This bot's index in the population, which is what its account and its file line are keyed on.</summary>
+        public int Index { get; }
 
         /// <summary>Counts the realm switches the session applies. After the connect, when the store exists; the swarm does not reconnect.</summary>
         public void WatchRealm()
@@ -708,7 +974,9 @@ public sealed class BotSwarm : IAsyncDisposable
             }
 
             _planet = (_planet + 1) % options.Planets;
-            var values = new RecordValues { ["Realm"] = FieldValue.Of((double)_planet) };
+            // "realm", as the server declares it (TatooineReplication.cs: Field(v => v.Realm, Codec.VarUInt, "realm")). It read "Realm" for as long as
+            // --god-tour has existed, so every tour silently asked for nothing: RecordValues.For threw, and the driver's catch below ate it once per tick.
+            var values = new RecordValues { ["realm"] = FieldValue.Of((double)_planet) };
             await Client.SendCommandAsync("ViewRealm", values, ct).ConfigureAwait(false);
             Interlocked.Increment(ref ToursAsked);
         }

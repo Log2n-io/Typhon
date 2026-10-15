@@ -452,6 +452,71 @@ public sealed class SimConfig
     /// </remarks>
     public double ResumeGraceS = 60d;
 
+    /// <summary>
+    /// <c>--auth-burst N</c>: how many <c>/auth</c> attempts one key may make at once; <c>0</c> keeps <see cref="AuthRateLimiter.Capacity"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>This exists for a bot fleet and the default must not move for anybody else.</b> The limiter keys on the client's address prefix
+    /// — a /24 for IPv4 — so an entire bot box is ONE key, and ten attempts with one refilling every six seconds means a thousand bots take
+    /// about ninety-nine minutes to sign up
+    /// or log in. That is correct behaviour against a dictionary run and useless against a load generator you own. Raised only on a server that is being
+    /// loaded on purpose, which is why it is a flag and not a different default: every real deployment keeps ten.
+    /// </remarks>
+    public int AuthBurst;
+
+    /// <summary>
+    /// <c>--auth-refill-ms M</c>: how long one <c>/auth</c> attempt takes to come back, in milliseconds; <c>0</c> keeps the six-second default.
+    /// </summary>
+    /// <remarks>See <see cref="AuthBurst"/>. The pair of them is the whole knob, and the sustained rate per key is <c>1000 / M</c> per second.</remarks>
+    public int AuthRefillMs;
+
+    /// <summary>
+    /// The shared secret a request from outside the VPC must carry in <c>X-Tatooine-Origin</c>; empty disables the check.
+    /// </summary>
+    /// <remarks>
+    /// <b>From the environment, never from the command line.</b> A secret in an argument is visible in <c>ps</c> to every
+    /// user on the box and is written to the shell's history; <c>TATOOINE_ORIGIN_SECRET</c> goes in the unit file's
+    /// <c>EnvironmentFile=</c>, which is mode 0640 and owned by root.
+    /// <para>
+    /// Empty is correct on a developer's machine, where the bind is loopback and there is no front door. On a reachable
+    /// bind the server says loudly that it is open; see <c>TatooineHost.ServeAsync</c> for why the security group alone
+    /// is not enough.
+    /// </para>
+    /// </remarks>
+    public string OriginSecret = Environment.GetEnvironmentVariable("TATOOINE_ORIGIN_SECRET") ?? string.Empty;
+
+    /// <summary>
+    /// <c>--tls-chain &lt;path&gt;</c>: a PEM chain to serve HTTPS with; empty serves plain HTTP.
+    /// </summary>
+    /// <remarks>
+    /// certbot's <c>fullchain.pem</c>. Paired with <see cref="TlsKeyPath"/>, and both are required together — the parse refuses
+    /// one without the other, because a server that quietly fell back to HTTP after being asked for TLS is an outage that reads
+    /// as a browser problem.
+    /// </remarks>
+    public string TlsChainPath = string.Empty;
+
+    /// <summary><c>--tls-key &lt;path&gt;</c>: the PEM private key matching <see cref="TlsChainPath"/>.</summary>
+    public string TlsKeyPath = string.Empty;
+
+    /// <summary><c>--tls-port N</c>: the port HTTPS is served on. 443 needs <c>CAP_NET_BIND_SERVICE</c>.</summary>
+    public int TlsPort = 443;
+
+    /// <summary><c>--redirect-port N</c>: a port serving nothing but a 308 to the TLS one; 0 maps none.</summary>
+    /// <remarks>80 in a deployment, so somebody typing the bare hostname arrives at the right scheme.</remarks>
+    public int RedirectPort;
+
+    /// <summary>
+    /// <c>--auth-local-only</c>: answer <c>/auth</c> only for callers on a private address.
+    /// </summary>
+    /// <remarks>
+    /// <b>Required on a public bind that has no CDN in front of it.</b> A signup is PBKDF2 at 600 000 iterations behind a
+    /// semaphore of <c>ProcessorCount / 4</c>, so junk attempts cost this process ~51 ms of a core each while costing the caller
+    /// one HTTP request — a few hundred a second and the tick loop stops getting CPU. Nothing public needs the endpoint: god
+    /// sessions are anonymous, and the bot fleet signs up over the private address. See
+    /// <c>TatooineHost.UseAuthInsideVpcOnly</c>.
+    /// </remarks>
+    public bool AuthLocalOnly;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 

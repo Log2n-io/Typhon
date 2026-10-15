@@ -1,0 +1,115 @@
+#cloud-config
+# The bot box (I4 / B8). Two units: the control panel, which is always on and reached over an SSM tunnel, and the
+# headless fleet, which a workflow starts. The payload arrives by SSM from the deploy workflow.
+
+# bootcmd, for the reason the server's cloud-init gives: write_files runs before runcmd, so a file asking for
+# owner root:tatooine needs the user to exist already.
+bootcmd:
+  - [ cloud-init-per, once, tatooine-user, useradd, --system, --no-create-home, --shell, /usr/sbin/nologin, tatooine ]
+
+package_update: true
+packages:
+  - unzip
+  - awscli
+  # tc, for the netem shaping the panel applies. iproute2 is usually present; naming it makes the dependency explicit
+  # rather than inherited from whatever the AMI happened to ship.
+  - iproute2
+
+write_files:
+  # --- The control panel ---------------------------------------------------------------------------------------------
+  #
+  # Always on, because it is how the box is operated, and harmless because it binds loopback: reaching it needs an SSM
+  # port forward, which needs the instance role and the operator's own credentials.
+  #
+  #   AmbientCapabilities=CAP_NET_ADMIN   so `tc qdisc` works without sudo for a password-less service account. This is
+  #                                       the one privilege the panel needs and it is the reason the shaping is real: a
+  #                                       delay applied in the client would not reach the ACKs, so the congestion window
+  #                                       and the server's backpressure would behave as they do on loopback -- which is
+  #                                       most of what a remote fleet exists to exercise.
+  - path: /etc/systemd/system/tatooine-botconsole.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine bot console (${stack})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=tatooine
+      Group=tatooine
+      WorkingDirectory=/opt/tatooine/current
+      ExecStart=/opt/tatooine/current/run-console.sh
+      Restart=on-failure
+      RestartSec=5
+      KillSignal=SIGTERM
+      TimeoutStopSec=60
+      LimitNOFILE=1048576
+      EnvironmentFile=/etc/tatooine/bots.env
+      AmbientCapabilities=CAP_NET_ADMIN
+      CapabilityBoundingSet=CAP_NET_ADMIN
+      NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- The headless fleet --------------------------------------------------------------------------------------------
+  #
+  # Type=oneshot and NOT enabled: a fleet run is a job with an end, not a service. `systemctl start tatooine-fleet` from
+  # an SSM command runs one, and the exit code is the run's verdict -- which is why Restart is absent: restarting a load
+  # generator that failed would hide the failure behind a healthy-looking process.
+  - path: /etc/systemd/system/tatooine-fleet.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine headless bot fleet (${stack})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      User=tatooine
+      Group=tatooine
+      WorkingDirectory=/opt/tatooine/current
+      ExecStart=/opt/tatooine/current/run-fleet.sh
+      TimeoutStartSec=infinity
+      LimitNOFILE=1048576
+      EnvironmentFile=/etc/tatooine/bots.env
+      AmbientCapabilities=CAP_NET_ADMIN
+      CapabilityBoundingSet=CAP_NET_ADMIN
+      NoNewPrivileges=true
+
+  # --- The environment -----------------------------------------------------------------------------------------------
+  #
+  # SWG_BOT_KEY is NOT here and must not be baked into an image or a payload. Bot passwords are derived from it, so the
+  # accounts file beside the binary authorises nothing without it -- which is the whole reason passwords are derived and
+  # never stored. Put it in with
+  #
+  #   aws ssm send-command --document-name AWS-RunShellScript \
+  #     --parameters 'commands=["printf \"SWG_BOT_KEY=%s\\n\" \"$KEY\" >> /etc/tatooine/bots.env"]'
+  #
+  # or, better, keep it in SSM Parameter Store as a SecureString and have the unit read it at start. Either way it goes
+  # to the box and not to the repository, and the SAME value must be used every run: a different key orphans every
+  # account already signed up.
+  - path: /etc/tatooine/bots.env
+    permissions: '0640'
+    owner: root:tatooine
+    content: |
+      ENDPOINT=${server_endpoint}
+      PORT=${console_port}
+      BIND=127.0.0.1
+      BOTS=1000
+      KIND=god
+      CONNECT_RATE=200
+      SECONDS_TO_RUN=3600
+      ACCOUNTS_FILE=/var/lib/tatooine/bots.jsonl
+
+runcmd:
+  # The service account is created in bootcmd above, before write_files needs it.
+  - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, /var/lib/tatooine ]
+  - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine, /var/lib/tatooine ]
+  # 0700: the accounts file holds tokens and resume tokens, both bearer secrets. The store sets the file's own mode too,
+  # and this is the directory half of the same decision.
+  - [ chmod, '0700', /var/lib/tatooine ]
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, tatooine-botconsole.service ]

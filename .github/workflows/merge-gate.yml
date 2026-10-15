@@ -156,6 +156,13 @@ jobs:
               # The SWG demo's realm checks (Realms G1d) build the demo itself.
               - 'demo/SwgTatooine/**'
               - 'demo/SwgTatooine.Tests/**'
+              # The bot fleet, and Typhon.Client through it (B5, 2026-10-14). SwgTatooine.Tests references the bots so
+              # one fixture can put a real provisioner against a real /auth host -- the thing worth testing is that a
+              # DERIVED password satisfies the SERVER's own rules, which needs both assemblies in one place. Adding
+              # that reference moved both paths into this job's closure, and check-gate-filters.py caught it: without
+              # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
+              - 'demo/SwgTatooine.Bots/**'
+              - 'src/Typhon.Client/**'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
               - 'tools/Typhon.Workbench/**'

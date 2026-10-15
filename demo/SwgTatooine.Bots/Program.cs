@@ -17,9 +17,9 @@ using System.Threading.Tasks;
 
 // The flags are the knobs an A/B moves, so they are parsed as strictly as the server's (#1072): an unknown, misspelt, repeated or malformed flag exits 2
 // naming the token, instead of running the default — a mistyped --bots used to give two identical arms under a report that said otherwise.
-string endpoint, kind, fuzzMode;
+string endpoint, kind, fuzzMode, accountsFile, authBaseArg;
 Uri endpointUri;
-int bots, seconds, hz, connectBatch, tourSeconds, planets, fuzz, fuzzRate;
+int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fuzzRate, signupConcurrency;
 double regionM;
 try
 {
@@ -34,11 +34,26 @@ try
     hz = r.Int("--hz", defaults.TickHz, "the driver's tick rate", min: 1);
     kind = r.Str("--kind", defaults.Kind, "the session kind the server's admission expects", "<kind>");
     connectBatch = r.Int("--connect-batch", defaults.ConnectBatch, "sessions opened per connect step", min: 1);
+
+    // The rail the ramp opens sessions at, where --connect-batch says how many fall between two 20 ms staggers; an explicit batch
+    // still wins, which is why the batch default is the 0 sentinel BotSwarmOptions documents. Low on purpose -- the cost of
+    // admitting faster is on the SERVER (each avatar is spawned serially inside the tick's transaction, and a just-admitted
+    // session is what #1024 stalls the replication track on), not on the socket.
+    connectRate = r.Int("--connect-rate", 0, "sessions per second the ramp opens; 0 leaves --connect-batch in charge", min: 0);
+
     // A god camera's region edge: what a ClientRegion god profile (the server's --god-region) observes.
     regionM = r.Dbl("--region-m", defaults.RegionRadiusM, "a god camera's region edge, metres", min: 1);
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
     tourSeconds = r.Int("--god-tour", defaults.TourEverySeconds, "seconds between planet switches; 0 never tours", min: 0);
     planets = r.Int("--planets", defaults.Planets, "planets a touring camera cycles through", min: 1);
+    // Registered rather than read ad hoc, because RejectUnknown is what makes a misspelt flag exit 2: an --accounts-file the
+    // reader does not know about is an unknown token, so a population that was meant to have real accounts would be refused
+    // outright instead of signed up.
+    r.Group("accounts — a population of real players instead of anonymous cameras (B5)");
+    accountsFile = r.Str("--accounts-file", null, "where names, tokens and resume tokens are kept; required by --kind player", "<path>");
+    authBaseArg = r.Str("--auth-base", null, "the /auth endpoints to sign up against; derived from --endpoint when absent", "<url>");
+    signupConcurrency = r.Int("--signup-concurrency", 8, "concurrent signups while provisioning", min: 1);
+
     r.Group("fuzz — hostile connections instead of a swarm (AC-17's live half)");
     fuzz = r.Int("--fuzz", 0, "hostile clients to open; 0 runs the swarm", min: 0);
     fuzzRate = r.Int("--fuzz-rate", 500, "messages per second per fuzz client; 0 is the control arm", min: 0);
@@ -48,7 +63,6 @@ try
         Console.Write(r.Help());
         return 0;
     }
-
     r.RejectUnknown();
     if (!Uri.TryCreate(endpoint, UriKind.Absolute, out endpointUri))
     {
@@ -63,9 +77,96 @@ catch (ArgumentException e)
 
 if (fuzz > 0)
 {
+    // Refused rather than ignored. The fuzzer is not a swarm: it opens hostile connections and never signs anything up, so a
+    // command line combining it with the account flags is asking for two different runs. Taking the fuzz branch silently would
+    // produce a run that did none of what the other half of the line asked for — the same class of quiet nothing that
+    // --god-tour was doing with its misspelt field name.
+    if (accountsFile != null || string.Equals(kind, "player", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine("--fuzz runs hostile connections instead of a swarm; it cannot be combined with --kind player or --accounts-file");
+        return 2;
+    }
+
     using var fuzzStop = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
     await new Fuzzer(endpointUri, fuzz, fuzzRate, fuzzMode).RunAsync(fuzzStop.Token);
     return 0;
+}
+
+// --accounts-file <path> [--auth-base <url>] [--signup-concurrency <n>]: give the population real accounts (B5).
+//
+// A god session is anonymous and read-only, so --kind god needs none of this. A PLAYER session IS its account — the server's
+// admission hook validates the token and carries the account through as the thing that decides which avatar to bind — so a
+// thousand player bots need a thousand accounts, signed up through the same /auth endpoints a browser posts to.
+//
+// SWG_BOT_KEY must be in the environment. Passwords are DERIVED from it and the bot's index and are never written anywhere: the
+// accounts file holds names, tokens and resume tokens, so losing it costs a round of logins and losing the key costs nothing.
+var isPlayer = string.Equals(kind, "player", StringComparison.Ordinal);
+if (isPlayer && accountsFile == null)
+{
+    Console.Error.WriteLine(
+        "--kind player needs --accounts-file <path>: the server refuses a player session without a token (close 4102), so the "
+        + "population has to be signed up first. --kind god needs no accounts.");
+    return 2;
+}
+
+BotAccountStore accounts = null;
+if (accountsFile != null && !isPlayer)
+{
+    // Said, not silently ignored. A god session carries no token at all, so provisioning one would sign up a thousand accounts
+    // nothing presents and would demand a key the run does not need -- and run-fleet.sh passes --accounts-file unconditionally
+    // because it does not know which kind it is being asked for.
+    Console.WriteLine($"--kind {kind} sessions are anonymous: {accountsFile} is not read and no accounts are provisioned");
+}
+else if (accountsFile != null)
+{
+    var authBase = authBaseArg != null ? new Uri(authBaseArg) : BotProvisioner.AuthBaseFrom(endpointUri);
+    if (authBase == null)
+    {
+        Console.Error.WriteLine($"--endpoint {endpoint} has no HTTP side to sign up against; pass --auth-base http://host:port");
+        return 2;
+    }
+
+    string fleetKey;
+    try
+    {
+        fleetKey = BotCredentials.ReadKeyOrThrow();
+    }
+    catch (InvalidOperationException e)
+    {
+        // The whole message, not a summary: it is the only thing standing between the operator and a thousand orphaned accounts.
+        Console.Error.WriteLine(e.Message);
+        return 2;
+    }
+
+    accounts = new BotAccountStore(accountsFile, bots);
+    Console.WriteLine($"accounts: {accounts.FilePath} ({accounts.UsableTokens(600)} of {bots} tokens still usable)");
+    if (accounts.SkippedLines > 0)
+    {
+        // Said out loud rather than absorbed: a skipped line becomes a login, and a run that silently re-signed-up part of its
+        // fleet would look like a churn measurement when it was a parse failure.
+        Console.WriteLine($"  !! {accounts.SkippedLines} line(s) in the accounts file could not be parsed and were skipped");
+    }
+
+    using (var provisioner = new BotProvisioner(authBase, accounts, fleetKey, signupConcurrency))
+    {
+        Console.WriteLine($"provisioning {bots} accounts against {authBase} …");
+        var report = await provisioner.EnsureAsync(
+            bots,
+            (done, total) => Console.WriteLine($"  {done} of {total} accounts ready"),
+            CancellationToken.None);
+
+        Console.WriteLine(
+            $"accounts ready in {report.Elapsed.TotalSeconds:F1}s: {report.Created} created, {report.LoggedIn} logged in, {report.Reused} reused, "
+            + $"{report.Failed} failed");
+
+        if (!report.Complete)
+        {
+            // Refused rather than run short. A fleet that is 60 % provisioned measures a server at 600 sessions while every
+            // header says 1000, and that is a wrong number rather than a missing one.
+            Console.Error.WriteLine($"{report.Failed} account(s) could not be provisioned; first failure: {report.FirstFailure}");
+            return 3;
+        }
+    }
 }
 
 var options = new BotSwarmOptions
@@ -74,10 +175,26 @@ var options = new BotSwarmOptions
     Count = bots,
     TickHz = hz,
     ConnectBatch = connectBatch,
+    ConnectRatePerSecond = connectRate,
     Kind = kind,
     RegionRadiusM = regionM,
     TourEverySeconds = tourSeconds,
     Planets = planets,
+
+    // Null when there is no accounts file, which is what keeps --kind god anonymous: the client writes an empty token and the
+    // server's hook takes the god branch, where there is no identity to authorise anything.
+    TokenFor = accounts == null ? null : index => accounts[index]?.Token,
+    ResumeFor = accounts == null ? null : accounts.Resume,
+    OnResumeToken = accounts == null
+        ? null
+        : (index, token) =>
+        {
+            accounts.PutResume(index, token);
+
+            // Batched: a thousand sessions each persisting 16 bytes is one write per 64 of them, not a thousand writes on a path
+            // the measurement does not care about. The final flush below catches the remainder.
+            accounts.FlushIfDue();
+        },
 };
 
 Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
@@ -223,6 +340,24 @@ Console.WriteLine($"ran {(DateTime.UtcNow - started).TotalSeconds:F0}s over {swa
 Console.WriteLine($"connected at end: {swarm.Connected} of {opened}");
 Console.WriteLine($"messages received: {swarm.MessagesReceived}");
 Console.WriteLine($"receive-loop faults: {swarm.Faults}");
+
+if (accounts != null)
+{
+    // Unconditional, because FlushIfDue leaves up to a threshold's worth on the floor, and those are exactly the resume tokens a
+    // restarted fleet would need. One write at the end costs nothing and is the difference between a warm restart and a cold one.
+    accounts.Flush();
+    Console.WriteLine($"accounts file written {accounts.Flushes} time(s): {accounts.FilePath}");
+}
+
+// Ours, not the network's: a field or command this program asked for and the catalog does not describe. Printed before the per-feature counters below,
+// because a fault here means those counters are describing a run that did not send what it thought it was sending — which is how --god-tour spent its
+// whole life asking for nothing while every number said the run was healthy.
+var (faultKinds, faultTotal) = swarm.ProtocolFaults();
+if (faultKinds > 0)
+{
+    Console.WriteLine($"PROTOCOL FAULTS: {faultTotal} across {faultKinds} distinct message(s) — the counters below are NOT a clean measurement");
+    swarm.ReportProtocolFaults();
+}
 var (toursAsked, realmSwitches, news, inRealm) = swarm.Realms();
 Console.WriteLine($"realms: {toursAsked} tours asked, {realmSwitches} realm switches applied, {news} RealmNews heard, {inRealm} of {opened} sessions holding a realm");
 

@@ -32,6 +32,173 @@ namespace SwgTatooine.Replication;
 public static class TatooineHost
 {
     /// <summary>
+    /// The header the front door adds and this server requires, which is what makes the CDN's prefix list sufficient.
+    /// </summary>
+    /// <remarks>
+    /// An <c>X-</c> name on purpose: it has to be something a CDN can be configured to add to every origin request, and
+    /// it must not collide with a header any intermediary rewrites. CloudFront adds it through an origin request policy.
+    /// </remarks>
+    public const string OriginSecretHeader = "X-Tatooine-Origin";
+
+    /// <summary>
+    /// Requires <see cref="OriginSecretHeader"/> on every request from outside the VPC.
+    /// </summary>
+    /// <param name="app">The host, before anything else is mapped on it.</param>
+    /// <param name="secret">The shared secret the front door adds.</param>
+    /// <returns><paramref name="app"/>, for chaining.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own method so that a test can exercise the refusal.</b> Inline in <c>ServeAsync</c>, which never returns and starts
+    /// the whole transport, the only reachable test was a copy of this logic in a fixture — and a copy cannot fail when the
+    /// original is wrong. Worse, every request a test can make arrives over loopback, so the exempt branch was the only one that
+    /// ever ran: nothing tested that an outside caller without the header is refused, which is the entire point.
+    /// </para>
+    /// <para>
+    /// <b>Why a header at all.</b> 08-hosting § 4: CloudFront's flat-rate Pro tier cannot use a private VPC origin — that needs
+    /// Business — so the origin is PUBLIC, and the security group can only narrow it to the CDN's origin-facing prefix list. That
+    /// list contains every CloudFront distribution in the world, including one an attacker creates in their own account and
+    /// points at this address. The prefix list is therefore necessary and not sufficient, and this header is what makes it
+    /// sufficient: only our distribution knows the secret.
+    /// </para>
+    /// <para>
+    /// It must be registered FIRST, before the WebSocket upgrade, the static files and <c>/auth</c>: a check that runs after any
+    /// of those is a check some requests get past.
+    /// </para>
+    /// </remarks>
+    internal static WebApplication UseOriginSecret(this WebApplication app, string secret)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        ArgumentException.ThrowIfNullOrEmpty(secret);
+
+        // Encoded ONCE, outside the request path. Inside it, this ran on every request from outside the VPC including each
+        // static asset of a page load — two arrays and a string per request for a value that cannot change.
+        var expected = System.Text.Encoding.UTF8.GetBytes(secret);
+
+        app.Use(async (context, next) =>
+        {
+            // <b>Private callers are exempt, and that is not a loophole.</b> The bot fleet connects to the private IP by design
+            // (07-bots § 5: same AZ, no transfer cost, still the real TCP and WebSocket path), so it never passes through the
+            // front door and has no secret to present. Reaching the private address at all requires already being inside the
+            // VPC, which the bot security group is the only thing granted.
+            var remote = context.Connection.RemoteIpAddress;
+            if (remote != null && IsInsideTheVpc(remote))
+            {
+                await next(context).ConfigureAwait(false);
+                return;
+            }
+
+            // Fixed-time compare: a byte-by-byte one leaks the secret's prefix to anybody who can measure the response, and this
+            // is a value an attacker can guess against as fast as the network allows. FixedTimeEquals RETURNS false on a length
+            // mismatch rather than throwing, so a missing header needs no special case.
+            var given = System.Text.Encoding.UTF8.GetBytes(context.Request.Headers[OriginSecretHeader].ToString());
+            if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expected, given))
+            {
+                // 403 and nothing else. Not 401, which invites a credential; not a body, which would confirm to a scanner that
+                // something is here worth a second look.
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
+        return app;
+    }
+
+    /// <summary>
+    /// Refuses <c>/auth</c> to anyone outside the VPC, so account creation is reachable from the bot box and not the internet.
+    /// </summary>
+    /// <param name="app">The host, before the routes are mapped.</param>
+    /// <returns><paramref name="app"/>, for chaining.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Because checking a password is deliberately expensive, and the server is the one paying.</b> A signup or a login runs
+    /// PBKDF2 at 600 000 iterations — about 51 ms of a core — behind a semaphore of <c>ProcessorCount / 4</c>. That slowness is
+    /// the security property: it is what makes a stolen credential store useless. But the cost falls on this process on every
+    /// attempt, including wrong ones, while costing the caller one HTTP request. A few hundred junk attempts a second keeps all
+    /// four slots permanently busy with a queue behind them, and the tick loop — which wants to run fifty times a second — stops
+    /// getting CPU. Cheap to send, expensive to absorb, and the game dies rather than the endpoint.
+    /// </para>
+    /// <para>
+    /// <b><see cref="AuthRateLimiter"/> is not enough on its own on a public bind.</b> It caps each address prefix at ten
+    /// attempts refilling one per six seconds, which stops one caller flooding — but a caller with many addresses gets ten each,
+    /// and the design's answer to that was a WAF at a CDN edge. A deployment that serves TLS directly has no edge, so the
+    /// honest move is to take the endpoint off the public internet instead of trying to out-rate-limit the internet.
+    /// </para>
+    /// <para>
+    /// <b>And nothing public needs it.</b> A god session is anonymous and read-only, so a public demo requires no account at
+    /// all; the bot fleet reaches this server on its PRIVATE address (07-bots § 5) and signs up over that. Which also removes a
+    /// conflict: raising <c>--auth-burst</c> for a thousand bots used to raise it for the internet too, because the limiter is
+    /// one instance for the endpoint. Behind this gate, it only raises it for callers who can get here.
+    /// </para>
+    /// <para>
+    /// <b>404, not 403.</b> A refusal confirms the endpoint exists and is worth coming back to; "no such route" is the same
+    /// answer an unrelated path gets, and tells a scanner nothing.
+    /// </para>
+    /// </remarks>
+    internal static WebApplication UseAuthInsideVpcOnly(this WebApplication app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        app.Use(async (context, next) =>
+        {
+            if (!context.Request.Path.StartsWithSegments("/auth", StringComparison.OrdinalIgnoreCase))
+            {
+                await next(context).ConfigureAwait(false);
+                return;
+            }
+
+            var remote = context.Connection.RemoteIpAddress;
+            if (remote == null || !IsInsideTheVpc(remote))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
+        return app;
+    }
+
+    /// <summary>
+    /// Whether an address is one only something inside our own network could be calling from.
+    /// </summary>
+    /// <param name="address">The caller's address.</param>
+    /// <returns><see langword="true"/> for loopback and the private ranges.</returns>
+    /// <remarks>
+    /// RFC 1918 for IPv4, RFC 4193 for IPv6, plus loopback and link-local. These are not routable on the internet, so a
+    /// request that appears to come from one either does, or arrived through a proxy that rewrote the source -- and
+    /// there is no proxy in this deployment: <c>AuthEndpoints.AddressKey</c> carries the same reasoning for the same
+    /// reason, and both lines have to change together if a load balancer is ever put in front.
+    /// </remarks>
+    private static bool IsInsideTheVpc(IPAddress address)
+    {
+        if (IPAddress.IsLoopback(address))
+        {
+            return true;
+        }
+
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            // fc00::/7 (unique local) and fe80::/10 (link local).
+            var v6 = address.GetAddressBytes();
+            return (v6[0] & 0xFE) == 0xFC || (v6[0] == 0xFE && (v6[1] & 0xC0) == 0x80);
+        }
+
+        var octets = address.GetAddressBytes();
+        return octets[0] == 10
+            || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+            || (octets[0] == 192 && octets[1] == 168)
+            || (octets[0] == 169 && octets[1] == 254);
+    }
+
+    /// <summary>
     /// Turns the requested bind address into one Kestrel can listen on, saying out loud when the answer is a public one.
     /// </summary>
     /// <param name="requested">What the operator asked for, or <see langword="null"/> for the loopback default.</param>
@@ -72,6 +239,14 @@ public static class TatooineHost
     /// </summary>
     /// <param name="runtime">The started runtime, whose registry already carries <see cref="TatooineReplication.Declare"/>.</param>
     /// <param name="port">The TCP port to listen on.</param>
+    /// <param name="tlsChainPath">A PEM chain (certbot's <c>fullchain.pem</c>) to serve TLS with, or <see langword="null"/> for plain HTTP.</param>
+    /// <param name="tlsKeyPath">The matching PEM private key.</param>
+    /// <param name="tlsPort">The port TLS is served on. 443 needs <c>CAP_NET_BIND_SERVICE</c>, which the unit file grants.</param>
+    /// <param name="redirectPort">A port that serves nothing but a redirect to the TLS one; <c>0</c> maps none.</param>
+    /// <param name="authInsideVpcOnly">
+    /// <see langword="true"/> answers <c>/auth</c> only for callers on a private address; the internet gets 404. Required on a
+    /// public bind with no CDN in front of it — see <see cref="UseAuthInsideVpcOnly"/>.
+    /// </param>
     /// <param name="bindAddress">
     /// The address to bind, or <see langword="null"/> for loopback. <c>0.0.0.0</c> binds every interface.
     /// </param>
@@ -83,7 +258,8 @@ public static class TatooineHost
     /// </param>
     /// <returns>A task that completes when the host has stopped.</returns>
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
-        Func<string> realmInventory = null, string bindAddress = null)
+        Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
+        bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -94,7 +270,31 @@ public static class TatooineHost
         // laptop on a shared network, `--serve 8080` served it to the network. Harmless while the only thing a session can do is watch, and not harmless at all
         // once there is an account to create — so the default changes now rather than on the day the login endpoint lands (08-hosting § 2, 03-server § 2).
         var address = ResolveBindAddress(bindAddress);
-        builder.WebHost.ConfigureKestrel(k => k.Listen(address, port));
+
+        // <b>TLS only when a certificate was actually given.</b> A box whose delegation is not finished, or whose first certbot
+        // run has not succeeded, still comes up and serves plain HTTP on the game port with the warning below -- which is
+        // diagnosable. Binding 443 with nothing to present would accept connections and fail every handshake, an outage that
+        // reads as a network fault; and refusing to start at all would make a half-configured box look like a crash loop.
+        var tls = !string.IsNullOrEmpty(tlsChainPath) && !string.IsNullOrEmpty(tlsKeyPath)
+            ? new TlsCertificate(tlsChainPath, tlsKeyPath)
+            : null;
+
+        builder.WebHost.ConfigureKestrel(k =>
+        {
+            k.Listen(address, port);
+
+            if (tls != null)
+            {
+                // ServerCertificateSelector rather than a certificate handed over once: it is consulted per connection, which
+                // is what lets a renewal be picked up without restarting and dropping every session. See TlsCertificate.
+                k.Listen(address, tlsPort, listen => listen.UseHttps(_ => tls.Current()));
+
+                if (redirectPort > 0)
+                {
+                    k.Listen(address, redirectPort);
+                }
+            }
+        });
 
         // The runtime is a singleton the endpoints resolve: the WebSocket endpoint starts its transport against it on the first upgrade, and the catalog
         // endpoint serves exactly the bytes WELCOME carries.
@@ -128,6 +328,74 @@ public static class TatooineHost
         });
 
         var app = builder.Build();
+
+        // ── The front door's shared secret (I3). FIRST in the pipeline, before the WebSocket upgrade, the static files
+        // and /auth, because a check that runs after any of those is a check some requests get past.
+        //
+        // <b>Why a header at all.</b> 08-hosting § 4: CloudFront's flat-rate Pro tier cannot use a private VPC origin --
+        // that needs Business -- so the origin is PUBLIC, and the security group can only narrow it to the CDN's
+        // origin-facing prefix list. That list contains every CloudFront distribution in the world, including one an
+        // attacker creates in their own account and points at this address. The prefix list is therefore necessary and
+        // not sufficient, and this header is what makes it sufficient: only our distribution knows the secret.
+        //
+        // The design said Kestrel checks it. Nothing did, which meant the deployment's stated posture and its real one
+        // differed by exactly the step that makes it work.
+        if (!string.IsNullOrEmpty(originSecret))
+        {
+            app.UseOriginSecret(originSecret);
+            Console.WriteLine($"  front door: requests from outside the VPC must carry {OriginSecretHeader}");
+        }
+        else if (!IPAddress.IsLoopback(address))
+        {
+            // Loud, because the gap is invisible from outside: the server works, the client works, and the origin is
+            // reachable by anyone who can route a CloudFront distribution at it.
+            Console.WriteLine("  !! no front-door secret set, so a reachable bind is open to anyone who can reach this address. "
+                + "Set TATOOINE_ORIGIN_SECRET and the same value on the CDN's origin request policy.");
+        }
+
+        if (tls != null)
+        {
+            Console.WriteLine($"  tls: serving https on {tlsPort} with {tls.Describe()}");
+
+            if (redirectPort > 0)
+            {
+                // Scoped to the redirect port ONLY, by testing the local port rather than using UseHttpsRedirection globally.
+                // A blanket redirect would also catch the game port, which the bot fleet reaches over plain ws on the private
+                // address by design -- so the fleet would be answered with a 307 to a name it has no reason to resolve.
+                app.Use(async (context, next) =>
+                {
+                    if (context.Connection.LocalPort == redirectPort)
+                    {
+                        var host = context.Request.Host.Host;
+                        var target = tlsPort == 443 ? $"https://{host}{context.Request.Path}{context.Request.QueryString}"
+                            : $"https://{host}:{tlsPort.ToString(CultureInfo.InvariantCulture)}{context.Request.Path}{context.Request.QueryString}";
+
+                        // 308, not 302: permanent and method-preserving, so a browser remembers it and a POST is not silently
+                        // turned into a GET.
+                        context.Response.Redirect(target, permanent: true, preserveMethod: true);
+                        return;
+                    }
+
+                    await next(context).ConfigureAwait(false);
+                });
+
+                Console.WriteLine($"  tls: port {redirectPort} redirects to https");
+            }
+        }
+        else if (!IPAddress.IsLoopback(address))
+        {
+            Console.WriteLine("  !! no certificate given, so this reachable bind serves plain HTTP. Browsers will refuse a wss:// "
+                + "upgrade from an https:// page, and nothing here is encrypted.");
+        }
+
+        // Account creation off the public internet (B/M8b). Before the routes, because it is a property of the request and not
+        // of the endpoint -- see UseAuthInsideVpcOnly for why an expensive endpoint is removed rather than rate-limited harder.
+        if (authInsideVpcOnly)
+        {
+            app.UseAuthInsideVpcOnly();
+            Console.WriteLine("  /auth: answered only for callers inside the VPC; the internet gets 404");
+        }
+
         app.UseWebSockets();
 
         if (!string.IsNullOrEmpty(clientRoot) && Directory.Exists(clientRoot))
@@ -139,7 +407,24 @@ public static class TatooineHost
         // Identity (A2), before the WebSocket route for no technical reason beyond reading order: a client signs up or logs in here, then presents the token
         // it got on the HELLO that /ws carries. The limiter is one instance for both endpoints, so an address's allowance is shared across them — a signup
         // flood and a login flood are the same flood.
-        app.MapAuth(runtime.Engine, new AuthRateLimiter());
+        // The limiter's own numbers unless a run says otherwise (--auth-burst / --auth-refill-ms). A bot fleet is one address key, so the defaults that
+        // make a dictionary run hopeless also make a thousand bots take ninety-nine minutes to log in; raising them is a property of the run, not of the
+        // build, and a server with no flags behaves exactly as before.
+        var limiter = authBurst > 0 || authRefillMs > 0
+            ? new AuthRateLimiter(
+                authBurst > 0 ? authBurst : AuthRateLimiter.Capacity,
+                authRefillMs > 0 ? TimeSpan.FromMilliseconds(authRefillMs) : AuthRateLimiter.RefillInterval,
+                AuthRateLimiter.MaxTrackedKeys)
+            : new AuthRateLimiter();
+
+        if (authBurst > 0 || authRefillMs > 0)
+        {
+            Console.WriteLine(
+                $"  !! /auth rate limit RAISED for this run: burst {(authBurst > 0 ? authBurst : AuthRateLimiter.Capacity)}, " +
+                $"one attempt per {(authRefillMs > 0 ? authRefillMs : (int)AuthRateLimiter.RefillInterval.TotalMilliseconds)} ms per address");
+        }
+
+        app.MapAuth(runtime.Engine, limiter);
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");

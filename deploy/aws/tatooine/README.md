@@ -1,0 +1,172 @@
+# `deploy/aws/tatooine` — the two-instance deployment
+
+**Status:** authored and `terraform validate`-clean. **Never applied.** No instance, bucket, distribution or budget
+exists yet; nothing here has been run against an AWS account.
+
+This is phase **I3–I7, I9, I10** of [`14-game-programme.md`](../../../claude/design/SwgTatooine/14-game-programme.md) § I,
+built to the topology in [`08-hosting.md`](../../../claude/design/SwgTatooine/08-hosting.md) § 11.
+
+Two front doors, mutually exclusive. **The default is the cheap one** — the instance serves TLS itself, with no CDN, no
+load balancer and no Elastic IP, so nothing bills while the stack is stopped:
+
+```
+ anyone with the URL ──https──► demo.typhondb.io ─► EC2 game server :443  (public_tls = true)
+                                 A record, TTL 60, published by the box at boot
+                                 Let's Encrypt cert, DNS-01, renewed by certbot.timer
+                                        │
+                                        ├── EBS world volume (prod only, prevent_destroy)
+                                        │
+ EC2 bot box ──ws──► server PRIVATE ip ─┘   /auth answered only inside the VPC
+   SwgTatooine.Bots + Blazor console on loopback, reached by `aws ssm start-session`
+```
+
+The other is the CDN, for when egress or abuse justifies $15/month (`enable_front_door = true`, `public_tls = false`):
+
+```
+ anyone with the URL ──https──► CloudFront + WAF ──X-Tatooine-Origin──► EC2 game server
+```
+
+**Standing cost of the default path: the $0.50/month hosted zone.** Everything else is instance hours.
+
+## One module, two variable sets
+
+08-hosting § 11.2's distinction is the **data**, not the instance:
+
+| | `ephemeral.tfvars.example` | `prod.tfvars.example` |
+|---|---|---|
+| World | fresh from the seed every start | on an EBS volume, `prevent_destroy`, never wiped |
+| Lifetime | hours, then the TTL backstop stops it | long-lived, **stopped by default** |
+| Count | many, in parallel | exactly one |
+| Created by | `tatooine-ephemeral.yml` (a button, a branch, a mandatory TTL) | once, by hand, updated in place |
+| Schema gate | skipped — no previous world to open | **required** |
+
+## Applying it
+
+```bash
+terraform init \
+  -backend-config="bucket=<state-bucket>" \
+  -backend-config="key=stacks/<name>.tfstate" \
+  -backend-config="region=eu-west-1"
+
+terraform apply -var-file=ephemeral.tfvars
+```
+
+The backend is a **partial configuration** — the key is one per stack, so it cannot be hard-coded. `terraform init
+-backend=false` is enough to `validate` or `fmt` without touching S3, which is all that has been done so far.
+
+**On a stack with `dns_zone_name`, there is one manual step and it is load-bearing.** After the first apply:
+
+```bash
+terraform output delegation       # prints four nameservers, and the DS record NOT to add
+```
+
+Add those as `NS` records on the subzone's label in the parent zone at the registrar — for `demo.typhondb.io`, that is the
+`demo` label in `typhondb.io`. **Add no DS record.** `typhondb.io` is DNSSEC-signed, and an unsigned child under a signed
+parent is a valid *insecure delegation*; a DS record for an unsigned child instead breaks every name beneath it with
+SERVFAIL, and only for validating resolvers — so it presents as "DNS is intermittently broken" rather than as a DNSSEC
+mistake. Verify with `dig NS demo.typhondb.io @8.8.8.8` and `dig DS demo.typhondb.io @8.8.8.8` before going further.
+
+Until that delegation exists, certbot cannot issue and the box serves plain HTTP on the game port with a loud line. That
+is deliberate: a half-configured stack stays diagnosable instead of crash-looping.
+
+Then, from the outputs:
+
+```bash
+# deploy a payload (I6): build, gate, swap the symlink, restart — all over SSM, no SSH
+gh workflow run tatooine-deploy.yml -f stack=prod \
+  -f server_instance=<server_instance_id> -f bot_instances=<bot_instance_ids> -f schema_gate=true
+
+# reach the bot console (it binds loopback; this is the only way in)
+terraform output -raw console_tunnel | bash
+```
+
+## What each file is
+
+| File | |
+|---|---|
+| `versions.tf` | Provider pinning, the per-stack S3 backend, and the `project`/`tier`/`stack` tags every cost control keys on |
+| `variables.tf` | The inputs, with the reasoning for each default beside it |
+| `network.tf` | Default VPC, **one subnet** so the bots share the server's AZ, and the two security groups |
+| `iam.tf` | The payload bucket (private, versioned, encrypted) and the instance role: SSM core, CloudWatch agent, payload read |
+| `instances.tf` | The two boxes, IMDSv2 required, plus prod's world volume |
+| `cost.tf` | **I5.** The TTL backstop, the budget at 50/80/100 % and forecast, and cost anomaly detection |
+| `frontdoor.tf` | CloudFront + WAF rate rules on `/ws` and `/auth`, and the EIP that gives the origin a stable name. **Off by default** |
+| `outputs.tf` | What the deploy workflow and the operator need, including the ready-made SSM tunnel command |
+| `templates/` | cloud-init for both boxes, which installs the systemd units (**I4**) and nothing else |
+
+## Decisions worth knowing before you read the code
+
+**No SSH anywhere.** No key pair, no port 22, no bastion. Administration is `aws ssm start-session`, the deploy is
+`aws ssm send-command`, and the bot console is an SSM port forward. That is 08-hosting § 6's posture and it is also why
+the bot security group has **no inbound rules at all**.
+
+**The payload arrives by deploy, not at boot.** cloud-init installs the unit files and the directory layout; the binary
+comes from `tatooine-deploy.yml`. A box that fetched the latest payload on boot could not be rolled back by restarting
+it, and "which build is running" would become a property of the last reboot rather than of the deploy.
+
+**The prefix list is necessary and not sufficient.** CloudFront Pro cannot use a private VPC origin (that needs
+Business), so the origin is public and the security group can only narrow it to the CDN's origin-facing ranges — which
+include a distribution an attacker creates in their own account. `X-Tatooine-Origin` is what closes that, and
+`TatooineHost` now checks it: requests from outside the VPC without it get a bare 403. Callers on private addresses are
+exempt, because the bot fleet reaches the private IP by design and has no secret to present.
+
+**`ignore_changes = [ami, user_data]`** on both instances. Canonical publishes a new AMI continually, and a plan that
+silently replaced the server — taking prod's attached volume through a detach — is not something to discover during a
+deploy. The cost is that **rotating `origin_header_secret` does not propagate by `apply`**: update
+`/etc/tatooine/server.env` over SSM and restart, or taint the instance deliberately.
+
+**Prod's volume carries `prevent_destroy`.** It is the only irreplaceable thing in this module. The ephemeral workflow
+also passes `persistent_data = false` on every destroy so the volume is never in that plan at all, and refuses the stack
+name `prod` outright. The sweep additionally excludes `prod` when it enumerates the state bucket. Note what that is NOT:
+the `sweep` job has no `needs: guard`, because `guard` is dispatch-only and the sweep also runs on a schedule — so on the
+sweep path the protection is the name exclusion and `prevent_destroy`, not the guard job.
+
+## Known gaps, named rather than assumed closed
+
+- **Nothing has been applied.** `terraform validate` passes; a `plan` against a real account will find attribute
+  mistakes that validation cannot, exactly as `bench/aws/runner/terraform`'s header warns about itself. A code review on
+  2026-10-15 found nine defects in this module and its workflows that validation could not see — among them a
+  `start_stopped` variable that nothing read (so prod came up running, ~$800/month against a $450 budget), one payload
+  bucket name shared by every stack (so the second stack's apply failed and an ephemeral destroy targeted prod's
+  bucket), a state backend with no lock, and cloud-init chowning files to a user that `runcmd` had not created yet.
+  All are fixed; the list is here because it is the measure of what a first real `plan` and `apply` should still be
+  expected to turn up.
+- **`aws_ec2_instance_state` is how `start_stopped` is honoured, and it `ignore_changes = [state]`.** That is deliberate
+  — "started on demand" has to survive the next `apply` — but it means Terraform will not stop a box you started by
+  hand. Stopping it is also a manual act.
+- **Only if you turn the CDN on: CloudFront would speak plaintext to the origin** (`origin_protocol_policy =
+  "http-only"`). That was the module's most serious gap and **the default path no longer has it**: with `public_tls` the
+  instance holds a publicly-trusted Let's Encrypt certificate, so there is no CDN hop and nothing crosses the internet in
+  clear. When the CDN does go in front, that same certificate is what makes `origin_protocol_policy = "https-only"`
+  possible — so set it then, and do not run a distribution against an `http-only` origin carrying real credentials.
+- **The exemption trusts the default VPC, which the CI runner also lives in.** `bench/aws/runner/terraform` uses the same
+  default VPC, so "inside the VPC" includes the merge-gate box. Keying the exemption on the bot security group's CIDR, or
+  giving the game its own VPC, is the real answer.
+- **No CAPTCHA on token issuance**, which 08-hosting § 8 wants. The WAF rate rule on `/auth` is the whole protection
+  today, and `/auth` is a 600 000-iteration PBKDF2 behind a `ProcessorCount/4` semaphore — so the rate limit is doing
+  real work and is not belt-and-braces.
+- **The flat-rate CloudFront plan is an account-level subscription** and is not managed here. Without it the same
+  distribution bills per-GB, which is 08-hosting § 4's $2 275/month rather than its $15.
+- **The profiler exporter still binds all interfaces with no authentication** (`TcpExporter.cs:108`). This module does
+  not open its port, which is the half we control from here; the engine change is still owed.
+- **The account-wide CI billing alarm is $50** and will fire on the first game instance. Raise or scope it, or it
+  becomes noise and gets muted.
+- **The budget and the anomaly monitor are account-wide, so only the `prod` stack creates them** (`persistent_data`
+  gates it). An account with no prod stack therefore has **no budget at all** — create prod, or add them by hand, before
+  anything runs overnight.
+- **A bot fleet needs the server started with `--auth-burst` / `--auth-refill-ms`.** The `/auth` limiter keys on the
+  caller's /24, so an entire bot box is one key: on the defaults a thousand signups take about ninety-nine minutes.
+  `run-fleet.sh` says so in its header; nothing in the deployment sets it, and raising it on a server that is *also*
+  public raises it for the internet in front of a 600 000-iteration PBKDF2. Sign the fleet up **before** going public,
+  or give the bot path its own listener.
+- **No backup/restore implementation exists** in the engine, so prod's persistence is the pre-deploy EBS snapshot the
+  deploy takes. That snapshot is crash-consistent, which makes every restore a real power-loss recovery test — a
+  feature, but one to exercise deliberately rather than discover.
+- **The schema gate costs a short outage, by design.** It stops the service, copies the quiescent world, opens the copy
+  with the new build, and only then swaps the symlink. Copying a world the server is still writing to gives files
+  captured at different instants — not even crash-consistent — so the gate could fail, or pass, for reasons that had
+  nothing to do with the schema. The stop costs nothing extra because the deploy restarts the service anyway, and a
+  failed gate restarts the **old** release and leaves the live world untouched.
+- **The gate needs free space for a second copy of the world** on the filesystem it writes to (`/tmp`, i.e. the root
+  volume). It measures that before copying and refuses rather than filling the disk — but on a stack whose world
+  outgrows its root volume the gate will refuse every deploy until `server_root_gb` is raised.

@@ -109,6 +109,91 @@ public sealed class CommandLineChecks
         });
     }
 
+    /// <summary>
+    /// The TLS flags parse, and every way of getting them wrong is refused at the parse rather than on the box.
+    /// </summary>
+    /// <remarks>
+    /// <b>Each of these is a shape that would otherwise fail after a world build, on a live instance.</b> A chain with no key
+    /// cannot complete a handshake; a key with no chain has nothing to present; a redirect with no TLS redirects to a port that
+    /// is not listening; two listeners on one port is a bind error thirty seconds into startup. The parser's character is to
+    /// refuse these (SWG-07), and the reason is that the alternative is debugging them over SSM.
+    /// </remarks>
+    [Test]
+    public void TheTlsFlagsParseAndEveryBadPairingIsRefused()
+    {
+        var good = CommandLine.Parse(
+        [
+            "--serve", "8080", "--bind", "0.0.0.0", "--origin", "https://demo.typhondb.io",
+            "--tls-chain", "/etc/letsencrypt/live/tatooine/fullchain.pem",
+            "--tls-key", "/etc/letsencrypt/live/tatooine/privkey.pem",
+            "--tls-port", "443", "--redirect-port", "80", "--auth-local-only",
+        ]);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(good.TlsChainPath, Does.EndWith("fullchain.pem"));
+            Assert.That(good.TlsKeyPath, Does.EndWith("privkey.pem"));
+            Assert.That(good.TlsPort, Is.EqualTo(443));
+            Assert.That(good.RedirectPort, Is.EqualTo(80));
+            Assert.That(good.AuthLocalOnly, Is.True);
+        });
+
+        // A chain without its key, and the reverse.
+        Assert.That(
+            () => CommandLine.Parse(["--serve", "8080", "--bind", "0.0.0.0", "--origin", "https://x", "--tls-chain", "/c.pem"]),
+            Throws.ArgumentException.With.Message.Contains("--tls-key"));
+        Assert.That(
+            () => CommandLine.Parse(["--serve", "8080", "--bind", "0.0.0.0", "--origin", "https://x", "--tls-key", "/k.pem"]),
+            Throws.ArgumentException.With.Message.Contains("--tls-chain"));
+
+        // A redirect with nothing to redirect TO.
+        Assert.That(
+            () => CommandLine.Parse(["--serve", "8080", "--bind", "0.0.0.0", "--origin", "https://x", "--redirect-port", "80"]),
+            Throws.ArgumentException.With.Message.Contains("--tls-chain"));
+
+        // Two listeners on one port.
+        Assert.That(
+            () => CommandLine.Parse(
+            [
+                "--serve", "443", "--bind", "0.0.0.0", "--origin", "https://x",
+                "--tls-chain", "/c.pem", "--tls-key", "/k.pem", "--tls-port", "443",
+            ]),
+            Throws.ArgumentException.With.Message.Contains("collides"));
+
+        Assert.That(
+            () => CommandLine.Parse(
+            [
+                "--serve", "8080", "--bind", "0.0.0.0", "--origin", "https://x",
+                "--tls-chain", "/c.pem", "--tls-key", "/k.pem", "--redirect-port", "8080",
+            ]),
+            Throws.ArgumentException.With.Message.Contains("collides"));
+    }
+
+    /// <summary>A hosting flag with no <c>--serve</c> is refused, including the new ones.</summary>
+    /// <remarks>
+    /// The existing case covers `--bind`, `--origin` and `--client-dir`. These four configure the same host and would otherwise
+    /// be silently ignored by a measurement run — which is the failure this whole parser is written against.
+    /// </remarks>
+    [Test]
+    public void TheNewHostingFlagsNeedServeToo()
+    {
+        foreach (var flag in new[] { "--tls-chain", "--tls-key" })
+        {
+            Assert.That(
+                () => CommandLine.Parse([flag, "/some/path.pem"]),
+                Throws.ArgumentException.With.Message.Contains("--serve"),
+                $"{flag} without --serve must be refused");
+        }
+
+        Assert.That(
+            () => CommandLine.Parse(["--redirect-port", "80"]),
+            Throws.ArgumentException.With.Message.Contains("--serve"));
+
+        Assert.That(
+            () => CommandLine.Parse(["--auth-local-only"]),
+            Throws.ArgumentException.With.Message.Contains("--serve"));
+    }
+
     /// <summary>A flag nobody declared is named, not ignored.</summary>
     [Test]
     public void AnUnknownFlagIsRefusedAndNamed()

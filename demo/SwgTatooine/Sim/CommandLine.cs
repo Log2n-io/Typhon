@@ -136,6 +136,8 @@ public static class CommandLine
             "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);
         c.ResumeGraceS = r.Dbl(
             "--resume-grace", c.ResumeGraceS, "how long a link-dead session's avatar waits for its client, s; 0 disables resume", min: 0d);
+        c.AuthBurst = r.Int("--auth-burst", c.AuthBurst, "/auth attempts one address may make at once; 0 keeps the default 10", min: 0);
+        c.AuthRefillMs = r.Int("--auth-refill-ms", c.AuthRefillMs, "ms for one /auth attempt to come back; 0 keeps the default 6000", min: 0);
         c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
         c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
@@ -183,6 +185,11 @@ public static class CommandLine
         // --sweep-worlds sets the house pattern for a list. Split in Validate so the help text shows the raw form.
         var origins = r.Str("--origin", null, "origins a browser may connect from, comma-separated. Required when --bind is not loopback", "<url,url>");
         c.ClientDirectory = r.Str("--client-dir", c.ClientDirectory, "directory of built client files to serve; the repo's dist/ when unset", "<path>");
+        c.TlsChainPath = r.Str("--tls-chain", c.TlsChainPath, "PEM chain to serve https with (certbot's fullchain.pem)", "<path>");
+        c.TlsKeyPath = r.Str("--tls-key", c.TlsKeyPath, "PEM private key matching --tls-chain (certbot's privkey.pem)", "<path>");
+        c.TlsPort = r.Int("--tls-port", c.TlsPort, "port https is served on; 443 needs CAP_NET_BIND_SERVICE", min: 1, max: 65535);
+        c.RedirectPort = r.Int("--redirect-port", c.RedirectPort, "port that serves only a redirect to https; 0 maps none", min: 0, max: 65535);
+        c.AuthLocalOnly = r.Switch("--auth-local-only", "answer /auth only for callers on a private address; required on a public bind with no CDN");
         c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
@@ -253,6 +260,36 @@ public static class CommandLine
         if (c.ServePort == 0 && (c.BindAddress != null || c.Origins.Length > 0 || c.ClientDirectory != null))
         {
             throw new ArgumentException("--bind, --origin and --client-dir configure the web host, which only exists with --serve <port>.");
+        }
+
+        if (c.ServePort == 0 && (c.TlsChainPath.Length > 0 || c.TlsKeyPath.Length > 0 || c.RedirectPort > 0 || c.AuthLocalOnly))
+        {
+            throw new ArgumentException(
+                "--tls-chain, --tls-key, --redirect-port and --auth-local-only configure the web host, which only exists with --serve <port>.");
+        }
+
+        // One without the other is the dangerous shape: a server asked for TLS that quietly served plain HTTP would look like a
+        // browser problem, not a configuration one. Refused at the parse, before a world is built.
+        if ((c.TlsChainPath.Length > 0) != (c.TlsKeyPath.Length > 0))
+        {
+            throw new ArgumentException(
+                "--tls-chain and --tls-key go together: a chain with no key cannot complete a handshake, and a key with no chain"
+                + " has nothing to present.");
+        }
+
+        if (c.RedirectPort > 0 && c.TlsChainPath.Length == 0)
+        {
+            throw new ArgumentException("--redirect-port redirects to https, so it needs --tls-chain and --tls-key.");
+        }
+
+        if (c.RedirectPort > 0 && (c.RedirectPort == c.ServePort || c.RedirectPort == c.TlsPort))
+        {
+            throw new ArgumentException($"--redirect-port {c.RedirectPort} collides with --serve or --tls-port; it must be a port of its own.");
+        }
+
+        if (c.TlsChainPath.Length > 0 && c.TlsPort == c.ServePort)
+        {
+            throw new ArgumentException($"--tls-port {c.TlsPort} collides with --serve {c.ServePort}; the plain and the TLS listeners need different ports.");
         }
 
         // The address and the origin pairing, checked HERE rather than where the host binds. Both used to be: the host's own version throws from inside the DI

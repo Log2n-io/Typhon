@@ -58,6 +58,71 @@ internal static class S0
 
         return h.ToString();
     }
+
+    /// <summary>
+    /// Every pooled player's key, position, activity and destination — the behavioural fingerprint of <c>PlayerThink</c>.
+    /// </summary>
+    /// <param name="sim">A run that has finished.</param>
+    /// <returns>The fingerprint.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b><see cref="Fingerprint"/> covers <c>Creature</c> and nothing else, so it is blind to every line of <c>PlayerThinkTick</c>.</b> That matters now
+    /// because B2/B3 extract the player brain into <c>SwgTatooine.Brain</c> and rewire <c>PlayerThink</c> to call it, a refactor whose whole contract is
+    /// "behaviour must not change" — and the only thing that can hold a refactor to that is a fingerprint taken before it. There was none for players.
+    /// </para>
+    /// <para>
+    /// <b>The activity and the destination are in it, not just the position.</b> A player's position alone would miss a brain that picked a different goal
+    /// and happened to be walking through the same place this tick; <c>Activity</c>, <c>ActivityTicks</c> and the destination are the goal FSM's own state,
+    /// which is the thing being moved into another assembly. Rounded to the millimetre for the same reason the creature fingerprint is: the float arithmetic
+    /// is identical run to run, and a millimetre is finer than any behavioural difference could be.
+    /// </para>
+    /// <para>
+    /// <see cref="WorldIndex.Players"/> holds the pooled crowd the world builder spawned, which is exactly the set <c>PlayerThink</c> drives — an avatar
+    /// spawned by a login is not in it, and must not be, because a session drives that one.
+    /// </para>
+    /// </remarks>
+    public static string PlayerFingerprint(TatooineSim sim)
+    {
+        var ids = sim.Index.Players;
+        var rows = new List<(long Key, int X, int Z, int Activity, int Ticks, int DestX, int DestZ)>(ids.Count);
+
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            var players = tx.For<Player>();
+            for (var i = 0; i < ids.Count; i++)
+            {
+                if (!players.TryOpen(ids[i], out var player))
+                {
+                    continue;   // retired by a clone or a realm teardown; its absence is part of the fingerprint through the key that is missing
+                }
+
+                var place = player.Read(Player.Bounds);
+                var state = player.Read(Player.State);
+                var move = player.Read(Player.Move);
+                rows.Add((
+                    ids[i].EntityKey,
+                    (int)MathF.Round(place.X * 1000f),
+                    (int)MathF.Round(place.Z * 1000f),
+                    (int)state.Activity,
+                    state.ActivityTicks,
+                    (int)MathF.Round(move.DestX * 1000f),
+                    (int)MathF.Round(move.DestZ * 1000f)));
+            }
+        }
+
+        // By key, because the index's order is the world builder's and a later change to it would read as a behavioural difference.
+        rows.Sort((a, b) => a.Key.CompareTo(b.Key));
+
+        var h = new System.Text.StringBuilder(rows.Count * 24);
+        foreach (var r in rows)
+        {
+            h.Append(r.Key).Append(':').Append(r.X).Append(',').Append(r.Z)
+                .Append('/').Append(r.Activity).Append('+').Append(r.Ticks)
+                .Append('>').Append(r.DestX).Append(',').Append(r.DestZ).Append(';');
+        }
+
+        return h.ToString();
+    }
 }
 
 /// <summary>
@@ -269,5 +334,68 @@ public sealed class SimulationDeterminismTests
         Assert.That(a, Is.Not.Empty, "the fingerprint covers a creature population");
         Assert.That(b, Is.EqualTo(a), "the same seed must reproduce the same run");
         Assert.That(c, Is.Not.EqualTo(a), "a different seed must reach the per-tick draws, not only world generation");
+    }
+
+    /// <summary>
+    /// The same, for the pooled players — the fingerprint B2/B3's refactor has to preserve.
+    /// </summary>
+    /// <remarks>
+    /// <b>This exists because the creature fingerprint above cannot see <c>PlayerThink</c> at all.</b> Extracting the player brain into its own assembly is a
+    /// refactor whose entire contract is that behaviour does not change, and until this test existed there was nothing in the repository that would have
+    /// noticed if it did: a goal picked differently, an activity timer off by one, a destination drawn from a different point in the random sequence would all
+    /// have passed every check and shown up later as a load run that did not match the one before it.
+    /// <para>
+    /// Long enough to exercise the goal FSM rather than one step of it: the activity split only reveals itself once timers have fired and players have chosen
+    /// again, which a twenty-tick run does not reach.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void SamePlayerSeed_ReproducesTheRun_AndADifferentSeedDoesNot()
+    {
+        var a = RunPlayerFingerprint(12345);
+        var b = RunPlayerFingerprint(12345);
+        var c = RunPlayerFingerprint(999);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(a, Is.Not.Empty, "the fingerprint covers no players, so it would hold for any brain at all");
+            Assert.That(a, Does.Contain("/"), "the activity is part of it, not only the position");
+            Assert.That(b, Is.EqualTo(a), "the same seed must reproduce the same player run");
+            Assert.That(c, Is.Not.EqualTo(a), "a different seed must reach the players' own per-tick draws");
+        });
+    }
+
+    /// <summary>Runs a world and fingerprints its players.</summary>
+    /// <param name="seed">The run seed.</param>
+    /// <returns>The fingerprint.</returns>
+    private static string RunPlayerFingerprint(int seed)
+    {
+        var dir = Worlds.NewDirectory();
+        try
+        {
+            var config = Worlds.Small(dir);
+            config.WarmTicks = 0;
+
+            // Two hundred ticks, not twenty: an activity runs for a timer's worth of ticks before the brain chooses again, so a short run fingerprints one
+            // decision per player and would miss a refactor that changed the SECOND one.
+            config.MeasuredTicks = 200;
+
+            // 50 Hz rather than 10, and it costs the test nothing: every timer in the brain counts TICKS, so the same two hundred ticks exercise the same
+            // decisions — paced, they just take four seconds of wall clock instead of twenty, three times over.
+            config.TickRateHz = 50;
+            config.WorkerCount = 1;
+            config.Seed = seed;
+
+            // Paced, for the reason RunFingerprint gives: an unpaced run ends at an indeterminate tick and two runs are not comparable.
+            config.Unpaced = false;
+            using var sim = new TatooineSim(config);
+            sim.Initialize();
+            sim.Run();
+            return S0.PlayerFingerprint(sim);
+        }
+        finally
+        {
+            Worlds.Delete(dir);
+        }
     }
 }

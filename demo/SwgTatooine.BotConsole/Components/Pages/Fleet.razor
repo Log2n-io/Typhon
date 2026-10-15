@@ -1,0 +1,236 @@
+@* The bot box's one page: set a fleet up, start it, watch what the server does with it.
+
+   Every number here is read straight off FleetRunner, which owns the sessions in this same process — there is no API
+   between the page and the fleet, which is the whole reason this is Blazor Server and in-process (see the csproj).
+
+   The form is disabled while a run is up rather than hidden: an operator should be able to read the configuration that
+   produced the numbers they are looking at, and a form that vanishes makes a run unidentifiable a minute later. *@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject FleetRunner Runner
+@inject FleetSettings Settings
+
+<h1>Bot console</h1>
+
+<section class="panel">
+    <h2>Fleet</h2>
+    <div class="grid">
+        <label>Endpoint<input @bind="Settings.Endpoint" disabled="@Busy" /></label>
+        <label>Bots<input type="number" min="1" max="20000" @bind="Settings.Count" disabled="@Busy" /></label>
+        <label>
+            Kind
+            <select @bind="Settings.Kind" disabled="@Busy">
+                <option value="god">god — anonymous camera, no accounts</option>
+                <option value="player">player — a real account each</option>
+            </select>
+        </label>
+        <label>Driver Hz<input type="number" min="1" max="50" @bind="Settings.TickHz" disabled="@Busy" /></label>
+        <label>
+            Connect rate (/s)
+            <input type="number" min="0" max="5000" @bind="Settings.ConnectRatePerSecond" disabled="@Busy" />
+            <small>A rail, not a target: admitting faster costs the SERVER, which spawns each avatar inside its tick.</small>
+        </label>
+        <label>Region radius (m)<input type="number" min="1" @bind="Settings.RegionRadiusM" disabled="@Busy" /></label>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Accounts</h2>
+    @if (Settings.IsPlayer)
+    {
+        <div class="grid">
+            <label>Accounts file<input @bind="Settings.AccountsFile" disabled="@Busy" /></label>
+            <label>
+                Signup concurrency
+                <input type="number" min="1" max="64" @bind="Settings.SignupConcurrency" disabled="@Busy" />
+                <small>Bounded for the server's sake: each login is a 600 000-iteration PBKDF2 behind its own semaphore.</small>
+            </label>
+        </div>
+        <p class="note">
+            <strong>@BotCredentials.KeyVariable must be set in this process's environment.</strong> Passwords are derived from it and
+            are never stored, so the accounts file holds only names, tokens and resume tokens — and the same key must be used on
+            every run, or the accounts already signed up cannot be logged into.
+        </p>
+    }
+    else
+    {
+        <p class="note">A god session is anonymous and read-only, so this fleet needs no accounts and no key.</p>
+    }
+</section>
+
+<section class="panel">
+    <h2>Network</h2>
+    <div class="grid">
+        <label>Latency (ms)<input type="number" min="0" max="2000" @bind="Settings.LatencyMs" disabled="@Busy" /></label>
+        <label>Jitter (ms)<input type="number" min="0" max="2000" @bind="Settings.JitterMs" disabled="@Busy" /></label>
+        <label>Interface<input placeholder="default route" @bind="Settings.NetworkInterface" disabled="@Busy" /></label>
+    </div>
+    <p class="note">
+        Shaped in the kernel with <code>tc netem</code>, so the delay reaches the ACKs and therefore the congestion window and the
+        server's backpressure — which a delay added inside the client would not. It is interface-wide, so every bot gets the same
+        path; per-bot variability is the brain's reaction latency, which models a human's hands rather than a network.
+        @if (!NetemShaper.Supported)
+        {
+            <strong>This host cannot shape (Linux and tc netem only), so a non-zero latency will fail the start rather than be ignored.</strong>
+        }
+    </p>
+</section>
+
+<section class="panel">
+    <h2>Run</h2>
+    <p>
+        <button @onclick="StartAsync" disabled="@Busy">Start</button>
+        <button @onclick="StopAsync" disabled="@(!Busy)">Stop</button>
+        <span class="phase">@_snapshot.Phase</span>
+        @if (_snapshot.Shaping != null)
+        {
+            <span class="shaping">@_snapshot.Shaping</span>
+        }
+    </p>
+
+    @if (_snapshot.Fault != null)
+    {
+        <p class="fault">@_snapshot.Fault</p>
+    }
+
+    @if (_snapshot.ProtocolFaults > 0)
+    {
+        @* Leads, because a protocol fault is OUR bug: the numbers below are then describing a run that did not send what it
+           thought it was sending, which is how the god tour spent its whole life asking for nothing. *@
+        <p class="fault">
+            PROTOCOL FAULTS: @_snapshot.ProtocolFaults distinct message(s) this program asked for and the catalog does not describe.
+            The figures below are NOT a clean measurement.
+        </p>
+    }
+
+    <table>
+        <tbody>
+            <tr><th>Sessions</th><td>@_snapshot.Connected connected of @_snapshot.Opened opened, @_snapshot.Requested asked for</td></tr>
+            <tr><th>Accounts ready</th><td>@_snapshot.Provisioned of @_snapshot.Requested</td></tr>
+            <tr><th>Elapsed</th><td>@_snapshot.Elapsed.ToString(@"hh\:mm\:ss")</td></tr>
+            <tr><th>Server tick</th><td>p50 @Ms(_snapshot.ServerTickP50) · p99 @Ms(_snapshot.ServerTickP99)</td></tr>
+            <tr><th>Messages</th><td>@_snapshot.Messages.ToString("N0", CultureInfo.InvariantCulture)</td></tr>
+            <tr><th>Wire per session</th><td>@_snapshot.BytesPerSessionPerSecond.ToString("N0", CultureInfo.InvariantCulture) B/s</td></tr>
+            <tr><th>Receive-loop faults</th><td>@_snapshot.Faults</td></tr>
+            <tr>
+                <th>Disconnects</th>
+                <td>
+                    @if (_snapshot.Disconnects.Count == 0)
+                    {
+                        <text>none</text>
+                    }
+                    else
+                    {
+                        @* By close code, because that is the measurement: 1013 means the server shed this client, 4001 means the
+                           fleet failed to ping, 4102 means it was not authenticated. "Some sessions dropped" says none of that. *@
+                        @string.Join(" · ", _snapshot.Disconnects.Select(d => $"{d.Key}: {d.Value}"))
+                    }
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h2>Log</h2>
+    <pre>@string.Join("\n", _log)</pre>
+</section>
+
+@code {
+    private FleetSnapshot _snapshot;
+    private string[] _log = [];
+    private bool _disposed;
+
+    /// <summary>Whether a run is up, which is what disables the form.</summary>
+    private bool Busy => Runner.Busy;
+
+    protected override void OnInitialized()
+    {
+        Runner.Changed += OnChanged;
+        Refresh();
+    }
+
+    public void Dispose()
+    {
+        // The flag before the unsubscribe: a notification already in flight can still reach OnChanged, and InvokeAsync on a
+        // torn-down circuit throws ObjectDisposedException — which, on a discarded task, surfaced nowhere at all.
+        _disposed = true;
+        Runner.Changed -= OnChanged;
+    }
+
+    /// <summary>Starts the fleet, keeping a failure on the page rather than as an unhandled circuit error.</summary>
+    private async Task StartAsync()
+    {
+        try
+        {
+            await Runner.StartAsync(Settings);
+        }
+        catch (Exception)
+        {
+            // FleetRunner has already recorded the fault and moved to Faulted, and the snapshot shows it. Letting it escape here
+            // would tear the Blazor circuit down and replace a readable message with a blank page.
+        }
+
+        Refresh();
+    }
+
+    /// <summary>Stops the fleet.</summary>
+    private async Task StopAsync()
+    {
+        await Runner.StopAsync();
+        Refresh();
+    }
+
+    /// <summary>
+    /// Pulls a new snapshot onto the page, from whichever thread raised the event.
+    /// </summary>
+    /// <remarks>
+    /// <c>InvokeAsync</c> because <c>Changed</c> is raised from the runner's own timer and from its connect loop — not from the
+    /// renderer's synchronisation context. Calling <c>StateHasChanged</c> directly from there is the classic Blazor Server race:
+    /// it works until the day two threads render at once.
+    /// </remarks>
+    private void OnChanged()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        // The task is OBSERVED rather than discarded. `_ = InvokeAsync(...)` dropped two real exceptions on the floor: a throw
+        // from Refresh, and the ObjectDisposedException InvokeAsync raises once the circuit is gone. FleetRunner.Notify's own
+        // try/catch cannot see either, because by then the work is on the renderer's queue and not on its call stack.
+        _ = ObserveAsync();
+    }
+
+    /// <summary>Re-renders, swallowing only what a torn-down circuit legitimately throws.</summary>
+    private async Task ObserveAsync()
+    {
+        try
+        {
+            await InvokeAsync(Refresh);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit went away between the notification and the render. Expected, and nothing to report to anyone.
+        }
+        catch (OperationCanceledException)
+        {
+            // Same.
+        }
+    }
+
+    /// <summary>Reads the runner once and re-renders.</summary>
+    private void Refresh()
+    {
+        _snapshot = Runner.Snapshot();
+        _log = Runner.Log();
+        StateHasChanged();
+    }
+
+    /// <summary>A millisecond figure, or a dash when the server has not reported one yet.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The text.</returns>
+    private static string Ms(double value)
+        => value > 0 ? value.ToString("F2", CultureInfo.InvariantCulture) + " ms" : "—";
+}

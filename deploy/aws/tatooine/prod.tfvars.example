@@ -1,0 +1,60 @@
+# Prod: exactly one, stopped by default, its world on a volume that survives everything.
+#
+#   terraform init -backend-config="bucket=<state>" -backend-config="key=stacks/prod.tfstate" -backend-config="region=eu-west-1"
+#   terraform apply -var-file=prod.tfvars
+#
+# READ 14-game-programme I8 AND I10 BEFORE THE FIRST APPLY. Prod's world must not be created until the schema-evolution
+# gate exists, or the first time a component is added to an existing archetype (EN-8) destroys the only thing prod is
+# for. The gate runs inside tatooine-deploy.yml's deploy step, with the service stopped so the copied world is a real
+# point in time; it is implemented, so what remains is to use it -- never deploy to prod with schema_gate = false.
+#
+# Prod is NOT the demo. It is a permanent integration test for the engine's operational story: schema evolution against
+# a world written by the previous build, rolling a new build over an existing world, WAL growth and checkpoint cadence
+# over days, cell reclamation, RSS drift, data that accumulates so AS-OF history is real, and restore-from-backup
+# proving the backup. Nothing else we have tests any of that.
+
+name            = "prod"
+persistent_data = true
+data_gb         = 200
+
+# No TTL: prod is stopped by default and started on demand, which is the cost control. A TTL would stop it mid-demo.
+ttl_hours     = 0
+start_stopped = true
+
+server_instance_type = "c6id.4xlarge"
+
+# On-demand, not spot: 07-bots § 5 -- a reclaim mid-demo costs more credibility than the discount saves.
+bot_count = 1
+bot_spot  = false
+
+# ── The public URL: the instance serves TLS itself ────────────────────────────────────────────────────────────────────
+#
+# No CDN, no load balancer, no Elastic IP. The instance gets a Let's Encrypt certificate over DNS-01 (authorised by its own
+# IAM role, so there is no API credential on the box) and publishes its own A records at every boot, so nothing bills while
+# the stack is stopped. Standing cost: the $0.50/month hosted zone.
+#
+# ONE MANUAL STEP, once: after the first apply, `terraform output delegation` prints four nameservers to add as NS records on
+# the `demo` label in the typhondb.io zone at OVH. Add NO DS record -- typhondb.io is DNSSEC-signed, and an unsigned child
+# under a signed parent is a valid insecure delegation, while a DS for an unsigned child breaks every name under it.
+public_tls    = true
+dns_zone_name = "demo.typhondb.io"
+acme_email    = "contact@log2n.io"
+
+# --origin is DERIVED from dns_zone_name; client_origin is only for a front door this module did not create.
+
+# ── The CDN, deliberately off ─────────────────────────────────────────────────────────────────────────────────────────
+#
+# CloudFront's value is flat-rate egress -- 08-hosting § 4's $2275 vs $15 at 26 TB/month -- and a WAF. Neither matters at a
+# demo's traffic, and Pro is a $15/month standing cost against a stack that is stopped most of the time. Turning it on later
+# is a variable flip plus re-pointing the apex: the Let's Encrypt certificate on the instance is exactly what then allows
+# origin_protocol_policy = "https-only", which is the gap that currently blocks player mode.
+#
+# The two are mutually exclusive and a precondition enforces it.
+enable_front_door = false
+
+# Not needed while enable_front_door is false: with no CDN there is no origin hop to protect. /auth is instead kept off the
+# public internet entirely by --auth-local-only, which cloud-init passes.
+# origin_header_secret = ""   # TF_VAR_origin_header_secret="$(openssl rand -base64 32)" when the CDN goes in front
+
+alert_email        = "you@example.com"
+monthly_budget_usd = 450

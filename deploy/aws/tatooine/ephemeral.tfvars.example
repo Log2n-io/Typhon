@@ -1,0 +1,26 @@
+# An ephemeral stack: a branch, a demo call, a scale test. Its world dies with it.
+#
+#   terraform init -backend-config="bucket=<state>" -backend-config="key=stacks/pr-1372.tfstate" -backend-config="region=eu-west-1"
+#   terraform apply -var-file=ephemeral.tfvars
+#
+# Normally created by .github/workflows/tatooine-ephemeral.yml, which also tags the deadline the sweep reads. Applying
+# by hand is for when something has gone wrong with the workflow; the TTL backstop below still fires either way.
+
+name            = "pr-1372"
+persistent_data = false
+ttl_hours       = 4
+
+# One bot box is enough for a thousand bots (07-bots § 4: 5-10k per c7i.2xlarge-class host). Spot, because losing a
+# bot box costs a run and nothing else -- its accounts file is reproducible from SWG_BOT_KEY.
+bot_count = 1
+bot_spot  = true
+
+# Smaller than prod's: an ephemeral stack is usually answering one question, not carrying a demo.
+server_instance_type = "c6id.2xlarge"
+
+# No front door. A private soak reaches the server from the bot box over the private IP, and a distribution takes about
+# fifteen minutes to come up and as long to go away.
+enable_front_door = false
+
+alert_email        = "you@example.com"
+monthly_budget_usd = 200

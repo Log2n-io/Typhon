@@ -33,7 +33,9 @@ public sealed partial class TatooineSim
         try
         {
             await TatooineHost
-                .ServeAsync(_runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress)
+                .ServeAsync(
+                    _runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress, _config.AuthBurst, _config.AuthRefillMs,
+                    _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort)
                 .ConfigureAwait(false);
         }
         finally

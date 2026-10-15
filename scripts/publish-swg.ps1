@@ -136,10 +136,18 @@ $exeName = if ($Runtime -like 'win-*') { 'SwgTatooine.exe' } else { 'SwgTatooine
 # TYPHON__PROFILER__LIVE in the unit's Environment= instead, and reach it over an SSM tunnel rather than binding it wide.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
+# TLS_CHAIN/TLS_KEY arrive from the unit's EnvironmentFile and are empty on a box with no certificate, in which case the
+# server serves plain HTTP on the game port and says so. AUTH_LOCAL_ONLY keeps /auth off the public internet -- required
+# whenever this is reachable without a CDN in front, because a signup costs the server ~51 ms of a core.
 exec "$here/__EXE__" \
     --serve "${PORT:-8080}" \
     --bind "${BIND:-127.0.0.1}" \
     ${ORIGIN:+--origin "$ORIGIN"} \
+    ${TLS_CHAIN:+--tls-chain "$TLS_CHAIN"} \
+    ${TLS_KEY:+--tls-key "$TLS_KEY"} \
+    ${TLS_CHAIN:+--tls-port "${TLS_PORT:-443}"} \
+    ${TLS_CHAIN:+--redirect-port "${REDIRECT_PORT:-80}"} \
+    ${AUTH_LOCAL_ONLY:+--auth-local-only} \
     --client-dir "$here/client" \
     --db-dir "${DB_DIR:-$here/data}" \
     --persist \

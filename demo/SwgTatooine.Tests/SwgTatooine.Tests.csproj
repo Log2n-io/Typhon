@@ -15,6 +15,11 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SwgTatooine\SwgTatooine.csproj" />
+    <!-- The bot fleet. Referenced here rather than in a project of its own so one fixture can stand up a real /auth host AND a
+         real provisioner against it: the thing worth testing about B5 is that a DERIVED password is acceptable to the SERVER's
+         own rules, which needs both assemblies in one place. Before this, nothing in the repository could reach BotSwarm at all,
+         which is how "Realm" instead of "realm" survived the whole life of the god-tour flag. -->
+    <ProjectReference Include="..\SwgTatooine.Bots\SwgTatooine.Bots.csproj" />
     <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
   </ItemGroup>
 </Project>

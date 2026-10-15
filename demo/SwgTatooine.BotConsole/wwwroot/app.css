@@ -1,0 +1,23 @@
+/* Deliberately small. This is an operator surface on a load generator, not a product: readable at a glance over a
+   tunnel, and nothing that needs a build step. */
+:root { color-scheme: light dark; --line: #8884; }
+body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 0 auto; padding: 1.5rem; max-width: 60rem; }
+h1 { font-size: 1.3rem; margin: 0 0 1rem; }
+h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.7; margin: 0 0 0.75rem; }
+.panel { border: 1px solid var(--line); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.75rem; }
+label { display: flex; flex-direction: column; gap: 0.2rem; font-weight: 600; }
+input, select { padding: 0.35rem; font: inherit; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; }
+input:disabled, select:disabled { opacity: 0.55; }
+small, .note { font-weight: 400; opacity: 0.75; }
+.note { margin: 0.75rem 0 0; }
+button { font: inherit; padding: 0.4rem 1.1rem; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: default; }
+.phase { margin-left: 0.75rem; font-weight: 700; }
+.shaping { margin-left: 0.75rem; opacity: 0.75; }
+.fault { color: #d33; font-weight: 700; }
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; font-weight: 600; width: 12rem; padding: 0.3rem 0.6rem 0.3rem 0; vertical-align: top; }
+td { padding: 0.3rem 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+pre { margin: 0; max-height: 18rem; overflow: auto; font-size: 12px; opacity: 0.85; }
+code { font-size: 0.9em; }
