@@ -196,6 +196,83 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         });
     }
 
+    /// <summary>
+    /// An entity that moves into a cluster with no replication block is parked, and its World observers are told nothing but that it moved (#1005).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// #1005's root cause, traced on the watched-set pipeline: a parked migrant landed in a block created that tick, which nothing projected, so for one tick
+    /// it was undescribed and every session that knew it was sent a leave, then an enter the tick after — one leave per park per session. Under push the
+    /// migration hook marks the arrival slot (<c>MigrateEntryCore</c>), so the blocks step gives the destination a block before the drain and the drained
+    /// entry is projected the same tick, as an arrival.
+    /// </para>
+    /// <para>
+    /// <b>The park is staged, not hoped for.</b> The mover goes to a spatial cell nobody occupies, so its destination cluster is born in the fence with no
+    /// block; the counters prove the entry was parked and drained rather than carried. The case asserts per frame, because a leave followed by a re-enter
+    /// under the same netId leaves the replica exactly where it started.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-09")]
+    public void AParkedMigrantIsAMoveToItsWorldObservers_NeverALeaveAndAReEnter()
+    {
+        using var harness = Create();
+
+        // Several in one cluster, so the source cluster outlives the move and only the mover's destination is new.
+        SpawnCreatures(harness, 6);
+        harness.RunTick(1);
+        var sessions = harness.OpenSessions(4, Profile);
+        harness.RunTick(2);
+        foreach (var s in sessions)
+        {
+            var fill = harness.Read(s);
+            Assert.That(fill.Enters.Count, Is.EqualTo(6), "the fill delivered every creature");
+            Assert.That((fill.Flags & TickFlags.ViewComplete) != 0, Is.True, "the view is complete before anything moves");
+        }
+
+        var creatures = harness.PlanIndex(nameof(ProjCreature));
+        var state = harness.Subscriptions.ReplicationStates[creatures];
+        var parkedBefore = state.EntriesParked;
+        var carriedBefore = state.EntriesMigrated;
+
+        // 4 000 m away, in a 256 m spatial cell nothing occupies: the fence creates its cluster, and that cluster has no block.
+        MoveFirst(harness, 1, to: 4000f);
+
+        var leaves = 0;
+        var enters = 0;
+        var segments = new List<uint>();
+        for (var tick = 3; tick <= 6; tick++)
+        {
+            harness.RunTick(tick);
+            foreach (var s in sessions)
+            {
+                var frame = harness.Read(s);
+                if (frame == null)
+                {
+                    continue;
+                }
+
+                leaves += frame.Leaves.Count;
+                enters += frame.Enters.Count;
+                segments.AddRange(frame.Segments);
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            // The precondition: the entry went through the park and the drain, not the carried path. Without it this case measures the sibling it already
+            // shares a test with.
+            Assert.That(state.EntriesParked - parkedBefore, Is.EqualTo(1), "the mover's destination had no block, so its entry was parked");
+            Assert.That(state.EntriesMigrated - carriedBefore, Is.Zero, "no destination block existed to carry the entry into");
+            Assert.That(state.ParkedDropped, Is.Zero, "the blocks step gave the destination a block, so the drain wrote the parked entry");
+
+            Assert.That(leaves, Is.Zero, "nothing was destroyed: a parked migrant must not be reported as leaving");
+            Assert.That(enters, Is.Zero, "and must not be re-entered, which is what a leave would have forced the tick after");
+            Assert.That(segments, Has.Count.GreaterThanOrEqualTo(sessions.Length), "every session was told the entity moved");
+            Assert.That(segments.Distinct().Count(), Is.EqualTo(1), "and only the mover moved");
+        });
+    }
+
     /// <summary>Leaves are the last records of their block, after the enters of the same frame, and never name a netId the same frame enters.</summary>
     [Test]
     public void LeavesAreLastAndNoNetIdBothEntersAndLeaves()
