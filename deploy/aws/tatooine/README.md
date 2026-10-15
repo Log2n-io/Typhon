@@ -175,8 +175,15 @@ sweep path the protection is the name exclusion and `prevent_destroy`, not the g
   distribution bills per-GB, which is 08-hosting § 4's $2 275/month rather than its $15.
 - **The profiler exporter still binds all interfaces with no authentication** (`TcpExporter.cs:108`). This module does
   not open its port, which is the half we control from here; the engine change is still owed.
-- **The account-wide CI billing alarm is $50** and will fire on the first game instance. Raise or scope it, or it
-  becomes noise and gets muted.
+- **The account's cost guard is one AWS Budget, `skypilot-monthly-cap`, at $100 — and it alerts without acting.**
+  Checked on 2026-10-15: there is **no CloudWatch billing alarm at all**, the budget has `filters: null` so it covers
+  the whole account, it has four notification thresholds (actual at 85 % and 100 %, forecast at 80 % and 100 %) and
+  **no budget actions** — so nothing is stopped by it. With $20.93 spent and $32.61 forecast, a test session costs
+  $1.62–3.60 and will not approach it. A **forgotten** instance will: a c6id.4xlarge on demand is ~$22/day, so the
+  remaining headroom is about 3.6 days. The TTL backstop in `cost.tf` is therefore the actual brake; the budget is a
+  notification. Raise or scope the $100 once the game runs regularly, so the game and SkyPilot stop sharing one ceiling.
+  (The notification thresholds report no subscriber addresses through the API, so whether the alerts reach anyone is
+  worth confirming in the console.)
 - **The budget and the anomaly monitor are account-wide, so only the `prod` stack creates them** (`persistent_data`
   gates it). An account with no prod stack therefore has **no budget at all** — create prod, or add them by hand, before
   anything runs overnight.
