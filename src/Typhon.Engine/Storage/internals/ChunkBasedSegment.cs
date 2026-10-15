@@ -1532,6 +1532,8 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// <see cref="ChunkAccessor{TStore}"/>, scan mode. An epoch-tagged accessor would keep every page the scan touched until the caller's scope ends,
     /// which a transaction holds until it is disposed.
     /// </summary>
+    [AllowCopy]
+    [return: TransfersOwnership]
     internal ChunkAccessor<TStore> CreateScanAccessor() => new(this, _store, _epochManager, null, scan: true);
 
     /// <summary>

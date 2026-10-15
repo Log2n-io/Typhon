@@ -1636,6 +1636,7 @@ public partial class DatabaseEngine
     /// A Transient segment has nothing to log or checkpoint, and the tick-fence shadow pass makes the same distinction by hand in its two branches.
     /// Resolved by type test rather than by an overload because the caller is generic over the store; the test is a JIT-time constant per instantiation.
     /// </remarks>
+    [AllowCopy]
     private static ChunkAccessor<TStore> CreateIndexAccessor<TStore>(ChunkBasedSegment<TStore> segment, ChangeSet changeSet) where TStore : struct, IPageStore
         => typeof(TStore) == typeof(PersistentStore) ? segment.CreateChunkAccessor(changeSet) : segment.CreateChunkAccessor();
 

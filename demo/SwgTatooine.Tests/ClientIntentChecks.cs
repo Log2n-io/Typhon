@@ -444,10 +444,11 @@ public sealed class ClientIntentChecks
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>This is the invariant that broke once and cost a session of debugging in the browser.</b> The engine compares
+    /// <b>This is the invariant that broke once and cost a session of debugging in the browser.</b> The engine compared
     /// <c>step²</c> against <c>(TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions with no margin, so an entity at exactly the declared maximum
-    /// tips over the boundary on about half its ticks — and each tip is reported as a teleport, which forbids interpolation. The symptom is not an error: a
-    /// player stands still for most of a second and then jumps. It was found by watching a mounted player stutter, not by a test.
+    /// tipped over the boundary on about half its ticks — and each tip was reported as a teleport, which forbids interpolation. The symptom is not an error: a
+    /// player stands still for most of a second and then jumps. It was found by watching a mounted player stutter, not by a test. The engine now carries a
+    /// quantization margin (#1074); a threshold below the fastest gait still stutters, which is what this guards.
     /// </para>
     /// <para>
     /// <b>Asserted here because the two numbers live apart and only arithmetic keeps them together.</b> The threshold is a replication constant and the gaits

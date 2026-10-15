@@ -595,5 +595,46 @@ class TransactionChainMaxActiveTests : TestBase<TransactionChainMaxActiveTests>
 
         Assert.That(dbe.TransactionChain.ActiveCount, Is.EqualTo(0));
     }
+
+    /// <summary>
+    /// A refused <c>CreateQuickTransaction</c> gives back the unit of work it claimed first (#1267). It used to keep the registry slot, so a caller retrying
+    /// against the active-transaction guard leaked one slot per attempt until the registry's own back-pressure stalled it.
+    /// </summary>
+    /// <remarks>
+    /// Also in a non-Deferred mode, where an ordinary dispose flushes: the refused UoW hosted nothing, so its slot comes back without waiting on the
+    /// durability of anyone's records, and the refusal is what surfaces.
+    /// </remarks>
+    [Test]
+    public void RefusedQuickTransaction_ReleasesItsUnitOfWork([Values(DurabilityMode.Deferred, DurabilityMode.Immediate)] DurabilityMode mode)
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+
+        var held = new List<Transaction>();
+        try
+        {
+            for (int i = 0; i < MaxActive; i++)
+            {
+                held.Add(dbe.CreateQuickTransaction(mode));
+            }
+
+            var uowsAtTheLimit = dbe.UowRegistry.ActiveCount;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+#pragma warning disable TYPHON004 // Refused: there is nothing to dispose
+                Assert.Throws<ResourceExhaustedException>(() => dbe.CreateQuickTransaction(mode));
+#pragma warning restore TYPHON004
+            }
+
+            Assert.That(dbe.UowRegistry.ActiveCount, Is.EqualTo(uowsAtTheLimit), "each refused attempt returns the unit of work it claimed");
+        }
+        finally
+        {
+            foreach (var tx in held)
+            {
+                tx.Dispose();
+            }
+        }
+    }
 }
 

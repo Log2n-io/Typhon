@@ -1403,14 +1403,47 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} not registered. Call after InitializeArchetypes.");
         }
 
-        var state = _archetypeStates[meta.ArchetypeId]?.ClusterState
-                    ?? throw new InvalidOperationException($"Archetype {typeof(TArch).Name} is not a cluster archetype.");
+        var state = _archetypeStates[meta.ArchetypeId]?.ClusterState ?? throw NotAClusterArchetype(typeof(TArch), meta.ArchetypeId);
         if (!state.SpatialSlot.HasSpatialIndex)
         {
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} has no spatial-indexed component.");
         }
 
         state.SpatialBarrierOnly = value;
+    }
+
+    /// <summary>
+    /// The slot whose component <see cref="InitializeArchetypes"/> could not resolve, for each archetype it skipped, by archetype id (#1071). Null until one is.
+    /// </summary>
+    private Dictionary<ushort, int> _skippedArchetypes;
+
+    /// <summary>
+    /// Why <see cref="InitializeArchetypes"/> gave archetype <paramref name="archetypeId"/> no storage, or null when it did not skip it.
+    /// </summary>
+    internal string SkippedArchetypeReason(ushort archetypeId)
+    {
+        if (_skippedArchetypes == null || !_skippedArchetypes.TryGetValue(archetypeId, out var slot))
+        {
+            return null;
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata(archetypeId);
+        var component = meta?._slotToComponentType?[slot];
+        return component == null
+            ? $"its slot {slot} has no component type"
+            : $"its component {component.Name} is not registered with this engine (RegisterComponentFromAccessor<{component.Name}>())";
+    }
+
+    /// <summary>
+    /// The refusal for a call that needs <paramref name="archetype"/>'s cluster state and finds none: the reason it was skipped at initialisation when it
+    /// was, which is nearly always a component never registered — "not a cluster archetype" described a state no archetype has entered since #666.
+    /// </summary>
+    private InvalidOperationException NotAClusterArchetype(Type archetype, ushort archetypeId)
+    {
+        var reason = SkippedArchetypeReason(archetypeId);
+        return new InvalidOperationException(reason != null
+            ? $"Archetype {archetype.Name} has no storage in this engine: InitializeArchetypes skipped it because {reason}."
+            : $"Archetype {archetype.Name} is not a cluster archetype.");
     }
 
     /// <summary>
@@ -1450,8 +1483,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             throw new InvalidOperationException($"Archetype {typeof(TArch).Name} not registered. Call after InitializeArchetypes.");
         }
 
-        var state = _archetypeStates[meta.ArchetypeId]?.ClusterState
-                    ?? throw new InvalidOperationException($"Archetype {typeof(TArch).Name} is not a cluster archetype.");
+        var state = _archetypeStates[meta.ArchetypeId]?.ClusterState ?? throw NotAClusterArchetype(typeof(TArch), meta.ArchetypeId);
 
         // The same check SetSpatialBarrierOnly makes, and for a sharper reason here: the dormancy arrays are allocated only inside InitializeSpatial's
         // spatial branch, so on a non-spatial archetype this would set a threshold that nothing can ever act on and report success.
@@ -4460,6 +4492,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         DropLegacyClusterIndexBootstrapKeys();
 
+        // Recorded afresh by every initialisation, so a reason never outlives the pass that found it.
+        _skippedArchetypes?.Clear();
+
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
         {
             // Connect slots to ComponentTables — skip archetypes with unregistered component types
@@ -4469,13 +4504,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             var slotToTable = new ComponentTable[meta.ComponentCount];
-            var allComponentsRegistered = true;
+            var skippedSlot = -1;
             for (var slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var compType = meta._slotToComponentType[slot];
                 if (compType == null)
                 {
-                    allComponentsRegistered = false;
+                    skippedSlot = slot;
                     break;
                 }
 
@@ -4485,14 +4520,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 var table = GetComponentTable(compType) ?? FindComponentTableBySchemaName(compType);
                 if (table == null)
                 {
-                    allComponentsRegistered = false;
+                    skippedSlot = slot;
                     break;
                 }
                 slotToTable[slot] = table;
             }
 
-            if (!allComponentsRegistered)
+            // The registry is process-wide, so an archetype another part of the process declared is skipped here as a matter of course and cannot be refused.
+            // What is recorded is why, so the first call that reaches the archetype can say it instead of describing a state it is not in (#1071). The slot
+            // only: the message is built when one is read, not for every foreign archetype on every open.
+            if (skippedSlot >= 0)
             {
+                (_skippedArchetypes ??= [])[meta.ArchetypeId] = skippedSlot;
                 continue;
             }
 
@@ -5816,9 +5855,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <remarks>
     /// <para>
     /// Every entry is kept, all-enabled ones included, so that an entity MISSING from the snapshot means "unknown", never "all enabled". The difference
-    /// matters on a migrating open after a crash: the old map is loaded with the same torn-page tolerance as the ordinary reopen, and read under the same
-    /// best-effort contract as the crash rebuild's <see cref="SnapshotEntityMapEnabledBits"/> — a torn page loses its entries, and a lost entry must fall
-    /// back to the weaker sources, not silently re-enable whatever that entity had disabled.
+    /// matters on a migrating open after a crash: the old map is loaded tolerating a torn page wherever one is possible
+    /// (<see cref="TolerateTornSegmentsAtOpen"/>), and read under the same best-effort contract as the crash rebuild's
+    /// <see cref="SnapshotEntityMapEnabledBits"/> — a torn page loses its entries, and a lost entry must fall back to the weaker sources, not silently
+    /// re-enable whatever that entity had disabled. Where no torn page is possible an unusable meta is refused instead (#1227).
     /// </para>
     /// <para>
     /// The old records are read at the CURRENT record size, which is only valid while the archetype's Versioned slot count is unchanged — a revision bump
@@ -5855,7 +5895,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         using var guard = EpochGuard.Enter(EpochManager);
-        var oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, EntityMapInitialBuckets, meta._entityRecordSize, tolerateDamage: true);
+
+        // An unusable meta is tolerated only where a torn page is possible — the predicate the segment load above uses (#1227). Not CrashRecoveryAtOpen:
+        // a refused clean open leaves the failed-open marker, so the next open takes the crash path with no torn page possible, and a forced repair open
+        // after a clean close does too. Anywhere else it is a map this engine cannot read — an earlier format or hash — and reading it as empty would take
+        // the snapshot from nothing, silently; the ordinary reopen refuses the same map.
+        RawValuePagedHashMap<long, PersistentStore> oldMap;
+        try
+        {
+            oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, EntityMapInitialBuckets, meta._entityRecordSize,
+                tolerateDamage: TolerateTornSegmentsAtOpen);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new InvalidOperationException(
+                $"Schema migration of archetype '{meta.Name}' refused: its pre-migration entity map cannot be read, so its enabled bits cannot be carried "
+                + "over. " + ex.Message, ex);
+        }
+
         (_preMigrationEnabledBits ??= [])[meta.ArchetypeId] = SnapshotEnabledBits(oldMap);
     }
 

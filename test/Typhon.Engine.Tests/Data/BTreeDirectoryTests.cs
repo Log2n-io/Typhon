@@ -142,6 +142,75 @@ class BTreeDirectoryTests
     }
 
     /// <summary>
+    /// A tree emptied in place and reloaded keeps its leaf root and serves its leaf chain once keys come back (#1332). Since #1322 an emptied leaf root
+    /// stays the root and is persisted as such; the reload dropped it because the count was 0, so the next insert allocated a second root and the first
+    /// stayed allocated, reachable from nothing — one chunk lost per reload of an emptied tree.
+    /// </summary>
+    [Test]
+    public unsafe void EmptiedTree_Reloaded_ServesItsLeafChainAfterReAdding()
+    {
+        using var mmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mmf.AllocateChunkBasedSegment(PageBlockType.None, 20, sizeof(Index32Chunk));
+        var key = new BTreeStableKey(3, 0);
+
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                var tree = new IntSingleBTree<PersistentStore>(segment, false, key);
+                for (var k = 0; k < 4; k++)
+                {
+                    tree.Add(k, k * 10, ref accessor);
+                }
+
+                for (var k = 0; k < 4; k++)
+                {
+                    Assert.That(tree.Remove(k, out _, ref accessor), Is.True);
+                }
+
+                Assert.That(tree.IsEmpty(), Is.True);
+                var chunksWhenEmptied = segment.AllocatedChunkCount;
+
+                var reloaded = new IntSingleBTree<PersistentStore>(segment, true, key);
+                Assert.That(reloaded.DiagnosticRoot.ChunkId, Is.EqualTo(tree.DiagnosticRoot.ChunkId), "the reload keeps the emptied tree's leaf root");
+                for (var k = 10; k < 14; k++)
+                {
+                    reloaded.Add(k, k * 10, ref accessor);
+                }
+
+                var seen = 0;
+                foreach (var kv in reloaded.EnumerateLeaves())
+                {
+                    Assert.That(kv.Value, Is.EqualTo(kv.Key * 10));
+                    seen++;
+                }
+
+                Assert.That(seen, Is.EqualTo(4), "the leaf chain of a reloaded, emptied tree must reach the re-added keys");
+
+                seen = 0;
+                foreach (var _ in reloaded.EnumerateRange(10, 13))
+                {
+                    seen++;
+                }
+
+                Assert.That(seen, Is.EqualTo(4), "a range scan over the re-added keys must find all of them");
+                Assert.That(segment.AllocatedChunkCount, Is.EqualTo(chunksWhenEmptied), "re-adding into the reloaded root allocates no second root");
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
     /// Fill the directory to capacity, then overflow it. The last accepted entry must be a working tree — proof it landed in a directory chunk and not in
     /// node storage.
     /// </summary>

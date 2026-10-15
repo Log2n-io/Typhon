@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Schema.Definition;
@@ -118,9 +119,11 @@ public sealed class UnitOfWork : IDisposable
             throw new InvalidOperationException($"Cannot create transaction: UoW is {_state}");
         }
 
+        // Counted once the chain admitted it: a refusal (the active-transaction guard, TSN exhaustion) created nothing.
+        var tx = _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline);
         Interlocked.Increment(ref _transactionCount);
         _dbe.RecordTransactionCreated();
-        return _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline);
+        return tx;
     }
 
     /// <summary>
@@ -136,9 +139,10 @@ public sealed class UnitOfWork : IDisposable
             throw new InvalidOperationException($"Cannot create transaction: UoW is {_state}");
         }
 
+        var tx = _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline, ownChangeSet: true);
         Interlocked.Increment(ref _transactionCount);
         _dbe.RecordTransactionCreated();
-        return _dbe.TransactionChain.CreateTransaction(_dbe, this, discipline: discipline, ownChangeSet: true);
+        return tx;
     }
 
     /// <summary>
@@ -231,6 +235,24 @@ public sealed class UnitOfWork : IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Gives back a unit of work that never hosted a transaction, without the durability flush a non-Deferred dispose makes (#1267).
+    /// </summary>
+    /// <remarks>
+    /// For <c>CreateQuickTransaction</c>'s refusal path. There is nothing to make durable, and the flush is harmful there: <see cref="Dispose"/> releases the
+    /// registry slot BEFORE it flushes, and the flush ends by recording the UoW committed — into a slot that is free again, and may already be another
+    /// UoW's — after waiting on the durability of records that are not this UoW's.
+    /// </remarks>
+    internal void DisposeUnused()
+    {
+        Debug.Assert(_transactionCount == 0, "only a unit of work that hosted no transaction has nothing to flush");
+        _skipDisposeFlush = true;
+        Dispose();
+    }
+
+    /// <summary>Set by <see cref="DisposeUnused"/>: the dispose gives the slot back without flushing.</summary>
+    private bool _skipDisposeFlush;
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -250,7 +272,7 @@ public sealed class UnitOfWork : IDisposable
 
         // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
         // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose.
-        if (_durabilityMode != DurabilityMode.Deferred)
+        if (_durabilityMode != DurabilityMode.Deferred && !_skipDisposeFlush)
         {
             _ = FlushAsync();
         }

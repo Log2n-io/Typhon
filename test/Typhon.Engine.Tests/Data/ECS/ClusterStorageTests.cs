@@ -65,6 +65,29 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         return dbe;
     }
 
+    /// <summary>
+    /// An archetype whose component was never registered names that component when a call reaches it (#1071).
+    /// </summary>
+    /// <remarks>
+    /// InitializeArchetypes skips it, and has to — the registry is process-wide, so other code's archetypes are skipped as a matter of course. It used to
+    /// skip without a record, so the first call to reach the archetype described something else: <c>SetSpatialBarrierOnly</c> said "not a cluster
+    /// archetype", a state no archetype has entered since #666, and a spawn said the archetype was not registered at all.
+    /// </remarks>
+    [Test]
+    public void AnArchetypeWithAnUnregisteredComponent_NamesItWhereItIsReached()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ClPosition>();   // ClMovement, ClAnt's other component, is not
+        dbe.InitializeArchetypes();
+
+        var barrier = Assert.Throws<InvalidOperationException>(() => dbe.SetSpatialBarrierOnly<ClAnt>());
+        Assert.That(barrier.Message, Does.Contain(nameof(ClMovement)).And.Contain("not registered"));
+
+        using var tx = dbe.CreateQuickTransaction();
+        var spawn = Assert.Throws<InvalidOperationException>(() => tx.Spawn<ClAnt>());
+        Assert.That(spawn.Message, Does.Contain(nameof(ClMovement)).And.Contain("skipped"));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Layout Tests
     // ═══════════════════════════════════════════════════════════════════════

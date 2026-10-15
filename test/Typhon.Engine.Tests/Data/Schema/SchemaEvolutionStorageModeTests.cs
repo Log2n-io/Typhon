@@ -1,3 +1,4 @@
+using System;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -378,6 +379,64 @@ class SchemaEvolutionStorageModeTests : TestBase<SchemaEvolutionStorageModeTests
 
                     Assert.That(refused, Is.True, $"entity {i}: a component never supplied must stay absent across the migration");
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A migrating clean open refuses a pre-migration entity map it cannot read, instead of reading it as empty (#1227).
+    /// </summary>
+    /// <remarks>
+    /// The map's meta is stamped with the previous format ("LHA2", whose keys sit in other buckets). Opened with damage tolerance, it presented an empty
+    /// map, the enabled-bits snapshot was taken from nothing and the migration went on without a word. Outside the crash path an unusable meta is not a torn
+    /// page, and the ordinary reopen already refuses the same map.
+    /// </remarks>
+    [Test]
+    public unsafe void Migration_OfAnArchetypeWhoseEntityMapIsAnEarlierFormat_IsRefused()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846SvV1>();
+            dbe.RegisterComponentFromAccessor<Evo846Ver>();
+            dbe.InitializeArchetypes();
+
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < 10; i++)
+                {
+                    t.Spawn<Evo846Arch>(Evo846Arch.Sv.Set(new Evo846SvV1(i)), Evo846Arch.Ver.Set(new Evo846Ver(i)));
+                }
+
+                t.Commit();
+            }
+
+            var segment = dbe._archetypeStates[Archetype<Evo846Arch>.Metadata.ArchetypeId].EntityMap.Segment;
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                var accessor = segment.CreateChunkAccessor(uow.ChangeSet);
+                accessor.GetChunk<PagedHashMapMeta>(0, true).Format = 0x3241484C;   // "LHA2"
+                accessor.Dispose();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the stamped meta reaches the file");
+        }
+
+        // Twice: the refused open leaves the failed-open marker, and a retry must not get past the refusal by any path — no torn page is possible on it
+        // either, so the same map must still be refused rather than read as empty. (The retry reaches it through the ordinary map load, which refuses it
+        // by the same meta check.)
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            using var scope = ServiceProvider.CreateScope();
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<Evo846SvV2>();
+            dbe.RegisterComponentFromAccessor<Evo846Ver>();
+            var ex = Assert.Throws<InvalidOperationException>(() => dbe.InitializeArchetypes(), $"open {attempt}");
+            Assert.That(ex.Message, Does.Contain("format 0x3241484C"), $"open {attempt}: refused for the format, not read as empty");
+            if (attempt == 1)
+            {
+                Assert.That(ex.Message, Does.Contain("pre-migration entity map cannot be read"), "the migrating open names what it could not carry over");
             }
         }
     }

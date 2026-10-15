@@ -55,8 +55,17 @@ internal readonly struct MotionPolicy
     /// <summary>The extrapolation error budget, squared — compared against a squared distance so no square root is taken per entity.</summary>
     public double ToleranceSquared { get; }
 
-    /// <summary>The teleport threshold as a distance per tick, squared: <c>(Teleport x period)²</c>.</summary>
+    /// <summary>
+    /// The teleport threshold as a distance per tick, squared: <c>(Teleport x period + </c><see cref="TeleportQuantumMargin"/><c> x quantum diagonal)²</c>.
+    /// </summary>
     public double TeleportSquaredPerTick { get; }
+
+    /// <summary>
+    /// Quantum diagonals the teleport threshold allows over the declared speed. Rounding puts each end of a measured step within half a quantum per axis,
+    /// which is one diagonal on the step; the second covers the float32 source's own representation error, the same order as the quantum at world scale
+    /// (2⁻¹⁰ m at ±8 192 m, which is also the 24-bit quantum there).
+    /// </summary>
+    internal const double TeleportQuantumMargin = 2.0;
 
     /// <summary>How many ticks a <b>moving</b> segment may live before it is refreshed. A stationary one never is.</summary>
     public uint MaxAgeTicks { get; }
@@ -110,7 +119,16 @@ internal readonly struct MotionPolicy
         var tolerance = position.ToleranceMetres;
         ToleranceSquared = tolerance * tolerance;
 
-        var teleport = position.TeleportMaxSpeedMps * tickPeriodSeconds;
+        // The step is measured between two QUANTIZED positions, so it is off from the true step by up to a quantum per axis. Without a margin an entity moving
+        // at exactly the declared speed sits on the boundary and reads as a teleport on about half its ticks (#1074) — the contract is "the fastest this
+        // moves", and an application stating it truthfully got broken motion. The margin (TeleportQuantumMargin) is millimetres against any real jump.
+        var quantumDiagonalSquared = 0d;
+        for (var a = 0; a < Dims; a++)
+        {
+            quantumDiagonalSquared += Step[a] * Step[a];
+        }
+
+        var teleport = (position.TeleportMaxSpeedMps * tickPeriodSeconds) + (TeleportQuantumMargin * Math.Sqrt(quantumDiagonalSquared));
         TeleportSquaredPerTick = teleport * teleport;
 
         // Rounded rather than truncated, and floored at one tick: a MaxAge shorter than a tick would otherwise round to zero and turn the heartbeat into a
@@ -449,8 +467,9 @@ internal static unsafe class MotionTracker
             var at = segment + policy.SegmentVelocityOffset;
             for (var a = 0; a < policy.Dims; a++)
             {
-                // Clamped by the codec, and the clamp is never reached in practice: the width was derived from the same teleport threshold that trigger 1
-                // refuses to let a step exceed (W5), so a displacement that would saturate has already been sent as a teleport.
+                // Clamped by the codec. The width was derived from the declared speed (W5) and trigger 1 lets a step exceed it only by TeleportQuantumMargin
+                // — quantization noise, millimetres — so the clamp is reached only by a mover within that noise of the codec's own limit, and then costs a
+                // refit through the error test, never a wrong position.
                 var code = velocity.IsEmpty ? 0 : WireMath.EncodeVel(velocity[a], policy.VelUnitExp, policy.VelBits);
                 WriteCode(at + (a * policy.VelBytes), policy.VelBytes, unchecked((uint)code));
             }

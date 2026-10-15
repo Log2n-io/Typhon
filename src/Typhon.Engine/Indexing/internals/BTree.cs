@@ -1380,7 +1380,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             {
                 FindInDirectory(key, ref accessor);
 
-                if (_count > 0)
+                // Gated on the root, not the count (#1332): an emptied tree reloads its leaf root (FindInDirectory), and nothing after the load sets the chain
+                // ends again — every leaf-chain walk and the head/tail fast paths would be dead for the tree's lifetime.
+                if (_rootChunkId != 0)
                 {
                     // Equivalent to `Root` (which is also non-caching since #297) — kept explicit because we are about to compute and assign Height inside the
                     // loop below, so reading the property here (which was the historical cache source) would be misleading.
@@ -1474,8 +1476,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         ref var entry = ref Unsafe.AsRef<BTreeDirectoryEntry>(entryChunkAddr + offset);
         _count = entry.Count;
 
+        // The root is restored whatever the count (#1332): since #1322 an emptied leaf root stays the root, and SyncHeader persists it. Gating on the count
+        // dropped it on reload, so the next insert allocated a second root and the persisted one stayed allocated, reachable from nothing.
         var rootChunkId = entry.RootChunkId;
-        if (_count > 0 && rootChunkId > 0)
+        if (rootChunkId > 0)
         {
             Root = new NodeWrapper(_storage, rootChunkId);
         }

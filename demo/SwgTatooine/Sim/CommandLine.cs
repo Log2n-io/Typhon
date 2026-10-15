@@ -42,6 +42,20 @@ public static class CommandLine
         return name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0;
     }
 
+    /// <summary>What <c>--help</c> prints before the flags.</summary>
+    private const string Usage =
+        """
+        SwgTatooine — a server-side Star Wars Galaxies workload for the Typhon engine.
+
+          usage: SwgTatooine [flags]          measure a fixed number of ticks and report
+                 SwgTatooine --serve <port>    serve the same world over WebSocket, forever
+                 SwgTatooine --sweep           run the partitioning matrix and write a report
+
+          --serve now REQUIRES its port. A bare --serve used to mean 8080, and so did a malformed one:
+          `--serve 808O` listened on 8080 and said nothing. Every flag names its value or is refused.
+
+        """;
+
     /// <summary>Parses a command line.</summary>
     /// <param name="args">The process arguments.</param>
     /// <returns>The configuration. <see cref="SimConfig.HelpText"/> is set instead when the line asks for help.</returns>
@@ -53,7 +67,7 @@ public static class CommandLine
         // Every fallback below is `c.X`, never a literal. A literal matching the field initialiser today is drift waiting to happen, and it would show up in
         // the one place meant to be authoritative: `--help` would print a default the program does not use.
         var c = new SimConfig();
-        var r = new ArgReader(args ?? []);
+        var r = new ArgReader(args ?? [], Usage);
 
         r.Group("mode");
         r.Switch("--help", "print this list and exit (or -h as the first argument)");

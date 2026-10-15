@@ -167,6 +167,12 @@ internal readonly ref struct OlcLatch
         // Release store: publishes every write made under the lock before the unlock is visible. Free on x64 (TSO — plain mov); emits stlr on arm64.
         int v = _version;
         var newV = ((v >> 2) + 1) << 2 | (v & 0b10);  // version++, keep obsolete, clear lock
+        // The counter wraps after 2³⁰ unlocks, and a live unlocked latch at 0 reads as "locked" to ReadVersion: every optimistic reader would restart until
+        // the next write (#1214). Skip 0. Only a live latch can land there: an obsolete one keeps bit 1.
+        if (newV == 0)
+        {
+            newV = 0b100;
+        }
         Volatile.Write(ref _version, newV);
         OlcLatchHeld.Count--;
         TyphonEvent.EmitConcurrencyOlcLatchWriteUnlock((uint)v, (uint)newV);

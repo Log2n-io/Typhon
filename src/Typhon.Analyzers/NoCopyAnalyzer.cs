@@ -245,6 +245,12 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// Where <c>[NoCopy]</c> and <c>[AllowCopy]</c> are declared. The match used to name <c>Typhon.Engine</c>, which neither attribute has lived in since
+    /// #331, so the analyzer never fired and a by-value <c>ChunkAccessor</c> compiled without a word (#1226).
+    /// </summary>
+    internal const string AttributeNamespace = "Typhon.Engine.Internals";
+
+    /// <summary>
     /// Checks whether the given member is marked with <c>[AllowCopy]</c>.
     /// </summary>
     private static bool HasAllowCopyAttribute(ISymbol symbol)
@@ -252,7 +258,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         foreach (var attr in symbol.GetAttributes())
         {
             if (attr.AttributeClass?.Name is "AllowCopyAttribute" or "AllowCopy" &&
-                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == "Typhon.Engine")
+                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == AttributeNamespace)
             {
                 return true;
             }
@@ -274,7 +280,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         foreach (var attr in typeSymbol.GetAttributes())
         {
             if (attr.AttributeClass?.Name is "NoCopyAttribute" or "NoCopy" &&
-                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == "Typhon.Engine")
+                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == AttributeNamespace)
             {
                 return true;
             }
@@ -297,7 +303,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         foreach (var attr in typeSymbol.GetAttributes())
         {
             if (attr.AttributeClass?.Name is "NoCopyAttribute" or "NoCopy" &&
-                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == "Typhon.Engine")
+                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == AttributeNamespace)
             {
                 foreach (var namedArg in attr.NamedArguments)
                 {
@@ -329,7 +335,9 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         // distinguish factories (fresh value) from getters (copy of existing state).
         if (unwrapped is IInvocationOperation invocation)
         {
-            return HasAllowCopyAttribute(invocation.TargetMethod);
+            // A ref-returning method hands out an EXISTING instance (a rented, cached accessor), so taking it into a by-value local copies it whatever its
+            // marking — the PS-19 leak. Every caller that takes it by ref returned earlier (a ref local or ref assignment is no copy).
+            return HasAllowCopyAttribute(invocation.TargetMethod) && invocation.TargetMethod.RefKind == RefKind.None;
         }
 
         // Property reads marked [AllowCopy] — sentinel properties like None that inline to direct construction
@@ -342,6 +350,32 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         if (unwrapped is IConditionalOperation conditional)
         {
             return IsAllowedValue(conditional.WhenTrue) && IsAllowedValue(conditional.WhenFalse);
+        }
+
+        // `a ?? b`: both sides must be allowed — `segment?.CreateChunkAccessor() ?? default` is a factory or a default, never a copy
+        if (unwrapped is ICoalesceOperation coalesce)
+        {
+            return IsAllowedValue(coalesce.Value) && IsAllowedValue(coalesce.WhenNull);
+        }
+
+        // `a?.M()`: what is produced is M's result, so it is allowed when M's is
+        if (unwrapped is IConditionalAccessOperation conditionalAccess)
+        {
+            return IsAllowedValue(conditionalAccess.WhenNotNull);
+        }
+
+        // A switch expression, like `?:`: every arm must be allowed
+        if (unwrapped is ISwitchExpressionOperation switchExpression)
+        {
+            foreach (var arm in switchExpression.Arms)
+            {
+                if (!IsAllowedValue(arm.Value))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         return false;
