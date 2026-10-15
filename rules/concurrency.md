@@ -341,10 +341,16 @@ lock ordering and deadlock prevention are still to come.
   invariant a back-pressure wait inside such a walk moves the waiting thread's epoch, with its warm accessors' (#1230): PagedMMF.RefreshableWaitDepth,
             entered by the walks a query passes a yield point to. Every page such a walk holds is a scan accessor's slot-reference pin, so the epoch
             protects none of them; left at the minimum, it protected every page every other thread tagged while it waited, until nothing could be
-            evicted and all of them timed out together. A wait outside such a walk — a point read, a commit — still holds its epoch: its frames may keep
-            an address the epoch alone protects (#1199). So does a point read INSIDE such a walk — a chain walk through the transaction's accessors,
+            evicted and all of them timed out together. A wait outside such a walk and outside an entity open — a commit's, a B+Tree operation's —
+            still holds its epoch: its frames may keep an address the epoch alone protects (#1199). So does a point read INSIDE such a walk — a chain walk through the transaction's accessors,
             a regular accessor's map read — which sets the depth to 0 for its length (EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
             EntityVisibility.IsVisiblePendingInScan)
+  invariant an entity open that meets back-pressure does not wait with its transaction's pin (#1230): the round throws BackpressureOpenRestart
+            (PagedMMF.RestartableOpenDepth), Transaction.ResolveEntity catches it at the open's start, moves the epoch there as NoteEntityOpen
+            does, waits for a page and runs the open again, its restarts within one back-pressure timeout of its first round. The open keeps nothing
+            it read until it returns, and every lock it takes is released by the throw, so the unwind loses nothing the retry needs. Not under a live
+            index cursor, nor in a commit's publish (AP-03): those still wait with their pins. Waiting, one reader's pin kept every page the others
+            touched meanwhile: 16 readers over 32 MiB had the whole cache epoch-held, nothing dirty, the pin 1,177 epochs behind
   invariant the tail transaction refreshes its epoch before it drains the deferred cleanups (Transaction.RefreshEpochBeforeDrain), at the call
             boundary its dispose is (EP-03), and between the drain's entries at most every millisecond (DeferredCleanupManager.EpochYield — a
             batch of thousands outlived the first refresh, its pin 6,800 to 15,700 epochs behind): the drain runs every transaction's cleanups, and the tail's pin is the oldest there is — a back-pressure
@@ -353,7 +359,8 @@ lock ordering and deadlock prevention are still to come.
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
-         EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
+         EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
+         Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
          RawValuePagedHashMap.AnyEntry, EcsQuery.ScanClusterSoa, EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
          EntityVisibility.IsVisiblePendingInScan, Transaction.RefreshEpochBeforeDrain, DeferredCleanupManager.EpochYield,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
@@ -392,6 +399,8 @@ lock ordering and deadlock prevention are still to come.
             yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer
             fills the cache (1 012 of 1 024 pages epoch-held) and stalls; the walk's next miss waits, moves its epoch, and both finish (with the wait's
             refresh removed: the back-pressure timeout, nothing dirty, 1 012 epoch-protected)
+  verified: EpochRefreshCadenceTests.AnOpenMeetingBackpressure_UnwindsToItsStart_MovesItsEpoch_AndRunsAgain [VerifiesRule] — three forced rounds
+            of back-pressure under an open that misses: three restarts, the epoch moved by each, the open's answer unchanged
   verified: QueryScanCacheBoundTests — the occupancy count, the entity-map count and existence check, the SoA scan, the index range scan and the
             unfiltered collect over a 625-page archetype, inside one read-only transaction, leave at most 5 pages epoch-protected; with the scans
             epoch-tagged again they leave 619 (count), 467 (SoA scan), and 41 with only the index range scan reverted; after each read no page
@@ -424,6 +433,12 @@ lock ordering and deadlock prevention are still to come.
             refreshed once per system instead (PointInTimeAccessor.FlushWorker), which also releases its cluster cache: a refresh
             increments the global epoch, which sends every other thread's warm B+Tree accessor down its cold path, so what a worker's
             epoch and cluster cache hold is bounded by the system's run
+  invariant while the page cache is under back-pressure, and for PagedMMF.PressureHold after its last back-pressure round, those cadences
+            shorten to every 8 (EntityAccessor.PressuredEpochRefreshInterval; PagedMMF.UnderPressure, read every 8 operations by
+            EntityAccessor.EpochRefreshDue). The epoch keeps every page any thread touched since the oldest pin — about pinned threads × the
+            interval × the pages an operation touches — so at 128, 32 threads over a 64 MiB cache needed twice the cache, epoch-held with
+            no skewed pin (#1230). A back-pressure timeout names the pinned threads and the oldest pin's lag, and when the cache is mostly
+            epoch-held, the two causes they tell apart (PageCacheBackpressureTimeoutException)
   invariant a stored component's collection is changed through EntityRefMut.CreateComponentCollectionAccessor(comp, ref copy,
             ref copy.Field), which creates a Versioned component's new revision before the accessor exists, so a buffer the committed
             revision still points to is cloned, never edited in place. Opening it records the write in every storage mode — the
@@ -446,7 +461,7 @@ lock ordering and deadlock prevention are still to come.
          EntityAccessor.ShareStagedCollections, Transaction.ReleaseStagedCollections, Transaction.PublishStagedEntry, ClusterRef.Set,
          EntityAccessor.Teleport, EntityAccessor.ResolveClusterBases,
          EntityAccessor.ReresolveClusterBase, EntityAccessor.EnsureClusterCache, EntityAccessor.NoteEntityOpen,
-         PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext
+         EntityAccessor.EpochRefreshDue, PagedMMF.UnderPressure, PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext
   on_violation: the cache gives the slot to another page while the pointer lives on — reads return another entity's values, and a
                 write through the pointer lands in another entity while the intended write is lost (#1199: a handle opened, then an
                 archetype switch and 130 spawns or a 200-entity enumeration, then another thread's reads: wrong values in 2 to 4 runs of
@@ -463,6 +478,9 @@ lock ordering and deadlock prevention are still to come.
             512-page cache and peaks at 45 epoch-protected pages (sampled every 1 024 opens), and without the open refresh times out with
             510 [VerifiesRule]; a ClusterRef used after its enumerator's next MoveNext or Dispose throws under strict mode [VerifiesRule];
             handles of two archetypes used in turn leave the generation unmoved, which a one-entry cluster cache fails
+  verified: EpochRefreshCadenceTests — a transaction refreshes every 8 opens while the cache is under pressure and every 128 once the hold has
+            passed and an allocation found a slot; red with the cadence fixed at 128 [VerifiesRule]; the timeout message names the pinned
+            threads, the oldest pin's lag and the working-set cause when the cache is mostly epoch-held
   verified: ComponentCollectionTests.Collection_ChangedThroughAHandle_LeavesTheCommittedRevisionsBufferAlone — an older snapshot still sees
             ten elements after a handle-made change commits eleven; without the copy-on-write first, it sees eleven [VerifiesRule];
             Collection_ChangedThroughAHandle_WithoutASet_IsStored — the change is stored with no Set, and fails without the write-back

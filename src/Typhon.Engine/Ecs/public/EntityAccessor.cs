@@ -29,7 +29,23 @@ public partial class EntityAccessor : IDisposable
     /// Number of entity operations between epoch refreshes. Each operation touches ~4-20 pages.
     /// At 128 ops × ~10 pages/op = ~1280 pages — refreshes before saturating a 1024-page cache.
     /// </summary>
-    private protected const int EpochRefreshInterval = 128;
+    internal const int EpochRefreshInterval = 128;
+
+    /// <summary>
+    /// The refresh interval while the page cache is under back-pressure (EP-03, #1230). The epoch keeps every page any thread touched since the oldest pin,
+    /// about pinned threads × the interval × the pages an operation touches; at 128, 32 threads over a 64 MiB cache needed twice the cache. A power of two:
+    /// the pressure flag is read only every this many operations.
+    /// </summary>
+    internal const int PressuredEpochRefreshInterval = 8;
+
+    /// <summary>
+    /// Whether the <paramref name="count"/>th operation since the last refresh refreshes: every <see cref="EpochRefreshInterval"/>, or every
+    /// <see cref="PressuredEpochRefreshInterval"/> while the cache is under pressure. The flag is read once per short interval, so the cadence costs
+    /// a mask and a branch per operation at rest.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected bool EpochRefreshDue(int count) =>
+        (count & (PressuredEpochRefreshInterval - 1)) == 0 && (count >= EpochRefreshInterval || _dbe.MMF.UnderPressure);
 
     private protected bool _isDisposed;
     private protected DatabaseEngine _dbe;
@@ -344,7 +360,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void CheckEpochRefresh()
     {
-        if (++_entityOperationCount >= EpochRefreshInterval && LiveIndexCursors == 0)
+        if (EpochRefreshDue(++_entityOperationCount) && LiveIndexCursors == 0)
         {
             FlushAndRefreshEpoch();
             _entityOperationCount = 0;
@@ -391,7 +407,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void NoteEntityOpen()
     {
-        if (++_entityOperationCount >= EpochRefreshInterval && LiveIndexCursors == 0)
+        if (EpochRefreshDue(++_entityOperationCount) && LiveIndexCursors == 0)
         {
             _entityOperationCount = 0;
             EnumerateRefreshEpoch();

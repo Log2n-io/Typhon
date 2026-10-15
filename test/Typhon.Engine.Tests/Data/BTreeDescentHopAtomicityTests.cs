@@ -229,6 +229,84 @@ public class BTreeDescentHopAtomicityTests
         }
     }
 
+    /// <summary>
+    /// The bound is on one hold, not on the sum of a hot node's holders (#1237): writer after writer taking the root, each for less than
+    /// <see cref="BTreeHeldNode.MaxWait"/> and together for four times it, is contention, and the descent waits it out. Summed, the storm's waiters named
+    /// the market key's leaf a liveness defect past a commit's WAL append, and the engine stopped.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IXW-01")]
+    public unsafe void ADescentMeetingANodeHeldByWriterAfterWriter_WaitsPastTheBoundOfOneHold()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 200, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        var bound = BTreeHeldNode.MaxWait;
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (int i = 1; i <= 2000; i++)
+            {
+                tree.Add(i * 10, i, ref accessor);
+            }
+
+            BTreeHeldNode.MaxWait = TimeSpan.FromMilliseconds(100);
+            Assert.That(tree.DiagnosticRoot.GetLatch(ref accessor).TryWriteLock(), Is.True, "premise: the root is held");
+            Exception failure = null;
+            var found = -1;
+            var reader = new Thread(() =>
+            {
+                var readerDepth = epochManager.EnterScope();
+                try
+                {
+                    foreach (var kv in tree.EnumerateRange(12_340, 12_340))
+                    {
+                        found = kv.Value;
+                    }
+                }
+                catch (Exception e)
+                {
+                    failure = e;
+                }
+                finally
+                {
+                    epochManager.ExitScope(readerDepth);
+                }
+            });
+            reader.Start();
+            var stillWaiting = true;
+            try
+            {
+                // Seven holds of 60 ms: each under the bound, 420 ms in all. An unlock bumps the version, so each relock is another holder's.
+                for (var hold = 0; hold < 7 && stillWaiting; hold++)
+                {
+                    stillWaiting = !reader.Join(60);
+                    var latch = tree.DiagnosticRoot.GetLatch(ref accessor);
+                    latch.WriteUnlock();
+                    Assert.That(tree.DiagnosticRoot.GetLatch(ref accessor).TryWriteLock(), Is.True, "premise: the next holder takes the root");
+                }
+            }
+            finally
+            {
+                tree.DiagnosticRoot.GetLatch(ref accessor).WriteUnlock();
+            }
+
+            reader.Join();
+            Assert.That(stillWaiting, Is.True, $"premise: the descent was still waiting after the last hold ({failure?.Message})");
+            Assert.That(failure, Is.Null, $"the descent summed the holders' holds into one: {failure?.Message}");
+            Assert.That(found, Is.EqualTo(1234), "the key, once the last holder let go");
+            accessor.Dispose();
+        }
+        finally
+        {
+            BTreeHeldNode.MaxWait = bound;
+            epochManager.ExitScope(depth);
+        }
+    }
+
     private unsafe int Descend(bool injectVersionBump, out Result<int, BTreeLookupStatus> found)
     {
         using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();

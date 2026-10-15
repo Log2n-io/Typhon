@@ -2391,6 +2391,15 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     }
 
     /// <summary>
+    /// Brings in, before a latch, the pages a latched step then touches in the buffer of <paramref name="leaf"/>'s entry at <paramref name="index"/>
+    /// (#1237): see <see cref="BaseNodeStorage.PrefetchBuffer"/>. The leaf is read unlatched, so the buffer id is a hint.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PrefetchEntryBuffer(NodeWrapper leaf, int index, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> bufferAccessor,
+        int elementChunkId = 0)
+        => _storage.PrefetchBuffer(leaf.GetItem(index, ref accessor).Value, elementChunkId, ref bufferAccessor);
+
+    /// <summary>
     /// Removes one element from <paramref name="key"/>'s buffer under the write latch of the leaf that holds the key, and returns how many the buffer still
     /// holds — or -1 when the key or the element is not there. <paramref name="bufferId"/> is the buffer as read UNDER that latch.
     /// </summary>
@@ -2411,6 +2420,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         out int bufferId)
     {
         bufferId = -1;
+        _storage.PrefetchBuffer(0, elementId, ref sibAccessor);   // #1237: the element's chunk, before the latch
         if (!TryLatchAuthoritativeLeaf(key, ref opAccessor, out var leaf))
         {
             return -1;
@@ -2900,6 +2910,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         PureSpin spin = default;
         SpinWait heldSpin = default;
         long heldSince = 0;
+        int heldNodeId = 0, heldNodeWord = 0;
         for (var attempt = 0; ;)
         {
             var (leafChunkId, stoppedAt, keyIndex) = OptimisticDescendToLeaf(key, ref accessor, followRightLink);
@@ -2924,19 +2935,26 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             // Only when this thread holds no latch itself: waiting while holding one could close a cycle the counted bound used to break.
             // The pass names the node it stopped at in the version slot (OptimisticDescendToLeaf): held now — locked, not obsolete — means a writer has it.
             // Re-resolved by chunk id, as every latch read after other reads must be; a node reused since only answers the question wrong, never unsafely.
+            // The bound is on one hold: a hot node taken by writer after writer, each briefly, is contention, and summing their holds named it a defect.
+            // A hold is one (node, latch word) pair: an unlock bumps the version, so the next holder's word differs. An abort does not, so holders that
+            // abort back to back read as one hold: each changed nothing, which is the livelock the bound is for.
             var heldNode = false;
+            var heldWord = 0;
             if (stoppedAt != 0 && OlcLatchHeld.Count == 0)
             {
                 var stoppedLatch = _storage.LoadNode(stoppedAt).GetLatch(ref accessor);
-                heldNode = stoppedLatch.IsLocked && !stoppedLatch.IsObsolete;
+                heldWord = stoppedLatch.Word;
+                heldNode = (heldWord & 0b11) == 0b01;   // locked, not obsolete
             }
 
             if (heldNode)
             {
                 var now = Stopwatch.GetTimestamp();
-                if (heldSince == 0)
+                if (heldSince == 0 || stoppedAt != heldNodeId || heldWord != heldNodeWord)
                 {
                     heldSince = now;
+                    heldNodeId = stoppedAt;
+                    heldNodeWord = heldWord;
                 }
                 else if (Stopwatch.GetElapsedTime(heldSince, now) > BTreeHeldNode.MaxWait)
                 {

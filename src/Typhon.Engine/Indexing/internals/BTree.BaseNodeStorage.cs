@@ -108,6 +108,12 @@ internal abstract partial class BTree<TKey, TStore>
         public virtual int BufferChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => 0;
 
         /// <summary>
+        /// Brings in the pages a latched step then touches in an AllowMultiple key's buffer, before the latch (#1237): its root and append chunk, and
+        /// <paramref name="elementChunkId"/>'s chunk when non-zero. Hints read unlatched; nothing for a unique index.
+        /// </summary>
+        public virtual void PrefetchBuffer(int bufferId, int elementChunkId, ref ChunkAccessor<TStore> bufferAccessor) { }
+
+        /// <summary>
         /// <see cref="Append"/> under the leaf latch (#1190): -1, with nothing written, when the append needs a chunk the calling thread has not reserved.
         /// </summary>
         public virtual int TryAppendReserved(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor) => Append(bufferId, value, ref bufferAccessor);

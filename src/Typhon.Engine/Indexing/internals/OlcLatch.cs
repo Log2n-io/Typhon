@@ -206,6 +206,9 @@ internal readonly ref struct OlcLatch
         OlcLatchHeld.Count--;
     }
 
+    /// <summary>The raw word, lock and obsolete bits included: a hold is one value of it, so a waiter tells one holder from the next (#1237).</summary>
+    public int Word => Volatile.Read(ref _version);
+
     /// <summary>Check if locked (for diagnostics only).</summary>
     public bool IsLocked => (_version & 0b1) != 0;
 

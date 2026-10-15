@@ -101,23 +101,35 @@ internal ref struct RevisionEnumerator : IDisposable
                 ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
-        _itemCountLeft = _header.ItemCount;
-        _nextChunkId = ref _header.NextChunkId;
+        // The step to an overflow chunk fetches a page, and a fetch can throw: a back-pressure timeout, or an entity open's restart (#1230), after which
+        // the transaction goes on. The constructor never returned, so the caller's using has nothing to dispose: the hold is released here, or the
+        // retry takes the shared lock again over one never given back and the next writer of the entity waits out its lock timeout (as #1278).
+        try
+        {
+            _itemCountLeft = _header.ItemCount;
+            _nextChunkId = ref _header.NextChunkId;
 
-        _indexInChunk = goToFirstItem ? _header.FirstItemIndex : (short)0;
-        if (_indexInChunk < ComponentRevisionManager.CompRevCountInRoot)
-        {
-            var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId, false);
-            _nextChunkId = ref chunkContent.Cast<byte, int>()[0];
-            _elements = chunkContent.Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
-            CurChunkId = compRevFirstChunkId;
+            _indexInChunk = goToFirstItem ? _header.FirstItemIndex : (short)0;
+            if (_indexInChunk < ComponentRevisionManager.CompRevCountInRoot)
+            {
+                var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId, false);
+                _nextChunkId = ref chunkContent.Cast<byte, int>()[0];
+                _elements = chunkContent.Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
+                CurChunkId = compRevFirstChunkId;
+            }
+            else
+            {
+                var (chunkIndexInChain, index) = CompRevStorageHeader.GetRevisionLocation(_indexInChunk);
+                _indexInChunk = (short)index;
+                StepToChunk(chunkIndexInChain, false);
+            }
         }
-        else
+        catch
         {
-            var (chunkIndexInChain, index) = CompRevStorageHeader.GetRevisionLocation(_indexInChunk);
-            _indexInChunk = (short)index;
-            StepToChunk(chunkIndexInChain, false);
+            Dispose();
+            throw;
         }
+
         --_indexInChunk;        // We pre-increment in MoveNext, so we start one before
         _revisionIndex = -1;
     }

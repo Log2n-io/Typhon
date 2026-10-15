@@ -2681,10 +2681,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // value outside them. Read after the zone map, the watermark shows any such update: the HEAD changed before the map was re-tightened.
                     if (skip && snapshotReads)
                     {
-                        if (!X86Base.IsSupported)
-                        {
-                            Interlocked.MemoryBarrier();
-                        }
+                        Volatile.ReadBarrier();   // the zone-map loads before the watermark re-read, on arm64 too (load-load); nothing on x64
 
                         skip = clusterState.ClusterMaxUpdated(clusterChunkId) <= txTsn;
                     }
@@ -2758,10 +2755,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // that copied a value newer than this snapshot into the bytes just read shows here, and the cluster is evaluated again at the snapshot.
                 if (snapshotReads && !snapshotCluster)
                 {
-                    if (!X86Base.IsSupported)
-                    {
-                        Interlocked.MemoryBarrier();   // the HEAD loads above are plain: an acquire alone would not keep them before the re-read
-                    }
+                    Volatile.ReadBarrier();   // the HEAD loads above are plain: an acquire alone would not keep them before the re-read; nothing on x64
 
                     if (ArchetypeClusterState.MaxUpdatedOf(ref slotWords) > txTsn)
                     {
@@ -3231,10 +3225,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     // stand; only the bytes they are verified on are taken at the snapshot.
                     if (snapshotReads && !snapshotCluster)
                     {
-                        if (!X86Base.IsSupported)
-                        {
-                            Interlocked.MemoryBarrier();
-                        }
+                        Volatile.ReadBarrier();   // see ScanClusterSoa
 
                         if (ArchetypeClusterState.MaxUpdatedOf(ref slotWords) > txTsn)
                         {

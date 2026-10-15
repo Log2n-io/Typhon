@@ -1147,7 +1147,9 @@ public unsafe partial class Transaction : EntityAccessor
                 _currentPK = entityRaw;
                 _currentKey = key;
 
-                if (++_entityCount % EpochRefreshInterval == 0)
+                // EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).
+                if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
+                    && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))
                 {
                     _tx.EnumerateRefreshEpoch();
                 }

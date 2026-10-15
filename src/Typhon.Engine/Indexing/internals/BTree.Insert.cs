@@ -405,6 +405,12 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         if (AllowMultiple)
                         {
+                            var tailCountHint = rl.GetCount(ref accessor);
+                            if (tailCountHint > 0)
+                            {
+                                PrefetchEntryBuffer(rl, tailCountHint - 1, ref accessor, ref args.SiblingAccessor);   // #1237
+                            }
+
                             rl.PreDirtyForWrite(ref accessor);
                             if (!latch.TryWriteLock())
                             {
@@ -524,6 +530,7 @@ internal abstract partial class BTree<TKey, TStore>
                     {
                         if (AllowMultiple)
                         {
+                            PrefetchEntryBuffer(ll, 0, ref accessor, ref args.SiblingAccessor);   // #1237
                             ll.PreDirtyForWrite(ref accessor);
                             if (!llLatch.TryWriteLock())
                             {
@@ -562,12 +569,19 @@ internal abstract partial class BTree<TKey, TStore>
             return OlcInsertResult.Restart;
         }
 
-        if (AllowMultiple && keyIndexSeen < 0)
+        var leaf = new NodeWrapper(_storage, leafChunkId);
+        if (AllowMultiple)
         {
-            EnsureBufferReserved(NewKeyBufferChunks, ref args);   // #1190: the descent saw a new key; its buffer is reserved before the latch
+            if (keyIndexSeen < 0)
+            {
+                EnsureBufferReserved(NewKeyBufferChunks, ref args);   // #1190: the descent saw a new key; its buffer is reserved before the latch
+            }
+            else
+            {
+                PrefetchEntryBuffer(leaf, keyIndexSeen, ref accessor, ref args.SiblingAccessor);   // #1237: an append, its pages brought in before the latch
+            }
         }
 
-        var leaf = new NodeWrapper(_storage, leafChunkId);
         leaf.PreDirtyForWrite(ref accessor);
         var leafLatch = leaf.GetLatch(ref accessor);
         if (!leafLatch.TryWriteLock())

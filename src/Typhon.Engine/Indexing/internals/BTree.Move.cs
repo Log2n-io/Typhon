@@ -399,6 +399,9 @@ internal abstract partial class BTree<TKey, TStore>
         // #1190: the new key's value-buffer chunk is reserved in this scope, holding nothing, and taken under the leaf latch. Opened only when a chunk must be.
         var reservation = ChunkReservation<TStore>.Current;
         var reservationOpen = false;
+        // #1237: the pages the latched steps touch in both buffers come in before the first latch, once the descents name the buffers. Faulted in under the
+        // leaf latch while the cache was under back-pressure, they held the hot key's leaf for seconds.
+        var prefetched = false;
         try
         {
             for (int attempt = 0; attempt < MaxOptimisticRestarts; attempt++)
@@ -430,6 +433,7 @@ internal abstract partial class BTree<TKey, TStore>
                 // latch below asks the same question again.
                 int newLeafId;
                 int newVersion;
+                var newKeyIndexSeen = int.MinValue;   // the second descent's, when there is one
                 var standingLeaf = _storage.LoadNode(oldLeafId);
                 if (!KeyOutsideLeafAuthority(standingLeaf, newKey, Comparer, ref opAccessor)
                     && standingLeaf.GetLatch(ref opAccessor).ValidateVersion(oldVersion))
@@ -439,13 +443,25 @@ internal abstract partial class BTree<TKey, TStore>
                 }
                 else
                 {
-                    (newLeafId, newVersion, _) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
+                    (newLeafId, newVersion, newKeyIndexSeen) = OptimisticDescendToLeaf(newKey, ref opAccessor, false);
                 }
 
                 if (newLeafId == 0)
                 {
                     Interlocked.Increment(ref _optimisticRestarts);
                     continue;
+                }
+
+                if (!prefetched)
+                {
+                    prefetched = true;
+                    PrefetchEntryBuffer(_storage.LoadNode(oldLeafId), oldKeyIndex, ref opAccessor, ref sibAccessor, elementId);
+                    var hintLeaf = _storage.LoadNode(newLeafId);
+                    var hintIndex = newKeyIndexSeen != int.MinValue ? newKeyIndexSeen : hintLeaf.Find(newKey, Comparer, ref opAccessor);
+                    if (hintIndex >= 0)
+                    {
+                        PrefetchEntryBuffer(hintLeaf, hintIndex, ref opAccessor, ref sibAccessor);
+                    }
                 }
 
                 // Phase 2: Lock and mutate

@@ -1943,6 +1943,45 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>How many back-pressure waits moved their thread's epoch (<see cref="RefreshableWaitDepth"/>).</summary>
     internal static long RefreshedWaits;
 
+    /// <summary>
+    /// Non-zero on a thread inside an entity open (<c>Transaction.ResolveEntity</c>), which keeps nothing it read until it returns, so it can be unwound to
+    /// its start and run again (#1230). A back-pressure round there throws <see cref="BackpressureOpenRestart"/> instead of waiting: the open moves its
+    /// epoch at its start, where a refresh is already safe (#1199), waits there for a page, and runs again. Waiting with its pin, a point reader protected
+    /// every page the other threads tagged meanwhile: at 16 readers over 32 MiB the whole cache, nothing dirty, its pin 1,177 epochs behind.
+    /// </summary>
+    internal static int RestartableOpenDepth
+    {
+        get => t_restartableOpenDepth;
+        set => t_restartableOpenDepth = value;
+    }
+
+    [ThreadStatic] private static int t_restartableOpenDepth;
+    /// <summary>
+    /// When the open now restarting met back-pressure first, a <see cref="Stopwatch"/> timestamp; 0 for none. Its restarts share one
+    /// <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> from there, which the open's end resets.
+    /// </summary>
+    internal static long OpenRestartSince
+    {
+        get => t_openRestartSince;
+        set => t_openRestartSince = value;
+    }
+
+    [ThreadStatic] private static long t_openRestartSince;
+
+    /// <summary>How many back-pressure rounds unwound their entity open to move its epoch (<see cref="RestartableOpenDepth"/>).</summary>
+    internal static long RestartedOpens;
+
+    /// <summary>
+    /// An open's wait between its restarts (<see cref="RestartableOpenDepth"/>), its epoch moved: the round's remedies, then one wait of the strategy, which
+    /// a page made evictable ends early.
+    /// </summary>
+    internal void AwaitPageAfterOpenRestart()
+    {
+        OnBackpressure?.Invoke();
+        var ctx = new BackpressureContext("Storage/PagedMMF/OpenRestart", TimeoutOptions.Current.PageCacheBackpressureTimeout);
+        _backpressureStrategy.OnPressure(ref ctx, 0, 0);
+    }
+
     /// <summary>How many times a publish's allocation outlasted <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> and went on waiting.</summary>
     internal long PublishBackpressureExtensions => Interlocked.Read(ref _publishBackpressureExtensions);
 
@@ -1950,6 +1989,56 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Test seam: while it returns true, every allocation round finds no slot, a whole lap's worth — back-pressure, on demand.</summary>
     internal Func<bool> ForceBackpressureForTest;
+
+    /// <summary>
+    /// The pressure flag, alone on its cache line: every transaction reads it every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> operations,
+    /// and it is written only when the cache enters or leaves back-pressure.
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit, Size = 128)]
+    private struct PaddedPressureFlag
+    {
+        [FieldOffset(64)] public int Value;
+    }
+
+    private PaddedPressureFlag _underPressure;
+    private long _pressureClearAt;
+
+    /// <summary>How long the cache stays under pressure after its last back-pressure round: past it, the next allocation clears the flag.</summary>
+    internal static TimeSpan PressureHold = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// True while an allocation waits on back-pressure, and for <see cref="PressureHold"/> after the last such round (EP-03, #1230). Transactions refresh
+    /// their epoch every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> operations meanwhile instead of every
+    /// <see cref="EntityAccessor.EpochRefreshInterval"/>: the pages every thread touched since the oldest pin are what the epoch keeps, so a shorter
+    /// interval shrinks that set by the same factor. A hint: a plain read, a stale value only delays the cadence change by a few operations.
+    /// </summary>
+    internal bool UnderPressure => _underPressure.Value != 0;
+
+    /// <summary>A back-pressure round: the cache is under pressure for at least <see cref="PressureHold"/> from now.</summary>
+    private void NotePressure()
+    {
+        Volatile.Write(ref _pressureClearAt, Stopwatch.GetTimestamp() + (long)(PressureHold.TotalSeconds * Stopwatch.Frequency));
+        if (_underPressure.Value == 0)
+        {
+            _underPressure.Value = 1;
+        }
+    }
+
+    /// <summary>An allocation that found a slot: once the hold since the last back-pressure round has passed, the cache has recovered.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteAllocated()
+    {
+        if (_underPressure.Value != 0 && Stopwatch.GetTimestamp() >= Volatile.Read(ref _pressureClearAt))
+        {
+            _underPressure.Value = 0;
+        }
+    }
+
+    /// <summary>Test seam: a back-pressure round, as an allocation that found nothing makes one.</summary>
+    internal void NotePressureForTests() => NotePressure();
+
+    /// <summary>Test seam: an allocation that found a slot.</summary>
+    internal void NoteAllocatedForTests() => NoteAllocated();
 
     private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
         CancellationToken cancellationToken = default)
@@ -2118,6 +2207,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         backpressureSince = Stopwatch.GetTimestamp();
                     }
 
+                    NotePressure();   // EP-03: transactions refresh their epoch on the shorter cadence while it lasts (#1230)
+
                     try
                     {
                         bpScope.RetryCount = bpCtx.RetryCount;
@@ -2143,6 +2234,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         {
                             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(EpochManager.RefreshScope());
                             Interlocked.Increment(ref RefreshedWaits);
+                        }
+                        else if (t_restartableOpenDepth > 0 && t_publishSince == 0 && EntityAccessor.LiveIndexCursors == 0)
+                        {
+                            // #1230: an entity open does not wait with its pin. It unwinds to its start and moves its epoch there (RestartableOpenDepth),
+                            // its restarts bounded together by one back-pressure timeout from its first round. From the first round, not the lap's end:
+                            // above the sweep floor a lap is several rounds, each a wait the open would make with its pin.
+                            var openSince = t_openRestartSince;
+                            if (openSince == 0)
+                            {
+                                t_openRestartSince = openSince = backpressureSince;
+                            }
+
+                            var openWaited = Stopwatch.GetElapsedTime(openSince);
+                            if (openWaited < TimeoutOptions.Current.PageCacheBackpressureTimeout)
+                            {
+                                Interlocked.Increment(ref RestartedOpens);
+                                throw new BackpressureOpenRestart();
+                            }
+
+                            ThrowHelper.ThrowPageCacheBackpressureTimeout(dirtyCount, epochCount, openWaited, EpochManager?.ActiveSlotCount ?? 0,
+                                EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0);
                         }
 
                         // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
@@ -2172,7 +2284,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                     dirtyCount, epochCount,
                                     publishSince != 0
                                         ? Stopwatch.GetElapsedTime(backpressureSince)
-                                        : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                                        : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining,
+                                    EpochManager?.ActiveSlotCount ?? 0,
+                                    EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0);
                             }
                         }
                     }
@@ -2187,6 +2301,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
 
             ++_metrics.TotalMemPageAllocatedCount;
+            NoteAllocated();
 
             // Record the eviction as a zero-duration marker span, parented under the enclosing PageCacheAllocatePage scope via TLS. Default-
             // suppressed alongside the other PageCache.* kinds — when the profiler is off or this kind is suppressed the whole call
