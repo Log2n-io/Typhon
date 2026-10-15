@@ -28,8 +28,9 @@ valid whatever its transaction does next; zero-copy access is cluster iteration'
 ([Entity Clusters](../entity-clusters.md)). At `Spawn`, an omitted `Versioned` component is *absent* — no chunk and no revision
 chain are allocated for it — while an omitted `SingleVersion`/`Transient` component is zero-initialized and
 disabled. The entity is staged invisibly until commit; `Destroy` tombstones it
-(cascade-deleting configured children) — data is freed later by deferred GC, never by the destroying
-transaction itself.
+(cascade-deleting configured children) — data is freed later by deferred GC, except when the entity was
+also spawned in the same transaction, in which case the commit frees its storage immediately since it was
+never published.
 
 ## 💻 Usage
 
@@ -120,7 +121,8 @@ dtx.Commit();
   worker accessor throws on `Set` to a `Versioned` slot (read-only there).
 - `Spawn`/`SpawnBatch` entities are invisible to other transactions until commit (`BornTSN = commit TSN`);
   `Destroy` only tombstones (`DiedTSN = commit TSN`) — entries/chunks are reclaimed by deferred GC once no live
-  transaction can still see the entity.
+  transaction can still see the entity; an entity this same transaction also `Spawn`ed is freed at commit instead,
+  since it was never published and no other transaction can reference it.
 - Enable/Disable never frees or reallocates a chunk — data is preserved for an immediate, zero-cost re-enable
   (`Disable` then `Enable` alone, no value required). Three states: *enabled*, *disabled* (value stored, O(1) re-enable),
   and *absent* (Versioned component never supplied at Spawn — `Enable(comp)` throws; use `Enable(comp, in value)`).

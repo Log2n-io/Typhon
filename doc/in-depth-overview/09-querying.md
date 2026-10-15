@@ -240,7 +240,7 @@ public interface IView
 }
 ```
 
-The `IView` surface deliberately omits the internal `ViewDeltaRingBuffer` — that's supplied separately at registration time, so registry code can read it directly off a field instead of through interface dispatch.
+The `IView` surface deliberately omits the internal `ViewDeltaRingBuffer` — that's supplied separately at registration time. The registry holds the buffer but **not** the view: storing the `IView` reference would root the object and prevent the GC from collecting an abandoned view, keeping its buffer subscribed and receiving commit deltas indefinitely (#865).
 
 ### `ViewBase` — shared state
 
@@ -308,13 +308,13 @@ One per `ComponentTable`. Maps `fieldIndex → ViewRegistration[]` (copy-on-writ
 ```csharp
 internal readonly struct ViewRegistration
 {
-    public readonly IView View;
-    public readonly ViewDeltaRingBuffer DeltaBuffer;  // cached here so the hot path doesn't cast
+    public readonly int ViewId;                       // NOT IView — holding the view would root it, blocking GC of abandoned views (#865)
+    public readonly ViewDeltaRingBuffer DeltaBuffer;
     public readonly byte ComponentTag;                // 0 = T1, 1 = T2 (multi-component views)
 }
 ```
 
-On `RegisterView(IView, DeltaBuffer)` the registry inserts a `ViewRegistration` into each field-dependency bucket. On `DeregisterView`, it sweeps all buckets, removing every registration for that view (some views are registered under multiple component tags).
+On `RegisterView(IView, DeltaBuffer)` the registry inserts a `ViewRegistration` into each field-dependency bucket. On `DeregisterView`, it sweeps all buckets, removing every registration for that view (some views are registered under multiple component tags). Both `RegisterView` and `DeregisterView` also sweep registrations whose view was finalized without `Dispose` (`DeltaBuffer.IsAbandoned`), retiring the buffer and removing the entry.
 
 ### `ViewDeltaRingBuffer`
 

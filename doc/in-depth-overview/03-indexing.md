@@ -200,7 +200,7 @@ For multi-value indexes, use `TryGetMultiple` which returns a `VariableSizedBuff
 
 [`BTree.RangeEnumerator.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.RangeEnumerator.cs)
 
-A `ref struct` enumerator that seeks the start leaf and walks the leaf-chain forward (via `NextChunk`) or backward (via `PrevChunk`). Per-leaf OLC validation: read the leaf version before reading the items, validate after; on validation failure, re-read just that leaf from the beginning/end.
+A `ref struct` enumerator that seeks the start leaf and walks the leaf-chain forward (via `NextChunk`) or backward (via `PrevChunk`). OLC per row (IXS-09): the cursor takes the leaf version before finding the key's position in it, validates both together, and re-validates each row before emitting it; on a version change it re-descends from the last key emitted.
 
 Variants:
 

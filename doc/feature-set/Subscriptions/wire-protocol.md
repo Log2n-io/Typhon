@@ -57,7 +57,7 @@ TypeScript.
 - **Exact by default**: 64-bit integers (`u64`, `i64`, their varints) and doubles (`f64`) travel whole, and a fixed shape as a `count` of its
   element; a lossy codec is a declaration's choice. Strings and blobs are length-capped by the catalog.
 - **Records are absolute**: a frame never depends on a frame the client might have missed.
-- `resumeToken` is always 0 until resume is built.
+- **`WELCOME` carries a 16-byte resume token** (`ResumeToken`); a client that reconnects within `ResumeGraceMs` presents it to reclaim its session (SUB-12).
 
 ## 🧪 Tests
 
