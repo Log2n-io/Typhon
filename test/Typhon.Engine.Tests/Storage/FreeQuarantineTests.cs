@@ -69,6 +69,56 @@ internal sealed class FreeQuarantineTests : TestBase<FreeQuarantineTests>
         return _dbe.GetComponentTable<MkWallet>().CompRevTableSegment.IsChunkAllocated(chunk);
     }
 
+    /// <summary>
+    /// A release that meets back-pressure waits with its epoch moved on (#1382): the release worker, waiting with its pin, held every page tagged while
+    /// it waited — one of the oldest pins of an epoch-held cache. The chunk is still freed once.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    public void AReleaseMeetingBackpressure_MovesItsEpoch_AndFreesTheChunk()
+    {
+        var segment = _dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        var chunk = AllocateRevision();
+        Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
+        Free(chunk);
+
+        // Sealed and made releasable by hand, not by a cycle: a cycle signals the release worker, which would free the chunk on its own thread.
+        var frees = (IQuarantinedFrees)segment;
+        frees.SealFrees();
+        Assert.That(frees.MarkReleasable(), Is.True);
+        _dbe.MMF.EvictEvictablePagesForTest();   // the release's bitmap page misses
+
+        // The pin each round sees, on this thread: the process-wide counters move with every other fixture's refreshes.
+        var pins = new List<long>();
+        var releaser = Environment.CurrentManagedThreadId;
+        var rounds = 0;
+        _dbe.MMF.ForceBackpressureForTest = () =>
+        {
+            if (Environment.CurrentManagedThreadId != releaser)
+            {
+                return false;
+            }
+
+            pins.Add(_dbe.EpochManager.CurrentThreadPinnedEpoch);
+            return ++rounds <= 2;
+        };
+        try
+        {
+            _dbe.MMF.DrainReleases();
+        }
+        finally
+        {
+            _dbe.MMF.ForceBackpressureForTest = null;
+        }
+
+        Assert.That(rounds, Is.GreaterThan(2), "premise: the release missed, and met two rounds of back-pressure");
+        Assert.That(pins[1], Is.GreaterThan(pins[0]), "the first round moved the release's epoch");
+        Assert.That(pins[2], Is.GreaterThan(pins[1]), "and the second");
+        Assert.That((Allocated(chunk), segment.IsChunkHeld(chunk)), Is.EqualTo((false, false)), "freed, held no more");
+        Assert.That(PagedMMF.RefreshableWaitDepth, Is.Zero, "the release's refreshable scope, closed");
+    }
+
     [Test]
     [VerifiesRule("CK-17")]
     [CancelAfter(10_000)]

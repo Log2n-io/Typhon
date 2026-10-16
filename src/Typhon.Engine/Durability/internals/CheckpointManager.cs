@@ -768,9 +768,10 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// <remarks>
     /// Given up, the hook may have persisted some archetypes and not others. Each update is a record and a dirty page, as a full run's are, and a
     /// flush-only cycle writes such pages as the write ahead of the hook already did: the cycle that runs the hook to its end advances CheckpointLSN
-    /// over them. Once the hook has not run for <see cref="HookDeferralWindow"/> it waits as before, bounded by the back-pressure timeout, so
-    /// CheckpointLSN cannot stall behind a hook that is never served — by time, not by a count of cycles: under a storm cycles run back to back, and
-    /// three deferrals in a row were a second, after which every fourth cycle waited again. The shutdown cycle never defers: it is the last.
+    /// over them. Once the hook has not run for <see cref="HookDeferralWindow"/> it must run, waiting for its pages outside its epoch, bounded by the
+    /// back-pressure timeout (<see cref="RunHookWaitingOutsideItsEpoch"/>), so CheckpointLSN cannot stall behind a hook that is never served — by time,
+    /// not by a count of cycles: under a storm cycles run back to back, and three deferrals in a row were a second, after which every fourth cycle waited
+    /// again. The shutdown cycle never defers: it is the last.
     /// </remarks>
     private bool RunHookOrDefer(CheckpointReason reason)
     {
@@ -816,7 +817,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// The hook that must run, waiting for its pages without its epoch (#1382): it gives up at a lap's end as a deferral would, unwinding its epoch scope and
     /// its marks, waits for a page there, and runs again — idempotent, so a rerun redoes nothing it saved. Waiting inside its allocation, with its pin, the
     /// checkpoint thread was the oldest pin of a cache gone epoch-held (3,841 epochs behind, at 16 writers over 32 MiB). Its reruns go on while pages are
-    /// served (S1); past that, one last run waits as before and its timeout reports the stall.
+    /// served (S1); past that, the back-pressure timeout reports the stall, thrown between two runs: never a wait with its pin.
     /// </summary>
     private void RunHookWaitingOutsideItsEpoch(Action hook)
     {
@@ -843,8 +844,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             budget.Start(mmf.ServedUnderPressure);
             if (!budget.Allows(timeouts.PageCacheBackpressureTimeout, timeouts.PageCacheOverloadWaitCeiling, mmf.ServedUnderPressure, out _))
             {
-                hook();
-                return;
+                // The timeout reports the stall from here, outside the epoch: a last run that waited as before held the oldest pin for a whole
+                // timeout, with the cache it waited on epoch-held behind it.
+                mmf.ThrowBackpressureTimeout(budget.Waited);
             }
 
             mmf.AwaitPageAfterOpenRestart();

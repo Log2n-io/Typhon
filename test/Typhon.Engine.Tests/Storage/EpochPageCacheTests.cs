@@ -177,6 +177,132 @@ class EpochPageCacheTests
         guard.Dispose();
     }
 
+    /// <summary>
+    /// A caller reads the epoch before the fetch, and a back-pressure wait inside the fetch may move its pin past it (a refreshable wait, #1230). The
+    /// page is tagged with the pin, not the value read before: that would leave it older than every pin, evictable while the caller uses it (#1382).
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [Property("MemPageCount", 8)]
+    [VerifiesRule("PS-03")]
+    public void PinMovedInFetch_TagsWithThePin() => PinMovedInFetch(0);
+
+    /// <summary>The same for <see cref="PagedMMF.RequestPageEpochUnchecked"/>, the segment grow's fetch.</summary>
+    [Test]
+    [CancelAfter(5000)]
+    [Property("MemPageCount", 8)]
+    [VerifiesRule("PS-03")]
+    public void PinMovedInUncheckedFetch_TagsWithThePin() => PinMovedInFetch(1);
+
+    /// <summary>The same for <see cref="PagedMMF.RequestPageEpochNoSweep"/>, the introspection fetch.</summary>
+    [Test]
+    [CancelAfter(5000)]
+    [Property("MemPageCount", 8)]
+    [VerifiesRule("PS-03")]
+    public void PinMovedInNoSweepFetch_TagsWithThePin() => PinMovedInFetch(2);
+
+    private void PinMovedInFetch(int variant)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        using (EpochGuard.Enter(epochManager))
+        {
+            for (var i = 0; i < 8; i++)
+            {
+                Assert.That(pmmf.RequestPageEpoch(i, epochManager.GlobalEpoch, out _), Is.True);
+            }
+        }
+
+        var guard = EpochGuard.Enter(epochManager);
+        var readBefore = epochManager.GlobalEpoch;
+        var requester = Environment.CurrentManagedThreadId;
+        var rounds = 0;
+        pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == requester && ++rounds <= 2;
+        PagedMMF.RefreshableWaitDepth++;
+        int memPageIndex;
+        try
+        {
+            var fetched = variant switch
+            {
+                0 => pmmf.RequestPageEpoch(100, readBefore, out memPageIndex),
+                1 => pmmf.RequestPageEpochUnchecked(100, readBefore, out memPageIndex),
+                _ => pmmf.RequestPageEpochNoSweep(100, readBefore, out memPageIndex),
+            };
+            Assert.That(fetched, Is.True);
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth--;
+            pmmf.ForceBackpressureForTest = null;
+        }
+
+        var pinned = epochManager.CurrentThreadPinnedEpoch;
+        Assert.That(pinned, Is.GreaterThan(readBefore), "premise: the fetch's back-pressure rounds moved the pin");
+        Assert.That(pmmf.GetPageAccessEpoch(memPageIndex), Is.GreaterThanOrEqualTo(pinned), "the page is protected by the pin that now holds it");
+        guard.Dispose();
+    }
+
+    /// <summary>
+    /// The eviction guard (#1382, on-demand stress runs): an evicted slot sits out a quarantine, its memory inaccessible, while an older one serves the
+    /// new page — so an address kept past its page's protection faults at the access. The cache keeps serving pages, and the slot it hands out is
+    /// accessible again.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [Property("MemPageCount", 16)]
+    public unsafe void EvictionGuard_QuarantinesEvictedSlots_Inaccessible()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        using (EpochGuard.Enter(epochManager))
+        {
+            for (var i = 0; i < 16; i++)
+            {
+                Assert.That(pmmf.RequestPageEpoch(i, epochManager.GlobalEpoch, out _), Is.True);
+            }
+        }
+
+        pmmf.EnableEvictionGuardForTests(2);
+        using (EpochGuard.Enter(epochManager))
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                Assert.That(pmmf.RequestPageEpoch(100 + i, epochManager.GlobalEpoch, out var mem), Is.True);
+                _ = System.Threading.Volatile.Read(ref *(int*)pmmf.GetMemPageAddress(mem));   // the slot served is accessible: this read would fault in a quarantined one
+                Assert.That(pmmf.QuarantinedSlotsForTests, Does.Not.Contain(mem));
+            }
+        }
+
+        var held = pmmf.QuarantinedSlotsForTests;
+        Assert.That(held, Has.Length.EqualTo(2), "two slots sit out the quarantine");
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var slot in held)
+            {
+                Assert.That(VirtualQuery(pmmf.GetMemPageAddress(slot), out var info, (nuint)sizeof(MemoryBasicInformation)), Is.Not.EqualTo((nuint)0));
+                Assert.That(info.Protect, Is.EqualTo(0x01u), $"slot {slot}: PAGE_NOACCESS");
+            }
+        }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public nint BaseAddress;
+        public nint AllocationBase;
+        public uint AllocationProtect;
+        public ushort PartitionId;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern unsafe nuint VirtualQuery(void* address, out MemoryBasicInformation info, nuint length);
+
     // ========================================
     // ChangeSet epoch-mode support
     // ========================================

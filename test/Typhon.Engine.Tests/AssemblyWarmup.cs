@@ -28,6 +28,14 @@ public class AssemblyWarmup
         // test fails if anything reads a slot's initial content (PS-14).
         PagedMMF.PoisonCacheForProcess = true;
 
+        // On-demand stress runs only (#1382): evicted slots sit out a quarantine, inaccessible, so an address kept past its page's protection faults
+        // with its stack. The fault ends the process, so a suite run never sets it.
+        if (int.TryParse(Environment.GetEnvironmentVariable("TYPHON_EVICTION_GUARD"), out var evictionGuardDepth) && evictionGuardDepth > 0)
+        {
+            PagedMMF.EvictionGuardDepthForProcess = evictionGuardDepth;
+            Console.WriteLine($"Eviction guard on: {evictionGuardDepth} slots quarantined per cache");
+        }
+
         // Install a last-chance handler so unhandled exceptions on background threads
         // dump their stack trace before the process dies.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>

@@ -86,11 +86,12 @@ class CheckpointHookDeferralTests : TestBase<CheckpointHookDeferralTests>
     [Test]
     [CancelAfter(15_000)]
     [VerifiesRule("CK-14")]
-    public void OnceTheHookHasNotRunForItsWindow_ItWaitsForItsPage()
+    public void PastItsWindow_TheHookWaitsOutsideItsEpoch_AndTimesOutWithoutItsPin()
     {
         using var dbe = OpenEngineWithAColdHookPage();
         var ckpt = dbe.CheckpointManager;
         var deferrals = ckpt.TotalHookDeferrals;
+        var restarts = ckpt.TotalHookRestarts;
         var saved = TimeoutOptions.Current;
         var window = CheckpointManager.HookDeferralWindow;
         var timeouts = saved.Clone();
@@ -131,7 +132,8 @@ class CheckpointHookDeferralTests : TestBase<CheckpointHookDeferralTests>
         }
 
         Assert.That(ckpt.TotalHookDeferrals - deferrals, Is.EqualTo(1), "past its window the hook did not defer");
-        Assert.That(waitedRounds, Is.GreaterThan(0), "it waited for its page");
+        Assert.That(ckpt.TotalHookRestarts - restarts, Is.GreaterThan(0), "it waited for its page outside its epoch");
+        Assert.That(waitedRounds, Is.Zero, "no round waited with its pin, the last one included (#1382)");
         Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Degraded), "its wait timed out, a transient cycle failure (CK-06)");
     }
 

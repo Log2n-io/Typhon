@@ -1071,9 +1071,9 @@ CK-08 (flush-only cycles) are later increments.
             writes and settles every owed page, runs no barrier, moves no CheckpointLSN); the next cycle runs the hook again. Once the hook has not
             run for CheckpointManager.HookDeferralWindow (10 s) it must run, and waits for its pages outside its epoch
             (CheckpointManager.RunHookWaitingOutsideItsEpoch): it gives up at a lap's end as a deferral would, waits for a page with its scope unwound,
-            and runs again — idempotent — while pages are served (PS-22); past that, one last run waits as before, bounded by the back-pressure
-            timeout. Waiting inside its allocation, the checkpoint thread's pin was the oldest of a 32 MiB cache gone epoch-held (3,841 epochs
-            behind). So CheckpointLSN cannot stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
+            and runs again — idempotent — while pages are served (PS-22); past that, the back-pressure timeout is thrown between two runs, never
+            after a wait with its pin (a last run that waited as before held the oldest pin for a whole timeout). Waiting inside its allocation,
+            the checkpoint thread's pin was the oldest of a 32 MiB cache gone epoch-held (3,841 epochs behind). So CheckpointLSN cannot stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
             shutdown cycle never defers. The deferral is taken at a lap's end, so on a cache above the sweep floor the clock is searched whole first A hook given up midway leaves some archetypes updated — records and dirty pages, as a full run's — and
             releases its ChangeSet's marks (PS-05)
   scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
@@ -1860,7 +1860,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-03: AccessEpoch uses CAS-max, never decreases `[correctness]`
   invariant AccessEpoch = max(existing, globalEpoch) via CAS
   invariant AccessEpoch only reset to 0 inside UnlatchPageExclusive
-  scope: PagedMMF.RequestPageEpoch, PagedMMF.UnlatchPageExclusive
+  invariant a fetched page is tagged with max(the epoch its caller read, the caller's pin at the tag): a wait inside
+            the fetch may move the pin past the value read before it (#1230); tagged with that value, the page is
+            older than every pin and evictable while the caller uses it (#1382, PagedMMF.TagEpoch)
+  scope: PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked, PagedMMF.RequestPageEpochNoSweep, PagedMMF.TagEpoch,
+         PagedMMF.UnlatchPageExclusive
   on_violation: decreasing epoch makes page appear stale;
     eviction while transaction still holds pointer
   note: the reset clears every thread's tag, not the unlatcher's alone: an address kept into a page for longer than the

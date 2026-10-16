@@ -371,6 +371,9 @@ lock ordering and deadlock prevention are still to come.
             batch of thousands outlived the first refresh, its pin 6,800 to 15,700 epochs behind): the drain runs every transaction's cleanups, and the tail's pin is the oldest there is — a back-pressure
             wait under it held every page touched since the tail began (#1230: 16 threads over 64 MiB, every worker timed out with 8,190 of 8,192
             slots epoch-held; refreshed, the same seeds pass)
+  invariant the free-quarantine release waits with its epoch moved on too (#1382, FreeQuarantine.Free): a free holds no page address past
+            its own fetch and write, and the page it fetched is tagged with the moved pin (PS-03). Waiting with its pin, the release worker was
+            one of the oldest pins of the 32 MiB market's epoch-held cache, 3,991 epochs behind
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
@@ -388,7 +391,8 @@ lock ordering and deadlock prevention are still to come.
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
-         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData
+         DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData,
+         FreeQuarantine.Free
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned

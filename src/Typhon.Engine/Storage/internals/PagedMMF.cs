@@ -696,6 +696,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             NativeMemory.Fill(_memPagesAddr, (nuint)cacheSize, 0xA5);
         }
 
+        if (EvictionGuardDepthForProcess > 0)
+        {
+            _evictionGuard = new EvictionGuard(_memPagesAddr, pageCount, EvictionGuardDepthForProcess);
+        }
+
         _windows = PageCacheWindow.Build(_memPagesAddr, pageCount);
         _debtBits = new long[(int)(((long)pageCount + 63) >> 6)];
         _clockSweepCurrentIndex.Value = 0;
@@ -1140,6 +1145,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // The quarantine's release worker frees chunks in this cache: stopped before it goes (a close ends it earlier, EndFreeQuarantine).
             StopReleaseWorker();
             _releaseSignal.Dispose();
+            var guard = _evictionGuard;
+            _evictionGuard = null;
+            guard?.ReleaseAll();   // the quarantined slots made accessible before the block is freed
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);
@@ -1175,6 +1183,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
     
     /// <summary>
+    /// The epoch a fetched page is tagged with: <paramref name="currentEpoch"/>, or the calling thread's pin when that is later. Callers read the epoch
+    /// before the fetch, and a back-pressure wait inside the fetch may move the thread's pin past it (a refreshable wait, #1230): tagged with the value
+    /// read before, the page would be older than every pin and evictable while the caller uses it (PS-01) — the release worker's bitmap write did (#1382).
+    /// Only a refreshable wait moves a pin inside a fetch, so outside one the hit path pays a single thread-static read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private long TagEpoch(long currentEpoch)
+    {
+        if (t_refreshableWaitDepth == 0)
+        {
+            return currentEpoch;
+        }
+
+        var pinned = EpochManager?.CurrentThreadPinnedEpoch ?? 0;
+        return pinned > currentEpoch ? pinned : currentEpoch;
+    }
+
+    /// <summary>
     /// Request epoch-tagged shared access to a page. The page is protected from eviction
     /// by its AccessEpoch tag rather than by ref-counting. Caller must be inside an
     /// <see cref="EpochGuard"/> scope.
@@ -1198,15 +1224,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
 
             // Tag the page with the current epoch (atomic max — never go backward)
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             // Race detection: the page may have been evicted, or be being reclaimed, between FetchPageToMemory and the epoch tag (PS-15). Also takes
             // a freshly prepared slot out of Allocating.
@@ -1251,15 +1278,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 continue;
             }
 
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             if (!ValidateTaggedSlot(pi, filePageIndex))
             {
@@ -1384,15 +1412,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 continue;
             }
 
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             if (!ValidateTaggedSlot(pi, filePageIndex))
             {
@@ -1940,6 +1969,29 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     [ThreadStatic] private static int t_refreshableWaitDepth;
 
+    /// <summary>Back-pressure rounds waited while holding a B+Tree write latch (#1382): each one a wait no epoch refresh can lift. Diagnostic.</summary>
+    internal static long LatchedBackpressureRounds;
+
+    /// <summary>Back-pressure rounds waited in a commit's publish, past its append (AP-03). Diagnostic.</summary>
+    internal static long PublishBackpressureRounds;
+
+    /// <summary>Back-pressure rounds waited, all threads and caches. Diagnostic.</summary>
+    internal static long TotalBackpressureRounds;
+
+    private static void CountBackpressureRound()
+    {
+        Interlocked.Increment(ref TotalBackpressureRounds);
+        if (OlcLatchHeld.Count > 0)
+        {
+            Interlocked.Increment(ref LatchedBackpressureRounds);
+        }
+
+        if (t_publishSince != 0)
+        {
+            Interlocked.Increment(ref PublishBackpressureRounds);
+        }
+    }
+
     /// <summary>How many back-pressure waits moved their thread's epoch (<see cref="RefreshableWaitDepth"/>).</summary>
     internal static long RefreshedWaits;
 
@@ -2281,6 +2333,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         bpScope.EpochCount = epochCount;
 
                         ++_metrics.BackpressureWaitCount;
+                        CountBackpressureRound();
                         if (lapComplete)
                         {
                             // High-water marks, kept because this is the ONLY place the engine looks at the cache while it is
@@ -2380,6 +2433,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
             }
 
+            // Test-only (#1382, EvictionGuardDepthForProcess): the reclaimed slot sits out a quarantine, inaccessible, and an older one serves instead.
+            var displacedSlot = memPageIndex;
+            var evictionGuard = _evictionGuard;
+            if (evictionGuard != null)
+            {
+                if (!evictionGuard.Exchange(ref memPageIndex))
+                {
+                    continue;   // the quarantine is filling: it kept the slot, look for another
+                }
+
+                pi = Slot(memPageIndex);
+            }
+
             ++_metrics.TotalMemPageAllocatedCount;
             NoteAllocated();
 
@@ -2389,7 +2455,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (evictedFilePageIndex >= 0)
             {
                 // Phase 5: dirtyBit reflects whether the displaced page was dirty at eviction time (still under the lock that gates clean reuse).
-                var dirtyBit = (byte)(HasWritebackDebt(memPageIndex) ? 1 : 0);
+                var dirtyBit = (byte)(HasWritebackDebt(displacedSlot) ? 1 : 0);
                 TyphonEvent.EmitPageEvicted(evictedFilePageIndex, dirtyBit);
             }
 
@@ -3284,7 +3350,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// debt and epoch counts, which leave marks out and count every epoch-tagged page as epoch-held. One pass over the cache, against a wait of seconds.
     /// </summary>
     [DoesNotReturn]
-    private void ThrowBackpressureTimeout(TimeSpan waited)
+    internal void ThrowBackpressureTimeout(TimeSpan waited)
     {
         var census = CountUnevictablePages();
         ThrowHelper.ThrowPageCacheBackpressureTimeout(census.Debt, census.EpochHeld, waited, EpochManager?.ActiveSlotCount ?? 0,
