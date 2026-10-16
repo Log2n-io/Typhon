@@ -3318,6 +3318,7 @@ public unsafe partial class Transaction
                     continue;
                 }
 
+                RefreshBetweenPublishSteps();
                 if (!ctx.HasMapAccessor || entry.Id.ArchetypeId != ctx.LastArchId)
                 {
                     DisposeSpawnAccessors(ref ctx);
@@ -4127,6 +4128,7 @@ public unsafe partial class Transaction
         {
             foreach (var entityId in _pendingDestroys)
             {
+                RefreshBetweenPublishSteps();
                 var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
                 if (meta == null)
                 {

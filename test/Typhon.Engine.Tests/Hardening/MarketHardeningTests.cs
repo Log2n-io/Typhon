@@ -721,7 +721,9 @@ public class MarketHardeningTests
     private void AssertNoErrors(string phase)
     {
         Log($"{phase}: back-pressure rounds (process-wide) {Interlocked.Read(ref PagedMMF.TotalBackpressureRounds):N0}, under a B+Tree latch "
-            + $"{Interlocked.Read(ref PagedMMF.LatchedBackpressureRounds):N0}, in a publish {Interlocked.Read(ref PagedMMF.PublishBackpressureRounds):N0}");
+            + $"{Interlocked.Read(ref PagedMMF.LatchedBackpressureRounds):N0}, in a publish {Interlocked.Read(ref PagedMMF.PublishBackpressureRounds):N0}; "
+            + $"publish index writes restarted {Interlocked.Read(ref PagedMMF.RestartedIndexWrites):N0}, publish steps refreshed "
+            + $"{Interlocked.Read(ref PagedMMF.PublishStepRefreshes):N0}");
         Assert.That(_errors, Is.Empty, $"{phase}: {_errors.Count} problem(s)\n  " + string.Join("\n  ", _errors));
     }
 

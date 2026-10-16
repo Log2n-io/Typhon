@@ -28,20 +28,32 @@ internal abstract partial class BTree<TKey, TStore>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
     public bool Move(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
-        ThrowIfFaulted();
-        var held = OlcLatchHeld.Count;
-        try
+        while (true)
         {
-            // A move can take the tree's last key away, as a removal can, and the append path trusts this cache (#1263: a unique key moved off the end read
-            // back as a duplicate to the next insert of it). Cleared after the move, as Remove clears it; the next append re-reads the tail.
-            var moved = MoveUnguarded(oldKey, newKey, value, ref accessor);
-            _hasCachedLastKey = false;
-            return moved;
-        }
-        catch (Exception e)
-        {
-            OnWriteException(e, held);   // #1321
-            throw;
+            ThrowIfFaulted();
+            var held = OlcLatchHeld.Count;
+            var restartable = PagedMMF.BeginRestartableIndexWrite();
+            try
+            {
+                // A move can take the tree's last key away, as a removal can, and the append path trusts this cache (#1263: a unique key moved off the end
+                // read back as a duplicate to the next insert of it). Cleared after the move, as Remove clears it; the next append re-reads the tail.
+                var moved = MoveUnguarded(oldKey, newKey, value, ref accessor);
+                _hasCachedLastKey = false;
+                return moved;
+            }
+            catch (BackpressureIndexRestart restart) when (restartable)
+            {
+                RestartIndexWrite(restart);   // #1382
+            }
+            catch (Exception e)
+            {
+                OnWriteException(e, held);   // #1321
+                throw;
+            }
+            finally
+            {
+                PagedMMF.EndRestartableIndexWrite(restartable);
+            }
         }
     }
 
@@ -371,19 +383,31 @@ internal abstract partial class BTree<TKey, TStore>
     public int MoveValue(TKey oldKey, TKey newKey, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
-        ThrowIfFaulted();
-        var held = OlcLatchHeld.Count;
-        try
+        while (true)
         {
-            // As Move: the old key may have been the tree's last, emptied and removed.
-            var elementIdAfter = MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
-            _hasCachedLastKey = false;
-            return elementIdAfter;
-        }
-        catch (Exception e)
-        {
-            OnWriteException(e, held);   // #1321
-            throw;
+            ThrowIfFaulted();
+            var held = OlcLatchHeld.Count;
+            var restartable = PagedMMF.BeginRestartableIndexWrite();
+            try
+            {
+                // As Move: the old key may have been the tree's last, emptied and removed.
+                var elementIdAfter = MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
+                _hasCachedLastKey = false;
+                return elementIdAfter;
+            }
+            catch (BackpressureIndexRestart restart) when (restartable)
+            {
+                RestartIndexWrite(restart);   // #1382
+            }
+            catch (Exception e)
+            {
+                OnWriteException(e, held);   // #1321
+                throw;
+            }
+            finally
+            {
+                PagedMMF.EndRestartableIndexWrite(restartable);
+            }
         }
     }
 

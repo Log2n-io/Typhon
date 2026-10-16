@@ -342,7 +342,8 @@ lock ordering and deadlock prevention are still to come.
             entered by the walks a query passes a yield point to. Every page such a walk holds is a scan accessor's slot-reference pin, so the epoch
             protects none of them; left at the minimum, it protected every page every other thread tagged while it waited, until nothing could be
             evicted and all of them timed out together. A wait outside such a walk and outside an entity open — a commit's, a B+Tree operation's —
-            still holds its epoch: its frames may keep an address the epoch alone protects (#1199). So does a point read INSIDE such a walk — a chain walk through the transaction's accessors,
+            still holds its epoch, unless it is a publish's B+Tree write that has changed nothing yet (below): its frames may keep an address the
+            epoch alone protects (#1199). So does a point read INSIDE such a walk — a chain walk through the transaction's accessors,
             a regular accessor's map read — which sets the depth to 0 for its length (EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
             EntityVisibility.IsVisiblePendingInScan)
   invariant an entity open that meets back-pressure does not wait with its transaction's pin (#1230): the round throws BackpressureOpenRestart
@@ -374,6 +375,26 @@ lock ordering and deadlock prevention are still to come.
   invariant the free-quarantine release waits with its epoch moved on too (#1382, FreeQuarantine.Free): a free holds no page address past
             its own fetch and write, and the page it fetched is tagged with the moved pin (PS-03). Waiting with its pin, the release worker was
             one of the oldest pins of the 32 MiB market's epoch-held cache, 3,991 epochs behind
+  invariant a B+Tree write a commit's publish makes (AP-03) does not wait out back-pressure with its pin while it has made no logical change
+            (#1382; a dirty mark before the latch, or a cache dropped, is idempotent). From its entry (BTree.Add, Remove, RemoveValue, Move,
+            MoveValue; PagedMMF.BeginRestartableIndexWrite) until its first latch (OlcLatch.TryWriteLock, TryWriteLockOnSmoPath), chunk
+            reservation (ChunkReservation.Begin, Fill), node (BTree.AllocNode) or deferred-node reclaim (BTree.DeferredReclaim, which frees), each
+            of which disarms it (PagedMMF.DisarmIndexRestart), a back-pressure round throws BackpressureIndexRestart, and disarms it as it throws:
+            the unwind's finally blocks then wait, never throw a second one through a half-done free. A chunk allocation or free asserts that no
+            write is armed (Debug). The entry moves the thread's epoch with its warm accessors', waits for a page and runs the write again
+            (PagedMMF.AwaitPageAfterIndexRestart), within CommitPublishBackpressureTimeout of the append; past it the round waits, and the publish
+            reports as AP-03 says. Never with a latch held, under a live index cursor or in the checkpoint's hook, and only the outermost write
+            catches it. The unwind loses nothing: the write holds its keys by value, a node it read is reclaimed only once every pin has passed
+            it, its accessors and reservation are returned in finally, and a throw with no latch held leaves the tree sound (#1321). The frames
+            above it, the publish's, keep only addresses a dirty mark, an accessor's window slot or native memory holds: the cluster slot and
+            chain header (dirty), the content chunks (Transaction._clusterCommitContentAccessor, which no other access moves while an entry
+            reconciles), the staging buffer. Never one the epoch alone protects: a ChangeSet accessor's evicted slots are released when any
+            B+Tree write returns its warm accessors in batch mode (ChangeSet.FlushDeferredEvictions), so an address from one is valid only while
+            it is still in the window. Between its entries the publish moves its epoch too while the cache is under pressure, every
+            PressuredEpochRefreshInterval entries and never under a live index cursor (Transaction.RefreshBetweenPublishSteps): an entry keeps
+            nothing it read for the next. Waiting with their pins, the publishes held the 32 MiB market's cache: 4,599 of the 4,649 waits 2,000
+            or more epochs behind, and the engine stopped (CommitPublishIncompleteException) in two of six storms; refreshed and restarted, in
+            none of six. A write past its first latch still waits with its pin (about 17 % of the publish's rounds, measured)
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
@@ -392,7 +413,8 @@ lock ordering and deadlock prevention are still to come.
          EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
          DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData,
-         FreeQuarantine.Free
+         FreeQuarantine.Free, PagedMMF.BeginRestartableIndexWrite, PagedMMF.EndRestartableIndexWrite, PagedMMF.DisarmIndexRestart,
+         PagedMMF.AwaitPageAfterIndexRestart, BackpressureIndexRestart, Transaction.RefreshBetweenPublishSteps, BTree.DeferredReclaim
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned

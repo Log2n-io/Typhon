@@ -83,33 +83,40 @@ internal sealed class FreeQuarantineTests : TestBase<FreeQuarantineTests>
         Assert.That(_dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
         Free(chunk);
 
-        // Sealed and made releasable by hand, not by a cycle: a cycle signals the release worker, which would free the chunk on its own thread.
-        var frees = (IQuarantinedFrees)segment;
-        frees.SealFrees();
-        Assert.That(frees.MarkReleasable(), Is.True);
-        _dbe.MMF.EvictEvictablePagesForTest();   // the release's bitmap page misses
-
         // The pin each round sees, on this thread: the process-wide counters move with every other fixture's refreshes.
         var pins = new List<long>();
         var releaser = Environment.CurrentManagedThreadId;
         var rounds = 0;
-        _dbe.MMF.ForceBackpressureForTest = () =>
-        {
-            if (Environment.CurrentManagedThreadId != releaser)
-            {
-                return false;
-            }
 
-            pins.Add(_dbe.EpochManager.CurrentThreadPinnedEpoch);
-            return ++rounds <= 2;
-        };
-        try
+        // The checkpoint above sealed a generation — empty, the free came after it — made it releasable and signaled the release worker. Woken late, as
+        // under the gate's eight loaded shards, the worker left it releasable: the seal below sealed nothing (FreeQuarantine.Seal), the drain released the
+        // empty generation, met no miss, and the chunk stayed held. So under the release lock, this thread first releases what the cycle left, then seals
+        // the free by hand, makes it releasable and releases it; the worker, waiting for the lock, then finds nothing releasable.
+        lock (_dbe.MMF.ReleaseLockForTests)
         {
             _dbe.MMF.DrainReleases();
-        }
-        finally
-        {
-            _dbe.MMF.ForceBackpressureForTest = null;
+            var frees = (IQuarantinedFrees)segment;
+            frees.SealFrees();
+            Assert.That(frees.MarkReleasable(), Is.True);
+            _dbe.MMF.EvictEvictablePagesForTest();   // the release's bitmap page misses
+            _dbe.MMF.ForceBackpressureForTest = () =>
+            {
+                if (Environment.CurrentManagedThreadId != releaser)
+                {
+                    return false;
+                }
+
+                pins.Add(_dbe.EpochManager.CurrentThreadPinnedEpoch);
+                return ++rounds <= 2;
+            };
+            try
+            {
+                _dbe.MMF.DrainReleases();
+            }
+            finally
+            {
+                _dbe.MMF.ForceBackpressureForTest = null;
+            }
         }
 
         Assert.That(rounds, Is.GreaterThan(2), "premise: the release missed, and met two rounds of back-pressure");

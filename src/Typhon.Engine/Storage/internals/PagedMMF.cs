@@ -2042,6 +2042,73 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// <summary>How many back-pressure rounds unwound their entity open to move its epoch (<see cref="RestartableOpenDepth"/>).</summary>
     internal static long RestartedOpens;
 
+    /// <summary>
+    /// True on a thread inside a B+Tree write a commit's publish makes (AP-03), from the write's start until its first latch, chunk reservation or node
+    /// allocation (#1382): a write that has taken none of them has changed nothing, so it can be unwound to its start and run again. A back-pressure
+    /// round there throws <see cref="BackpressureIndexRestart"/> instead of waiting; the write's entry moves the thread's epoch, waits for a page and
+    /// runs the write again (<see cref="AwaitPageAfterIndexRestart"/>). Waiting with its pin, a publish kept every page the other threads tagged
+    /// meanwhile: at 32 MiB the publishes' were the oldest pins of the epoch-held cache, 4,599 of the 4,649 waits 2,000 epochs or more behind.
+    /// </summary>
+    [ThreadStatic] private static bool t_indexRestartArmed;
+
+    /// <summary>True on a thread inside a restartable B+Tree write (<see cref="BeginRestartableIndexWrite"/>), whether or not it is still armed.</summary>
+    [ThreadStatic] private static bool t_indexWriteOpen;
+
+    /// <summary>
+    /// The start of a B+Tree write: arms its restart (<see cref="t_indexRestartArmed"/>) when the thread publishes a commit and is not already inside
+    /// one. Returns whether this call armed it, which the write passes to <see cref="EndRestartableIndexWrite"/> and which alone lets it catch the
+    /// restart: a nested write's frames sit below the outer one's, which may keep an address the epoch alone protects.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool BeginRestartableIndexWrite()
+    {
+        if (t_publishSince == 0 || t_indexWriteOpen)
+        {
+            return false;
+        }
+
+        t_indexWriteOpen = true;
+        t_indexRestartArmed = true;
+        return true;
+    }
+
+    /// <summary>The end of a write <see cref="BeginRestartableIndexWrite"/> armed, however it ends.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EndRestartableIndexWrite(bool began)
+    {
+        if (began)
+        {
+            t_indexWriteOpen = false;
+            t_indexRestartArmed = false;
+        }
+    }
+
+    /// <summary>
+    /// The write took a latch, a chunk reservation or a node: from here a throw would leave its change half made, so its back-pressure rounds wait
+    /// with its pin as before. One store, unconditional: it sits on every latch acquisition.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void DisarmIndexRestart() => t_indexRestartArmed = false;
+
+    /// <summary>Whether the calling thread's B+Tree write is still restartable: a chunk allocation or free asserts it is not (Debug).</summary>
+    internal static bool IndexRestartArmed => t_indexRestartArmed;
+
+    /// <summary>How many back-pressure rounds unwound a publish's B+Tree write to move its epoch (<see cref="BeginRestartableIndexWrite"/>).</summary>
+    internal static long RestartedIndexWrites;
+
+    /// <summary>How many times a publish moved its epoch between its entries while the cache was under pressure (#1382).</summary>
+    internal static long PublishStepRefreshes;
+
+    /// <summary>
+    /// A publish's B+Tree write between its restarts (<see cref="BeginRestartableIndexWrite"/>): moves the thread's epoch, with its warm accessors', at
+    /// the write's entry, where its frames keep nothing it read, then waits for a page as an open's restart does.
+    /// </summary>
+    internal void AwaitPageAfterIndexRestart()
+    {
+        ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(EpochManager.RefreshScope());
+        AwaitPageAfterOpenRestart();
+    }
+
     /// <summary>How many contended chain locks unwound their entity open or first write to move its epoch (#1382).</summary>
     internal static long LockRestartedOpens;
 
@@ -2381,6 +2448,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                             }
 
                             ThrowBackpressureTimeout(t_openBudget.Waited);
+                        }
+                        else if (t_indexRestartArmed && OlcLatchHeld.Count == 0 && t_noBackpressureWaitDepth == 0 && EntityAccessor.LiveIndexCursors == 0
+                                 && Stopwatch.GetElapsedTime(t_publishSince) < TimeoutOptions.Current.CommitPublishBackpressureTimeout)
+                        {
+                            // #1382: a publish's B+Tree write that has changed nothing yet does not wait with its pin either. It unwinds to its entry, which
+                            // moves the epoch there and runs it again, within the publish's own bound (AP-03); past it, the wait below reports the publish.
+                            // Disarmed before the throw: the unwind runs the write's finally blocks (a deferred-node reclaim among them), and a round
+                            // there must wait, not throw a second restart through a half-done free. The entry catches by its own local, not the flag.
+                            t_indexRestartArmed = false;
+                            Interlocked.Increment(ref RestartedIndexWrites);
+                            throw new BackpressureIndexRestart(this);
                         }
 
                         // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →

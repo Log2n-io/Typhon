@@ -131,6 +131,12 @@ public partial class PagedMMF
         }
     }
 
+    /// <summary>
+    /// Test seam: the lock every release runs under. A test that holds it while it makes frees releasable and drains them frees them on its own thread:
+    /// the worker, signaled by an earlier cycle, waits for the lock and then finds nothing releasable.
+    /// </summary>
+    internal object ReleaseLockForTests => _releaseLock;
+
     /// <summary>Releases the worker could not complete — retried at the next covered cycle. Diagnostic.</summary>
     internal long QuarantineReleaseFailures => Interlocked.Read(ref _quarantineReleaseFailures);
 

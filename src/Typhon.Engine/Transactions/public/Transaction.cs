@@ -118,6 +118,9 @@ public unsafe partial class Transaction : EntityAccessor
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
     private int _publishDrainIndex;
 
+    /// <summary>The publish's entries so far, for its pressured epoch refresh cadence (<see cref="RefreshBetweenPublishSteps"/>).</summary>
+    private int _publishStepCount;
+
     /// <summary>
     /// Blittable per-component-entry publish descriptor recorded by <see cref="PrepareComponent"/> and consumed by <see cref="PublishComponent"/>
     /// after the WAL Append (AP-01). Carries everything publish needs to re-derive the revision handle and finish the commit without re-reading
@@ -2376,6 +2379,24 @@ public unsafe partial class Transaction : EntityAccessor
         element.IsolationFlag && (contentChunkId != 0 ? element.ComponentChunkId == contentChunkId : element.ComponentChunkId == 0 && element.TSN == TSN);
 
     /// <summary>
+    /// Between two entries of a commit's publish — component entries, spawns, destroys, staged writes — while the cache is under pressure: moves the
+    /// thread's epoch, with its warm accessors', every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> entries (#1382), the transactions'
+    /// pressured cadence (EP-03). An entry keeps nothing it read for the next: what it wrote is dirty-marked, and the accessors it shares with the next
+    /// re-resolve every address. Held for the whole publish instead, its pin kept every page the other threads tagged meanwhile, for as long as the
+    /// publish's back-pressure waits lasted (AP-03). Every entry would bump the global epoch 1.3 million times a storm, each one sending every other
+    /// thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a commit made inside an index scan.
+    /// </summary>
+    private void RefreshBetweenPublishSteps()
+    {
+        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0 && _dbe.MMF.UnderPressure
+            && EntityAccessor.LiveIndexCursors == 0)
+        {
+            ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
+        }
+    }
+
+    /// <summary>
     /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.
     /// </summary>
     private void PublishPreparedComponents()
@@ -2402,6 +2423,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 PublishComponent(_publishEntries[_publishDrainIndex]);
                 _publishDrainIndex++;
+                RefreshBetweenPublishSteps();
                 if ((_publishDrainIndex & 0x3FF) == 0)
                 {
                     ChunkBasedSegment<PersistentStore>.ExitBatchMode();
@@ -2981,6 +3003,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 PublishStagedEntry(info, staged.Key, staged.Value);
+                RefreshBetweenPublishSteps();
             }
         }
 

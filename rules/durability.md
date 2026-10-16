@@ -215,7 +215,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   invariant past the append, page-cache back-pressure is waited out: the committing thread publishes with
             `PagedMMF.PublishSince` set when its append returns, so an allocation that outlasts `PageCacheBackpressureTimeout`
             logs and waits on, a fresh timeout at a time, until `TimeoutOptions.CommitPublishBackpressureTimeout` (60 s) after
-            it — one bound for the whole publish
+            it — one bound for the whole publish. It waits without its pin where it can (#1382, EP-02): between its entries while
+            the cache is under pressure, and in a B+Tree write that has taken no latch, reservation or node yet, which unwinds to its
+            entry and runs again within the same bound
   invariant any other failure between the append and the end of the publish (`CompleteAfterFailedPublish`): the engine latches
             `CommitPipelineFailure` and pins the commit's first LSN below the checkpoint (`PinnedCommitFloor`, CK-13), then
             the transaction is Committed — never rolled back (AP-02) — and only then is anything that can throw done: the
@@ -251,7 +253,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
          CheckpointManager.PrepareCrashStop, DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
-         DatabaseEngine.RemoveEmptyClosingRealms
+         DatabaseEngine.RemoveEmptyClosingRealms, Transaction.RefreshBetweenPublishSteps, BackpressureIndexRestart
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
           (indexes and views, AP-07), under the lock since #1263, allocates and can throw: B+Tree nodes past the publish limit,

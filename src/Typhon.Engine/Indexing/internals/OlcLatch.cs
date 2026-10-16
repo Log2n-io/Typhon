@@ -114,6 +114,7 @@ internal readonly ref struct OlcLatch
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
             OlcLatchHeld.Count++;
+            PagedMMF.DisarmIndexRestart();   // #1382: a latched write is no longer restartable
             return true;
         }
         TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
@@ -149,6 +150,7 @@ internal readonly ref struct OlcLatch
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
             OlcLatchHeld.Count++;
+            PagedMMF.DisarmIndexRestart();   // #1382: a latched write is no longer restartable
             wasObsolete = (v & 0b10) != 0;
             return true;
         }

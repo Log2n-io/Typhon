@@ -56,6 +56,7 @@ internal sealed class ChunkReservation<TStore> where TStore : struct, IPageStore
     /// <summary>Opens (or re-enters) the reservation for <paramref name="segment"/>. Every <see cref="Begin"/> is paired with an <see cref="End"/>.</summary>
     internal void Begin(ChunkBasedSegment<TStore> segment)
     {
+        PagedMMF.DisarmIndexRestart();   // #1382: a B+Tree write that reserves is no longer restartable
         if (_depth == 0)
         {
             _segment = segment;
@@ -77,6 +78,7 @@ internal sealed class ChunkReservation<TStore> where TStore : struct, IPageStore
     internal void Fill(int target, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
     {
         Debug.Assert(_depth > 0, "Fill outside Begin/End");
+        PagedMMF.DisarmIndexRestart();
         if (target > _chunks.Length)
         {
             Array.Resize(ref _chunks, Math.Max(target, _chunks.Length * 2));
