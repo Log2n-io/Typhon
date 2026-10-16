@@ -89,10 +89,32 @@ internal ref struct RevisionEnumerator : IDisposable
                 var acquired = _exclusiveAccess ? _header.Control.TryEnterExclusiveAccess() : _header.Control.TryEnterSharedAccess();
                 if (!acquired)
                 {
-                    lockWc = budgetOwner.ChainLockWaitContext();
-                    if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+                    // #1382: inside an open or a first write, a contended chain is waited on briefly, then the operation unwinds and moves its epoch
+                    // instead of waiting with its pin (PagedMMF.RestartForLockWithin). The ticket is a snapshot: nothing to end when no lock was taken.
+                    if (PagedMMF.OpenRestartAllowed)
                     {
-                        ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        // The caller's budget still bounds it: its deadline and cancellation end the restarts too (CX-06).
+                        lockWc = budgetOwner.ChainLockWaitContext();
+                        if (lockWc.ShouldStop)
+                        {
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
+
+                        var briefSpan = lockWc.Remaining < PagedMMF.LockWaitBeforeRestart ? lockWc.Remaining : PagedMMF.LockWaitBeforeRestart;
+                        var brief = WaitContext.FromTimeout(briefSpan);
+                        if (!_header.Control.Enter(_exclusiveAccess, ref brief))
+                        {
+                            PagedMMF.RestartForLockWithin(TimeoutOptions.Current.RevisionChainLockTimeout);
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
+                    }
+                    else
+                    {
+                        lockWc = budgetOwner.ChainLockWaitContext();
+                        if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+                        {
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
                     }
                 }
             }

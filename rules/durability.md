@@ -1066,8 +1066,16 @@ CK-08 (flush-only cycles) are later increments.
             once the writeback debt reaches the dirty-page trigger's threshold, capped at 50 % of the cache
   invariant that early write keeps CK-02 (the WAL is durable through what the copies can reflect before the data fsync) and CP-03 (a page is
             settled only after it), and does not move CheckpointLSN: the hook's records still precede the cycle's own barrier and advance
+  invariant the write ahead is not enough under contention, so the hook also never waits (#1382): it runs with PagedMMF.NoBackpressureWaitDepth
+            set, a back-pressure round there throws BackpressureCheckpointDeferral, and the cycle completes as a flush-only one (CK-08's mode: it
+            writes and settles every owed page, runs no barrier, moves no CheckpointLSN); the next cycle runs the hook again. Once the hook has not
+            run for CheckpointManager.HookDeferralWindow (10 s) it waits as before, bounded by the back-pressure timeout, so CheckpointLSN cannot
+            stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
+            shutdown cycle never defers. The deferral is taken at a lap's end, so on a cache above the sweep floor the clock is searched whole first A hook given up midway leaves some archetypes updated — records and dirty pages, as a full run's — and
+            releases its ChangeSet's marks (PS-05)
   scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
-         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState
+         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState, CheckpointManager.RunHookOrDefer,
+         PagedMMF.NoBackpressureWaitDepth, BackpressureCheckpointDeferral
   on_violation: the checkpoint is the only thing that turns owed slots into free ones. When a step of its own cycle waits for a free slot while every
                 slot is owed, it waits for itself until the back-pressure timeout: the cycle ends Degraded and every writer waiting behind it times out
                 too. Measured (#1184): MarketHardeningTests, a 0.76 GiB file over a 256 MiB cache, 16 threads. PersistArchetypeState, which writes
@@ -1075,6 +1083,11 @@ CK-08 (flush-only cycles) are later increments.
                 twice); the storm died at 36 639 operations on main
   verified: CheckpointManagerTests.HookLoadingAPage_OnAFullyOwedCache_DoesNotWait [VerifiesRule] — every slot owes a write, the loop is not
             running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
+  verified: CheckpointHookDeferralTests [VerifiesRule] — back-pressure forced while the hook loads the evicted archetype-table page: the hook gives
+            up, the cycle only writes, CheckpointLSN does not move, no page is left marked, well inside the timeout (5 s and a Degraded cycle with
+            the no-wait mode removed); the next cycle advances; past its window the hook waits
+  on_violation (#1382): with the write ahead in place, the freed slots went to the 16 writers waiting for them first; the hook still waited out the
+                5 s with writeback at zero, in 3 of 3 instrumented market failures (64 MiB, 16 writers), and every writer timed out behind it
 
 ### CK-15: A checkpoint pass frees pages while it writes `[correctness]`
   invariant a pass is written in batches — at most WriteBatchMaxPages pages, or WriteBatchMaxTicks (100 ms) of writing — and each batch is settled
@@ -1870,8 +1883,13 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never retain a mark "for the checkpoint to consume" (that is #824's leak)
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
+  invariant an owner releases its marks on its throw path too (#1382): a transaction's and a unit of work's dispose release them in a finally,
+            whatever their rollback, drain or registry write threw, and so does the checkpoint's metadata hook for its local set. A cleanup drain
+            releases the marks of the entries it has committed whenever it moves its epoch (DeferredCleanupManager.EpochYield.Refresh): it is
+            unbounded, and kept to its end its marks held every page it had touched — 3,434 of a 64 MiB cache, while it waited on back-pressure
   scope: ChangeSet.AddByMemPageIndex / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally)
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally),
+         DeferredCleanupManager.EpochYield, DatabaseEngine.PersistArchetypeState
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
             throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected;
             ChangeSetCallSiteRecordingTests.ReleasingOneOwnersMarks_LeavesTheOtherOwnersMarkInPlace (an over-release, which Release's clamp

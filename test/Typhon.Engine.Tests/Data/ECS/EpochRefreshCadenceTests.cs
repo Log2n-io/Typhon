@@ -218,5 +218,18 @@ class EpochRefreshCadenceTests : TestBase<EpochRefreshCadenceTests>
 
         var dirty = new PageCacheBackpressureTimeoutException(3231, 2918, TimeSpan.FromSeconds(5), 16, 40);
         Assert.That(dirty.Message, Does.Not.Contain("working set"), "mostly dirty: writeback debt, not the epoch");
+
+        // #1382: the census at the throw. Marks were not counted, and a cache 7,887 pages under them read "mostly epoch-held".
+        var marked = new PageCacheBackpressureTimeoutException(2, 259, TimeSpan.FromSeconds(5), 35, 84, 7887, 30);
+        Assert.That(marked.Message, Does.Contain("under dirty marks: 7887").And.Contain("Mostly under dirty marks"));
+        Assert.That(marked.Message, Does.Not.Contain("working set"), "mostly marked: write sets in flight, not the epoch");
+        Assert.That(marked.MarkedPageCount, Is.EqualTo(7887));
+        Assert.That(marked.EpochOnlyCount, Is.EqualTo(30));
+
+        var owed = new PageCacheBackpressureTimeoutException(7085, 2206, TimeSpan.FromSeconds(5), 34, 1577, 3286, 120);
+        Assert.That(owed.Message, Does.Contain("Mostly owed a write"));
+
+        var epochOnly = new PageCacheBackpressureTimeoutException(40, 8100, TimeSpan.FromSeconds(5), 33, 1180, 20, 8000);
+        Assert.That(epochOnly.Message, Does.Contain("epoch-only: 8000").And.Contain("working set larger than the cache"));
     }
 }

@@ -422,18 +422,31 @@ internal class DeferredCleanupManager
             _refreshedAt = Stopwatch.GetTimestamp();
         }
 
-        /// <summary>Between two entries: refreshes the thread's epoch if the interval has passed.</summary>
-        internal void BetweenEntries()
-        {
-            if (_epochManager == null || EntityAccessor.LiveIndexCursors != 0
-                || Stopwatch.GetElapsedTime(_refreshedAt) < EntityAccessor.ScanEpochRefreshInterval)
-            {
-                return;
-            }
+        /// <summary>Whether the interval has passed, with no live index cursor: the drain may move its epoch here (<see cref="Refresh"/>).</summary>
+        internal bool Due => _epochManager != null && EntityAccessor.LiveIndexCursors == 0
+                             && Stopwatch.GetElapsedTime(_refreshedAt) >= EntityAccessor.ScanEpochRefreshInterval;
 
+        /// <summary>
+        /// Between two entries, once due: gives back <paramref name="marks"/>' dirty marks and moves the thread's epoch. The drain's accessors must have
+        /// committed their changes (a disposed accessor has). Kept, the marks held every page the drain had touched unevictable until it ended, and the
+        /// drain is unbounded: one held 3,434 pages of a 64 MiB cache while it waited on back-pressure itself (#1382). Released, a page is held by its
+        /// writeback debt until the checkpoint writes it (PS-10), as at a transaction's epoch refresh.
+        /// </summary>
+        internal void Refresh(ChangeSet marks)
+        {
+            marks?.ReleaseDirtyMarks();
             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
             _refreshedAt = Stopwatch.GetTimestamp();
             Interlocked.Increment(ref DrainEpochRefreshes);
+        }
+
+        /// <summary>Between two entries whose accessors are disposed: <see cref="Refresh"/> if due.</summary>
+        internal void BetweenEntries(ChangeSet marks = null)
+        {
+            if (Due)
+            {
+                Refresh(marks);
+            }
         }
     }
 
@@ -579,7 +592,14 @@ internal class DeferredCleanupManager
         {
             for (var i = 0; i < entries.Length; i++)
             {
-                epochYield.BetweenEntries();
+                // The batch's accessors are shared: their changes committed first, so the marks can go with the epoch (#1382).
+                if (epochYield.Due)
+                {
+                    compRevTableAccessor.CommitChanges();
+                    compContentAccessor.CommitChanges();
+                    epochYield.Refresh(changeSet);
+                }
+
                 ref var entry = ref entries[i];
                 Debug.Assert(ReferenceEquals(entry.Table, table));
 

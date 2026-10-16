@@ -413,10 +413,17 @@ public unsafe partial class Transaction : EntityAccessor
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
             // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
-            ProcessReadOnlyDeferredCleanups();
+            // A drain that throws still leaves the epoch and the chain (#1382), as below.
+            try
+            {
+                ProcessReadOnlyDeferredCleanups();
+            }
+            finally
+            {
+                _isDisposed = true;
+                ExitEpochAndRemove();
+            }
 
-            _isDisposed = true;
-            ExitEpochAndRemove();
             return;
         }
 
@@ -424,34 +431,55 @@ public unsafe partial class Transaction : EntityAccessor
         var dbe = _dbe;
         var tsn = TSN;
 
-        dbe.LogTxDispose(tsn, "EnsureCompleted");
-        EnsureCompleted();
-        dbe.LogTxDispose(tsn, "ProcessDeferredCleanups");
-        ProcessDeferredCleanups();
-        dbe.LogTxDispose(tsn, "FlushAccessors");
-        FlushAccessors();
-        DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
-        if (_hasEntityMapCache)
+        // #1382: whatever the auto-rollback or the drain throws (a back-pressure timeout among them), the transaction still lets go of what it holds, and
+        // the exception surfaces after. Left, its epoch pin kept every page anyone touched after it unevictable and its chain node held the cleanup
+        // cutoff, for good: one transient timeout became a permanent stall. A rollback cut short leaves entries flagged by a TSN that never gets a card,
+        // which every reader resolves as invisible (VIS-01).
+        try
         {
-            _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
-            _hasEntityMapCache = false;
+            dbe.LogTxDispose(tsn, "EnsureCompleted");
+            EnsureCompleted();
+            dbe.LogTxDispose(tsn, "ProcessDeferredCleanups");
+            ProcessDeferredCleanups();
         }
-
-        // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
-        // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
-        // #385 was.
-        if (_ownsChangeSet && _changeSet != null)
+        finally
         {
-            _changeSet.ReleaseDirtyMarks();
-            dbe.MMF.ReturnChangeSet(_changeSet);
-            _changeSet = null;
+            try
+            {
+                try
+                {
+                    dbe.LogTxDispose(tsn, "FlushAccessors");
+                    FlushAccessors();
+                    DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
+                    if (_hasEntityMapCache)
+                    {
+                        _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
+                        _hasEntityMapCache = false;
+                    }
+                }
+                finally
+                {
+                    // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still
+                    // dirty pages through it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another
+                    // owner's marks is the over-release that #385 was.
+                    if (_ownsChangeSet && _changeSet != null)
+                    {
+                        _changeSet.ReleaseDirtyMarks();
+                        dbe.MMF.ReturnChangeSet(_changeSet);
+                        _changeSet = null;
+                    }
+                }
+            }
+            finally
+            {
+                // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
+                // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd
+                // overwrite the new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
+                _isDisposed = true;
+                dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
+                ExitEpochAndRemove();
+            }
         }
-        // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
-        // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
-        // new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
-        _isDisposed = true;
-        dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
-        ExitEpochAndRemove();
     }
 
     /// <summary>Auto-rollback if not yet committed. Phase 6: tagged with <see cref="Typhon.Profiler.TransactionRollbackReason.AutoOnDispose"/>.</summary>
@@ -606,12 +634,21 @@ public unsafe partial class Transaction : EntityAccessor
         _epochManager.ExitScopeUnordered();
         var owningUow = OwnsUnitOfWork ? OwningUnitOfWork : null;
         dbe.LogTxDispose(tsn, "ChainRemove");
-        _dbe.TransactionChain.Remove(this);
-        if (owningUow != null)
+        // The pool's Reset unplaces a failed commit's spawns, which loads pages and can throw: the unit of work is disposed all the same, or its marks and
+        // its registry slot were held for good (#1382).
+        try
         {
-            dbe.LogTxDispose(tsn, "UoWDispose");
-            owningUow.Dispose();
+            _dbe.TransactionChain.Remove(this);
         }
+        finally
+        {
+            if (owningUow != null)
+            {
+                dbe.LogTxDispose(tsn, "UoWDispose");
+                owningUow.Dispose();
+            }
+        }
+
         dbe.LogTxDispose(tsn, "ExitEpochAndRemoveDone");
     }
 

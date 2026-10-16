@@ -1968,8 +1968,65 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     [ThreadStatic] private static long t_openRestartSince;
 
+    [ThreadStatic] private static long t_lockRestartSince;
+
+    /// <summary>Resets the restart budgets, page and lock alike, when the outermost restartable operation ends.</summary>
+    internal static void ResetRestartBudgets()
+    {
+        t_openRestartSince = 0;
+        t_lockRestartSince = 0;
+    }
+
+    /// <summary>
+    /// Non-zero on the checkpoint thread while its cycle runs the durable-metadata hook (CK-14, #1382). A back-pressure round there throws
+    /// <see cref="BackpressureCheckpointDeferral"/> instead of waiting: only the checkpoint turns owed slots into free ones, so a hook waiting for a
+    /// slot waited for its own cycle, for the whole timeout, and every writer behind it timed out too. The cycle then only writes, and the next runs the
+    /// hook again (<c>CheckpointManager.RunHookOrDefer</c>).
+    /// </summary>
+    internal static int NoBackpressureWaitDepth
+    {
+        get => t_noBackpressureWaitDepth;
+        set => t_noBackpressureWaitDepth = value;
+    }
+
+    [ThreadStatic] private static int t_noBackpressureWaitDepth;
+
     /// <summary>How many back-pressure rounds unwound their entity open to move its epoch (<see cref="RestartableOpenDepth"/>).</summary>
     internal static long RestartedOpens;
+
+    /// <summary>How many contended chain locks unwound their entity open or first write to move its epoch (#1382).</summary>
+    internal static long LockRestartedOpens;
+
+    /// <summary>
+    /// Whether the calling thread may give up a wait and unwind its operation (<see cref="BackpressureOpenRestart"/>): inside an open or a first write
+    /// before its claim, not under a live index cursor, not in a commit's publish.
+    /// </summary>
+    internal static bool OpenRestartAllowed => t_restartableOpenDepth > 0 && t_publishSince == 0 && EntityAccessor.LiveIndexCursors == 0;
+
+    /// <summary>
+    /// A contended chain lock inside a restartable operation (#1382): throws <see cref="BackpressureOpenRestart"/> unless the operation's restarts
+    /// have used <paramref name="budget"/> since its first, in which case it returns and the caller throws its own timeout. Waiting with its pin, a
+    /// thread queued behind a publish that waited on back-pressure while holding the chain kept every page anyone touched meanwhile, and the
+    /// publish's page could never come: one such pin was 4,239 epochs behind when the market's 16 writers timed out together.
+    /// </summary>
+    internal static void RestartForLockWithin(TimeSpan budget)
+    {
+        // Its own clock, not the back-pressure restarts': shared, a lock met after seconds of page waits timed out after 5 ms of waiting on it.
+        var since = t_lockRestartSince;
+        if (since == 0)
+        {
+            t_lockRestartSince = since = Stopwatch.GetTimestamp();
+        }
+
+        if (Stopwatch.GetElapsedTime(since) < budget)
+        {
+            Interlocked.Increment(ref LockRestartedOpens);
+            throw new BackpressureOpenRestart(lockWait: true);
+        }
+    }
+
+    /// <summary>How long a restartable operation waits for a contended chain lock before it unwinds instead (#1382).</summary>
+    internal static readonly TimeSpan LockWaitBeforeRestart = TimeSpan.FromMilliseconds(5);
 
     /// <summary>
     /// An open's wait between its restarts (<see cref="RestartableOpenDepth"/>), its epoch moved: the round's remedies, then one wait of the strategy, which
@@ -2229,6 +2286,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                 bpCtx.WaitContext.Remaining.TotalMilliseconds);
                         }
 
+                        // CK-14 (#1382): the checkpoint's hook does not wait for a slot only its own cycle frees; the cycle writes instead.
+                        // At a lap's end: above the sweep floor a lap is several rounds, and evictable slots further along the clock serve the hook.
+                        if (t_noBackpressureWaitDepth > 0 && lapComplete)
+                        {
+                            throw new BackpressureCheckpointDeferral();
+                        }
+
                         // #1230: a walk holding only slot-reference pins waits with its epoch moved on, so it no longer protects what others tag meanwhile.
                         if (t_refreshableWaitDepth > 0 && EntityAccessor.LiveIndexCursors == 0)
                         {
@@ -2253,8 +2317,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                 throw new BackpressureOpenRestart();
                             }
 
-                            ThrowHelper.ThrowPageCacheBackpressureTimeout(dirtyCount, epochCount, openWaited, EpochManager?.ActiveSlotCount ?? 0,
-                                EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0);
+                            ThrowBackpressureTimeout(openWaited);
                         }
 
                         // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
@@ -2280,13 +2343,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                             }
                             else
                             {
-                                ThrowHelper.ThrowPageCacheBackpressureTimeout(
-                                    dirtyCount, epochCount,
-                                    publishSince != 0
-                                        ? Stopwatch.GetElapsedTime(backpressureSince)
-                                        : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining,
-                                    EpochManager?.ActiveSlotCount ?? 0,
-                                    EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0);
+                                ThrowBackpressureTimeout(publishSince != 0
+                                    ? Stopwatch.GetElapsedTime(backpressureSince)
+                                    : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
                             }
                         }
                     }
@@ -3152,22 +3211,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// The full unevictability breakdown, taken in ONE pass so the parts are mutually consistent.
     /// </summary>
     /// <remarks>
-    /// A page is unevictable if ANY of the four holds, so the individual counts overlap and do not sum — <c>Unevictable</c>
+    /// A page is unevictable if ANY of the five holds, so the individual counts overlap and do not sum — <c>Unevictable</c>
     /// is the union and is the only one that answers "how much of the cache is unavailable". Reporting the parts
     /// separately is what distinguishes the failure modes: writeback debt means the checkpoint is behind, ACW means a
-    /// writer is mid-mutation, and epoch means some scope is old enough to pin everything touched since it opened —
-    /// which, unlike the other three, is bounded by transaction LIFETIME rather than by anything the storage layer does.
+    /// writer is mid-mutation, a dirty mark means a write set still in flight (a transaction's, a cleanup drain's), and epoch means some scope is old
+    /// enough to pin everything touched since it opened — which, unlike the others, is bounded by transaction LIFETIME rather than by anything the
+    /// storage layer does. <c>EpochOnly</c> counts the pages nothing else holds: what a refreshed epoch alone would free. Marks were not counted
+    /// before #1382, and a cache 7,887 pages under them read as epoch-held.
     /// </remarks>
-    internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountUnevictablePages()
+    internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Marked, int EpochOnly, int Unevictable, int Total) CountUnevictablePages()
     {
         var slots = _slots;
         if (slots == null)
         {
-            return (0, 0, 0, 0, 0, 0);
+            return (0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
-        int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, unevictable = 0, total = 0;
+        int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, marked = 0, epochOnly = 0, unevictable = 0, total = 0;
 
         // Read through the local: a diagnostic (the demo's census, a test) may call this after the store is disposed, which nulls the field.
         for (var i = 0; i < slots.Count; i++)
@@ -3183,15 +3244,30 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var a = Volatile.Read(ref pi.ActiveChunkWriters) != 0;
             var s = Volatile.Read(ref pi.SlotRefCount) > 0;
             var e = Volatile.Read(ref pi.AccessEpoch) >= minActiveEpoch;
+            var m = Volatile.Read(ref pi.DirtyCounter) > 0;
 
             if (d) { debt++; }
             if (a) { acw++; }
             if (s) { slotRef++; }
             if (e) { epochHeld++; }
-            if (d || a || s || e) { unevictable++; }
+            if (m) { marked++; }
+            if (e && !(d || a || s || m)) { epochOnly++; }
+            if (d || a || s || e || m) { unevictable++; }
         }
 
-        return (debt, acw, slotRef, epochHeld, unevictable, total);
+        return (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total);
+    }
+
+    /// <summary>
+    /// The back-pressure timeout, with the cache's breakdown taken in one pass at the throw (#1382): what held the slots, not only the lap census's
+    /// debt and epoch counts, which leave marks out and count every epoch-tagged page as epoch-held. One pass over the cache, against a wait of seconds.
+    /// </summary>
+    [DoesNotReturn]
+    private void ThrowBackpressureTimeout(TimeSpan waited)
+    {
+        var census = CountUnevictablePages();
+        ThrowHelper.ThrowPageCacheBackpressureTimeout(census.Debt, census.EpochHeld, waited, EpochManager?.ActiveSlotCount ?? 0,
+            EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0, census.Marked, census.EpochOnly);
     }
 
     /// <summary>

@@ -246,6 +246,107 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         }
     }
 
+    /// <summary>The tail, with other threads' transfers queued behind it for its drain.</summary>
+    private static (Transaction Tail, EntityId[] Ids) TailWithABacklog(DatabaseEngine dbe)
+    {
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+#pragma warning disable TYPHON004 // the caller disposes the tail: its dispose is what the tests observe
+        var tail = dbe.CreateQuickTransaction();
+#pragma warning restore TYPHON004
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var rng = new Random(1);
+            for (var k = 0; k < Transfers; k++)
+            {
+                Transfer(dbe, ids, rng);
+            }
+        }).Wait();
+        Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.GreaterThan(0), "premise: cleanups wait for the tail");
+        return (tail, ids);
+    }
+
+    /// <summary>
+    /// #1382: the drain gives back its dirty marks with its epoch, between its entries. It runs every transaction's cleanups and kept a mark on every page
+    /// it touched until it ended: on a 64 MiB market one drain held 3,434 pages unevictable while it waited on back-pressure itself.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // the refresh interval is process-wide
+    public void TheTailsDrain_GivesBackItsMarksAsItGoes([Values] bool betweenEntries)
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, _) = TailWithABacklog(dbe);
+        var entries = 0;
+        var mostMarked = 0;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ =>
+        {
+            entries++;
+            mostMarked = Math.Max(mostMarked, dbe.MMF.CountUnevictablePages().Marked);
+        };
+        var interval = EntityAccessor.ScanEpochRefreshInterval;
+        EntityAccessor.ScanEpochRefreshInterval = betweenEntries ? TimeSpan.Zero : TimeSpan.MaxValue;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            EntityAccessor.ScanEpochRefreshInterval = interval;
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        TestContext.Out.WriteLine($"entries {entries}, most pages marked during the drain {mostMarked}");
+        Assert.That(entries, Is.GreaterThan(Traders), "premise: the tail drained the backlog");
+        if (betweenEntries)
+        {
+            Assert.That(mostMarked, Is.LessThanOrEqualTo(MarkedByOneEntry), "the drain held the marks of one entry at a time");
+        }
+        else
+        {
+            Assert.That(mostMarked, Is.GreaterThan(MarkedByOneEntry), "premise: never refreshed, the drain's marks pile up");
+        }
+    }
+
+    /// <summary>The pages one cleanup entry marks: its chain's root, its content chunk, at most an overflow chunk and the next content chunk.</summary>
+    private const int MarkedByOneEntry = 4;
+
+    /// <summary>
+    /// #1382: a tail whose drain throws — a back-pressure timeout on a small cache, here the probe — still leaves its epoch scope and the chain, and gives
+    /// back its marks. It did not: the dispose ended at the throw, the thread kept its pin (every page anyone touched after it unevictable) and the chain
+    /// its node (the cleanup cutoff held), for good — one transient timeout made a permanent stall.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    public void ATailsDrainThatThrows_StillLeavesItsEpochAndTheChain_AndGivesBackItsMarks()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, ids) = TailWithABacklog(dbe);
+        var entries = 0;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ =>
+        {
+            if (++entries == 3)
+            {
+                throw new InvalidOperationException("the drain's fault");
+            }
+        };
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => tail.Dispose(), "premise: the drain threw out of the dispose");
+        }
+        finally
+        {
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        Assert.That(dbe.EpochManager.IsCurrentThreadInScope, Is.False, "the tail's epoch scope, left");
+        Assert.That(dbe.TransactionChain.ActiveCount, Is.Zero, "the tail's chain node, removed");
+        Assert.That(dbe.MMF.CountUnevictablePages().Marked, Is.Zero, "no page left under a mark");
+        Transfer(dbe, ids, new Random(2));   // and the engine goes on
+    }
+
     /// <summary>
     /// #1230, the read-only tail: its dispose drains the ECS cleanup queue — the destroyed entities other threads queued behind it — under a pin refreshed
     /// first, then between entries.

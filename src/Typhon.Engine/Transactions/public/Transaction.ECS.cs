@@ -1389,11 +1389,11 @@ public unsafe partial class Transaction
                 {
                     return ResolveEntityCore(id, writable, throwOnMiss);
                 }
-                catch (BackpressureOpenRestart)
+                catch (BackpressureOpenRestart restart)
                 {
                     _entityOperationCount = 0;
                     EnumerateRefreshEpoch();
-                    _dbe.MMF.AwaitPageAfterOpenRestart();
+                    AwaitAfterRestart(restart);
                 }
             }
         }
@@ -1401,8 +1401,24 @@ public unsafe partial class Transaction
         {
             if (--PagedMMF.RestartableOpenDepth == 0)
             {
-                PagedMMF.OpenRestartSince = 0;
+                PagedMMF.ResetRestartBudgets();
             }
+        }
+    }
+
+    /// <summary>
+    /// After an operation unwound (<see cref="BackpressureOpenRestart"/>) and moved its epoch: a page wait waits for a page; a chain-lock wait retries at
+    /// once, its brief wait on the lock being the pacing (#1382).
+    /// </summary>
+    private void AwaitAfterRestart(BackpressureOpenRestart restart)
+    {
+        if (restart.LockWait)
+        {
+            Thread.Yield();
+        }
+        else
+        {
+            _dbe.MMF.AwaitPageAfterOpenRestart();
         }
     }
 
@@ -1664,6 +1680,55 @@ public unsafe partial class Transaction
     /// </summary>
     internal override (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId = 0)
     {
+        // #1382: until it claims its revision a first write leaves no trace on a throw (CHAIN-02), and its caller holds nothing across this call but
+        // the handle, which re-resolves (EP-03). So a contended chain, or back-pressure, before the claim unwinds it: the epoch moves here, as at an
+        // open's start, and the write runs again. Waiting with its pin, a writer queued behind a publish that held the chain while it waited on
+        // back-pressure kept every page anyone touched, and the publish's page never came. Past the claim it waits as before.
+        PagedMMF.RestartableOpenDepth++;
+        var restartScope = true;
+        try
+        {
+            while (true)
+            {
+                try
+                {
+                    return EcsVersionedCopyOnWriteCore(compType, entityId, table, chainRootChunkId, ref restartScope);
+                }
+                catch (BackpressureOpenRestart restart) when (restartScope)
+                {
+                    _entityOperationCount = 0;
+                    EnumerateRefreshEpoch();
+                    AwaitAfterRestart(restart);
+                }
+            }
+        }
+        finally
+        {
+            if (restartScope && --PagedMMF.RestartableOpenDepth == 0)
+            {
+                PagedMMF.ResetRestartBudgets();
+            }
+        }
+    }
+
+    /// <summary>Leaves a first write's restart scope once it has claimed its revision: past that point it waits as before.</summary>
+    private static void EndRestartScope(ref bool restartScope)
+    {
+        if (!restartScope)
+        {
+            return;
+        }
+
+        restartScope = false;
+        if (--PagedMMF.RestartableOpenDepth == 0)
+        {
+            PagedMMF.ResetRestartBudgets();
+        }
+    }
+
+    private (int chunkId, nint ptr) EcsVersionedCopyOnWriteCore(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId,
+        ref bool restartScope)
+    {
         var info = GetComponentInfo(compType);
         long pk = (long)entityId.RawValue;
 
@@ -1718,11 +1783,13 @@ public unsafe partial class Transaction
                 {
                     cri.Operations |= ComponentInfo.OperationType.Updated;
                     claimed = true;
+                    EndRestartScope(ref restartScope);   // claimed: no longer restartable (#1382)
                 }
 
                 ComponentRevisionManager.AddCompRev(info, ref cri, TSN, UowId, false);
                 cri.Operations |= ComponentInfo.OperationType.Updated;
                 claimed = true;
+                EndRestartScope(ref restartScope);   // claimed: no longer restartable (#1382)
 
                 // Copy old data to new chunk
                 byte* oldPtr = info.CompContentAccessor.GetChunkAddress(oldChunkId);

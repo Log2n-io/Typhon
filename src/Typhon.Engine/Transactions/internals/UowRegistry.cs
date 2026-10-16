@@ -261,14 +261,30 @@ internal unsafe class UowRegistry : IDisposable
 
             var slotIndex = (w * 64) + bit;
 
-            // Ensure capacity (may need to grow segment for higher slot indices)
-            if (slotIndex >= _currentCapacity)
+            // The grow and the entry's write load pages and can throw (a back-pressure timeout): the claimed slot goes back, or it was lost for the
+            // process's life (#1382). Its next claimer writes the entry whole.
+            try
             {
-                EnsureCapacity(slotIndex + 1);
-            }
+                // Ensure capacity (may need to grow segment for higher slot indices)
+                if (slotIndex >= _currentCapacity)
+                {
+                    EnsureCapacity(slotIndex + 1);
+                }
 
-            // Initialize the entry on the page
-            InitializeEntry(slotIndex, externalCs);
+                // Initialize the entry on the page
+                InitializeEntry(slotIndex, externalCs);
+            }
+            catch
+            {
+                Interlocked.Or(ref _allocationBitmap[w], mask);
+                var waiters = Volatile.Read(ref _waiters);
+                if (waiters > 0 && _slotFreed.CurrentCount < waiters)
+                {
+                    _slotFreed.Release();
+                }
+
+                throw;
+            }
 
             Interlocked.Increment(ref _activeCount);
             // Cumulative allocation counter — monotonic. Profiler per-tick gauges derive the "created this tick" delta from this value.
@@ -348,43 +364,48 @@ internal unsafe class UowRegistry : IDisposable
             return;
         }
 
-        bool wasVoid;
+        var wasVoid = false;
 
-        // Write Free state to the page
-        using (var guard = EpochGuard.Enter(_epochManager))
+        // The page write can throw (a back-pressure timeout): the slot is freed all the same, or it was lost for the process's life (#1382). Its next
+        // claimer writes the entry whole (InitializeEntry).
+        try
         {
+            // Write Free state to the page
+            using var guard = EpochGuard.Enter(_epochManager);
             var entry = ReadEntry(uowId, guard.Epoch);
             wasVoid = entry.State == UnitOfWorkState.Void;
             WriteEntryState(uowId, UnitOfWorkState.Free, guard.Epoch, externalCs);
         }
-
-        // Clear committed bitmap bit
-        var wordIndex = uowId >> 6;
-        var bitMask = 1UL << (uowId & 63);
-        Interlocked.And(ref _committedBitmap[wordIndex], ~bitMask);
-
-        // Set allocation bitmap bit (slot is free again)
-        Interlocked.Or(ref _allocationBitmap[wordIndex], bitMask);
-
-        Interlocked.Decrement(ref _activeCount);
-
-        if (wasVoid)
+        finally
         {
-            var remaining = Interlocked.Decrement(ref _voidEntryCount);
-            if (remaining == 0)
+            // Clear committed bitmap bit
+            var wordIndex = uowId >> 6;
+            var bitMask = 1UL << (uowId & 63);
+            Interlocked.And(ref _committedBitmap[wordIndex], ~bitMask);
+
+            // Set allocation bitmap bit (slot is free again)
+            Interlocked.Or(ref _allocationBitmap[wordIndex], bitMask);
+
+            Interlocked.Decrement(ref _activeCount);
+
+            if (wasVoid)
             {
-                _committedBeforeTSN = long.MaxValue;
+                var remaining = Interlocked.Decrement(ref _voidEntryCount);
+                if (remaining == 0)
+                {
+                    _committedBeforeTSN = long.MaxValue;
+                }
             }
-        }
 
-        // Wake any threads waiting in AllocateUowId() for a free slot — but ONLY when one exists. An unconditional
-        // Release turns this signal into a monotonic counter that overflows int.MaxValue and throws (#844). The
-        // allocation bit was set above with an Interlocked, so this read is ordered after it: a waiter that registered
-        // before our read is seen here, and one that registers after our read will find the bit in its own re-check.
-        var waiters = Volatile.Read(ref _waiters);
-        if (waiters > 0 && _slotFreed.CurrentCount < waiters)
-        {
-            _slotFreed.Release();
+            // Wake any threads waiting in AllocateUowId() for a free slot — but ONLY when one exists. An unconditional
+            // Release turns this signal into a monotonic counter that overflows int.MaxValue and throws (#844). The
+            // allocation bit was set above with an Interlocked, so this read is ordered after it: a waiter that registered
+            // before our read is seen here, and one that registers after our read will find the bit in its own re-check.
+            var waiters = Volatile.Read(ref _waiters);
+            if (waiters > 0 && _slotFreed.CurrentCount < waiters)
+            {
+                _slotFreed.Release();
+            }
         }
     }
 

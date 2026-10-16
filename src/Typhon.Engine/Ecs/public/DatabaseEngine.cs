@@ -1644,7 +1644,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             for (; processed < toProcess.Count; processed++)
             {
-                epochYield.BetweenEntries();
+                epochYield.BetweenEntries(changeSet);   // each entry disposes its accessors: its marks can go with the epoch (#1382)
                 var freesBefore = frees?.Count ?? 0;
                 try
                 {
@@ -3655,6 +3655,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         using var guard = EpochGuard.Enter(EpochManager);
         var cs = MMF.CreateChangeSet();
+        // A throw before the save (a back-pressure round, or the checkpoint's deferral of this hook: CK-14, #1382) must not keep the marks: held, they
+        // left the archetype table's pages unevictable for good. The pages updated so far keep their debt and their records; a later cycle writes them.
+        var saved = false;
+        try
+        {
+            if (PersistArchetypeStateInto(archetypesTable, cs))
+            {
+                cs.SaveChanges();
+            }
+
+            saved = true;
+        }
+        finally
+        {
+            if (!saved)
+            {
+                cs.ReleaseDirtyMarks();
+            }
+        }
+    }
+
+    /// <summary>The archetypes whose persisted state is stale, updated through <paramref name="cs"/>; true when any was.</summary>
+    private bool PersistArchetypeStateInto(ComponentTable archetypesTable, ChangeSet cs)
+    {
         var anyUpdated = false;
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -3716,10 +3740,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             anyUpdated = true;
         }
 
-        if (anyUpdated)
-        {
-            cs.SaveChanges();
-        }
+        return anyUpdated;
     }
 
     /// <summary>

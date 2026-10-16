@@ -128,13 +128,26 @@ internal ref struct ComponentRevisionManager
         if (!lockAlreadyHeld)
         {
             ticket = ChainLockTicket(ref compRevTableAccessor, ref firstHeader);
-            var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+            // #1382: a first write waits for a contended chain briefly, then unwinds and moves its epoch instead of waiting with its pin; nothing is
+            // written before the lock, so the write starts over clean (CHAIN-02).
+            var restartable = PagedMMF.OpenRestartAllowed;
+            var lockTimeout = TimeoutOptions.Current.RevisionChainLockTimeout;
+            var wc = WaitContext.FromTimeout(restartable && PagedMMF.LockWaitBeforeRestart < lockTimeout ? PagedMMF.LockWaitBeforeRestart : lockTimeout);
             if (!firstHeader.Control.EnterExclusiveAccess(ref wc))
             {
+                if (restartable)
+                {
+                    PagedMMF.RestartForLockWithin(TimeoutOptions.Current.RevisionChainLockTimeout);
+                }
+
                 ThrowHelper.ThrowLockTimeout("RevisionChain/AddRevision", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
 
+        // Under the lock the append is not restartable (#1382): its steps write the chain one after the other, and a restart thrown between two of them
+        // (a back-pressure round on a page) left it half-written for the retry. It waits as before, and only its timeout can interrupt it.
+        var restartDepth = PagedMMF.RestartableOpenDepth;
+        PagedMMF.RestartableOpenDepth = 0;
         try
         {
             // Check if we need to add one more chunk to the chain
@@ -182,6 +195,7 @@ internal ref struct ComponentRevisionManager
         }
         finally
         {
+            PagedMMF.RestartableOpenDepth = restartDepth;
             if (!lockAlreadyHeld)
             {
                 firstHeader.Control.ExitExclusiveAccess();
@@ -1603,13 +1617,15 @@ internal ref struct ComponentRevisionManager
 
             // Add a new chunk after the last in the chain
             var newChunkId = compRevTable.AllocateChunk(true, info.CompRevTableAccessor.ChangeSet); // Clear content to make sure the next chunk ID is 0
+
+            // Copy the elements from the first chunk to the new chunk, then link it: both fetches can throw (a back-pressure timeout), and linked first,
+            // a throw left the chain last → new → 0 with its length and first index unchanged — the retry grew it again from the orphan (#1382).
+            var newChunkElements = compRevTableAccessor.GetChunkAsSpan(newChunkId, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
+            var firstChunkElements = compRevTableAccessor.GetChunkAsSpan(firstChunkIndexInChain, true).Slice(sizeof(int))
+                .Cast<byte, CompRevStorageElement>();
+            firstChunkElements.Slice(0, firstItemIndexInChunk).CopyTo(newChunkElements);
             enumerator.NextChunkId = newChunkId;
             compRevTableAccessor.DirtyChunk(enumerator.CurChunkId);
-
-            // Copy the elements from the first chunk to the new chunk
-            var newChunkElements = compRevTableAccessor.GetChunkAsSpan(newChunkId, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
-            var firstChunkElements = compRevTableAccessor.GetChunkAsSpan(firstChunkIndexInChain, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
-            firstChunkElements.Slice(0, firstItemIndexInChunk).CopyTo(newChunkElements);
 
             firstHeader.ChainLength++;                                              // One more item in the chain
             firstHeader.FirstItemIndex += (short)CompRevCountInNext; // We added a chunk before, the first item index gets shifted

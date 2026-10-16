@@ -351,6 +351,21 @@ lock ordering and deadlock prevention are still to come.
             it read until it returns, and every lock it takes is released by the throw, so the unwind loses nothing the retry needs. Not under a live
             index cursor, nor in a commit's publish (AP-03): those still wait with their pins. Waiting, one reader's pin kept every page the others
             touched meanwhile: 16 readers over 32 MiB had the whole cache epoch-held, nothing dirty, the pin 1,177 epochs behind
+  invariant a contended revision-chain lock is not waited on with a pin either, inside an open or inside a first write before it claims its revision
+            (#1382): the lock is waited for PagedMMF.LockWaitBeforeRestart (5 ms), then the operation unwinds (BackpressureOpenRestart, LockWait),
+            moves its epoch and tries again, within RevisionChainLockTimeout (PagedMMF.RestartForLockWithin; the shared lock of RevisionEnumerator's
+            walk, the exclusive one of ComponentRevisionManager.AddCompRev). Transaction.EcsVersionedCopyOnWrite is a restart boundary as the open is:
+            until its claim a first write leaves no trace on a throw (CHAIN-02), and its caller holds nothing across it but the handle, which
+            re-resolves (EP-03). Waiting with its pin, a writer queued behind a publish that held the chain while it waited on back-pressure (AP-03)
+            kept every page anyone touched, so the publish's page never came: the market's last two failures in 20 seeds, a pin 4,239 epochs behind
+  invariant a transaction's dispose leaves its epoch scope and the chain whatever its auto-rollback or its drain throws (#1382), and the exception
+            surfaces after: left, its pin kept every page anyone touched after it unevictable and its chain node held the cleanup cutoff, for good —
+            one transient back-pressure timeout made a permanent stall. A rollback cut short leaves entries flagged by a TSN that never gets a card,
+            which every reader resolves as invisible (VIS-01) — but nothing reclaims them before the next crash open's scrub (VIS-07): the revision GC
+            stops at a flagged entry and a destroyed entity's chain release defers on it, so that entity's chain keeps its later revisions. Accepted
+            against a permanent stall; bounded by how rarely a rollback itself fails. The UoW registry gives a claimed slot back when its entry's
+            write throws, and frees a released one when its page write throws; a transaction whose pool reset throws is dropped with its spawn arena
+            given back
   invariant the tail transaction refreshes its epoch before it drains the deferred cleanups (Transaction.RefreshEpochBeforeDrain), at the call
             boundary its dispose is (EP-03), and between the drain's entries at most every millisecond (DeferredCleanupManager.EpochYield — a
             batch of thousands outlived the first refresh, its pin 6,800 to 15,700 epochs behind): the drain runs every transaction's cleanups, and the tail's pin is the oldest there is — a back-pressure
@@ -360,7 +375,10 @@ lock ordering and deadlock prevention are still to come.
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
          EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
-         Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
+         Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, Transaction.Dispose, UowRegistry.TryClaimFreeSlot,
+         PagedMMF.RestartForLockWithin, PagedMMF.OpenRestartAllowed, Transaction.EcsVersionedCopyOnWrite, RevisionEnumerator,
+         ComponentRevisionManager.AddCompRev,
+         RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
          RawValuePagedHashMap.AnyEntry, EcsQuery.ScanClusterSoa, EcsQuery.FillSnapshotColumn, EnabledGate.IsPresentAtSnapshot,
          EntityVisibility.IsVisiblePendingInScan, Transaction.RefreshEpochBeforeDrain, DeferredCleanupManager.EpochYield,
          LogicalSegment.AcquirePageForRead, LogicalSegment.WalkForwardChainPageCount, LogicalSegment.VerifyGrownChainLinks,
@@ -399,6 +417,13 @@ lock ordering and deadlock prevention are still to come.
             yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer
             fills the cache (1 012 of 1 024 pages epoch-held) and stalls; the walk's next miss waits, moves its epoch, and both finish (with the wait's
             refresh removed: the back-pressure timeout, nothing dirty, 1 012 epoch-protected)
+  verified: RevisionChunkRetentionTests.ATailsDrainThatThrows_StillLeavesItsEpochAndTheChain_AndGivesBackItsMarks [VerifiesRule] — the drain throws
+            on its third entry: the dispose rethrows, the thread is in no epoch scope, the chain is empty, no page is marked, the engine goes on (the
+            thread stays pinned with the finally removed); TheTailsDrain_GivesBackItsMarksAsItGoes [VerifiesRule] — refreshed between entries the
+            drain holds 1 marked page at most, 10 without the release
+  verified: LockReleaseOnThrowTests.AnOpenWaitingOnAHeldChain_MovesItsEpochWhileItWaits_AndGoesOnOnceItIsReleased [VerifiesRule] — another thread
+            holds the chain: the open restarts, its pin moves, and the write commits once the chain is released (no restart and no epoch move with the
+            lock restart removed)
   verified: EpochRefreshCadenceTests.AnOpenMeetingBackpressure_UnwindsToItsStart_MovesItsEpoch_AndRunsAgain [VerifiesRule] — three forced rounds
             of back-pressure under an open that misses: three restarts, the epoch moved by each, the open's answer unchanged
   verified: QueryScanCacheBoundTests — the occupancy count, the entity-map count and existence check, the SoA scan, the index range scan and the

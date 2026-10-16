@@ -755,6 +755,69 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
         return written;
     }
 
+    /// <summary>
+    /// Runs <see cref="PersistDurableMetadataHook"/> without letting it wait on back-pressure (CK-14, #1382), and returns false when it gave up. The
+    /// hook loads pages — the archetype table's, each entity map's meta chunk — and under a write storm the churn has evicted them while every other
+    /// slot owes a write only this cycle makes. Written ahead (<see cref="WriteAheadOfTheHook"/>), the freed slots went to the writers waiting for them
+    /// first, so the hook still waited, for the whole back-pressure timeout, with writeback at zero, and every writer behind it timed out too: 3 of 3
+    /// instrumented market failures.
+    /// </summary>
+    /// <remarks>
+    /// Given up, the hook may have persisted some archetypes and not others. Each update is a record and a dirty page, as a full run's are, and a
+    /// flush-only cycle writes such pages as the write ahead of the hook already did: the cycle that runs the hook to its end advances CheckpointLSN
+    /// over them. Once the hook has not run for <see cref="HookDeferralWindow"/> it waits as before, bounded by the back-pressure timeout, so
+    /// CheckpointLSN cannot stall behind a hook that is never served — by time, not by a count of cycles: under a storm cycles run back to back, and
+    /// three deferrals in a row were a second, after which every fourth cycle waited again. The shutdown cycle never defers: it is the last.
+    /// </remarks>
+    private bool RunHookOrDefer(CheckpointReason reason)
+    {
+        var hook = PersistDurableMetadataHook;
+        if (hook == null)
+        {
+            return true;
+        }
+
+        if (reason == CheckpointReason.Shutdown || Stopwatch.GetElapsedTime(_hookRanAt) >= HookDeferralWindow)
+        {
+            // Served or timed out, the wait opens a new window: the next cycle defers again if it must.
+            try
+            {
+                hook();
+                return true;
+            }
+            finally
+            {
+                _hookRanAt = Stopwatch.GetTimestamp();
+            }
+        }
+
+        PagedMMF.NoBackpressureWaitDepth++;
+        try
+        {
+            hook();
+            _hookRanAt = Stopwatch.GetTimestamp();
+            return true;
+        }
+        catch (BackpressureCheckpointDeferral)
+        {
+            Interlocked.Increment(ref _totalHookDeferrals);
+            return false;
+        }
+        finally
+        {
+            PagedMMF.NoBackpressureWaitDepth--;
+        }
+    }
+
+    /// <summary>How long after its last run the hook may still give up on back-pressure (<see cref="RunHookOrDefer"/>). Settable: tests shorten it.</summary>
+    internal static TimeSpan HookDeferralWindow = TimeSpan.FromSeconds(10);
+
+    private long _hookRanAt = Stopwatch.GetTimestamp();   // under _cycleLock
+    private long _totalHookDeferrals;
+
+    /// <summary>Cycles whose metadata hook gave up on back-pressure and only wrote (<see cref="RunHookOrDefer"/>, CK-14). Diagnostic.</summary>
+    public long TotalHookDeferrals => Interlocked.Read(ref _totalHookDeferrals);
+
     /// <summary>The highest writeback debt, in percent of the cache, at which <see cref="WriteAheadOfTheHook"/> still lets the hook run first.</summary>
     private const int MaxWriteAheadThresholdPercent = 50;
 
@@ -1182,7 +1245,13 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // its WAL records and dirty pages are flushed by THIS cycle. This makes the consolidated cluster/EntityMap base reachable on reopen after a
             // hard crash (CK-09 family / #395) — the checkpoint already writes the data pages; this records the pointers to them. Idempotent and cheap
             // (skips archetypes whose state is unchanged).
-            PersistDurableMetadataHook?.Invoke();
+            // CK-14 (#1382): a hook that would wait for a slot gives up, and the cycle only writes: CheckpointLSN does not move, and the next cycle runs
+            // the hook again.
+            if (!RunHookOrDefer(reason))
+            {
+                RunFlushOnlyCycleCore();
+                return;
+            }
 
             // Step 1: Durability barrier (CK-01/CK-02). Flush the WAL through everything appended so far, then take the
             // post-flush DurableLsn as the cycle's authoritative high-water (barrierLsn). The checkpoint advances to

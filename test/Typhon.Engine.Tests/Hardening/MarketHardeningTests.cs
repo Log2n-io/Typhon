@@ -736,7 +736,8 @@ public class MarketHardeningTests
     private sealed class Sampler : IDisposable
     {
         private const string Header =
-            "t_s,phase,slots_used,debt,acw,slot_ref,epoch_held,unevictable,pages_read,pages_written,bp_rounds,bp_peak_debt,bp_peak_epoch_held," +
+            "t_s,phase,slots_used,debt,acw,slot_ref,epoch_held,marked,epoch_only,unevictable,pages_read,pages_written,bp_rounds,bp_peak_debt," +
+            "bp_peak_epoch_held," +
             "bp_longest_wait_ms,ckpt_cycles,ckpt_pressure_cycles,ckpt_pages_written,ops,private_mib,working_set_mib,managed_mib";
 
         private readonly StreamWriter _out;
@@ -825,17 +826,18 @@ public class MarketHardeningTests
                 if (dbe != null)
                 {
                     var mmf = dbe.MMF;
-                    var (debt, acw, slotRef, epochHeld, unevictable, total) = mmf.CountUnevictablePages();
+                    var (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total) = mmf.CountUnevictablePages();
                     var m = mmf.GetMetrics();
                     var ck = dbe.CheckpointManager;
                     var waitMs = Stopwatch.GetElapsedTime(0, Volatile.Read(ref mmf.PeakBackpressureWaitTicks)).TotalMilliseconds;
-                    row.Append($",{total},{debt},{acw},{slotRef},{epochHeld},{unevictable},{m.ReadFromDiskCount},{m.PageWrittenToDiskCount}");
+                    row.Append($",{total},{debt},{acw},{slotRef},{epochHeld},{marked},{epochOnly},{unevictable}");
+                    row.Append($",{m.ReadFromDiskCount},{m.PageWrittenToDiskCount}");
                     row.Append($",{m.BackpressureWaitCount},{mmf.PeakBackpressureDebt},{mmf.PeakBackpressureEpochHeld},{waitMs:F0}");
                     row.Append($",{ck?.TotalCheckpoints},{ck?.TotalPressureCheckpoints},{ck?.TotalPagesWritten},{_operations?.Invoke()}");
                 }
                 else
                 {
-                    row.Append(",,,,,,,,,,,,,,,,");
+                    row.Append(",,,,,,,,,,,,,,,,,,");
                 }
             }
 

@@ -263,28 +263,35 @@ public sealed class UnitOfWork : IDisposable
 
         _disposed = true;
 
-        // Release the UoW registry slot. For Deferred/GroupCommit the mutation goes into the
-        // shared ChangeSet so it will be included in whatever flush path runs next.
-        if (_uowId != 0)
+        // The registry write loads a page and can throw (a back-pressure timeout): the marks are returned and the UoW ends all the same, or every page
+        // its ChangeSet marked stayed unevictable for good (#1382). The exception surfaces after.
+        try
         {
-            _dbe.UowRegistry.Release(_uowId, ChangeSet);
-        }
+            // Release the UoW registry slot. For Deferred/GroupCommit the mutation goes into the
+            // shared ChangeSet so it will be included in whatever flush path runs next.
+            if (_uowId != 0)
+            {
+                _dbe.UowRegistry.Release(_uowId, ChangeSet);
+            }
 
-        // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
-        // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose.
-        if (_durabilityMode != DurabilityMode.Deferred && !_skipDisposeFlush)
+            // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
+            // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose.
+            if (_durabilityMode != DurabilityMode.Deferred && !_skipDisposeFlush)
+            {
+                _ = FlushAsync();
+            }
+        }
+        finally
         {
-            _ = FlushAsync();
+            // Return every DirtyCounter mark this UoW's ChangeSet took (PS-05). Its pages are never written via SaveChangesAsync — only the checkpoint writes
+            // them — and they stay unevictable through their writeback debt until it has (PS-10), so releasing the marks loses nothing.
+            ChangeSet?.ReleaseDirtyMarks();
+
+            // Cancel any outstanding operations
+            _cts.Cancel();
+            _cts.Dispose();
+
+            _state = UnitOfWorkState.Free;
         }
-
-        // Return every DirtyCounter mark this UoW's ChangeSet took (PS-05). Its pages are never written via SaveChangesAsync — only the checkpoint writes
-        // them — and they stay unevictable through their writeback debt until it has (PS-10), so releasing the marks loses nothing.
-        ChangeSet?.ReleaseDirtyMarks();
-
-        // Cancel any outstanding operations
-        _cts.Cancel();
-        _cts.Dispose();
-
-        _state = UnitOfWorkState.Free;
     }
 }
