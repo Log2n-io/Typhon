@@ -306,8 +306,10 @@ public sealed class BotProvisioner : IDisposable
         if (response.StatusCode == HttpStatusCode.Conflict)
         {
             // The account exists from an earlier run whose file we no longer have. Not an error. No signup retry on a 401 from
-            // here: the signup that would be retried is the one that just answered 409.
-            return await LoginAsync(index, name, password, existing, signupOnUnauthorized: false, ct).ConfigureAwait(false);
+            // here (the signup that would be retried is the one that just answered 409), but a 401 AFTER that 409 is the one case
+            // where the key is proven wrong rather than merely suspected, so this path carries the diagnosis.
+            return await LoginAsync(index, name, password, existing, signupOnUnauthorized: false, ct, nameIsTaken: true)
+                .ConfigureAwait(false);
         }
 
         if (!response.IsSuccessStatusCode)
@@ -348,7 +350,10 @@ public sealed class BotProvisioner : IDisposable
 
         if (!response.IsSuccessStatusCode)
         {
-            return new Outcome(OutcomeKind.Failed, null, await RefusalAsync(response, "signup", ct).ConfigureAwait(false));
+            // BOTH reasons: the login's describes the ACCOUNT and the signup's only describes the probe. A server with signup
+            // disabled answers 403 here, and reporting that alone would hide the 401 that sent us looking.
+            var probe = await RefusalAsync(response, "signup", ct).ConfigureAwait(false);
+            return new Outcome(OutcomeKind.Failed, null, $"{refusal}; the signup probe then answered {probe}");
         }
 
         var minted = await response.Content.ReadFromJsonAsync(BotAccountJson.Default.BotAuthResponse, ct).ConfigureAwait(false);
@@ -369,7 +374,7 @@ public sealed class BotProvisioner : IDisposable
     /// <param name="ct">Cancels the call.</param>
     /// <returns>The outcome.</returns>
     private async Task<Outcome> LoginAsync(int index, string name, string password, BotAccountRecord existing, bool signupOnUnauthorized,
-        CancellationToken ct)
+        CancellationToken ct, bool nameIsTaken = false)
     {
         using var response = await PostAsync("/auth/login", name, password, ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
@@ -377,6 +382,15 @@ public sealed class BotProvisioner : IDisposable
             var refusal = await RefusalAsync(response, "login", ct).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.Unauthorized || !signupOnUnauthorized)
             {
+                // <b>The caller may already have PROVEN the name exists, and then a 401 has exactly one explanation.</b> A signup
+                // answering 409 establishes it; this login then refusing the derived password leaves only the key. It is said here
+                // because this is the STRONGER of the two paths - the other infers existence from a signup it has yet to try — and
+                // it was reporting a bare "login refused: 401", the same dead end the fallback below exists to end.
+                if (nameIsTaken && response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    refusal += $" — the account exists but {BotCredentials.KeyVariable} does not match the one it was created with";
+                }
+
                 return new Outcome(OutcomeKind.Failed, null, refusal);
             }
 

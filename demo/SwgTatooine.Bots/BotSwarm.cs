@@ -263,9 +263,7 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <summary>Guards the bot-index allocator: the high-water mark and the one released run.</summary>
     private readonly object _indexLock = new();
 
-    private int _nextIndex;
-    private int _freeFrom = -1;
-    private int _freeCount;
+    private BotIndexPool _indices;
 
     /// <summary>What the ramp's chunks cost, by half, under <see cref="_reportLock"/>.</summary>
     private int _chunks;
@@ -295,6 +293,7 @@ public sealed class BotSwarm : IAsyncDisposable
         // Capacity, not population: the array is the ceiling an operator may turn the fleet up to, and it is allocated once because a
         // growing array would have to be republished under the driver's feet every time somebody moved a slider.
         _bots = new Bot[Math.Max(options.Count, options.MaxCount)];
+        _indices = new BotIndexPool(_bots.Length);
         _target = options.Count;
     }
 
@@ -986,7 +985,19 @@ public sealed class BotSwarm : IAsyncDisposable
                 var first = AllocateIndices(size, out var allocated);
                 if (allocated <= 0)
                 {
-                    break;
+                    // <b>A stall, NOT an exit.</b> `break` here left the whole reconciler loop, so the dial stopped working in both
+                    // directions for the rest of the run while the panel still said Running — exactly what this method's remarks
+                    // promise cannot happen. Settling after three such rounds is what the caller is waiting on; staying in the loop
+                    // is what keeps a LOWER target still reachable, which matters most when the fleet is out of indices.
+                    stalls++;
+                    if (stalls >= 3)
+                    {
+                        _settled.TrySetResult();
+                    }
+
+                    nextDue = clock.Elapsed;
+                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    continue;
                 }
 
                 var chunkClock = Stopwatch.StartNew();
@@ -1075,79 +1086,20 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// Takes up to <paramref name="want"/> bot indices, preferring ones a shrink or a failure handed back.
-    /// </summary>
-    /// <param name="want">How many indices the chunk would like.</param>
-    /// <param name="allocated">How many it got; fewer than asked for only at the capacity.</param>
-    /// <returns>The first index, which is contiguous for <paramref name="allocated"/> entries.</returns>
+    /// <summary>Takes a contiguous run of account indices for a chunk.</summary>
+    /// <param name="want">How many the chunk would like.</param>
+    /// <param name="allocated">How many it got; zero means the pool is exhausted.</param>
+    /// <returns>The first index of the run.</returns>
     /// <remarks>
-    /// <b>An allocator rather than the array's own count, because an index names an ACCOUNT and the array index names a slot.</b> The
-    /// two drift apart the moment a handshake fails: the array compacts and the count does not advance, so deriving the account from
-    /// the count re-opened accounts that were already playing. Free indices are preferred so that a shrink followed by a re-grow
-    /// reuses the same accounts — their tokens are still valid, so that path makes no HTTP calls at all.
-    /// <para>
-    /// Contiguous because the provisioner takes a range. A free list that could not satisfy a contiguous run falls back to fresh
-    /// indices, which costs signups for accounts that did not need them but never opens one twice.
-    /// </para>
+    /// The arithmetic and its invariants live in <see cref="BotIndexPool"/>, with tests, because handing out an index that is still
+    /// in use logs a second session into a live account and the server kicks it.
     /// </remarks>
-    private int AllocateIndices(int want, out int allocated)
-    {
-        lock (_indexLock)
-        {
-            // The free list holds released runs; the common case after a shrink is one long contiguous run at the tail.
-            if (_freeFrom >= 0 && _freeCount > 0)
-            {
-                allocated = Math.Min(want, _freeCount);
-                var from = _freeFrom;
-                _freeFrom += allocated;
-                _freeCount -= allocated;
-                if (_freeCount == 0)
-                {
-                    _freeFrom = -1;
-                }
+    private int AllocateIndices(int want, out int allocated) => _indices.Allocate(want, out allocated);
 
-                return from;
-            }
-
-            allocated = Math.Min(want, _bots.Length - _nextIndex);
-            var first = _nextIndex;
-            _nextIndex += allocated;
-            return first;
-        }
-    }
-
-    /// <summary>Hands indices back so a later chunk reuses them.</summary>
+    /// <summary>Gives account indices back, one or many.</summary>
     /// <param name="from">The first index.</param>
     /// <param name="count">How many.</param>
-    /// <remarks>
-    /// One run is tracked rather than a general set: a shrink always releases the tail, and a failed handshake releases one index
-    /// that the next chunk takes immediately. Releasing a second, disjoint run while one is pending simply keeps the lower of the
-    /// two and lets the other be re-allocated as fresh indices — correct, and at worst it costs a signup that was not needed.
-    /// </remarks>
-    private void ReleaseIndices(int from, int count)
-    {
-        lock (_indexLock)
-        {
-            if (count <= 0)
-            {
-                return;
-            }
-
-            // Walking the high-water mark back is better than remembering a run, when the run IS the tail.
-            if (from + count == _nextIndex)
-            {
-                _nextIndex = from;
-                return;
-            }
-
-            if (_freeFrom < 0 || from < _freeFrom)
-            {
-                _freeFrom = from;
-                _freeCount = count;
-            }
-        }
-    }
+    private void ReleaseIndices(int from, int count) => _indices.Release(from, count);
 
     /// <summary>Records what a chunk spent on each half of the pipeline, and which half bound it.</summary>
     /// <param name="provisionMs">Milliseconds signing the chunk's accounts up.</param>
@@ -1222,11 +1174,12 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
-    /// <summary>Publishes a batch of freshly opened bots, skipping the ones whose handshake failed.</summary>
-    /// <param name="opened">The batch.</param>
-    /// <returns>How many were added.</returns>
+    /// <summary>Counts how many of a chunk's handshakes produced a session.</summary>
     /// <remarks>
-    /// The slot is written before the count is published, so a reader on the control panel's thread never sees an unfilled one.
+    /// <b>It no longer publishes anything, and the name is kept because its one caller asks exactly this.</b> Publication moved into
+    /// <see cref="AppendOne"/>, called from each handshake, so by the time a chunk's <c>WhenAll</c> completes every bot in it is
+    /// already in the population — see <see cref="OpenOneAsync"/> for why that timing matters. What the reconciler still needs from
+    /// here is whether the chunk made progress, and a null entry is a handshake that failed.
     /// </remarks>
     private int Append(Bot[] opened)
     {
@@ -1290,36 +1243,42 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private async Task ShrinkToAsync(int target, int batch)
     {
-        var live = BotCount;
-        var removing = Math.Min(batch, live - target);
-        if (removing <= 0)
-        {
-            return;
-        }
+        Bot[] going;
 
-        var going = new Bot[removing];
-        for (var i = 0; i < removing; i++)
-        {
-            going[i] = _bots[live - 1 - i];
-        }
-
-        // <b>The count drops first so no NEW reader reaches these slots; every reader must still tolerate a null.</b> Ordering alone
-        // cannot make this safe in either direction — a reader that captured the old count is walking slots this method is about to
-        // empty whichever order they are written in — so the guarantee is the readers', and `Bots` is documented accordingly. Getting
-        // this wrong put a NullReferenceException through the control panel's snapshot and killed the Blazor circuit, which is the
-        // failure the array-and-count design was adopted to prevent in the first place.
-        // <b>Under the append lock, because appends no longer come from the reconciler alone.</b> A handshake publishes its own bot
-        // the moment it completes, so an open still in flight when the target drops can be writing at the very count this method is
-        // about to lower — which would either lose that session into a slot nobody walks or hand it a slot this loop then nulls.
+        // <b>The count, the victims and the count's new value, all under one lock.</b> Reading `live` outside it and taking the
+        // lock only for the write left a window an append could land in: a handshake publishing at the old count would be stranded
+        // ABOVE the lowered one, where nothing pings it, drives it, closes it or releases its index — it would die of silence and be
+        // counted as a loss nobody could explain. The single-threaded reconciler happens to make that unreachable today, because it
+        // awaits every handshake in the chunk before it can shrink; that is the await's guarantee, not this lock's, and a comment
+        // claiming the lock gives it would be the kind of false assurance the next change trips over.
         lock (_appendLock)
         {
-            Volatile.Write(ref _botCount, live - removing);
-            for (var i = 0; i < removing; i++)
+            var live = BotCount;
+            var cut = Math.Min(batch, live - target);
+            if (cut <= 0)
+            {
+                return;
+            }
+
+            going = new Bot[cut];
+            for (var i = 0; i < cut; i++)
+            {
+                going[i] = _bots[live - 1 - i];
+            }
+
+            Volatile.Write(ref _botCount, live - cut);
+            for (var i = 0; i < cut; i++)
             {
                 _bots[live - 1 - i] = null;
             }
         }
 
+        // <b>The count dropped first so no NEW reader reaches these slots; every reader must still tolerate a null.</b> Ordering
+        // alone cannot make this safe in either direction — a reader that captured the old count is walking slots the block above
+        // has emptied whichever order they are written in — so the guarantee is the readers', and `Bots` is documented accordingly.
+        // Getting this wrong put a NullReferenceException through the control panel's snapshot and killed the Blazor circuit, which
+        // is the failure the array-and-count design was adopted to prevent in the first place.
+        var removing = going.Length;
         var closing = new Task[removing];
         for (var i = 0; i < removing; i++)
         {
@@ -1329,15 +1288,16 @@ public sealed class BotSwarm : IAsyncDisposable
         await Task.WhenAll(closing).ConfigureAwait(false);
         Interlocked.Add(ref _retired, removing);
 
-        // Their ACCOUNT indices go back to the allocator, lowest first, so a re-grow reuses these same accounts and their still-valid
-        // tokens. Taken from the bots rather than computed, because the slot a bot sat in is not its index.
-        var lowest = int.MaxValue;
+        // <b>ONE AT A TIME, because the retired slots are not a contiguous run of account indices.</b> This used to release
+        // `(min(index), removing)` as a single block, which was right only while slot order matched index order — true when a whole
+        // chunk was published together, false now that each handshake publishes itself in whatever order it completes. Releasing a
+        // block that the retired set merely spans marked live indices free: the next growth re-opened an account still playing and
+        // the server refused the arriving session, which is the one failure the allocator exists to prevent. The free list
+        // coalesces, so these come back together as one run anyway.
         foreach (var bot in going)
         {
-            lowest = Math.Min(lowest, bot.Index);
+            ReleaseIndices(bot.Index, 1);
         }
-
-        ReleaseIndices(lowest, removing);
     }
 
     /// <summary>Closes one bot's session, swallowing whatever a dying socket says on the way out.</summary>
@@ -1579,10 +1539,18 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </para>
     /// <para>
     /// At the drive rate and NOT above it, which was measured rather than assumed: at twice the rate the sweep itself grew from a
-    /// 346 ms worst case to 604 ms and retention did not move, because this process is CPU-bound well before it is
-    /// cadence-bound. Decoupling the interval from the driver's cost is the part that is worth having; paying twice for it is not.
-    /// Concurrent sends to one client are safe — the transport serialises them behind its own send lock, which the ping loop and
-    /// the driver have always both relied on.
+    /// 346 ms worst case to 604 ms and retention did not move, because this process is CPU-bound well before it is cadence-bound.
+    /// Decoupling the interval from the driver's SCHEDULE is the part that is worth having; paying twice for it is not.
+    /// </para>
+    /// <para>
+    /// <b>Decoupled from the driver's schedule, NOT from its sends, and the difference bounds what this loop can promise.</b> Both
+    /// paths send through one <see cref="TyphonClient"/>, and the transport serialises them behind a single send lock — which is
+    /// what makes concurrent sends safe, and equally what makes them queue. A bot whose kernel send buffer has filled blocks its own
+    /// ping behind whatever the driver is sending to it, and because a sweep awaits its whole batch, the batch's next ping waits
+    /// with it; <see cref="PingBatch"/> being eight times <see cref="DriveBatch"/> makes that exposure eight times wider than the
+    /// driver's. So this removes the movement pass from the ping INTERVAL, which is what was costing sessions, and does not make a
+    /// ping immune to a stalled socket. Measured at 8 000 of 8 000 on one process; a fleet that outgrows that needs the ping to stop
+    /// sharing a lock with the commands, not a faster sweep.
     /// </para>
     /// </remarks>
     private async Task PingLoopAsync(CancellationToken ct)

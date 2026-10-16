@@ -2414,9 +2414,9 @@ public static partial class TatooineReplication
     /// <param name="speed">Metres per second.</param>
     /// <returns><see langword="false"/> for a class above what the player is entitled to.</returns>
     /// <remarks>
-    /// There is no mount state in this demo, so <c>PlayerRunSpeedMps</c> is the ceiling and a client asking for more is refused rather than clamped: a clamp
-    /// would let a client ask for 12 m/s every tick and never learn that it is not getting it, and the refusal is the number that says whether anything is
-    /// trying.
+    /// There is no mount state in this demo, so every class below <see cref="SpeedClasses.Count"/> is granted to any player and the ladder's top
+    /// (<c>PlayerSpeederFastSpeedMps</c>, 72 m/s) is the ceiling. A class ABOVE it is refused rather than clamped: a clamp would let a client ask for more
+    /// every tick and never learn that it is not getting it, and the refusal is the number that says whether anything is trying.
     /// </remarks>
     private static bool TrySpeedFor(byte speedClass, out float speed)
     {

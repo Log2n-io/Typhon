@@ -169,7 +169,9 @@ public sealed class WebSocketClientTransport : IClientTransport
                 return message;
             }
 
-            // A message spanning frames: only now is a stream worth its allocation.
+            // A message spanning frames: only now is a stream worth its allocation. Not disposed, deliberately: a MemoryStream over
+            // its own array holds no unmanaged resource and has no finalizer, and the alternative is a using that cannot span the
+            // loop. It becomes garbage with the message.
             assembled ??= new MemoryStream(FrameBytes * 2);
             assembled.Write(buffer, 0, result.Count);
             if (assembled.Length > _maxMessageBytes)
