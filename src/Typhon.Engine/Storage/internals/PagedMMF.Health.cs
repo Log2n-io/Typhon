@@ -224,6 +224,8 @@ public partial class PagedMMF
         {
             _healthCalmSince = 0;
         }
+
+        AdjustAdmission(StorageHealth);
     }
 
     private void Transition(StorageHealthState from, StorageHealthState to, long now)

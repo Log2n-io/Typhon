@@ -269,6 +269,8 @@ export const enum GaugeId {
   PageCacheHealthState = 0x0209,           // #1382: 0 Healthy, 1 Pressured, 2 Overloaded, 3 Starved
   PageCacheBackpressureRoundsTotal = 0x020A, // cumulative
   PageCacheOverloadExtensionsTotal = 0x020B, // cumulative: waits that went on past their timeout while pages were served
+  PageCacheAdmissionLimit = 0x020C,        // #1382 S4: units of work let run at once, 0 = gate off
+  PageCacheAdmissionWaitsTotal = 0x020D,   // cumulative
 
   // Transient store — 0x0210
   TransientStoreBytesUsed = 0x0210,

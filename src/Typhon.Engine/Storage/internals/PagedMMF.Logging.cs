@@ -37,6 +37,12 @@ public partial class PagedMMF
         double sinceServedMs, int debtPercent);
 
     [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Storage admission ({State}): at most {Limit} units of work at once, was {Previous} (0 = no limit), {Running} running — new work waits "
+                + "at its start, holding nothing, so the work already running gets the cache")]
+    private static partial void LogAdmissionLimitChanged(ILogger logger, StorageHealthState state, int previous, int limit, int running);
+
+    [LoggerMessage(
         Level = LogLevel.Information,
         Message = "Storage health {From} -> {To} after {DurationMs}ms")]
     private static partial void LogStorageHealthChanged(ILogger logger, StorageHealthState from, StorageHealthState to, double durationMs);

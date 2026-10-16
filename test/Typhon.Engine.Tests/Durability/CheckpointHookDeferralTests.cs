@@ -95,6 +95,7 @@ class CheckpointHookDeferralTests : TestBase<CheckpointHookDeferralTests>
         var window = CheckpointManager.HookDeferralWindow;
         var timeouts = saved.Clone();
         timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(100);
+        timeouts.PageCacheOverloadWaitCeiling = TimeSpan.FromMilliseconds(500);   // the engine's own threads may serve pages meanwhile (S1)
         TimeoutOptions.Current = timeouts;
         var me = Environment.CurrentManagedThreadId;
         var waitedRounds = 0;
@@ -132,5 +133,62 @@ class CheckpointHookDeferralTests : TestBase<CheckpointHookDeferralTests>
         Assert.That(ckpt.TotalHookDeferrals - deferrals, Is.EqualTo(1), "past its window the hook did not defer");
         Assert.That(waitedRounds, Is.GreaterThan(0), "it waited for its page");
         Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Degraded), "its wait timed out, a transient cycle failure (CK-06)");
+    }
+
+    /// <summary>
+    /// Past its window, the hook that must run waits for its page outside its epoch (#1382): it gives up at a lap's end, its epoch scope unwound, waits
+    /// there and runs again — for as long as pages are served — and completes once its page comes, the cycle advancing CheckpointLSN. Waiting inside its
+    /// allocation, the checkpoint thread's pin was the oldest of a cache gone epoch-held.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("CK-14")]
+    public void PastItsWindow_TheHookWaitsOutsideItsEpoch_AndCompletesOnceServed()
+    {
+        using var dbe = OpenEngineWithAColdHookPage();
+        var ckpt = dbe.CheckpointManager;
+        var lsnBefore = ckpt.CheckpointLsn;
+        var restarts = ckpt.TotalHookRestarts;
+        var saved = TimeoutOptions.Current;
+        var window = CheckpointManager.HookDeferralWindow;
+        var timeouts = saved.Clone();
+        timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(100);
+        TimeoutOptions.Current = timeouts;
+        var me = Environment.CurrentManagedThreadId;
+        var held = Stopwatch.StartNew();
+        var waitedWithItsPin = 0;
+        dbe.MMF.ForceBackpressureForTest = () =>
+        {
+            if (Environment.CurrentManagedThreadId != me || held.ElapsedMilliseconds >= 300)
+            {
+                return false;
+            }
+
+            if (PagedMMF.NoBackpressureWaitDepth == 0)
+            {
+                waitedWithItsPin++;
+            }
+
+            dbe.MMF.NoteServedForTests();   // other threads' allocations, going through
+            return true;
+        };
+        try
+        {
+            CheckpointManager.HookDeferralWindow = TimeSpan.Zero;
+            ckpt.RunCheckpointCycle(dbe.WalManager.DurableLsn);
+        }
+        finally
+        {
+            dbe.MMF.ForceBackpressureForTest = null;
+            TimeoutOptions.Current = saved;
+            CheckpointManager.HookDeferralWindow = window;
+        }
+
+        Assert.That(held.ElapsedMilliseconds, Is.GreaterThanOrEqualTo(300), "premise: held past three timeouts");
+        Assert.That(ckpt.TotalHookRestarts - restarts, Is.GreaterThan(0), "it gave its epoch up to wait");
+        Assert.That(waitedWithItsPin, Is.Zero, "no round waited inside its allocation");
+        Assert.That(ckpt.Health, Is.Not.EqualTo(DurabilityHealth.Degraded), "no timeout");
+        Assert.That(ckpt.CheckpointLsn, Is.GreaterThan(lsnBefore), "the hook completed and the cycle advanced CheckpointLSN");
+        Assert.That(dbe.MMF.CountUnevictablePages().Marked, Is.Zero, "the runs given up left no page under their marks");
     }
 }

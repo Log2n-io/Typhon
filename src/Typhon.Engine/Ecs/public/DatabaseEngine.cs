@@ -1909,17 +1909,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var effectiveTimeout = timeout == TimeSpan.Zero ? TimeoutOptions.Current.DefaultUowTimeout : timeout;
         var wc = WaitContext.FromTimeout(effectiveTimeout);
 
-        // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
-        // the registry page mutation in it (avoiding a synchronous SaveChanges).
-        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
-        LogUowLifecycle("ChangeSet created");
+        // S4 (#1382): while the page cache cannot keep up, new work waits here, before it holds anything (PS-23); bounded by its own deadline.
+        MMF.Admit(ref wc);
+        ChangeSet changeSet = null;
+        try
+        {
+            // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
+            // the registry page mutation in it (avoiding a synchronous SaveChanges).
+            changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
+            LogUowLifecycle("ChangeSet created");
 
-        // Back-pressure: if registry is full, wait for a slot to be freed.
-        // The admission check is a fast-path optimization — AllocateUowId's CAS provides the real atomicity (TOCTOU by design).
-        var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
-        LogUowIdAllocated(uowId);
+            // Back-pressure: if registry is full, wait for a slot to be freed.
+            // The admission check is a fast-path optimization — AllocateUowId's CAS provides the real atomicity (TOCTOU by design).
+            var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
+            LogUowIdAllocated(uowId);
 
-        return new UnitOfWork(this, durabilityMode, uowId, effectiveTimeout, changeSet);
+            return new UnitOfWork(this, durabilityMode, uowId, effectiveTimeout, changeSet) { Admitted = true };
+        }
+        catch
+        {
+            changeSet?.ReleaseDirtyMarks();
+            MMF.ReleaseAdmission(Environment.CurrentManagedThreadId);
+            throw;
+        }
     }
 
     /// <summary>Records that a transaction was created (for observability counters).</summary>

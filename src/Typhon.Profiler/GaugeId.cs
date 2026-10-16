@@ -124,6 +124,14 @@ public enum GaugeId : ushort
     /// </summary>
     PageCacheOverloadExtensionsTotal = 0x020B,
 
+    /// <summary>
+    /// How many units of work the storage gate lets run at once, 0 when it is off (#1382, S4). Value kind: <see cref="GaugeValueKind.U32Count"/>.
+    /// </summary>
+    PageCacheAdmissionLimit = 0x020C,
+
+    /// <summary>Units of work that waited at the storage gate, cumulative (#1382). Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>
+    PageCacheAdmissionWaitsTotal = 0x020D,
+
     // ── TransientStore ─────────────────────────────────────────────────── 0x0210
 
     /// <summary>Bytes currently in use by the transient store. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>

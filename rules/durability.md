@@ -1069,13 +1069,16 @@ CK-08 (flush-only cycles) are later increments.
   invariant the write ahead is not enough under contention, so the hook also never waits (#1382): it runs with PagedMMF.NoBackpressureWaitDepth
             set, a back-pressure round there throws BackpressureCheckpointDeferral, and the cycle completes as a flush-only one (CK-08's mode: it
             writes and settles every owed page, runs no barrier, moves no CheckpointLSN); the next cycle runs the hook again. Once the hook has not
-            run for CheckpointManager.HookDeferralWindow (10 s) it waits as before, bounded by the back-pressure timeout, so CheckpointLSN cannot
-            stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
+            run for CheckpointManager.HookDeferralWindow (10 s) it must run, and waits for its pages outside its epoch
+            (CheckpointManager.RunHookWaitingOutsideItsEpoch): it gives up at a lap's end as a deferral would, waits for a page with its scope unwound,
+            and runs again — idempotent — while pages are served (PS-22); past that, one last run waits as before, bounded by the back-pressure
+            timeout. Waiting inside its allocation, the checkpoint thread's pin was the oldest of a 32 MiB cache gone epoch-held (3,841 epochs
+            behind). So CheckpointLSN cannot stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
             shutdown cycle never defers. The deferral is taken at a lap's end, so on a cache above the sweep floor the clock is searched whole first A hook given up midway leaves some archetypes updated — records and dirty pages, as a full run's — and
             releases its ChangeSet's marks (PS-05)
   scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
          CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState, CheckpointManager.RunHookOrDefer,
-         PagedMMF.NoBackpressureWaitDepth, BackpressureCheckpointDeferral
+         PagedMMF.NoBackpressureWaitDepth, BackpressureCheckpointDeferral, CheckpointManager.RunHookWaitingOutsideItsEpoch
   on_violation: the checkpoint is the only thing that turns owed slots into free ones. When a step of its own cycle waits for a free slot while every
                 slot is owed, it waits for itself until the back-pressure timeout: the cycle ends Degraded and every writer waiting behind it times out
                 too. Measured (#1184): MarketHardeningTests, a 0.76 GiB file over a 256 MiB cache, 16 threads. PersistArchetypeState, which writes
@@ -1085,7 +1088,8 @@ CK-08 (flush-only cycles) are later increments.
             running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
   verified: CheckpointHookDeferralTests [VerifiesRule] — back-pressure forced while the hook loads the evicted archetype-table page: the hook gives
             up, the cycle only writes, CheckpointLSN does not move, no page is left marked, well inside the timeout (5 s and a Degraded cycle with
-            the no-wait mode removed); the next cycle advances; past its window the hook waits
+            the no-wait mode removed); the next cycle advances; past its window the hook waits; past its window and served, it waits outside its
+            epoch — no round inside its allocation — and completes, advancing CheckpointLSN (mutant: the hook run plainly, waiting with its pin)
   on_violation (#1382): with the write ahead in place, the freed slots went to the 16 writers waiting for them first; the hook still waited out the
                 5 s with writeback at zero, in 3 of 3 instrumented market failures (64 MiB, 16 writers), and every writer timed out behind it
 
@@ -2405,6 +2409,28 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   on_violation: a wait that throws while the cache is serving pages fails work the engine would have completed a moment later — under a 16-writer
                 storm over 64 MiB, the timeouts that made 35-45 % of the market's runs fail; a state never published leaves an application that
                 gave the engine too little cache or disk with slowness and no reason
+
+---
+
+### PS-23: Work is paced at its start, holding nothing, and never refused for being slow `[correctness]`
+  invariant while the storage gate is on (AdmissionLimit > 0), DatabaseEngine.CreateUnitOfWork admits a unit of work only once fewer than the limit
+            run, waiting before it creates its ChangeSet or claims a registry slot: no pin, latch or lock is held, and no append has happened (#1382, S4)
+  invariant a thread already inside an epoch scope is never held at the gate: it would wait with its pin, protecting the pages every other thread tags;
+            nor is a thread that holds an admitted unit already: it would wait holding that unit's marks and registry slot, at a limit of one for
+            itself. Units made outside CreateUnitOfWork (a bulk load's) are not gated
+  invariant past its own deadline (the unit of work's timeout) a waiting unit is admitted all the same: the gate slows work, it never refuses it
+  invariant every admitted unit is released exactly once, at its dispose or when its creation throws; the limit is never below one, so the gate alone
+            never stops the engine
+  invariant the limit follows the health state at each evaluation (S5): off when Healthy; Overloaded turns it on at three quarters of the units
+            running and holds it, never below a quarter of the cores; Starved halves it, down to one, once what runs is within it; Pressured
+            raises it by a quarter. Every change is logged and published as the gauge
+            PageCacheAdmissionLimit, with PageCacheAdmissionWaitsTotal
+  scope: PagedMMF.Admit, PagedMMF.ReleaseAdmission, PagedMMF.AdjustAdmission, PagedMMF.AdmissionLimit, DatabaseEngine.CreateUnitOfWork, UnitOfWork.Admitted
+  verified: StorageAdmissionTests [VerifiesRule] — a unit waits at a full gate until one ends; a thread inside an epoch scope, and a thread holding
+            a unit, pass a full gate; past its deadline a unit is admitted; the limit's steps per state, and every unit released at its dispose.
+            Mutants killed: no epoch-scope bypass, no held-unit bypass, no deadline admit, no release at dispose
+  on_violation: a unit made to wait while it holds a pin keeps the cache epoch-held for the work already running — the stall the gate exists to
+                prevent; a unit refused for slowness fails work the engine would have completed
 
 ## Module: WAL Recovery
 

@@ -153,6 +153,8 @@ internal static class GaugeSnapshotEmitter
             values[n++] = GaugeValue.FromU32(GaugeId.PageCacheHealthState, (uint)pagedMmf.StorageHealth);
             values[n++] = GaugeValue.FromU64(GaugeId.PageCacheBackpressureRoundsTotal, (ulong)pagedMmf.GetMetrics().BackpressureWaitCount);
             values[n++] = GaugeValue.FromU64(GaugeId.PageCacheOverloadExtensionsTotal, (ulong)pagedMmf.OverloadWaitExtensions);
+            values[n++] = GaugeValue.FromU32(GaugeId.PageCacheAdmissionLimit, (uint)pagedMmf.AdmissionLimit);
+            values[n++] = GaugeValue.FromU64(GaugeId.PageCacheAdmissionWaitsTotal, (ulong)pagedMmf.AdmissionWaits);
         }
 
         // ── Transaction chain ──

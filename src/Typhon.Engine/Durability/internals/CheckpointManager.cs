@@ -785,7 +785,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             // Served or timed out, the wait opens a new window: the next cycle defers again if it must.
             try
             {
-                hook();
+                RunHookWaitingOutsideItsEpoch(hook);
                 return true;
             }
             finally
@@ -811,6 +811,52 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
             PagedMMF.NoBackpressureWaitDepth--;
         }
     }
+
+    /// <summary>
+    /// The hook that must run, waiting for its pages without its epoch (#1382): it gives up at a lap's end as a deferral would, unwinding its epoch scope and
+    /// its marks, waits for a page there, and runs again — idempotent, so a rerun redoes nothing it saved. Waiting inside its allocation, with its pin, the
+    /// checkpoint thread was the oldest pin of a cache gone epoch-held (3,841 epochs behind, at 16 writers over 32 MiB). Its reruns go on while pages are
+    /// served (S1); past that, one last run waits as before and its timeout reports the stall.
+    /// </summary>
+    private void RunHookWaitingOutsideItsEpoch(Action hook)
+    {
+        var mmf = _mmf;
+        var budget = default(PagedMMF.OverloadBudget);
+        while (true)
+        {
+            PagedMMF.NoBackpressureWaitDepth++;
+            try
+            {
+                hook();
+                return;
+            }
+            catch (BackpressureCheckpointDeferral)
+            {
+                Interlocked.Increment(ref _totalHookRestarts);
+            }
+            finally
+            {
+                PagedMMF.NoBackpressureWaitDepth--;
+            }
+
+            var timeouts = TimeoutOptions.Current;
+            budget.Start(mmf.ServedUnderPressure);
+            if (!budget.Allows(timeouts.PageCacheBackpressureTimeout, timeouts.PageCacheOverloadWaitCeiling, mmf.ServedUnderPressure, out _))
+            {
+                hook();
+                return;
+            }
+
+            mmf.AwaitPageAfterOpenRestart();
+        }
+    }
+
+    private long _totalHookRestarts;
+
+    /// <summary>
+    /// Times the hook that had to run gave up its epoch to wait for a page, and ran again (<see cref="RunHookWaitingOutsideItsEpoch"/>). Diagnostic.
+    /// </summary>
+    internal long TotalHookRestarts => Interlocked.Read(ref _totalHookRestarts);
 
     /// <summary>How long after its last run the hook may still give up on back-pressure (<see cref="RunHookOrDefer"/>). Settable: tests shorten it.</summary>
     internal static TimeSpan HookDeferralWindow = TimeSpan.FromSeconds(10);

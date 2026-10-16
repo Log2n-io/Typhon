@@ -735,6 +735,7 @@ const TOOLTIP_GAUGES: Record<string, TooltipGaugeSpec[]> = {
     { id: GaugeId.PageCacheEpochProtectedPages, label: 'Epoch-held',  unit: 'count', colorIdx: 2 },
     { id: GaugeId.PageCachePendingIoReads,      label: 'Pending I/O', unit: 'count', colorIdx: 5 },
     { id: GaugeId.PageCacheHealthState,         label: 'Health (0 ok, 3 starved)', unit: 'count', colorIdx: 7 },
+    { id: GaugeId.PageCacheAdmissionLimit,      label: 'Admission limit (0 off)', unit: 'count', colorIdx: 3 },
   ],
   'gauge-transient': [
     { id: GaugeId.TransientStoreBytesUsed, label: 'Used', unit: 'bytes-compact', colorIdx: 1 },

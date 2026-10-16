@@ -1597,6 +1597,8 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         writer.WriteThroughput("PressuredEntries", HealthEntries(StorageHealthState.Pressured));
         writer.WriteThroughput("OverloadedEntries", HealthEntries(StorageHealthState.Overloaded));
         writer.WriteThroughput("StarvedEntries", HealthEntries(StorageHealthState.Starved));
+        writer.WriteThroughput("AdmissionWaits", AdmissionWaits);
+        writer.WriteThroughput("AdmissionDeadlineAdmits", AdmissionDeadlineAdmits);
     }
 
     /// <inheritdoc />

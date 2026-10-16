@@ -253,6 +253,16 @@ public sealed class UnitOfWork : IDisposable
     /// <summary>Set by <see cref="DisposeUnused"/>: the dispose gives the slot back without flushing.</summary>
     private bool _skipDisposeFlush;
 
+    /// <summary>Admitted by the storage gate (<see cref="DatabaseEngine.CreateUnitOfWork"/>, S4 of #1382): its dispose lets the next one in.</summary>
+    internal bool Admitted
+    {
+        get => _admittedBy != 0;
+        init => _admittedBy = value ? Environment.CurrentManagedThreadId : 0;
+    }
+
+    /// <summary>The thread that created this unit of work, when admitted: its own later units pass the gate while it holds this one.</summary>
+    private readonly int _admittedBy;
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -283,6 +293,16 @@ public sealed class UnitOfWork : IDisposable
         }
         finally
         {
+            // The admission first, in its own finally: a throw below (a cancellation callback's) must not take a slot from the gate for good (PS-23).
+            try
+            {
+                if (Admitted)
+                {
+                    _dbe.MMF.ReleaseAdmission(_admittedBy);
+                }
+            }
+            finally
+            {
             // Return every DirtyCounter mark this UoW's ChangeSet took (PS-05). Its pages are never written via SaveChangesAsync — only the checkpoint writes
             // them — and they stay unevictable through their writeback debt until it has (PS-10), so releasing the marks loses nothing.
             ChangeSet?.ReleaseDirtyMarks();
@@ -292,6 +312,7 @@ public sealed class UnitOfWork : IDisposable
             _cts.Dispose();
 
             _state = UnitOfWorkState.Free;
+            }
         }
     }
 }
