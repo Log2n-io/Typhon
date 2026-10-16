@@ -14,8 +14,42 @@ public sealed class BotSwarmOptions
     /// <summary>Where the server is: <c>ws://…</c> or <c>tcp://host:port</c>.</summary>
     public Uri Endpoint { get; init; }
 
-    /// <summary>How many sessions to open.</summary>
+    /// <summary>How many sessions to open to begin with.</summary>
     public int Count { get; init; } = 100;
+
+    /// <summary>
+    /// The largest population the swarm may later be turned up to; <c>0</c> or less means <see cref="Count"/> is also the ceiling.
+    /// </summary>
+    /// <remarks>
+    /// <b>Capacity is the session array's size and the dial's ceiling, and costs an allocation.</b> It used to also be the number of
+    /// accounts signed up before the run started, which made asking for headroom cost its full price immediately; accounts are now
+    /// provisioned a chunk at a time as the ramp reaches them, so a ceiling of ten thousand with five hundred bots signs up about five
+    /// hundred.
+    /// </remarks>
+    public int MaxCount { get; init; }
+
+    /// <summary>Bots carried through provision → connect → drive as one step; 0 or less means 250.</summary>
+    /// <remarks>
+    /// Large enough that per-chunk overhead is noise, small enough that the first bots are walking in about a second and a ten
+    /// thousand ramp is forty steps rather than twenty thousand.
+    /// </remarks>
+    public int ChunkSize { get; init; } = 250;
+
+    /// <summary>
+    /// Ensures accounts exist for the bots at <c>[from, from + count)</c>, answering how many of them are usable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Supplied by the caller rather than built here, because the swarm must not know what an account is.</b> It drives sessions;
+    /// the provisioner owns HTTP, the key and the accounts file. Null means there is nothing to provision — which is the <c>god</c>
+    /// case, where a session is anonymous and the chunk can be opened straight away.
+    /// </para>
+    /// <para>
+    /// Answering a COUNT rather than a bool is what lets a partial chunk still open: if 250 were asked for and 180 signed up, the
+    /// reconciler opens 180 and comes back for the rest, instead of discarding a chunk because one account in it failed.
+    /// </para>
+    /// </remarks>
+    public Func<int, int, CancellationToken, Task<int>> EnsureAccounts { get; init; }
 
     /// <summary>The session kind the server's admission expects.</summary>
     public string Kind { get; init; } = "god";
@@ -25,6 +59,27 @@ public sealed class BotSwarmOptions
 
     /// <summary>How far a camera's footprint reaches, in metres.</summary>
     public double RegionRadiusM { get; init; } = 256;
+
+    /// <summary>
+    /// Seconds a wandering player holds one heading before picking another; <c>0</c> leaves the avatars standing still.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Player bots stood perfectly still until this existed, and that quietly halved what a run measured.</b> The swarm sent one
+    /// command in its whole life — the god camera's <c>ClientRegion</c>, which <c>--kind player</c> does not even use — so a thousand
+    /// player sessions exercised admission, subscription and replication and touched the intent path, the spatial index and cluster
+    /// migration not at all. The server's own report said so and it took a person looking at the world to notice: <c>intents: 5
+    /// applied</c> while a thousand avatars were bound, those five being the one human in a browser.
+    /// </para>
+    /// <para>
+    /// This is not the brain <c>07-bots</c> § 2 describes — no goals, no profiles, no reaction latency, no adversarial slice. It walks,
+    /// which is the one behaviour that makes bodies cross cells.
+    /// </para>
+    /// </remarks>
+    public double WanderSeconds { get; init; } = 12;
+
+    /// <summary>The speed class a wandering player asks for; 2 is <c>Run</c>, the server's default gait.</summary>
+    public byte WanderSpeedClass { get; init; } = 2;
 
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
     public double CameraSpeedMps { get; init; } = 12;
@@ -140,9 +195,92 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private readonly Bot[] _bots;
 
+    /// <summary>
+    /// The movement command's catalog name, which the SWG server declares and both SDKs resolve by this exact string.
+    /// </summary>
+    /// <remarks>
+    /// A constant rather than a literal at the two call sites: <c>SendCommandAsync</c> throws for a name the catalog does not
+    /// describe, and <c>DriveAsync</c> catches that as "our own bug" and counts it — so a typo would cost a fleet that reports
+    /// protocol faults rather than one that fails to compile.
+    /// </remarks>
+    private const string MoveDirCommand = "MoveDir";
+
+    /// <summary>Bots driven concurrently within one tick.</summary>
+    /// <remarks>
+    /// Large enough that the per-tick cost is a few round trips rather than N of them, small enough that the in-flight sends and their
+    /// buffers stay bounded: at ten thousand sessions this is twenty batches, where the sequential loop was ten thousand.
+    /// </remarks>
+    private const int DriveBatch = 512;
+
+    /// <summary>Bots PINGED concurrently within one tick, which is deliberately far larger than <see cref="DriveBatch"/>.</summary>
+    /// <remarks>
+    /// <b>Because the ping is the session's life and it was queued behind everything else.</b> A ping is a few bytes with no
+    /// encode; a wander is a command built against the catalog. Driving both in one pass meant a bot in the sixteenth batch
+    /// waited for fifteen batches of MOVEMENT before its ping went out, and the server closes a session it has not heard from
+    /// for <c>3 / pingHz</c> seconds — 750 ms at the 4 Hz this server advertises. That is the ceiling a fleet kept hitting at a
+    /// few thousand sessions: the sweep grew past the silence window, the tail was closed with 4001, and the population settled
+    /// wherever the sweep happened to fit.
+    /// </remarks>
+    private const int PingBatch = 4096;
+
+    /// <summary>Serialises the slot a freshly opened bot takes, because handshakes complete concurrently.</summary>
+    private readonly object _appendLock = new();
+
+    private long _pingTicksTotal;
+    private long _pingTicksWorst;
+    private long _pingSends;
+
+    private double _pingSweepMs;
+    private double _pingSweepWorstMs;
+    private double _driveSweepMs;
+    private double _driveSweepWorstMs;
+
     private int _botCount;
     private readonly CancellationTokenSource _stopping = new();
     private Task _driver;
+    private Task _pinger;
+    private Task _reconciler;
+
+    /// <summary>How long the reconciler waits between polls when the population already matches the target.</summary>
+    private static readonly TimeSpan IdlePoll = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>How long it waits between polls once the ramp has stopped making progress.</summary>
+    /// <remarks>
+    /// Long enough that a target the server refuses stops being a load test of its own, short enough that lowering the target or a
+    /// server recovering is picked up while an operator is still looking at the page.
+    /// </remarks>
+    private static readonly TimeSpan StalledPoll = TimeSpan.FromSeconds(2);
+
+    /// <summary>The population asked for, which an operator may move while the swarm runs.</summary>
+    private int _target;
+
+    /// <summary>Sessions closed by a shrink, so a report can tell a deliberate cut from a disconnect.</summary>
+    private long _retired;
+
+    /// <summary>Abnormal closes by their local cause, under <see cref="_reportLock"/>.</summary>
+    private readonly Dictionary<string, int> _closeDetails = [];
+
+    /// <summary>Guards the bot-index allocator: the high-water mark and the one released run.</summary>
+    private readonly object _indexLock = new();
+
+    private int _nextIndex;
+    private int _freeFrom = -1;
+    private int _freeCount;
+
+    /// <summary>What the ramp's chunks cost, by half, under <see cref="_reportLock"/>.</summary>
+    private int _chunks;
+    private int _chunksBoundByProvisioning;
+    private double _provisionMsTotal;
+    private double _connectMsTotal;
+
+    /// <summary>Completes when the population first reaches the target, or when opening stops making progress.</summary>
+    private readonly TaskCompletionSource _settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Sessions the ramp asked for and could not open.</summary>
+    private long _openFailures;
+
+    /// <summary>The first reason a session could not be opened, which is the one worth printing.</summary>
+    private string _firstOpenFailure;
 
     /// <summary>Builds a swarm. Nothing connects until <see cref="StartAsync"/>.</summary>
     /// <param name="options">The swarm's configuration.</param>
@@ -153,11 +291,41 @@ public sealed class BotSwarm : IAsyncDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.Count, nameof(options.Count));
 
         _options = options;
-        _bots = new Bot[options.Count];
+
+        // Capacity, not population: the array is the ceiling an operator may turn the fleet up to, and it is allocated once because a
+        // growing array would have to be republished under the driver's feet every time somebody moved a slider.
+        _bots = new Bot[Math.Max(options.Count, options.MaxCount)];
+        _target = options.Count;
     }
+
+    /// <summary>
+    /// The population asked for. Settable while the swarm runs; the reconciler opens or closes sessions to match at the connect rate.
+    /// </summary>
+    /// <remarks>
+    /// <b>Clamped to the capacity rather than refused</b>, because this is driven by a number typed into a form: asking for more than
+    /// the swarm was built to hold should give the most it can, and the snapshot reports both figures so the difference is visible.
+    /// </remarks>
+    public int Target
+    {
+        get => Volatile.Read(ref _target);
+        set => Volatile.Write(ref _target, Math.Clamp(value, 0, _bots.Length));
+    }
+
+    /// <summary>The largest population this swarm can be turned up to.</summary>
+    public int Capacity => _bots.Length;
+
+    /// <summary>Sessions closed by a shrink rather than lost.</summary>
+    public long Retired => Interlocked.Read(ref _retired);
 
     /// <summary>How many sessions the ramp has published so far.</summary>
     private int BotCount => Volatile.Read(ref _botCount);
+
+    /// <summary>Sessions asked for that never opened, and why the first of them did not.</summary>
+    /// <remarks>
+    /// Exposed so the report and the control panel can say "asked 10 000, opened 8 192, refused 1 808 — the session table is full"
+    /// instead of printing two numbers and leaving the gap to be guessed at.
+    /// </remarks>
+    public (long Count, string FirstReason) OpenFailures => (Interlocked.Read(ref _openFailures), Volatile.Read(ref _firstOpenFailure));
 
     /// <summary>
     /// The published population, as a span whose length is fixed at the moment it is taken.
@@ -166,6 +334,15 @@ public sealed class BotSwarm : IAsyncDisposable
     /// Taking the length once is what makes a concurrent append harmless: the span covers only slots whose write happened before
     /// the count was published, so a ramp that adds a bot during an enumeration is simply not in that enumeration. It cannot be
     /// used across an <c>await</c>, which is why the two asynchronous walks index the array directly instead.
+    /// </remarks>
+    /// <summary>
+    /// The live population as a span — <b>whose entries may be null, and every reader must say so.</b>
+    /// </summary>
+    /// <remarks>
+    /// A shrink lowers the count and then empties the slots above it, so a reader that captured the count a moment earlier is walking
+    /// slots that are being emptied under it. No ordering of those two writes removes that window, so tolerating a null is the
+    /// reader's job: the alternative is a NullReferenceException out of the control panel's once-a-second snapshot, which takes the
+    /// Blazor circuit with it — the exact failure the array-and-count design was adopted to prevent.
     /// </remarks>
     private ReadOnlySpan<Bot> Bots => _bots.AsSpan(0, Volatile.Read(ref _botCount));
 
@@ -177,6 +354,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var live = 0;
             foreach (var bot in Bots)
             {
+                if (bot == null)
+                {
+                    continue;   // a shrink can empty a slot inside a span already taken; see Bots
+                }
+
                 if (bot.Client.IsConnected)
                 {
                     live++;
@@ -200,7 +382,6 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
-    /// <summary>Messages received across every session.</summary>
     /// <summary>Bytes delivered to the whole population, as they came off the wire.</summary>
     public long BytesReceived
     {
@@ -209,6 +390,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var total = 0L;
             foreach (var bot in Bots)
             {
+                if (bot == null)
+                {
+                    continue;   // a shrink can empty a slot inside a span already taken; see Bots
+                }
+
                 total += bot.Client.BytesReceived;
             }
 
@@ -216,6 +402,7 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
+    /// <summary>Messages received across every session.</summary>
     public long MessagesReceived
     {
         get
@@ -223,6 +410,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var total = 0L;
             foreach (var bot in Bots)
             {
+                if (bot == null)
+                {
+                    continue;   // a shrink can empty a slot inside a span already taken; see Bots
+                }
+
                 total += bot.Client.MessagesReceived;
             }
 
@@ -251,6 +443,11 @@ public sealed class BotSwarm : IAsyncDisposable
         var best = -1L;
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             if (blocks > best)
             {
@@ -292,6 +489,11 @@ public sealed class BotSwarm : IAsyncDisposable
         var best = -1L;
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             if (blocks > best)
             {
@@ -343,6 +545,11 @@ public sealed class BotSwarm : IAsyncDisposable
 
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             var frames = bot.Client.Store?.Frames ?? 0;
             total += frames;
             min = Math.Min(min, frames);
@@ -365,6 +572,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var frames = 0L;
             foreach (var bot in Bots)
             {
+                if (bot == null)
+                {
+                    continue;   // a shrink can empty a slot inside a span already taken; see Bots
+                }
+
                 records += bot.Client.Store?.Records ?? 0;
                 frames += bot.Client.Store?.Frames ?? 0;
             }
@@ -384,8 +596,9 @@ public sealed class BotSwarm : IAsyncDisposable
         var tail = 0L;
         for (var i = 0; i < tenth && i < live; i++)
         {
-            head += _bots[i].Client.Store?.Frames ?? 0;
-            tail += _bots[live - 1 - i].Client.Store?.Frames ?? 0;
+            // Null-checked for the reason Bots is: a shrink empties the tail's slots, and the TAIL is exactly what this reads.
+            head += _bots[i]?.Client.Store?.Frames ?? 0;
+            tail += _bots[live - 1 - i]?.Client.Store?.Frames ?? 0;
         }
 
         return ((double)head / tenth, (double)tail / tenth);
@@ -403,6 +616,11 @@ public sealed class BotSwarm : IAsyncDisposable
             var granted = 0;
             foreach (var bot in Bots)
             {
+                if (bot == null)
+                {
+                    continue;   // a shrink can empty a slot inside a span already taken; see Bots
+                }
+
                 if ((bot.Client.CapsGranted & Capabilities.Stats) != 0)
                 {
                     granted++;
@@ -430,6 +648,11 @@ public sealed class BotSwarm : IAsyncDisposable
 
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             var blocks = bot.Client.Store?.StatsBlocks ?? 0;
             total += blocks;
             min = Math.Min(min, blocks);
@@ -460,6 +683,11 @@ public sealed class BotSwarm : IAsyncDisposable
 
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             var plan = bot.Client.Plan;
             var store = bot.Client.Store;
             if (plan == null || store == null)
@@ -493,6 +721,35 @@ public sealed class BotSwarm : IAsyncDisposable
         return double.IsNegativeInfinity(max) ? (double.NaN, double.NaN, 0) : (min, max, atMax);
     }
 
+    /// <summary>The last ping sweep's duration in milliseconds, and the worst one this run has seen.</summary>
+    /// <remarks>
+    /// <b>Against the server's silence window, which is what makes it a reading rather than a statistic.</b> A session the fleet
+    /// has not pinged within <c>3 / pingHz</c> seconds is closed with 4001, so a sweep approaching that figure means the
+    /// population is about to stop growing — and the worst is kept because the live value forgets the spike that did the damage.
+    /// </remarks>
+    public (double Last, double Worst) PingSweepMs
+    {
+        get
+        {
+            lock (_reportLock)
+            {
+                return (_pingSweepMs, _pingSweepWorstMs);
+            }
+        }
+    }
+
+    /// <summary>The last drive sweep's duration in milliseconds — movement and regions, with the ping taken out of it.</summary>
+    public (double Last, double Worst) DriveSweepMs
+    {
+        get
+        {
+            lock (_reportLock)
+            {
+                return (_driveSweepMs, _driveSweepWorstMs);
+            }
+        }
+    }
+
     /// <summary>How many times the shared timer has fired.</summary>
     public long Ticks { get; private set; }
 
@@ -506,13 +763,46 @@ public sealed class BotSwarm : IAsyncDisposable
         var inRealm = 0;
         foreach (var bot in Bots)
         {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
             asked += Volatile.Read(ref bot.ToursAsked);
             switches += Volatile.Read(ref bot.RealmSwitches);
             news += bot.News.Count;
-            inRealm += bot.Client.Store?.Realm != null ? 1 : 0;
+
+            // <b>LIVE sessions only, which is the whole point of the number.</b> A bot whose link died keeps its store, and its
+            // store keeps the last realm it was told about, so counting every store counted the dead: a panel showing
+            // "holding a realm 8000 of 4314" was reporting that 3 686 corpses were still being served. The comparison is
+            // against the connected count, so the two sides have to mean the same thing.
+            inRealm += bot.Client.IsConnected && bot.Client.Store?.Realm != null ? 1 : 0;
         }
 
         return (asked, switches, news, inRealm);
+    }
+
+    /// <summary>Movement intents this fleet has sent, so a run can prove its population was walking rather than standing.</summary>
+    /// <returns>The count.</returns>
+    /// <remarks>
+    /// <b>Worth its own counter because its absence was invisible.</b> Every run before the wander existed reported a healthy fleet
+    /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
+    /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
+    /// </remarks>
+    public long IntentsSent()
+    {
+        long sent = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;   // a shrink can empty a slot inside a span already taken; see Bots
+            }
+
+            sent += Volatile.Read(ref bot.IntentsSent);
+        }
+
+        return sent;
     }
 
     private readonly Dictionary<ushort, int> _disconnects = [];
@@ -583,97 +873,498 @@ public sealed class BotSwarm : IAsyncDisposable
         Console.WriteLine($"  !! protocol fault (this is our bug, not the server's): {message}");
     }
 
-    /// <summary>Connects every bot and starts the shared driver.</summary>
-    /// <param name="ct">Cancels the start.</param>
-    /// <returns>How many sessions opened.</returns>
+    /// <summary>
+    /// Starts the driver and the reconciler, then waits for the population to first reach <see cref="Target"/>.
+    /// </summary>
+    /// <param name="ct">Cancels the wait, not the swarm.</param>
+    /// <returns>How many sessions are open when the target is first reached, or when opening stops making progress.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The driver starts BEFORE the ramp, and that ordering is a fix.</b> It used to start after the last session opened, so during
+    /// a ramp nothing walked and nothing pinged except a keepalive sweep that existed only to cover the gap. At a thousand sessions the
+    /// ramp was seconds and nobody noticed; at ten thousand the ramp was minutes, so an operator watched a filling world in which not
+    /// one avatar moved, and the sweep — which pings the WHOLE population on a cadence — grew with the fleet until it starved the
+    /// connects it was interleaved with. The ramp went from 400 sessions a second to about one. Driving from the first batch makes the
+    /// sweep redundant: the driver pings everything it finds, including the sessions that arrived a moment ago.
+    /// </para>
+    /// <para>
+    /// <b>And the population is now a TARGET rather than a count.</b> <see cref="Target"/> can be moved at any time, up to the
+    /// capacity the swarm was built with, and the reconciler opens or closes sessions to match it at the connect rate — which is what
+    /// makes "turn it up to five thousand and watch what happens" an action rather than a restart.
+    /// </para>
+    /// </remarks>
     public async Task<int> StartAsync(CancellationToken ct = default)
     {
-        // The ramp's own keepalive clock. Half the client ping period, so no session crosses the server's silence bound while its neighbours connect.
-        var rampPingPeriod = _options.TickHz > 0 ? TimeSpan.FromSeconds(0.5 / _options.TickHz) : TimeSpan.FromMilliseconds(125);
-        var rampPing = Stopwatch.StartNew();
-
-        // `batch = rate x stagger` when a rate was asked for, so --connect-rate says sessions per second and the stagger stays the quantum it always was.
-        // An explicit --connect-batch wins, which keeps every existing command line meaning what it meant.
-        var batch = Math.Max(1, _options.ConnectBatch);
-        if (_options.ConnectBatch <= 0 && _options.ConnectRatePerSecond > 0 && _options.ConnectStagger > TimeSpan.Zero)
-        {
-            batch = Math.Max(1, (int)Math.Ceiling(_options.ConnectRatePerSecond * _options.ConnectStagger.TotalSeconds));
-        }
-
-        // The deadline the pacing above is measured against. `perBatch` is what the operator asked for expressed as a period:
-        // at --connect-rate 200 and a batch of 4 that is 20 ms, and a batch that took longer than that simply does not wait.
-        var stopwatch = Stopwatch.StartNew();
-        var perBatch = _options.ConnectRatePerSecond > 0
-            ? TimeSpan.FromSeconds((double)batch / _options.ConnectRatePerSecond)
-            : _options.ConnectStagger;
-        var nextBatchDue = TimeSpan.Zero;
-
-        for (var i = 0; i < _options.Count; i += batch)
-        {
-            nextBatchDue += perBatch;
-
-            // CONCURRENTLY within the batch. Awaited one at a time — as this loop did until now — the ramp's ceiling is one session per handshake round
-            // trip, which no stagger can lift: a thousand sessions over a 60 ms link took a minute while --connect-batch 25 claimed to ask for 1250/s.
-            var size = Math.Min(batch, _options.Count - i);
-            var opening = new Task<Bot>[size];
-            for (var k = 0; k < size; k++)
-            {
-                opening[k] = OpenOneAsync(i + k, ct);
-            }
-
-            var opened = await Task.WhenAll(opening).ConfigureAwait(false);
-
-            // Appended on THIS thread, after the batch, and the slot is written before the count is published so a reader on the
-            // control panel's thread never sees an unfilled one.
-            foreach (var bot in opened)
-            {
-                if (bot != null)
-                {
-                    bot.WatchRealm();
-
-                    // After the handshake, because the token arrives in WELCOME: asking before the connect would persist the token
-                    // the LAST run was given, which is the one that has just been spent.
-                    _options.OnResumeToken?.Invoke(bot.Index, bot.Client.ResumeToken);
-
-                    var at = _botCount;
-                    _bots[at] = bot;
-                    Volatile.Write(ref _botCount, at + 1);
-                }
-            }
-
-            if (i + size < _options.Count)
-            {
-                // PACED AGAINST A DEADLINE, not slept for after the fact. Delaying a fixed stagger after awaiting the batch makes
-                // the period `handshake + stagger` rather than `max(handshake, stagger)`, so the achieved rate was
-                // `size / (stagger + RTT)`: on the 60 ms link this tool exists to measure over, `--connect-rate 200` delivered
-                // about fifty a second while reporting that it had asked for two hundred. For a load generator whose report IS
-                // the product, a knob that overstates by four times is worse than no knob.
-                var remaining = nextBatchDue - stopwatch.Elapsed;
-                if (remaining > TimeSpan.Zero)
-                {
-                    await Task.Delay(remaining, ct).ConfigureAwait(false);
-                }
-            }
-
-            // Ping everyone already up, because the ramp is long enough to matter: a hundred sessions at this stagger take seconds, and a session that
-            // says nothing for seconds is a session the server is entitled to treat as gone. Without this the generator manufactures its own silence and
-            // then reports the server's reaction to it as a server defect.
-            //
-            // ON A CADENCE, not after every connect. Pinging the whole population per connection is O(n squared) sends: at the thousand sessions this class
-            // is meant to reach that is half a million pings before a single measurement, which makes the generator the expensive thing its own remarks say
-            // it must not be. Half a ping period is frequent enough that nobody crosses the silence bound during the ramp.
-            var sinceRampPing = rampPing.Elapsed;
-            if (sinceRampPing < rampPingPeriod)
-            {
-                continue;
-            }
-
-            rampPing.Restart();
-            await SweepRampPingsAsync(ct).ConfigureAwait(false);
-        }
-
+        // <b>Its OWN loop, not a pass inside the driver's tick, and the difference is thousands of sessions.</b> The server closes a
+        // session it has not heard a PING from within 3 / pingHz seconds — 750 ms at the 4 Hz this one advertises — so what matters
+        // is the INTERVAL between two pings to the same bot. Inside the drive tick that interval is the ping pass plus the movement
+        // pass plus the timer's wait, which at a few thousand sessions crosses the window exactly while the ramp is also opening
+        // sockets: measured, the server closed 880 of 3 000 for silence and the client could only see them as 1006. On its own loop
+        // the interval is bounded by the ping pass alone, whatever the rest of the fleet is doing.
+        _pinger = Task.Run(() => PingLoopAsync(_stopping.Token), CancellationToken.None);
         _driver = Task.Run(() => DriveAsync(_stopping.Token), CancellationToken.None);
+        _reconciler = Task.Run(() => ReconcileAsync(_stopping.Token), CancellationToken.None);
+
+        await _settled.Task.WaitAsync(ct).ConfigureAwait(false);
         return BotCount;
+    }
+
+    /// <summary>Opens and closes sessions until the live population matches <see cref="Target"/>, for as long as the swarm lives.</summary>
+    /// <param name="ct">Stops the reconciler.</param>
+    private async Task ReconcileAsync(CancellationToken ct)
+    {
+        // <b>Guarded, because a throw in here used to disappear and take the dial with it.</b> Append invokes OnResumeToken, which
+        // writes the accounts file: an IOException from a locked file or a full disk faulted this task, left _settled uncompleted so
+        // StartAsync waited on it until Stop, and reported nothing anywhere. After settling it was worse — the reconciler died
+        // silently, the panel still said Running, and moving the target did nothing at all.
+        try
+        {
+            await ReconcileLoopAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down.
+        }
+        catch (Exception e)
+        {
+            Interlocked.CompareExchange(ref _firstOpenFailure, "the ramp stopped: " + e.Message, null);
+            Console.WriteLine($"  !! the fleet's reconciler stopped: {e.Message}");
+        }
+        finally
+        {
+            // So StartAsync cannot wait forever on a loop that is no longer running.
+            _settled.TrySetResult();
+        }
+    }
+
+    /// <summary>The reconciler's loop proper; <see cref="ReconcileAsync"/> owns its failure handling.</summary>
+    /// <param name="ct">Stops the loop.</param>
+    private async Task ReconcileLoopAsync(CancellationToken ct)
+    {
+        // <b>The chunk is the pipeline's unit of work and --connect-batch no longer sets it.</b> That knob means `rate x stagger` — 8
+        // at 400/s — which is a sensible quantum for a socket and a disastrous one for a batch of signups: it made a 10 000 ramp into
+        // 1 250 provisioning passes, each one rewriting and fsyncing the whole accounts file. This document's own design says the
+        // chunk is deliberately not derived from that product, and preferring ConnectBatch here contradicted it.
+        //
+        // The pacing below still honours --connect-batch, which is what existing command lines actually ask of it: how many sockets
+        // to open between two staggers.
+        var chunk = Math.Max(1, _options.ChunkSize);
+
+        // The deadline a chunk is paced to. A chunk of 250 at 400/s is 625 ms; with an explicit --connect-batch the stagger is that
+        // batch's share of the rate, scaled up to the chunk, so the achieved rate still matches the number asked for.
+        var perBatch = _options.ConnectRatePerSecond > 0
+            ? TimeSpan.FromSeconds((double)chunk / _options.ConnectRatePerSecond)
+            : TimeSpan.FromTicks(_options.ConnectStagger.Ticks * Math.Max(1, chunk / Math.Max(1, _options.ConnectBatch)));
+
+        // PACED AGAINST A DEADLINE, not slept for after the fact. Delaying a fixed stagger after awaiting the batch makes the period
+        // `handshake + stagger` rather than `max(handshake, stagger)`, so the achieved rate was `size / (stagger + RTT)`: on the 60 ms
+        // link this tool exists to measure over, `--connect-rate 200` delivered about fifty a second while reporting two hundred. For a
+        // load generator whose report IS the product, a knob that overstates by four times is worse than no knob.
+        var clock = Stopwatch.StartNew();
+        var nextDue = TimeSpan.Zero;
+        var stalls = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            var target = Math.Clamp(Volatile.Read(ref _target), 0, _bots.Length);
+            var live = BotCount;
+
+            if (live < target)
+            {
+                var size = Math.Min(chunk, target - live);
+
+                // <b>Accounts for THIS chunk, here, rather than for the whole population before the loop starts.</b> That is the
+                // pipeline: these are signing up while the chunk before them is already walking. A chunk whose accounts are already
+                // good makes no HTTP calls at all, which is what makes a shrink followed by a re-grow free.
+                // Timed, because provisioning and connecting are ONE step now and the slower half decides the achieved rate. Without
+                // this, --connect-rate would report what was asked for while the signups bound it — the same overstatement the
+                // deadline-paced connect loop was written to avoid, and a knob that overstates is worse than no knob.
+                // <b>Account indices come from their own allocator, never from the array slot.</b> `live` is a COMPACTED count — a
+                // failed handshake leaves it short — so using it as the account index made one failure shift the whole window
+                // backwards: the next chunk re-opened an account that was already playing, the server kicked the arriving session
+                // for it (AccountAlreadyPlaying), and the gap was never retried because the count had not moved.
+                var first = AllocateIndices(size, out var allocated);
+                if (allocated <= 0)
+                {
+                    break;
+                }
+
+                var chunkClock = Stopwatch.StartNew();
+                var provisioned = await EnsureChunkAsync(first, allocated, ct).ConfigureAwait(false);
+                var provisionMs = chunkClock.Elapsed.TotalMilliseconds;
+                if (provisioned <= 0)
+                {
+                    // Handed back, or a chunk whose signups failed would burn its indices and the fleet would walk up to its
+                    // capacity without ever opening a session.
+                    ReleaseIndices(first, allocated);
+
+                    // Treated exactly like a chunk that opened nothing: the stall counter below decides whether to give up, so a
+                    // server refusing signups cannot leave StartAsync waiting forever.
+                    stalls++;
+                    if (stalls >= 3)
+                    {
+                        _settled.TrySetResult();
+                    }
+
+                    nextDue = clock.Elapsed;
+                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    continue;
+                }
+
+                // <b>The WHOLE chunk is opened, not the provisioned count.</b> The hook answers how many accounts are usable, not
+                // WHICH, so opening only the first `provisioned` of them was right just when the failures happened to be the last
+                // entries: with one in the middle it opened the failed index and skipped a good one at the end. A bot whose token is
+                // missing instead fails its handshake and is counted with its real reason, and its index goes back to the allocator.
+                var opening = new Task<Bot>[allocated];
+                for (var k = 0; k < allocated; k++)
+                {
+                    opening[k] = OpenOneAsync(first + k, ct);
+                }
+
+                chunkClock.Restart();
+                var opened = await Task.WhenAll(opening).ConfigureAwait(false);
+                var added = Append(opened);
+                NoteChunkCost(provisionMs, chunkClock.Elapsed.TotalMilliseconds);
+
+                // The indices whose handshake failed go back, so the next chunk retries exactly those rather than allocating fresh
+                // ones and leaving a hole no session ever fills.
+                for (var k = 0; k < allocated; k++)
+                {
+                    if (opened[k] == null)
+                    {
+                        ReleaseIndices(first + k, 1);
+                    }
+                }
+
+                // A ramp that stops making progress is settled too, or StartAsync would wait forever for sessions the server is
+                // refusing — which is exactly what a full session table does.
+                stalls = added > 0 ? 0 : stalls + 1;
+                if (added > 0 || stalls < 3)
+                {
+                    nextDue += perBatch;
+                    var remaining = nextDue - clock.Elapsed;
+                    if (remaining > TimeSpan.Zero)
+                    {
+                        await Task.Delay(remaining, ct).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
+                _settled.TrySetResult();
+            }
+            else if (live > target)
+            {
+                await ShrinkToAsync(target, chunk).ConfigureAwait(false);
+            }
+            else
+            {
+                // Reset here, or a ramp that stalled once would leave the reconciler on its slow poll for the rest of the run and a
+                // later growth would start a couple of seconds late for no reason.
+                stalls = 0;
+                _settled.TrySetResult();
+            }
+
+            // Idle or settled: the deadline is re-based so a later growth is not charged for the time spent waiting.
+            //
+            // <b>And a stalled ramp backs off.</b> A target the server will not grant — a full session table, accounts it refuses —
+            // otherwise retried ten times a second forever, which turns a refusal into a load test of its own. The slow poll still
+            // notices when the operator lowers the target or the server recovers.
+            nextDue = clock.Elapsed;
+            await Task.Delay(stalls >= 3 ? StalledPoll : IdlePoll, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Takes up to <paramref name="want"/> bot indices, preferring ones a shrink or a failure handed back.
+    /// </summary>
+    /// <param name="want">How many indices the chunk would like.</param>
+    /// <param name="allocated">How many it got; fewer than asked for only at the capacity.</param>
+    /// <returns>The first index, which is contiguous for <paramref name="allocated"/> entries.</returns>
+    /// <remarks>
+    /// <b>An allocator rather than the array's own count, because an index names an ACCOUNT and the array index names a slot.</b> The
+    /// two drift apart the moment a handshake fails: the array compacts and the count does not advance, so deriving the account from
+    /// the count re-opened accounts that were already playing. Free indices are preferred so that a shrink followed by a re-grow
+    /// reuses the same accounts — their tokens are still valid, so that path makes no HTTP calls at all.
+    /// <para>
+    /// Contiguous because the provisioner takes a range. A free list that could not satisfy a contiguous run falls back to fresh
+    /// indices, which costs signups for accounts that did not need them but never opens one twice.
+    /// </para>
+    /// </remarks>
+    private int AllocateIndices(int want, out int allocated)
+    {
+        lock (_indexLock)
+        {
+            // The free list holds released runs; the common case after a shrink is one long contiguous run at the tail.
+            if (_freeFrom >= 0 && _freeCount > 0)
+            {
+                allocated = Math.Min(want, _freeCount);
+                var from = _freeFrom;
+                _freeFrom += allocated;
+                _freeCount -= allocated;
+                if (_freeCount == 0)
+                {
+                    _freeFrom = -1;
+                }
+
+                return from;
+            }
+
+            allocated = Math.Min(want, _bots.Length - _nextIndex);
+            var first = _nextIndex;
+            _nextIndex += allocated;
+            return first;
+        }
+    }
+
+    /// <summary>Hands indices back so a later chunk reuses them.</summary>
+    /// <param name="from">The first index.</param>
+    /// <param name="count">How many.</param>
+    /// <remarks>
+    /// One run is tracked rather than a general set: a shrink always releases the tail, and a failed handshake releases one index
+    /// that the next chunk takes immediately. Releasing a second, disjoint run while one is pending simply keeps the lower of the
+    /// two and lets the other be re-allocated as fresh indices — correct, and at worst it costs a signup that was not needed.
+    /// </remarks>
+    private void ReleaseIndices(int from, int count)
+    {
+        lock (_indexLock)
+        {
+            if (count <= 0)
+            {
+                return;
+            }
+
+            // Walking the high-water mark back is better than remembering a run, when the run IS the tail.
+            if (from + count == _nextIndex)
+            {
+                _nextIndex = from;
+                return;
+            }
+
+            if (_freeFrom < 0 || from < _freeFrom)
+            {
+                _freeFrom = from;
+                _freeCount = count;
+            }
+        }
+    }
+
+    /// <summary>Records what a chunk spent on each half of the pipeline, and which half bound it.</summary>
+    /// <param name="provisionMs">Milliseconds signing the chunk's accounts up.</param>
+    /// <param name="connectMs">Milliseconds opening its sessions.</param>
+    private void NoteChunkCost(double provisionMs, double connectMs)
+    {
+        lock (_reportLock)
+        {
+            _chunks++;
+            _provisionMsTotal += provisionMs;
+            _connectMsTotal += connectMs;
+            if (provisionMs > connectMs)
+            {
+                _chunksBoundByProvisioning++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the ramp spent, and which half of the pipeline bound it.
+    /// </summary>
+    /// <returns>Chunks, mean milliseconds per half, and how many chunks the signups bound.</returns>
+    /// <remarks>
+    /// <b>The report has to say this, because the two halves are now one step.</b> Signups run on the SERVER's cores behind a
+    /// PBKDF2; connects run on its tick. If the signups are the slower half then --connect-rate describes an intention rather than
+    /// an outcome, and a load generator whose report is its product must not overstate what it delivered.
+    /// </remarks>
+    public (int Chunks, double MeanProvisionMs, double MeanConnectMs, int BoundByProvisioning) ChunkCost()
+    {
+        lock (_reportLock)
+        {
+            return _chunks == 0
+                ? (0, 0, 0, 0)
+                : (_chunks, _provisionMsTotal / _chunks, _connectMsTotal / _chunks, _chunksBoundByProvisioning);
+        }
+    }
+
+    /// <summary>Provisions a chunk's accounts, answering how many of its bots can now be opened.</summary>
+    /// <param name="from">The first bot index in the chunk.</param>
+    /// <param name="count">How many bots the chunk wanted.</param>
+    /// <param name="ct">Cancels the pass.</param>
+    /// <returns>How many are usable: the whole chunk when there is nothing to provision.</returns>
+    private async Task<int> EnsureChunkAsync(int from, int count, CancellationToken ct)
+    {
+        var ensure = _options.EnsureAccounts;
+        if (ensure == null)
+        {
+            return count;
+        }
+
+        try
+        {
+            var ready = await ensure(from, count, ct).ConfigureAwait(false);
+            return Math.Clamp(ready, 0, count);
+        }
+        catch (OperationCanceledException)
+        {
+            return 0;
+        }
+        catch (Exception e)
+        {
+            // Reported once and counted, not thrown: a chunk that cannot sign up must stall the ramp rather than tear the swarm
+            // down, and the reason has to reach the operator — a refusal that is swallowed looks exactly like a generator that
+            // stopped trying, which is the mistake this whole area has already made twice.
+            Interlocked.Increment(ref _openFailures);
+            if (Interlocked.CompareExchange(ref _firstOpenFailure, e.Message, null) == null)
+            {
+                Console.WriteLine($"  !! a chunk's accounts could not be provisioned: {e.Message}");
+            }
+
+            return 0;
+        }
+    }
+
+    /// <summary>Publishes a batch of freshly opened bots, skipping the ones whose handshake failed.</summary>
+    /// <param name="opened">The batch.</param>
+    /// <returns>How many were added.</returns>
+    /// <remarks>
+    /// The slot is written before the count is published, so a reader on the control panel's thread never sees an unfilled one.
+    /// </remarks>
+    private int Append(Bot[] opened)
+    {
+        var added = 0;
+        foreach (var bot in opened)
+        {
+            if (bot != null)
+            {
+                added++;
+            }
+        }
+
+        return added;
+    }
+
+    /// <summary>Publishes one freshly opened bot to the population, so the ping loop and the driver can both see it.</summary>
+    /// <param name="bot">The bot, already past its handshake.</param>
+    /// <remarks>
+    /// <b>Called from each handshake rather than once per chunk</b> — see <see cref="OpenOneAsync"/> for why that timing is the
+    /// difference between keeping a population and losing it. Several handshakes finish at once, so the slot is taken under the
+    /// swarm's lock; the count is published with a release write afterwards, which is the ordering every reader of
+    /// <see cref="Bots"/> already relies on.
+    /// </remarks>
+    private bool AppendOne(Bot bot)
+    {
+        bot.WatchRealm();
+
+        // After the handshake, because the token arrives in WELCOME: asking before the connect would persist the token the LAST
+        // run was given, which is the one that has just been spent.
+        _options.OnResumeToken?.Invoke(bot.Index, bot.Client.ResumeToken);
+
+        lock (_appendLock)
+        {
+            var at = _botCount;
+            if (at >= _bots.Length)
+            {
+                // <b>Reported, not swallowed.</b> The allocator should make this unreachable, but a session that is open and in no
+                // slot is the worst of both: the server holds an avatar for it while nothing in this process ever pings it, so it
+                // dies of silence a second later and the fleet counts it as a loss it cannot explain. The caller closes it instead.
+                return false;
+            }
+
+            _bots[at] = bot;
+            Volatile.Write(ref _botCount, at + 1);
+            return true;
+        }
+    }
+
+    /// <summary>Closes sessions from the tail until the population is down to <paramref name="target"/>.</summary>
+    /// <param name="target">The population to come down to.</param>
+    /// <param name="batch">How many to close at once, so a big cut does not arrive as one burst of closes.</param>
+    /// <remarks>
+    /// <b>From the tail, and the count is lowered BEFORE the socket is closed.</b> The driver reads the count and then the slot, so
+    /// retiring a bot the driver may still be mid-tick on has to make it unreachable first — otherwise the driver sends on a client
+    /// that is being disposed, which surfaces as a protocol fault blamed on the catalog.
+    /// <para>
+    /// Closed properly rather than dropped, which is the difference between a shrink and a crash: a dropped socket leaves the server
+    /// holding the avatar for its whole resume grace, so cutting a fleet in half would leave half a population standing for a minute
+    /// and the next measurement would include them.
+    /// </para>
+    /// </remarks>
+    private async Task ShrinkToAsync(int target, int batch)
+    {
+        var live = BotCount;
+        var removing = Math.Min(batch, live - target);
+        if (removing <= 0)
+        {
+            return;
+        }
+
+        var going = new Bot[removing];
+        for (var i = 0; i < removing; i++)
+        {
+            going[i] = _bots[live - 1 - i];
+        }
+
+        // <b>The count drops first so no NEW reader reaches these slots; every reader must still tolerate a null.</b> Ordering alone
+        // cannot make this safe in either direction — a reader that captured the old count is walking slots this method is about to
+        // empty whichever order they are written in — so the guarantee is the readers', and `Bots` is documented accordingly. Getting
+        // this wrong put a NullReferenceException through the control panel's snapshot and killed the Blazor circuit, which is the
+        // failure the array-and-count design was adopted to prevent in the first place.
+        // <b>Under the append lock, because appends no longer come from the reconciler alone.</b> A handshake publishes its own bot
+        // the moment it completes, so an open still in flight when the target drops can be writing at the very count this method is
+        // about to lower — which would either lose that session into a slot nobody walks or hand it a slot this loop then nulls.
+        lock (_appendLock)
+        {
+            Volatile.Write(ref _botCount, live - removing);
+            for (var i = 0; i < removing; i++)
+            {
+                _bots[live - 1 - i] = null;
+            }
+        }
+
+        var closing = new Task[removing];
+        for (var i = 0; i < removing; i++)
+        {
+            closing[i] = CloseOneAsync(going[i]);
+        }
+
+        await Task.WhenAll(closing).ConfigureAwait(false);
+        Interlocked.Add(ref _retired, removing);
+
+        // Their ACCOUNT indices go back to the allocator, lowest first, so a re-grow reuses these same accounts and their still-valid
+        // tokens. Taken from the bots rather than computed, because the slot a bot sat in is not its index.
+        var lowest = int.MaxValue;
+        foreach (var bot in going)
+        {
+            lowest = Math.Min(lowest, bot.Index);
+        }
+
+        ReleaseIndices(lowest, removing);
+    }
+
+    /// <summary>Closes one bot's session, swallowing whatever a dying socket says on the way out.</summary>
+    /// <param name="bot">The bot.</param>
+    private static async Task CloseOneAsync(Bot bot)
+    {
+        try
+        {
+            // <b>CloseAsync before DisposeAsync, and the first one is the whole point.</b> Dispose only drops the socket: no close
+            // frame leaves, so the server classifies the session as link-dead and holds its avatar for the entire resume grace. A
+            // shrink from 5 000 to 1 000 would then report 4 000 retired while the server kept 4 000 bodies standing, replicated and
+            // in the spatial index, for a minute — exactly what this method's own remarks promise cannot happen.
+            await bot.Client.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A socket that is already gone cannot be told goodbye; the dispose below is still owed.
+        }
+
+        try
+        {
+            await bot.Client.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A shrink must not fail because one socket was already gone.
+        }
     }
 
     /// <summary>Opens one bot's session, or answers <see langword="null"/> when the handshake failed.</summary>
@@ -686,7 +1377,7 @@ public sealed class BotSwarm : IAsyncDisposable
     private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
     {
         var bot = new Bot(index, _options);
-        bot.Client.Disconnected += (code, _) => Note(code);
+        bot.Client.Disconnected += (code, _) => Note(code, bot.Client.CloseDetail);
 
         // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
         // read-modify-write that silently loses updates. The report is the product here, so a counter that undercounts is the report lying.
@@ -695,78 +1386,93 @@ public sealed class BotSwarm : IAsyncDisposable
         try
         {
             await bot.Client.ConnectAsync(ct).ConfigureAwait(false);
+
+            // <b>Published HERE, not after the chunk's WhenAll, and this one line is worth thousands of sessions.</b> The server
+            // starts a session's silence clock when it binds it at HELLO and closes it if no PING arrives within 3 / pingHz
+            // seconds. Appending a whole chunk at once meant the FIRST bot to finish its handshake waited for the slowest of its
+            // 249 neighbours before it was visible to the ping loop at all -- a mean of 456 ms and a tail well past the 750 ms
+            // window, so the earliest openers in every chunk were killed for silence before the fleet had ever pinged them. That
+            // is what cost a one-process fleet 7 023 sessions down to 4 314 when the ramp's own ping sweep was removed: the sweep
+            // was covering exactly this gap.
+            if (!AppendOne(bot))
+            {
+                await bot.Client.CloseAsync().ConfigureAwait(false);
+                await bot.Client.DisposeAsync().ConfigureAwait(false);
+                return null;
+            }
+
             return bot;
         }
-        catch (Exception)
+        catch (OperationCanceledException)
+        {
+            // <b>Not counted, and that is the point.</b> Pressing Stop mid-ramp cancels every connect in flight; counting those as
+            // refusals made a clean shutdown print "N session(s) were refused or failed to open. First reason: The operation was
+            // canceled", which is a shutdown reported as a server problem.
+            await bot.Client.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception e)
         {
             // A handshake that failed is a disconnect with no code: counted as zero so a run that could not open its population is visible in the same
             // table as one that lost it later.
             Note(0);
+
+            // <b>And the REASON, which used to be discarded here.</b> A fleet that asked for 10 000 and opened 8 192 reported only the two numbers, so a
+            // server refusing for a full session table looked exactly like a generator that stopped trying — and the close reason the server does send
+            // ("the session table is full (8192)") was thrown away one line above the counter that said something had gone wrong. The first message is
+            // kept rather than every one: ten thousand copies of one sentence is not a diagnostic.
+            Interlocked.Increment(ref _openFailures);
+            if (Interlocked.CompareExchange(ref _firstOpenFailure, e.Message, null) == null)
+            {
+                Console.WriteLine($"  !! a session could not be opened: {e.Message}");
+            }
+
             await bot.Client.DisposeAsync().ConfigureAwait(false);
             return null;
         }
     }
 
-    /// <summary>Pings every session already up, so none crosses the server's silence bound while its neighbours are still connecting.</summary>
-    /// <param name="ct">Cancels the sweep.</param>
-    /// <remarks>
-    /// <b>Concurrently.</b> Awaited one at a time this is O(n) round trips per cadence, and at the thousand sessions this class exists to reach the sweep
-    /// took longer than the cadence it was supposed to fit inside — so the ramp spent its time pinging rather than connecting, and the population the
-    /// generator was measuring arrived late for reasons that were entirely its own.
-    /// </remarks>
-    private async Task SweepRampPingsAsync(CancellationToken ct)
-    {
-        var live = BotCount;
-        if (live == 0)
-        {
-            return;
-        }
-
-        var pings = new Task[live];
-        for (var i = 0; i < live; i++)
-        {
-            pings[i] = PingOneAsync(_bots[i], ct);
-        }
-
-        await Task.WhenAll(pings).ConfigureAwait(false);
-    }
-
-    /// <summary>Pings one session, swallowing its failure.</summary>
-    /// <param name="bot">The bot.</param>
-    /// <param name="ct">Cancels the send.</param>
-    private static async Task PingOneAsync(Bot bot, CancellationToken ct)
-    {
-        try
-        {
-            await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            // Counted by the disconnect handler; one bot must not stop the ramp.
-        }
-    }
+    // SweepRampPingsAsync lived here and is gone with the ramp it served. It pinged the WHOLE population on a cadence, interleaved
+    // with the connects, purely because the driver did not start until the last session was open — so it was O(population) sends
+    // competing with the opens, and by six thousand sessions it had slowed the ramp from 400 a second to about one. The driver now
+    // starts first and pings everything it finds, including a bot that arrived a moment ago, so there is nothing left for a sweep to
+    // cover. Deleted rather than left unreferenced: a second pinger is a second thing to reason about on the next slow ramp.
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         await _stopping.CancelAsync().ConfigureAwait(false);
-        if (_driver != null)
+
+        // Both, and the reconciler first: it is the one that opens sockets, so letting it run while the bots are being closed would
+        // race a new session into an array the teardown has already walked.
+        foreach (var task in new[] { _reconciler, _driver, _pinger })
         {
+            if (task == null)
+            {
+                continue;
+            }
+
             try
             {
-                await _driver.ConfigureAwait(false);
+                await task.ConfigureAwait(false);
             }
             catch (Exception)
             {
-                // Shutting down; the driver has nowhere to report a failure on the way out.
+                // Shutting down; neither loop has anywhere to report a failure on the way out.
             }
         }
 
         // Indexed, not a span: a ref struct cannot live across an await.
+        // Null-checked, because a shrink leaves the slots above the count empty and a teardown racing one would dereference the hole
+        // it just made.
         var live = BotCount;
         for (var i = 0; i < live; i++)
         {
-            await _bots[i].Client.DisposeAsync().ConfigureAwait(false);
+            var bot = _bots[i];
+            if (bot != null)
+            {
+                await CloseOneAsync(bot).ConfigureAwait(false);
+            }
         }
 
         Volatile.Write(ref _botCount, 0);
@@ -781,11 +1487,36 @@ public sealed class BotSwarm : IAsyncDisposable
     /// report prints — so an unsynchronised write here is the report lying rather than merely a race. The engine's own smoke fixture locks the same two
     /// counters; this file did not inherit it.
     /// </remarks>
-    private void Note(ushort code)
+    private void Note(ushort code, string detail = null)
     {
         lock (_reportLock)
         {
             _disconnects[code] = _disconnects.GetValueOrDefault(code) + 1;
+
+            // <b>The local failure behind an abrupt close, counted by kind.</b> 1006 means only that no close frame arrived, so a
+            // table of three thousand of them says nothing about why — and a reset by the peer, a local abort and a timeout are
+            // three different investigations. Counted rather than printed: one line per session would be the log nobody reads.
+            if (detail != null)
+            {
+                _closeDetails[detail] = _closeDetails.GetValueOrDefault(detail) + 1;
+            }
+        }
+    }
+
+    /// <summary>Abnormal closes by the local failure that revealed them, which the close code cannot express.</summary>
+    /// <returns>A snapshot, commonest first.</returns>
+    public IReadOnlyList<(string Detail, int Count)> CloseDetails()
+    {
+        lock (_reportLock)
+        {
+            var list = new List<(string, int)>(_closeDetails.Count);
+            foreach (var pair in _closeDetails)
+            {
+                list.Add((pair.Key, pair.Value));
+            }
+
+            list.Sort((a, b) => b.Item2.CompareTo(a.Item2));
+            return list;
         }
     }
 
@@ -798,55 +1529,228 @@ public sealed class BotSwarm : IAsyncDisposable
             var moveRegions = _options.RegionEveryTicks > 0 && Ticks % _options.RegionEveryTicks == 0;
             var tourPeriod = (long)_options.TourEverySeconds * Math.Max(1, _options.TickHz);
             var touring = _options.TourEverySeconds > 0 && _options.Planets > 1 && _options.Kind != "player";
-            var index = 0;
+
+            // Players only: MoveDir is Roles(Player), so a god camera asking to walk would be refused a command it has no body for.
+            var wandering = _options.WanderSeconds > 0 && _options.Kind == "player";
 
             // Indexed for the same reason DisposeAsync is: the body awaits.
             var live = BotCount;
-            for (var b = 0; b < live; b++)
+
+            // The pings are NOT here: PingLoopAsync owns them on its own cadence. See StartAsync.
+            var driveStart = Stopwatch.GetTimestamp();
+
+            // <b>CONCURRENTLY within a batch, which is the same fix StartAsync's ramp already carries.</b> Awaited one bot at a time —
+            // as this loop did — a tick costs N send round trips in series, so the driver's real ceiling is one bot per round trip
+            // whatever the timer says. It held at a thousand and fell apart at ten: a 90-second run managed 58 of its 360 ticks, 0.64 Hz
+            // against the 4 Hz asked for, and the sessions it then stopped pinging were closed by the server for silence — 9 805 of them.
+            // That read as a server limit, a socket limit and a memory limit in turn, and it was none of those.
+            //
+            // Bounded rather than one WhenAll over every bot: ten thousand simultaneous sends each hold a buffer, and the burst is the
+            // thing the stagger exists to avoid. A batch overlaps its own latency while keeping the in-flight count predictable.
+            for (var b = 0; b < live; b += DriveBatch)
             {
-                var bot = _bots[b];
-                index++;
-                if (!bot.Client.IsConnected)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    // The ping first: it is what keeps the session alive, and a region update that threw would otherwise take the ping with it.
-                    await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
-
-                    // Staggered by bot: every camera switching on one tick would be N whole-planet RESETs in one server tick.
-                    if (touring && (Ticks + index) % tourPeriod == 0)
-                    {
-                        await bot.SendNextPlanetAsync(_options, ct).ConfigureAwait(false);
-                    }
-
-                    if (moveRegions)
-                    {
-                        await bot.SendRegionAsync(Ticks, _options, ct).ConfigureAwait(false);
-                    }
-                }
-                catch (OperationCanceledException)
+                if (ct.IsCancellationRequested)
                 {
                     return;
                 }
-                catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or FormatException)
+
+                var size = Math.Min(DriveBatch, live - b);
+                var driving = new Task[size];
+                for (var k = 0; k < size; k++)
                 {
-                    // <b>OUR OWN bug, not the network's, and it must not be survivable in silence.</b> These are what the encoder throws when this program
-                    // asks for something the catalog does not describe: a field name that does not exist (RecordValues.For), a command name that does not
-                    // (SendCommandAsync), a value of the wrong shape. The blanket catch below used to take them too, so --god-tour sent nothing for its whole
-                    // life while every counter said the run was healthy. At a thousand bots that is the difference between a load test and a screensaver.
-                    //
-                    // Counted and printed once per distinct message rather than thrown: one bot cannot be allowed to stop the fleet, and a fleet that stops
-                    // on the first typo tells you less than one that reports it and keeps load on the server. The run's exit summary carries the count.
-                    NoteProtocolFault(e);
+                    // b + k + 1 preserves the old one-based position, which the tour's stagger is phased on.
+                    driving[k] = DriveOneAsync(_bots[b + k], b + k + 1, touring, tourPeriod, moveRegions, wandering, ct);
                 }
-                catch (Exception)
-                {
-                    // One bot's socket going away must not stop the other ninety-nine from being driven. The disconnect is counted by its own handler.
-                }
+
+                await Task.WhenAll(driving).ConfigureAwait(false);
             }
+
+            NoteDriveSweep(Stopwatch.GetElapsedTime(driveStart).TotalMilliseconds);
+        }
+    }
+
+    /// <summary>Pings every live session on its own cadence, independently of the driver.</summary>
+    /// <param name="ct">Stops the loop.</param>
+    /// <returns>The loop.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The one loop whose latency decides whether the fleet stays connected.</b> It does nothing but ping: no movement, no
+    /// region, no catalog lookups, nothing that can be slow. See <see cref="StartAsync"/> for the measurement that moved it here.
+    /// </para>
+    /// <para>
+    /// At the drive rate and NOT above it, which was measured rather than assumed: at twice the rate the sweep itself grew from a
+    /// 346 ms worst case to 604 ms and retention did not move, because this process is CPU-bound well before it is
+    /// cadence-bound. Decoupling the interval from the driver's cost is the part that is worth having; paying twice for it is not.
+    /// Concurrent sends to one client are safe — the transport serialises them behind its own send lock, which the ping loop and
+    /// the driver have always both relied on.
+    /// </para>
+    /// </remarks>
+    private async Task PingLoopAsync(CancellationToken ct)
+    {
+        var hz = Math.Max(1, _options.TickHz);
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1000.0 / hz));
+        while (await SafeWaitAsync(timer, ct).ConfigureAwait(false))
+        {
+            var live = BotCount;
+            var start = Stopwatch.GetTimestamp();
+            for (var b = 0; b < live; b += PingBatch)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var size = Math.Min(PingBatch, live - b);
+                var pinging = new Task[size];
+                for (var k = 0; k < size; k++)
+                {
+                    pinging[k] = PingOneAsync(_bots[b + k], ct);
+                }
+
+                await Task.WhenAll(pinging).ConfigureAwait(false);
+            }
+
+            NotePingSweep(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
+    }
+
+    /// <summary>What one ping actually costs: mean and worst microseconds over every ping this run has sent.</summary>
+    /// <remarks>
+    /// Held against the sweep's wall time: a mean of a few microseconds with a sweep of hundreds of milliseconds says the sends are
+    /// cheap and the SCHEDULING is not, which no amount of making the send faster would fix.
+    /// </remarks>
+    public (double MeanUs, double WorstUs, long Count) PingCost
+    {
+        get
+        {
+            var sends = Volatile.Read(ref _pingSends);
+            var total = Volatile.Read(ref _pingTicksTotal);
+            var worst = Volatile.Read(ref _pingTicksWorst);
+            var perTick = 1_000_000.0 / Stopwatch.Frequency;
+            return (sends == 0 ? 0 : total * perTick / sends, worst * perTick, sends);
+        }
+    }
+
+    /// <summary>Records a ping sweep's duration.</summary>
+    /// <param name="ms">How long the sweep took.</param>
+    private void NotePingSweep(double ms)
+    {
+        lock (_reportLock)
+        {
+            _pingSweepMs = ms;
+            _pingSweepWorstMs = Math.Max(_pingSweepWorstMs, ms);
+        }
+    }
+
+    /// <summary>Records a drive sweep's duration.</summary>
+    /// <param name="ms">How long the sweep took.</param>
+    private void NoteDriveSweep(double ms)
+    {
+        lock (_reportLock)
+        {
+            _driveSweepMs = ms;
+            _driveSweepWorstMs = Math.Max(_driveSweepWorstMs, ms);
+        }
+    }
+
+    /// <summary>Sends one bot's ping, swallowing what a dead socket throws.</summary>
+    /// <param name="bot">The bot, which may be null or already gone.</param>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The send.</returns>
+    /// <remarks>
+    /// Separate from <see cref="DriveOneAsync"/> and deliberately doing nothing else: this is the pass whose latency decides
+    /// whether the fleet stays connected, so nothing that can be deferred belongs in it.
+    /// </remarks>
+    private async Task PingOneAsync(Bot bot, CancellationToken ct)
+    {
+        if (bot == null || !bot.Client.IsConnected)
+        {
+            return;
+        }
+
+        try
+        {
+            // Timed individually, because the sweep's wall time cannot tell a ping that COSTS a long time from a ping that merely
+            // WAITED a long time to be scheduled, and those are opposite fixes.
+            var at = Stopwatch.GetTimestamp();
+            await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
+            var took = Stopwatch.GetTimestamp() - at;
+            Interlocked.Add(ref _pingTicksTotal, took);
+            Interlocked.Increment(ref _pingSends);
+            var worst = Volatile.Read(ref _pingTicksWorst);
+            while (took > worst && Interlocked.CompareExchange(ref _pingTicksWorst, took, worst) != worst)
+            {
+                worst = Volatile.Read(ref _pingTicksWorst);
+            }
+        }
+        catch (Exception)
+        {
+            // One bot's socket going away must not stop the rest of the sweep. The disconnect is counted by its own handler.
+        }
+    }
+
+    /// <summary>Drives one bot for one tick: the ping, and whatever else this tick asks of it.</summary>
+    /// <param name="bot">The bot.</param>
+    /// <param name="position">Its one-based position in the fleet, which phases the tour's stagger.</param>
+    /// <param name="touring">Whether cameras are touring planets this run.</param>
+    /// <param name="tourPeriod">Ticks between a camera's planet switches.</param>
+    /// <param name="moveRegions">Whether this tick moves the god cameras' regions.</param>
+    /// <param name="wandering">Whether players are walking this run.</param>
+    /// <param name="ct">Cancels the sends.</param>
+    /// <remarks>
+    /// <b>Every exception is contained here rather than at the batch.</b> These run under a <c>WhenAll</c>, which reports only the
+    /// first fault and would let one bot's dead socket cancel the rest of its batch — so the per-bot guarantee the old loop made with
+    /// a try/catch inside the body has to be made inside the task instead.
+    /// </remarks>
+    private async Task DriveOneAsync(Bot bot, int position, bool touring, long tourPeriod, bool moveRegions, bool wandering, CancellationToken ct)
+    {
+        // Null-checked as well as connection-checked, because a shrink lowers the count before it empties the slots: the driver can
+        // read a count that still includes a bot the reconciler is in the middle of retiring. Lowering the count first is the right
+        // order — it makes the bot unreachable before its socket closes — and this is the other half of that bargain.
+        if (bot == null || !bot.Client.IsConnected)
+        {
+            return;
+        }
+
+        try
+        {
+            // The ping is NOT here any more: it goes out in its own pass ahead of this one, because queueing it behind the
+            // movement of every earlier batch is what pushed sessions past the server's silence window. See PingBatch.
+            //
+            // Staggered by bot: every camera switching on one tick would be N whole-planet RESETs in one server tick.
+            if (touring && (Ticks + position) % tourPeriod == 0)
+            {
+                await bot.SendNextPlanetAsync(_options, ct).ConfigureAwait(false);
+            }
+
+            if (moveRegions)
+            {
+                await bot.SendRegionAsync(Ticks, _options, ct).ConfigureAwait(false);
+            }
+
+            if (wandering)
+            {
+                await bot.WanderAsync(Ticks, _options, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The batch's own check returns from the loop; one cancelled send must not fault its neighbours' WhenAll.
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or FormatException)
+        {
+            // <b>OUR OWN bug, not the network's, and it must not be survivable in silence.</b> These are what the encoder throws when this program
+            // asks for something the catalog does not describe: a field name that does not exist (RecordValues.For), a command name that does not
+            // (SendCommandAsync), a value of the wrong shape. The blanket catch below used to take them too, so --god-tour sent nothing for its whole
+            // life while every counter said the run was healthy. At a thousand bots that is the difference between a load test and a screensaver.
+            //
+            // Counted and printed once per distinct message rather than thrown: one bot cannot be allowed to stop the fleet, and a fleet that stops
+            // on the first typo tells you less than one that reports it and keeps load on the server. The run's exit summary carries the count.
+            NoteProtocolFault(e);
+        }
+        catch (Exception)
+        {
+            // One bot's socket going away must not stop the other ninety-nine from being driven. The disconnect is counted by its own handler.
         }
     }
 
@@ -906,8 +1810,14 @@ public sealed class BotSwarm : IAsyncDisposable
         private readonly double _phase;
         private int _planet;
 
+        /// <summary>The wanderer's state: its heading in radians, when it next turns, and the stream it draws turns from.</summary>
+        private float _heading;
+        private long _nextTurnTick;
+        private uint _wander;
+
         public long ToursAsked;
         public long RealmSwitches;
+        public long IntentsSent;
         public readonly NewsCounter News = new();
 
         public Bot(int index, BotSwarmOptions options)
@@ -919,6 +1829,19 @@ public sealed class BotSwarm : IAsyncDisposable
             _centreX = Math.Cos(index * golden) * radius;
             _centreY = Math.Sin(index * golden) * radius;
             _phase = index * golden;
+
+            // The wanderer's own stream, seeded from the index so a run reproduces and no two bots walk in step. Offset by the index so
+            // the first turn is staggered too: every avatar turning on one tick would be N commands in a single server tick, which is
+            // the mistake the planet tour already staggers to avoid.
+            _wander = (uint)((index * 2654435761u) | 1u);
+            _heading = (float)((index * golden) % (Math.PI * 2));
+
+            // <b>Zero, so the FIRST heading is sent on the first tick this bot is driven.</b> This was `index % dwellTicks`, which
+            // staggered the first intent as well as the turns — and the stagger is only needed for the turns. With a long dwell that
+            // delayed the first step by the whole stagger: at an 8 000-second dwell, bot 500 would not have walked for two minutes,
+            // and a fleet set up that way looks exactly like a fleet whose brain does not work. The turns are staggered where they
+            // are decided, by jittering each dwell.
+            _nextTurnTick = 0;
 
             Index = index;
             Client = new TyphonClient(new ClientOptions
@@ -979,6 +1902,66 @@ public sealed class BotSwarm : IAsyncDisposable
             var values = new RecordValues { ["realm"] = FieldValue.Of((double)_planet) };
             await Client.SendCommandAsync("ViewRealm", values, ct).ConfigureAwait(false);
             Interlocked.Increment(ref ToursAsked);
+        }
+
+        /// <summary>Walks: renews the current heading, and turns onto a new one when this bot's dwell has run out.</summary>
+        /// <param name="tick">The driver's tick.</param>
+        /// <param name="options">The swarm's configuration.</param>
+        /// <param name="ct">Cancels the send.</param>
+        /// <remarks>
+        /// <para>
+        /// <b>Re-sent every tick, and that is a requirement rather than laziness.</b> The server turns a heading plus a speed class into
+        /// a destination <c>max(speed, 1)</c> metres ahead — about one second of travel — so an intent that stops being renewed is simply
+        /// reached, and the avatar halts where it got to. The client SDK's own rule is the same: send on change, plus a periodic refresh.
+        /// <c>MoveDir</c> is coalesced <c>LatestPerSession</c> and rate-limited at 30/s with a burst of 60, so at the driver's 4 Hz this
+        /// is an eighth of the allowance.
+        /// </para>
+        /// <para>
+        /// The turn is a bounded deflection rather than a fresh angle, which is what "do not change direction too often" means
+        /// geometrically: a new random heading every dwell is a random walk that stays near where it started, while a limited turn
+        /// produces a path that actually goes somewhere and crosses cells — the thing worth loading the spatial index with.
+        /// </para>
+        /// </remarks>
+        public async Task WanderAsync(long tick, BotSwarmOptions options, CancellationToken ct)
+        {
+            if (Client.Plan?.CommandByName(MoveDirCommand) == null)
+            {
+                return;
+            }
+
+            if (tick >= _nextTurnTick)
+            {
+                // xorshift32, because this is a direction for a bot and not a source of entropy: it is deterministic from the seed,
+                // needs no allocation and no lock, and every bot owns its own.
+                _wander ^= _wander << 13;
+                _wander ^= _wander >> 17;
+                _wander ^= _wander << 5;
+
+                // Up to ±60°, so a turn is a change of course and not a reversal.
+                var deflect = ((_wander & 0xFFFFu) / 65536f * 2f - 1f) * (MathF.PI / 3f);
+                _heading = MathF.IEEERemainder(_heading + deflect, MathF.PI * 2);
+
+                // The dwell itself varies by up to half, so the fleet does not fall into lockstep after the first turn.
+                var dwell = options.WanderSeconds * Math.Max(1, options.TickHz);
+                var jitter = ((_wander >> 16) / 65536.0 * 0.5) + 0.75;
+                _nextTurnTick = tick + Math.Max(1, (long)Math.Round(dwell * jitter));
+            }
+
+            // The field names as the server declares them (TatooineReplication.cs: Field(m => m.Heading, Codec.F16, "heading"), and so
+            // on). RecordValues.For throws on a name the catalog does not carry, which is how --god-tour spent its whole life sending
+            // nothing with "Realm" for "realm" — so these are copied from the declaration rather than from memory.
+            var values = new RecordValues
+            {
+                ["heading"] = FieldValue.Of((double)_heading),
+                ["speedClass"] = FieldValue.Of((double)options.WanderSpeedClass),
+
+                // 0: the intent changed on the tick boundary as far as this bot is concerned. A14b's phase exists to place a human's
+                // keypress inside a tick, and a timer has nothing finer to report.
+                ["changePhase"] = FieldValue.Of(0.0),
+            };
+
+            await Client.SendCommandAsync(MoveDirCommand, values, ct).ConfigureAwait(false);
+            IntentsSent++;
         }
 
         public async Task SendRegionAsync(long tick, BotSwarmOptions options, CancellationToken ct)

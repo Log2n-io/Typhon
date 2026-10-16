@@ -116,7 +116,7 @@ public sealed class TcpClientTransport : IClientTransport
     }
 
     /// <inheritdoc />
-    public async Task<byte[]> ReceiveAsync(CancellationToken ct)
+    public async ValueTask<byte[]> ReceiveAsync(CancellationToken ct)
     {
         var stream = _stream;
         if (stream == null)

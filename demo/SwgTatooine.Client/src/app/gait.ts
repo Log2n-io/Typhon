@@ -7,9 +7,9 @@ import { SpeedClass } from '../data/source';
  * the alternative — hold a key to go fast — cannot be combined with holding W, A, S or D on most keyboards and would make
  * the fastest gait the one you cannot steer in. So the person presses once and then plays.
  *
- * <b>Four gaits, one of which is honest about being made up.</b> 1 is a run, 2 is SWG's Burst Run at its source
- * multiplier, 3 is a landspeeder, and 4 is twice a speeder — nothing in SWG moved a player at 24 m/s on the ground, so 4
- * exists to cross a 16 km planet rather than to reproduce anything. Every figure lives on the SERVER and arrives as a
+ * <b>Four gaits, two of which are honest about being made up.</b> 1 is a run and 2 is SWG's Burst Run at its source
+ * multiplier; 3 and 4 are travel gaits well past anything SWG had — the swoop's 14.7 m/s was the game's ceiling — and
+ * exist to cross a 16 km planet rather than to reproduce anything. Every figure lives on the SERVER and arrives as a
  * replicated stat; this module knows the CLASSES and nothing about metres per second, which is the whole arrangement that
  * keeps a client from having its own idea of how fast it is (see `no-speed-literals.test.ts`).
  */

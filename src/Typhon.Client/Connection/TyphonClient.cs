@@ -184,6 +184,15 @@ public sealed class TyphonClient : IAsyncDisposable
     /// <summary>Whether a session is open right now.</summary>
     public bool IsConnected => _transport is { IsConnected: true } && Plan != null;
 
+    /// <summary>
+    /// What the transport knows about an abnormal close beyond its code, or <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// Surfaced because a close code of 1006 says only that no close frame arrived. A caller counting abrupt disconnects — a load
+    /// generator, say — needs the local failure behind them to tell a reset by the peer from an abort or a timeout.
+    /// </remarks>
+    public string CloseDetail => _transport?.CloseDetail;
+
     /// <summary>How many messages have been received across every attempt.</summary>
     public long MessagesReceived { get; private set; }
 

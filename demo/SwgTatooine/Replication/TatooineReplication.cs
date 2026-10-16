@@ -144,10 +144,10 @@ public static class SpeedClasses
     /// <summary>[CORE3] <c>TatooineData.PlayerBurstRunSpeedMps</c> — Burst Run's 1.822x, 9.11 m/s. Shift+2.</summary>
     public const byte Burst = 3;
 
-    /// <summary>[WIKI] <c>TatooineData.PlayerMountSpeedMps</c> — a landspeeder, 12 m/s. Shift+3.</summary>
+    /// <summary><c>TatooineData.PlayerSpeederSpeedMps</c> — twice a landspeeder, 24 m/s. Shift+3, invented rather than sourced.</summary>
     public const byte Speeder = 4;
 
-    /// <summary>Twice a speeder, 24 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
+    /// <summary>Three times Shift+3, 72 m/s. Shift+4, invented rather than sourced, and what sizes the teleport threshold.</summary>
     public const byte SpeederFast = 5;
 
     /// <summary>The first class this server does not grant.</summary>
@@ -624,6 +624,23 @@ public static partial class TatooineReplication
     /// <summary>God-camera sessions admitted at once (<c>--max-spectators</c>); 0 is unlimited.</summary>
     public static int MaxSpectators { get; set; }
 
+    /// <summary>
+    /// The engine's session table size (<c>--max-sessions</c>), shared by both roles; 0 leaves the refusal to the engine.
+    /// </summary>
+    /// <remarks>
+    /// <b>Checked here so that reaching it SAYS something.</b> The engine refuses admission past its table at connect time, which is
+    /// correct and cheap, but it is silent: a fleet asking for 10 000 against the default 8 192 opened 8 192, stopped, and reported
+    /// "8 191 of 8 191 opened" — no close reason, no server line, nothing naming the limit. Twenty minutes went into looking for a
+    /// socket or a thread ceiling that was never there.
+    /// <para>
+    /// This guard refuses the same connect one step earlier, with <see cref="HouseFullCloseCode"/> and a message that names the
+    /// table, and it moves <see cref="RefusedFull"/>, so the count appears in the periodic report. It can refuse ONE early relative
+    /// to the engine, because the engine's table also holds pending resumes that this count does not see; that is the harmless
+    /// direction, and it is why this is a diagnostic rather than the authority.
+    /// </para>
+    /// </remarks>
+    public static int SessionTableSize { get; set; }
+
     /// <summary>The close code a session refused for a full house carries; the application range starts at 4100.</summary>
     public const ushort HouseFullCloseCode = 4101;
 
@@ -657,6 +674,9 @@ public static partial class TatooineReplication
     private static int _pendingClients;
     private static int _pendingSpectators;
     private static long _refusedFull;
+
+    /// <summary>The refusal count the report has already announced, so a run sitting at the ceiling says so once rather than every report.</summary>
+    private static long _refusedFullSaid;
 
     /// <summary>Sessions refused because their role's cap was reached, for the shutdown report.</summary>
     public static long RefusedFull => System.Threading.Interlocked.Read(ref _refusedFull);
@@ -798,6 +818,18 @@ public static partial class TatooineReplication
             return Admission.Reject(ShutdownCloseCode, _shutdownReason);
         }
 
+        // Before the role caps, because the session table is shared by both roles and is the limit a crowd actually reaches: --max-clients
+        // and --max-spectators are 0 (unlimited) in every run anybody makes, and the table is 8 192 whether or not anyone chose it.
+        if (SessionTableSize > 0)
+        {
+            var live = System.Threading.Volatile.Read(ref _liveClients) + System.Threading.Volatile.Read(ref _liveSpectators);
+            var pending = System.Threading.Volatile.Read(ref _pendingClients) + System.Threading.Volatile.Read(ref _pendingSpectators);
+            if (live + pending >= SessionTableSize)
+            {
+                return Full("session table", SessionTableSize);
+            }
+        }
+
         var player = string.Equals(request.Kind, PlayerKind, StringComparison.Ordinal);
         if (player)
         {
@@ -843,6 +875,7 @@ public static partial class TatooineReplication
         System.Threading.Volatile.Write(ref _pendingClients, 0);
         System.Threading.Volatile.Write(ref _pendingSpectators, 0);
         System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
+        _refusedFullSaid = 0;
         System.Threading.Interlocked.Exchange(ref _refusedUnauthenticated, 0);
         ResetAvatarAccounting();
         BoundPlayer.Clear();
@@ -1979,6 +2012,19 @@ public static partial class TatooineReplication
                 + $"{System.Threading.Volatile.Read(ref _chatHeard)} said ({System.Threading.Volatile.Read(ref _chatRefusedNoSpeaker)} no speaker, "
                 + $"{System.Threading.Volatile.Read(ref _chatRefusedEmpty)} empty)");
 
+            // <b>Said out loud, because a full table is indistinguishable from a client that stopped connecting.</b> A fleet that asked
+            // for more sessions than the table holds gets refused at admission and reports only what it opened, so the ceiling reads as
+            // "the ramp stopped" on both sides. Printed once per crossing rather than every report: at 300 ticks a run that sits at the
+            // ceiling would otherwise bury everything else.
+            var refused = RefusedFull;
+            if (refused > _refusedFullSaid)
+            {
+                _refusedFullSaid = refused;
+                Console.Error.WriteLine(
+                    $"  !! {refused} session(s) REFUSED for a full house; the session table is {SessionTableSize} (--max-sessions), "
+                    + "clients and god cameras share it");
+            }
+
             // What the intent path did (SWG-01). These counters were built "for the report and for the checks beside the demo" — the checks read them, and the
             // report never did, so a served run printed nothing about the one thing a connected client changes. The refusals are printed beside the applications
             // deliberately: "only what the server allows is applied" is a claim about what does NOT happen, and a report that shows only successes cannot carry it.
@@ -2398,7 +2444,7 @@ public static partial class TatooineReplication
         SpeedClasses.Walk => TatooineData.PlayerRunSpeedMps * 0.5f,
         SpeedClasses.Run => TatooineData.PlayerRunSpeedMps,
         SpeedClasses.Burst => TatooineData.PlayerBurstRunSpeedMps,
-        SpeedClasses.Speeder => TatooineData.PlayerMountSpeedMps,
+        SpeedClasses.Speeder => TatooineData.PlayerSpeederSpeedMps,
         SpeedClasses.SpeederFast => TatooineData.PlayerSpeederFastSpeedMps,
         _ => 0f,
     };

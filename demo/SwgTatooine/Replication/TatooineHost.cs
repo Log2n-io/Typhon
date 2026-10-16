@@ -505,6 +505,11 @@ public static class TatooineHost
         app.Lifetime.ApplicationStopping.Register(KickEveryone);
 
         Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
+
+        // <b>Printed because it is the ceiling a crowd run hits, and it used to be invisible.</b> A 10 000-bot fleet against the default
+        // table opened 8 192 and stopped, with no line here and no reason on the wire. The number belongs next to the URL for the same
+        // reason the TLS and auth lines are there: it is a property of this run that decides whether it can do what was asked of it.
+        Console.WriteLine($"  session table: {TatooineReplication.SessionTableSize} clients and god cameras at once (--max-sessions, 65535 is structural)");
         if (!string.IsNullOrEmpty(clientRoot) && !Directory.Exists(clientRoot))
         {
             Console.WriteLine($"  !! no client build at {clientRoot}; run `npm run build` in demo/SwgTatooine.Client to serve the viewer");

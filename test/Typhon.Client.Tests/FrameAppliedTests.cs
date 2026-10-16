@@ -295,7 +295,7 @@ public class FrameAppliedTests
             return ValueTask.CompletedTask;
         }
 
-        public async Task<byte[]> ReceiveAsync(CancellationToken ct)
+        public async ValueTask<byte[]> ReceiveAsync(CancellationToken ct)
         {
             if (_closed || !await _inbound.Reader.WaitToReadAsync(ct).ConfigureAwait(false) || _closed)
             {

@@ -497,6 +497,10 @@ internal sealed class BotProvisionerChecks
     private WebApplication _app;
     private Uri _authBase;
 
+    // The world a mid-test server swap builds, kept separate from _dir because the ACCOUNTS FILE lives in _dir and the point of
+    // the swap is that the file survives the database.
+    private string _swappedDir;
+
     [SetUp]
     public async Task SetUp()
     {
@@ -535,6 +539,12 @@ internal sealed class BotProvisionerChecks
         _sim?.Dispose();
         _sim = null;
         Worlds.Delete(_dir);
+
+        if (_swappedDir != null)
+        {
+            Worlds.Delete(_swappedDir);
+            _swappedDir = null;
+        }
     }
 
     /// <summary>A fresh population signs itself up, and every token it is handed is one the game would admit.</summary>
@@ -623,6 +633,89 @@ internal sealed class BotProvisionerChecks
             Assert.That(report.LoggedIn, Is.EqualTo(Population), "a signup answering 409 must fall through to a login, not fail");
             Assert.That(report.Created, Is.Zero);
         });
+    }
+
+    /// <summary>The accounts file outliving the SERVER's database: the fleet signs up again rather than blaming the key.</summary>
+    /// <remarks>
+    /// <b>The mirror of <see cref="APopulationWhoseFileWasLostLogsInInstead"/>, and the case that was missing.</b> Thirteen
+    /// pipeline use cases and two 5 000-bot runs all created the accounts file and the database together, so not one of them
+    /// could see this: records marked <c>SignedUp</c> sent the provisioner straight to <c>/auth/login</c>, the server answered
+    /// 401 for accounts it had never heard of — it answers 401 for an unknown name deliberately, so a probe cannot enumerate
+    /// accounts — and the provisioner read that as the key being wrong and gave up. Nothing was signed up, no session opened, and
+    /// the fleet reported "check the scheme and the port". Restarting a server while keeping the file is the ordinary case; on a
+    /// fresh box it is the only case.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task APopulationWhoseServerLostTheAccountsSignsUpAgain()
+    {
+        using (var first = new BotProvisioner(_authBase, new BotAccountStore(_accountsPath, Population), Key, concurrency: 4))
+        {
+            var initial = await first.EnsureAsync(Population, null, CancellationToken.None);
+            Assert.That(initial.Failed, Is.Zero, initial.FirstFailure);
+        }
+
+        // STAGED for the same reason as the key-mismatch test below: six still-valid tokens are reused without one HTTP call, so
+        // without this the test would assert nothing. Expiring them forces the login that the empty database must now refuse.
+        var expired = new BotAccountStore(_accountsPath, Population);
+        for (var i = 0; i < Population; i++)
+        {
+            expired.Put(expired[i] with { TokenExpUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds() });
+        }
+
+        expired.Flush();
+        await ReplaceServerWithAnEmptyDatabaseAsync();
+
+        using var second = new BotProvisioner(_authBase, new BotAccountStore(_accountsPath, Population), Key, concurrency: 4);
+        var report = await second.EnsureAsync(Population, null, CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(report.Failed, Is.Zero, report.FirstFailure);
+            Assert.That(report.Complete, Is.True);
+            Assert.That(
+                report.Created,
+                Is.EqualTo(Population),
+                "a login refused by a database that has never seen the account must fall through to a signup");
+        });
+
+        // Minted is not enough: these are the tokens the run will present on HELLO, against the server that just issued them.
+        var reopened = new BotAccountStore(_accountsPath, Population);
+        for (var i = 0; i < Population; i++)
+        {
+            Assert.That(AuthToken.TryValidate(reopened[i].Token, out _), Is.True, $"bot {i}'s new token would be refused on HELLO");
+        }
+    }
+
+    /// <summary>Swaps the running server for one whose database has never seen an account, keeping the accounts file.</summary>
+    /// <returns>The swap.</returns>
+    /// <remarks>
+    /// A new <see cref="TatooineSim"/> on its own directory, because the accounts live in the database and there is no other way
+    /// to reach the state a restarted server, a wiped database or a fresh instance is in. The fields are reassigned so the
+    /// teardown still owns exactly one sim and one host, and <c>_dir</c> is left alone because the accounts file is in it.
+    /// </remarks>
+    private async Task ReplaceServerWithAnEmptyDatabaseAsync()
+    {
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+        _sim.Dispose();
+
+        _swappedDir = Worlds.NewDirectory();
+        var config = Worlds.Small(_swappedDir);
+        config.WarmTicks = 0;
+        config.MeasuredTicks = 0;
+        _sim = new TatooineSim(config);
+        _sim.Initialize();
+
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.SetMinimumLevel(LogLevel.Error);
+        builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0));
+        builder.Services.AddAuthJson();
+        _app = builder.Build();
+        _app.MapAuth(_sim.Dbe, new AuthRateLimiter(10_000, TimeSpan.FromSeconds(1), 10_000));
+
+        await _app.StartAsync();
+        _authBase = new Uri(BoundAddress(_app));
     }
 
     /// <summary>A key that is not the key the accounts were made with is reported as exactly that.</summary>

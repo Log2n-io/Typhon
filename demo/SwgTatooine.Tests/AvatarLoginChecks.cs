@@ -180,7 +180,7 @@ internal sealed class AvatarLoginChecks
     /// </remarks>
     [Test]
     [CancelAfter(60_000)]
-    public void AFirstLoginCreatesACharacterAndSpawnsAtTheCapital()
+    public void AFirstLoginCreatesACharacterAndSpawnsInATown()
     {
         using var sim = Start(Config());
         var before = Census(sim);
@@ -188,17 +188,115 @@ internal sealed class AvatarLoginChecks
         var (_, avatar) = LogIn(sim, AnAccount(0x5001));
 
         var at = Where(sim, avatar);
-        var capital = sim.Map.Cities[0];
-        var distance = MathF.Sqrt(((at.X - capital.X) * (at.X - capital.X)) + ((at.Z - capital.Z) * (at.Z - capital.Z)));
 
         Assert.Multiple(() =>
         {
             Assert.That(TatooineReplication.CharactersCreated, Is.EqualTo(1), "a first login must create exactly one character");
             Assert.That(TatooineReplication.AvatarsSpawned, Is.EqualTo(1));
             Assert.That(CharacterCount(sim), Is.EqualTo(1));
-            Assert.That(distance, Is.LessThan(1f), "a new avatar must arrive at the capital, not at the origin");
+
+            // Any town, not the capital: arrivals are spread across all seven by the map's playerWeight. What matters is that it is IN
+            // one of them rather than in the open desert the origin is.
+            Assert.That(TownHolding(sim, at.X, at.Z), Is.Not.Null, "a new avatar must arrive inside a town, not at the origin");
             Assert.That(at.Realm, Is.Zero);
             Assert.That(Census(sim).Total, Is.EqualTo(before.Total + 1), "the avatar must be ADDITIONAL to the pooled crowd");
+        });
+    }
+
+    /// <summary>
+    /// <b>Arrivals are spread over the town, which is the whole reason the spawn is a disc.</b> A single point put every new character
+    /// on one tile: inside every other one's 192 m sphere, so each replica held the entire population and the client's per-session cost
+    /// grew with the crowd instead of with the world — a thousand bot sessions reached 42 GB on that alone. It also showed a player
+    /// logging in to a world reporting ten thousand players and rendering nobody, because the crowd was one tile wide.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ArrivalsAreSpreadAcrossTheTowns()
+    {
+        using var sim = Start(Config());
+
+        var points = new List<(float X, float Z)>();
+        var towns = new HashSet<string>();
+        for (ulong i = 0; i < 24; i++)
+        {
+            var (_, avatar) = LogIn(sim, AnAccount(0x6100 + i), expectedBindings: (long)i + 1);
+            var at = Where(sim, avatar);
+            points.Add((at.X, at.Z));
+
+            var town = TownHolding(sim, at.X, at.Z);
+            Assert.That(town, Is.Not.Null, $"account {i} arrived outside every town, at {at.X:F0},{at.Z:F0}");
+            towns.Add(town);
+        }
+
+        var closest = float.MaxValue;
+        for (var i = 0; i < points.Count; i++)
+        {
+            for (var j = i + 1; j < points.Count; j++)
+            {
+                var dx = points[i].X - points[j].X;
+                var dz = points[i].Z - points[j].Z;
+                closest = MathF.Min(closest, MathF.Sqrt((dx * dx) + (dz * dz)));
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            // A floor on the CLOSEST pair, which also says they are all distinct. The point of the spread is that neighbours fall out
+            // of each other's sphere, not merely that two floats differ, and a disc that ever collapsed towards its centre would fail
+            // here rather than quietly stack the crowd again.
+            Assert.That(closest, Is.GreaterThan(1f), "the arrivals are spread, not jittered by centimetres");
+
+            // <b>More than one town, which is the behaviour this test is named for.</b> Twenty-four accounts against weights whose
+            // smallest is 5 % will not reach all seven reliably, and a test that demanded seven would be asserting the sampler's luck
+            // rather than the distribution — so the claim is that arrivals are not all in one place.
+            Assert.That(towns, Has.Count.GreaterThan(1), "arrivals must be distributed across towns, not stacked in the capital");
+        });
+    }
+
+    /// <summary>Which town holds a point, or <see langword="null"/> when it is outside all of them.</summary>
+    /// <param name="sim">The server, for its map.</param>
+    /// <param name="x">World x.</param>
+    /// <param name="z">World z.</param>
+    /// <returns>The town's name, or null.</returns>
+    private static string TownHolding(TatooineSim sim, float x, float z)
+    {
+        foreach (var city in sim.Map.Cities)
+        {
+            var dx = x - city.X;
+            var dz = z - city.Z;
+            if (MathF.Sqrt((dx * dx) + (dz * dz)) <= city.Radius)
+            {
+                return city.Name;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// <c>--spawn-spread 0</c> keeps the old single point in the capital, which is what the cases that place fixtures near its centre
+    /// depend on.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void APinnedSpawnSpreadPutsEveryArrivalOnOnePoint()
+    {
+        var config = Config();
+        config.SpawnSpread = 0;
+
+        using var sim = Start(config);
+        var capital = sim.Map.Cities[0];
+
+        var (_, first) = LogIn(sim, AnAccount(0x6201));
+        var (_, second) = LogIn(sim, AnAccount(0x6202), expectedBindings: 2);
+
+        var a = Where(sim, first);
+        var b = Where(sim, second);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(MathF.Sqrt(((a.X - capital.X) * (a.X - capital.X)) + ((a.Z - capital.Z) * (a.Z - capital.Z))), Is.LessThan(1f));
+            Assert.That(MathF.Sqrt(((b.X - capital.X) * (b.X - capital.X)) + ((b.Z - capital.Z) * (b.Z - capital.Z))), Is.LessThan(1f));
         });
     }
 

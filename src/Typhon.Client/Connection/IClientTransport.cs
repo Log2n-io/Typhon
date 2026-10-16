@@ -37,13 +37,34 @@ public interface IClientTransport : IAsyncDisposable
     /// The message is above the cap (1009). The stream is left open: refusing it — a <c>BYE 4004</c>, then the close — is the caller's.
     /// </exception>
     /// <remarks>
+    /// <para>
     /// The returned array belongs to the caller: a transport that pooled it would hand the same buffer to the decoder and to a recorder, and the recorder
     /// keeps what it is given.
+    /// </para>
+    /// <para>
+    /// <b>A <see cref="ValueTask{TResult}"/> because this is the hottest call in the client.</b> A session takes a frame every server tick, so a fleet of a
+    /// few thousand takes hundreds of thousands a second, and a <see cref="Task{TResult}"/> here allocated one object per message for a call that usually
+    /// completes synchronously from bytes already buffered. The implementation pools its state machine as well. Awaited exactly once, as a ValueTask requires.
+    /// </para>
     /// </remarks>
-    Task<byte[]> ReceiveAsync(CancellationToken ct);
+    ValueTask<byte[]> ReceiveAsync(CancellationToken ct);
 
     /// <summary>The code the peer closed with, or zero when it has not closed.</summary>
     ushort CloseCode { get; }
+
+    /// <summary>
+    /// What the transport knows about an ABNORMAL close beyond its code, or <see langword="null"/> when there is nothing to add.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because 1006 is not a reason, it is the absence of one.</b> The WebSocket specification's "closed abnormally" means no close
+    /// frame arrived, so the peer's intent is unknowable — but the LOCAL failure that revealed it is known, and a reset by the peer, a
+    /// local abort and a timeout are three different root causes that the code alone cannot separate. A fleet counting thousands of
+    /// 1006s has nothing to go on without this; with it the count becomes a reading.
+    /// <para>
+    /// A default of <see langword="null"/>, so a transport with nothing to say need not implement it.
+    /// </para>
+    /// </remarks>
+    string CloseDetail => null;
 
     /// <summary>Closes the stream, telling the peer why when the transport can carry a reason.</summary>
     /// <param name="code">The close code.</param>

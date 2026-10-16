@@ -19,8 +19,8 @@ using System.Threading.Tasks;
 // naming the token, instead of running the default — a mistyped --bots used to give two identical arms under a report that said otherwise.
 string endpoint, kind, fuzzMode, accountsFile, authBaseArg;
 Uri endpointUri;
-int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fuzzRate, signupConcurrency;
-double regionM;
+int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fuzzRate, signupConcurrency, accountBase, maxBots, chunkSize;
+double regionM, wanderSeconds;
 try
 {
     var defaults = new BotSwarmOptions();
@@ -30,6 +30,16 @@ try
     endpoint = r.Str("--endpoint", "ws://127.0.0.1:9100/ws", "the server's WebSocket endpoint (`SwgTatooine --serve <port>` listens at ws://host:<port>/ws)",
         "<uri>");
     bots = r.Int("--bots", defaults.Count, "sessions to open", min: 1);
+
+    // The ceiling the population may later be moved to, which is also how many accounts are provisioned up front. Headless has
+    // no dial, but it shares the swarm with the control panel and a run started here can be inspected by one -- and the accounts
+    // file is the thing both of them reuse.
+    maxBots = r.Int("--max-bots", 0, "ceiling the population may be turned up to; 0 is --bots", min: 0);
+
+    // The pipeline's unit of work: this many bots are signed up, connected and handed to the driver as one step, so the chunk before
+    // is already walking while this one signs up. Deliberately not `rate x stagger`, which is 8 at 400/s -- a fine quantum for a
+    // socket and a poor one for a batch of signups.
+    chunkSize = r.Int("--chunk-size", defaults.ChunkSize, "bots provisioned, connected and driven as one step", min: 1);
     seconds = r.Int("--seconds", 60, "the measured window, from the moment every session is open", min: 1);
     hz = r.Int("--hz", defaults.TickHz, "the driver's tick rate", min: 1);
     kind = r.Str("--kind", defaults.Kind, "the session kind the server's admission expects", "<kind>");
@@ -43,6 +53,10 @@ try
 
     // A god camera's region edge: what a ClientRegion god profile (the server's --god-region) observes.
     regionM = r.Dbl("--region-m", defaults.RegionRadiusM, "a god camera's region edge, metres", min: 1);
+
+    // --kind player only: MoveDir is Roles(Player). 0 leaves the avatars standing where they spawned, which is what every run before
+    // this one measured -- replication only, with the intent path, the spatial index and cluster migration untouched.
+    wanderSeconds = r.Dbl("--wander-seconds", defaults.WanderSeconds, "seconds a player bot holds a heading; 0 stands still", min: 0d);
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
     tourSeconds = r.Int("--god-tour", defaults.TourEverySeconds, "seconds between planet switches; 0 never tours", min: 0);
     planets = r.Int("--planets", defaults.Planets, "planets a touring camera cycles through", min: 1);
@@ -53,6 +67,11 @@ try
     accountsFile = r.Str("--accounts-file", null, "where names, tokens and resume tokens are kept; required by --kind player", "<path>");
     authBaseArg = r.Str("--auth-base", null, "the /auth endpoints to sign up against; derived from --endpoint when absent", "<url>");
     signupConcurrency = r.Int("--signup-concurrency", 8, "concurrent signups while provisioning", min: 1);
+
+    // One population across several processes: give each its own slice of the account name space. Ten thousand sessions in one process
+    // does not work -- it dies of its own inbound traffic while the server is still inside its tick budget -- so a run that big is
+    // five processes of two thousand, each with its own --account-base and its own accounts file.
+    accountBase = r.Int("--account-base", 0, "added to every bot index before deriving its account name", min: 0);
 
     r.Group("fuzz — hostile connections instead of a swarm (AC-17's live half)");
     fuzz = r.Int("--fuzz", 0, "hostile clients to open; 0 runs the swarm", min: 0);
@@ -110,6 +129,10 @@ if (isPlayer && accountsFile == null)
 }
 
 BotAccountStore accounts = null;
+
+// Kept for the run's whole length, because the ramp signs each chunk up as it reaches it. Disposed after the swarm, so no chunk can
+// be mid-signup when its HttpClient goes away.
+BotProvisioner fleetProvisioner = null;
 if (accountsFile != null && !isPlayer)
 {
     // Said, not silently ignored. A god session carries no token at all, so provisioning one would sign up a thousand accounts
@@ -138,8 +161,11 @@ else if (accountsFile != null)
         return 2;
     }
 
-    accounts = new BotAccountStore(accountsFile, bots);
-    Console.WriteLine($"accounts: {accounts.FilePath} ({accounts.UsableTokens(600)} of {bots} tokens still usable)");
+    // Provisioned to the CEILING, not the starting count: the accounts have to exist before the population can be turned up to
+    // them, and signing up thousands while an operator waits on a dial is not a thing to do at that moment.
+    var accountCapacity = maxBots > 0 ? Math.Max(bots, maxBots) : bots;
+    accounts = new BotAccountStore(accountsFile, accountCapacity);
+    Console.WriteLine($"accounts: {accounts.FilePath} ({accounts.UsableTokens(600)} of {accountCapacity} tokens still usable)");
     if (accounts.SkippedLines > 0)
     {
         // Said out loud rather than absorbed: a skipped line becomes a login, and a run that silently re-signed-up part of its
@@ -147,37 +173,40 @@ else if (accountsFile != null)
         Console.WriteLine($"  !! {accounts.SkippedLines} line(s) in the accounts file could not be parsed and were skipped");
     }
 
-    using (var provisioner = new BotProvisioner(authBase, accounts, fleetKey, signupConcurrency))
-    {
-        Console.WriteLine($"provisioning {bots} accounts against {authBase} …");
-        var report = await provisioner.EnsureAsync(
-            bots,
-            (done, total) => Console.WriteLine($"  {done} of {total} accounts ready"),
-            CancellationToken.None);
-
-        Console.WriteLine(
-            $"accounts ready in {report.Elapsed.TotalSeconds:F1}s: {report.Created} created, {report.LoggedIn} logged in, {report.Reused} reused, "
-            + $"{report.Failed} failed");
-
-        if (!report.Complete)
-        {
-            // Refused rather than run short. A fleet that is 60 % provisioned measures a server at 600 sessions while every
-            // header says 1000, and that is a wrong number rather than a missing one.
-            Console.Error.WriteLine($"{report.Failed} account(s) could not be provisioned; first failure: {report.FirstFailure}");
-            return 3;
-        }
-    }
+    // <b>Not provisioned here any more: the swarm asks for each chunk as the ramp reaches it.</b> Signing the whole population up
+    // first meant nothing existed for seventeen seconds at ten thousand, and it is why the ceiling used to cost its full price
+    // immediately. The provisioner is kept alive for the run's whole length, because the ramp calls back into it.
+    fleetProvisioner = new BotProvisioner(authBase, accounts, fleetKey, signupConcurrency, accountBase);
+    Console.WriteLine($"accounts are signed up a chunk at a time as the ramp reaches them, against {authBase}");
 }
 
 var options = new BotSwarmOptions
 {
     Endpoint = endpointUri,
     Count = bots,
+    MaxCount = maxBots,
+    ChunkSize = chunkSize,
+
+    // Null for a god fleet: anonymous sessions need no account, so every chunk opens straight away.
+    EnsureAccounts = fleetProvisioner == null
+        ? null
+        : async (from, count, ct) =>
+        {
+            var report = await fleetProvisioner.EnsureRangeAsync(from, count, null, ct);
+            var ready = report.Created + report.LoggedIn + report.Reused;
+            if (report.Failed > 0)
+            {
+                Console.WriteLine($"  !! chunk {from}..{from + count - 1}: {report.Failed} account(s) failed, first: {report.FirstFailure}");
+            }
+
+            return ready;
+        },
     TickHz = hz,
     ConnectBatch = connectBatch,
     ConnectRatePerSecond = connectRate,
     Kind = kind,
     RegionRadiusM = regionM,
+    WanderSeconds = wanderSeconds,
     TourEverySeconds = tourSeconds,
     Planets = planets,
 
@@ -199,6 +228,9 @@ var options = new BotSwarmOptions
 
 Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
 
+// Declared BEFORE the swarm so it is disposed AFTER it — `using` unwinds in reverse — and no chunk can be mid-signup when the
+// provisioner's HttpClient goes away.
+using var provisionerLifetime = fleetProvisioner;
 await using var swarm = new BotSwarm(options);
 // Armed only once every session is open: armed here, a connect phase longer than `--seconds` left no measured window at all, and every figure
 // below was read the moment the last session joined.
@@ -224,8 +256,16 @@ if (opened == 0)
 
 if (opened < bots)
 {
+    // <b>With the reason, which this line used to leave out.</b> A fleet asking for 10 000 against a server whose session table holds
+    // 8 192 printed "only 8192 of 10000 opened" and nothing else — so a hard, named, server-side refusal was indistinguishable from a
+    // generator that had run out of sockets, threads or memory, each of which was investigated before the real limit was found.
+    var (refused, reason) = swarm.OpenFailures;
     Console.Error.WriteLine($"only {opened} of {bots} sessions opened, so everything below is measured on a smaller population "
         + "than was asked for.");
+    if (refused > 0)
+    {
+        Console.Error.WriteLine($"  {refused} session(s) were refused or failed to open. First reason: {reason}");
+    }
 }
 
 var started = DateTime.UtcNow;
@@ -337,6 +377,30 @@ foreach (var (name, count) in swarm.LabelledMetric("typhon.archetype.entities", 
 
 Console.WriteLine();
 Console.WriteLine($"ran {(DateTime.UtcNow - started).TotalSeconds:F0}s over {swarm.Ticks} driver ticks");
+
+// <b>Against the server's silence window, because that comparison is the whole diagnosis.</b> A session the fleet has not pinged
+// within 3 / pingHz seconds is closed with 4001 — 750 ms at the 4 Hz the server advertises — so a ping sweep approaching that is
+// the reason a population settles below its target, and a sweep well inside it rules the fleet's own cadence out.
+var pingCost = swarm.PingCost;
+var proc = System.Diagnostics.Process.GetCurrentProcess();
+
+// <b>The collector, because a sweep whose MEAN is 66 ms and whose WORST is 844 ms is not slow, it is stopped.</b> A pause longer
+// than the server's silence window closes every session the fleet was about to ping, so the pause total is the figure that says
+// whether a lost population was a cost problem or a garbage problem — and this fleet's first answer was 700 MB/s of it.
+Console.WriteLine(
+    $"gc: {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} gen0/1/2, "
+    + $"{GC.GetTotalPauseDuration().TotalMilliseconds:F0} ms paused in total, {GC.GetTotalAllocatedBytes() / 1048576.0:F0} MiB allocated, "
+    + $"heap {GC.GetTotalMemory(false) / 1048576.0:F0} MiB");
+Console.WriteLine(
+    $"ping cost: {pingCost.MeanUs:F1} us mean, {pingCost.WorstUs:F0} us worst over {pingCost.Count} sends; "
+    + $"pool {ThreadPool.ThreadCount} threads, {ThreadPool.PendingWorkItemCount} queued; "
+    + $"process CPU {proc.TotalProcessorTime.TotalSeconds:F1} s over {(DateTime.UtcNow - started).TotalSeconds:F0} s wall");
+
+var pingSweep = swarm.PingSweepMs;
+var driveSweep = swarm.DriveSweepMs;
+Console.WriteLine(
+    $"sweeps: ping {pingSweep.Last:F0} ms (worst {pingSweep.Worst:F0}), drive {driveSweep.Last:F0} ms (worst {driveSweep.Worst:F0}) "
+    + "— the server closes a session it has not heard from for 3/pingHz seconds");
 Console.WriteLine($"connected at end: {swarm.Connected} of {opened}");
 Console.WriteLine($"messages received: {swarm.MessagesReceived}");
 Console.WriteLine($"receive-loop faults: {swarm.Faults}");
@@ -360,6 +424,35 @@ if (faultKinds > 0)
 }
 var (toursAsked, realmSwitches, news, inRealm) = swarm.Realms();
 Console.WriteLine($"realms: {toursAsked} tours asked, {realmSwitches} realm switches applied, {news} RealmNews heard, {inRealm} of {opened} sessions holding a realm");
+
+// Beside the sessions, because a fleet of bound avatars that sends none of these is a replication test wearing a player test's name.
+// Which half of the pipeline bound the ramp. Printed unconditionally, because "--connect-rate 400" is a claim about the outcome and
+// this is the only line that can falsify it.
+// <b>The local cause behind each abrupt close.</b> A table of "1006 x 3306" is not a diagnosis: no close frame arrived, so the
+// peer's intent is unknowable, but the socket failure that revealed it is known and distinguishes a reset by the peer from a local
+// abort from a timeout. Without this the count is a dead end, which is precisely where a 5 000-session run stalled.
+var closeDetails = swarm.CloseDetails();
+if (closeDetails.Count > 0)
+{
+    Console.WriteLine("abnormal closes by local cause:");
+    foreach (var (detail, count) in closeDetails)
+    {
+        Console.WriteLine($"  {detail}: {count}");
+    }
+}
+
+var cost = swarm.ChunkCost();
+if (cost.Chunks > 0)
+{
+    Console.WriteLine(
+        $"ramp: {cost.Chunks} chunk(s), mean {cost.MeanProvisionMs:F0} ms provisioning + {cost.MeanConnectMs:F0} ms connecting; "
+        + $"{cost.BoundByProvisioning} bound by SIGNUPS");
+}
+
+var intentsSent = swarm.IntentsSent();
+Console.WriteLine(intentsSent == 0
+    ? $"movement: NO intents sent — the population stood where it spawned (--wander-seconds {wanderSeconds})"
+    : $"movement: {intentsSent} MoveDir intents sent, {(double)intentsSent / Math.Max(1, opened):F0} per session");
 
 if (swarm.Disconnects.Count == 0)
 {

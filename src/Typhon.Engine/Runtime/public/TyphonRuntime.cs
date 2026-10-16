@@ -643,6 +643,8 @@ public sealed partial class TyphonRuntime : IDisposable
             ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
             Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
             NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
+            SessionsClosedSilent = subscriptions?.Frames?.SessionsClosedSilent ?? 0L,
+            SessionsClosedLagging = subscriptions?.Frames?.SessionsClosedLagging ?? 0L,
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
             SessionsClosed = ReadCloseCounts(subscriptions),
             FramesSkipped = ReadSkipCounts(subscriptions),

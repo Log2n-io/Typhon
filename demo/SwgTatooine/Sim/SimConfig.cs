@@ -441,6 +441,47 @@ public sealed class SimConfig
     public double AvatarSaveIntervalS = TatooineReplication.DefaultSaveIntervalSeconds;
 
     /// <summary>
+    /// <c>--spawn-spread S</c>: a scale on every town's own radius, over which new characters are spread.
+    /// <c>1</c> is each town as the map draws it; <c>0</c> puts every new character on one point in the capital.
+    /// </summary>
+    /// <remarks>
+    /// <b>Arrivals are distributed across ALL SEVEN towns by the map's own <c>playerWeight</c>, not stacked in the capital.</b> Zero was
+    /// the original behaviour and it is pathological: every new character at exactly one point means each one sits inside every other
+    /// one's 192 m sphere, so each replica holds the whole population and the client's per-session cost grows with the crowd instead of
+    /// with the world. It also looks like a bug in the client, because a player logs in to a world reporting ten thousand players and
+    /// sees nobody — the crowd is one tile wide and they are not standing on it.
+    /// <para>
+    /// One town is not enough either, and that is what this scale is for. Ten thousand arrivals in the capital's 456 m disc still put
+    /// ~1 770 bodies in every session's sphere: 124 records a frame, 54 GB of traffic in ninety seconds, and a fleet process that died
+    /// of it while the server held its tick budget. Seven towns divide the AVERAGE by about three — not by seven, because the weights
+    /// are population shares and the radii are physical sizes, and they are not proportional. The scale is the honest knob: density is
+    /// what a crowd test varies, so it should be a number somebody chose.
+    /// </para>
+    /// <para>
+    /// Which town and where inside it are both derived from the account id, so the same account returns to the same doorstep and a test
+    /// gets a reproducible world without pinning a seed.
+    /// </para>
+    /// </remarks>
+    public double SpawnSpread = 1d;
+
+    /// <summary>
+    /// <c>--max-sessions N</c>: how many clients may be connected at once — the engine's session table, allocated once at start-up.
+    /// </summary>
+    /// <remarks>
+    /// <b>Restated here rather than left at the engine's default, because the default is what a 10 000-bot run hits.</b>
+    /// <c>SubscriptionsOptions.MaxSessions</c> is 8 192 and nothing in this demo set it, so a fleet asking for ten thousand opened
+    /// 8 192 and then simply stopped: admission past the table is refused at connect time, the server said nothing about why, and the
+    /// generator reported "8 191 of 8 191 opened" as though that were the number it had asked for. For a demo whose own bot document
+    /// targets 5-10 k sessions, the one option that bounds exactly that should not be unreachable from the command line.
+    /// <para>
+    /// 65 535 is structural and not a policy: a session identity packs a 16-bit slot and a 16-bit generation into 32 bits, so a slot
+    /// wider than a <c>ushort</c> does not exist. Between the two, the cost is memory — several arrays of this many entries inside
+    /// the frame assembler, allocated whether or not the sessions arrive.
+    /// </para>
+    /// </remarks>
+    public int MaxSessions = 8192;
+
+    /// <summary>
     /// <c>--resume-grace S</c>: how long a link-dead session's avatar stays standing for its client to come back to, seconds; 0 disables resume entirely.
     /// </summary>
     /// <remarks>

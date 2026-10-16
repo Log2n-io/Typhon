@@ -58,6 +58,11 @@ public sealed class ClientIntentChecks
         var config = Worlds.Small(_dir);
         config.Unpaced = false;
         config.TickRateHz = TickRateHz;
+
+        // STAGED, because several cases here place their fixtures a few metres from the capital's centre and need the avatar's 192 m
+        // sphere to cover them. By default arrivals are spread over all seven towns, so an avatar can be kilometres away and see none
+        // of them -- a flake that would depend on the account id. Pinning it to the point states the precondition instead of hoping.
+        config.SpawnSpread = 0;
         return config;
     }
 
@@ -436,6 +441,33 @@ public sealed class ClientIntentChecks
                     Assert.That(replicated[i], Is.GreaterThan(replicated[i - 1]), $"class {classes[i]} is not faster than {classes[i - 1]}");
                 }
             }
+        });
+    }
+
+    /// <summary>The two travel gaits are the multiples of a landspeeder they were asked to be, and the world's own speed is untouched.</summary>
+    /// <remarks>
+    /// <b>Pinned as RATIOS because that is how they were specified</b> — Shift+3 at twice a landspeeder and Shift+4 at three times
+    /// Shift+3 — and because the obvious way to implement that was to scale <c>PlayerMountSpeedMps</c>, which would have been
+    /// wrong: mounts, creatures and the shuttle read that same figure, so the planet's whole traffic would have sped up with the
+    /// player. The last assertion is the one that catches that mistake coming back.
+    /// </remarks>
+    [Test]
+    public void TheTravelGaitsAreMultiplesOfASpeederAndLeaveTheWorldAlone()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                TatooineData.PlayerSpeederSpeedMps,
+                Is.EqualTo(TatooineData.PlayerMountSpeedMps * 2f),
+                "Shift+3 is specified as twice a landspeeder");
+            Assert.That(
+                TatooineData.PlayerSpeederFastSpeedMps,
+                Is.EqualTo(TatooineData.PlayerSpeederSpeedMps * 3f),
+                "Shift+4 is specified as three times Shift+3");
+            Assert.That(
+                TatooineData.PlayerMountSpeedMps,
+                Is.EqualTo(12f),
+                "the mount speed is the WORLD's, read by creatures and the shuttle: scaling a player gait through it speeds them up too");
         });
     }
 

@@ -106,15 +106,31 @@ public static class TatooineData
     /// </remarks>
     public const float PlayerBurstRunSpeedMps = PlayerRunSpeedMps * 1.822f;
 
-    /// <summary>Twice a speeder, and the only speed here with no source behind it.</summary>
+    /// <summary>The player's Shift+3 gait: twice a landspeeder, 24 m/s, and invented rather than sourced.</summary>
+    /// <remarks>
+    /// <b>Its own constant rather than <see cref="PlayerMountSpeedMps"/>, because that figure is not only the player's.</b>
+    /// Mounts, creatures and the shuttle read the mount speed too, so scaling the player's travel gait through it would have
+    /// sped the whole planet's traffic up with him. The gait ladder and the world's own speeds are separate things that
+    /// happened to share a number.
+    /// </remarks>
+    public const float PlayerSpeederSpeedMps = PlayerMountSpeedMps * 2f;
+
+    /// <summary>The player's Shift+4 gait: three times Shift+3, 72 m/s, and the only speed here with no source behind it.</summary>
     /// <remarks>
     /// <b>Asked for as a way to cross 16 km of planet quickly, and it is honest about being invented.</b> Nothing in SWG
-    /// moved a player at 24 m/s on the ground; the swoop's 14.7 m/s was the ceiling. It earns its place by what it
-    /// exercises rather than by what it reproduces — at 24 m/s a session crosses a replication cell every 2.7 s, which is
-    /// the enter/leave churn no other gait reaches, and it is what sizes
-    /// <see cref="Replication.TatooineReplication.MaxSpeedMps"/>.
+    /// moved a player at 24 m/s on the ground, let alone 72; the swoop's 14.7 m/s was the ceiling. It earns its place by
+    /// what it exercises rather than by what it reproduces — at 72 m/s a session crosses a 256 m replication cell every
+    /// 3.6 s while the far side of the planet is 16 km away, which is the enter/leave churn no other gait reaches, and it
+    /// is what sizes <see cref="Replication.TatooineReplication.MaxSpeedMps"/>.
+    /// <para>
+    /// <b>That sizing costs nothing here, and it was computed rather than assumed.</b> The teleport threshold sets the velocity
+    /// codec's width for every moving entity in the world, not just for players, so tripling the top gait could have cost a
+    /// width step on all of them. It does not: at a 0.05 m tolerance over a 5 s max age the unit is 2^-13 m, and 75.6 m/s over a
+    /// 20 ms tick needs 12 387 codes against the 32 767 a 16-bit code carries — the same width 24 m/s used, with 2.6x of
+    /// headroom left (<c>ProjectionCompiler.VelocityCodec</c>). A further doubling would still fit; 6x from here would not.
+    /// </para>
     /// </remarks>
-    public const float PlayerSpeederFastSpeedMps = PlayerMountSpeedMps * 2f;
+    public const float PlayerSpeederFastSpeedMps = PlayerSpeederSpeedMps * 3f;
 
     /// <summary>
     /// [WIKI] Weapon delay floor. Combat is continuous and gated per weapon by

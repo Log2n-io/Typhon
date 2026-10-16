@@ -53,7 +53,12 @@ builder.Services.AddScoped(_ => new FleetSettings { Endpoint = endpoint });
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(120));
 
 var app = builder.Build();
-app.UseStaticFiles();
+// MapStaticAssets and NOT UseStaticFiles, and the difference is the whole page working or not. UseStaticFiles serves
+// wwwroot, so app.css arrived and the panel looked merely unstyled -- but `_framework/blazor.web.js` is not a file in
+// wwwroot, it is an endpoint from the static-asset manifest, and on .NET 9 and later only MapStaticAssets registers it.
+// Without it the script 404s, no SignalR circuit is ever established, the page renders as static HTML, and every
+// @onclick silently does nothing. Start did nothing for exactly this reason.
+app.MapStaticAssets();
 app.UseAntiforgery();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 

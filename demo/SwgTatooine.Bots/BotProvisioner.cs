@@ -65,21 +65,26 @@ public sealed class BotProvisioner : IDisposable
     private readonly string _key;
     private readonly int _concurrency;
 
+    /// <summary>Added to every local index before a name and password are derived, so several processes can share one population.</summary>
+    private readonly int _accountBase;
+
     /// <summary>Builds a provisioner.</summary>
     /// <param name="authBase">The HTTP base the <c>/auth</c> endpoints hang off, from <see cref="AuthBaseFrom"/>.</param>
     /// <param name="store">The accounts file.</param>
     /// <param name="key">The fleet key from <see cref="BotCredentials.ReadKeyOrThrow"/>.</param>
     /// <param name="concurrency">How many calls run at once; <see cref="DefaultConcurrency"/> when not given.</param>
-    public BotProvisioner(Uri authBase, BotAccountStore store, string key, int concurrency = DefaultConcurrency)
+    public BotProvisioner(Uri authBase, BotAccountStore store, string key, int concurrency = DefaultConcurrency, int accountBase = 0)
     {
         ArgumentNullException.ThrowIfNull(authBase);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(concurrency);
+        ArgumentOutOfRangeException.ThrowIfNegative(accountBase);
 
         _store = store;
         _key = key;
         _concurrency = concurrency;
+        _accountBase = accountBase;
 
         // A generous timeout, because a login is a PBKDF2 behind a semaphore and a thousand of them queue: the default 100 s is
         // right and the point of saying so is that a shorter one would read as a server fault.
@@ -117,8 +122,30 @@ public sealed class BotProvisioner : IDisposable
     /// <param name="progress">Called with the number finished, for a long pass; may be <see langword="null"/>.</param>
     /// <param name="ct">Cancels the pass.</param>
     /// <returns>What the pass did.</returns>
-    public async Task<ProvisionReport> EnsureAsync(int count, Action<int, int> progress, CancellationToken ct = default)
+    public Task<ProvisionReport> EnsureAsync(int count, Action<int, int> progress, CancellationToken ct = default)
+        => EnsureRangeAsync(0, count, progress, ct);
+
+    /// <summary>
+    /// Signs up or logs in a SLICE of the population: indices <paramref name="from"/> up to <paramref name="from"/> + <paramref name="count"/>.
+    /// </summary>
+    /// <param name="from">The first bot index in the slice.</param>
+    /// <param name="count">How many bots.</param>
+    /// <param name="progress">Called with the number finished, for a long pass; may be <see langword="null"/>.</param>
+    /// <param name="ct">Cancels the pass.</param>
+    /// <returns>What the pass did.</returns>
+    /// <remarks>
+    /// <b>A slice, because provisioning a whole population before anything happens is what made a ramp start slowly.</b> The fleet
+    /// advances in chunks — provision these, connect these, let them walk, take the next — so one chunk signs up while the chunk
+    /// before it is already playing. Ten thousand accounts took seventeen seconds during which nothing existed at all; a chunk of
+    /// 250 takes about one, and every chunk after the first is overlapped with sessions that are already driving.
+    /// <para>
+    /// It also removes the reason the capacity had to be provisioned up front. Asking for headroom used to cost the full price
+    /// immediately, so a run that only ever reached 500 sessions still signed up ten thousand accounts.
+    /// </para>
+    /// </remarks>
+    public async Task<ProvisionReport> EnsureRangeAsync(int from, int count, Action<int, int> progress, CancellationToken ct = default)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(from);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
 
         var started = Stopwatch.StartNew();
@@ -136,15 +163,17 @@ public sealed class BotProvisioner : IDisposable
 
         for (var i = 0; i < count; i++)
         {
-            var index = i;
+            // The ACCOUNT index is offset by the slice's start, while `results` stays slice-local. Conflating the two would write
+            // every chunk's outcomes into the first chunk's slots and read the wrong account's token back.
+            var index = from + i;
             var existing = _store[index];
             if (existing != null && !string.IsNullOrEmpty(existing.Token) && existing.TokenExpUnix - now > RefreshWindowSeconds)
             {
-                results[index] = new Outcome(OutcomeKind.Reused, existing, null);
+                results[i] = new Outcome(OutcomeKind.Reused, existing, null);
                 continue;   // a token that is still good is the whole reason the file exists; a second run of the same fleet makes no HTTP calls at all
             }
 
-            work.Add(ProvisionOneAsync(index, existing, gate, results, ct));
+            work.Add(ProvisionOneAsync(index, i, existing, gate, results, ct));
         }
 
         if (work.Count > 0)
@@ -214,32 +243,38 @@ public sealed class BotProvisioner : IDisposable
     public void Dispose() => _http.Dispose();
 
     /// <summary>Signs up or logs in one account.</summary>
-    /// <param name="index">The bot index.</param>
+    /// <param name="index">The bot index, which names the account.</param>
+    /// <param name="slot">Where the outcome goes: the index WITHIN this slice, not the account index.</param>
     /// <param name="existing">What the file already knows, or <see langword="null"/>.</param>
     /// <param name="gate">The concurrency bound.</param>
     /// <param name="results">Where to put the outcome.</param>
     /// <param name="ct">Cancels the call.</param>
-    private async Task ProvisionOneAsync(int index, BotAccountRecord existing, SemaphoreSlim gate, Outcome[] results, CancellationToken ct)
+    private async Task ProvisionOneAsync(int index, int slot, BotAccountRecord existing, SemaphoreSlim gate, Outcome[] results, CancellationToken ct)
     {
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var name = BotCredentials.Name(index);
-            var password = BotCredentials.Password(_key, index);
+            // <b>Offset by the fleet's account base, which is what lets one population span several processes.</b> Names are derived
+            // from the index alone (`bot000123`), so two processes both running indices 0..1999 would ask for the same accounts: the
+            // second would log in to bodies the first is already driving, and the server's one-session-per-account guard would refuse
+            // it. A base per process gives each one its own slice of the name space while the store stays keyed by local index.
+            var name = BotCredentials.Name(_accountBase + index);
+            var password = BotCredentials.Password(_key, _accountBase + index);
 
             // Signup first for an account the file has never seen, login first for one it has. The order matters only for the
-            // number of round trips: signup answers 409 for a name that exists, which is the recovery path when the file was lost
-            // but the server's accounts were not — so a missing file costs one extra call per bot and nothing else.
+            // number of round trips, because EITHER order recovers: signup answers 409 for a name that exists, and a login
+            // refused with 401 tries a signup — the file outliving the server's accounts is as ordinary as the reverse, and on a
+            // fresh box it is the normal case.
             var signupFirst = existing == null || !existing.SignedUp;
             var outcome = signupFirst
                 ? await SignupThenLoginAsync(index, name, password, existing, ct).ConfigureAwait(false)
-                : await LoginAsync(index, name, password, existing, ct).ConfigureAwait(false);
+                : await LoginAsync(index, name, password, existing, signupOnUnauthorized: true, ct).ConfigureAwait(false);
 
-            results[index] = outcome;
+            results[slot] = outcome;
         }
         catch (OperationCanceledException)
         {
-            results[index] = new Outcome(OutcomeKind.Failed, null, "cancelled");
+            results[slot] = new Outcome(OutcomeKind.Failed, null, "cancelled");
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or InvalidOperationException
             or System.Text.Json.JsonException or NotSupportedException)
@@ -250,7 +285,7 @@ public sealed class BotProvisioner : IDisposable
             // answers 200 with. Without them one such response faulted the whole pass: EnsureAsync threw instead of answering
             // `Failed` with a message, contradicting this class's own rule that a refusal is reported rather than thrown, and
             // leaving the account's slot Pending forever.
-            results[index] = new Outcome(OutcomeKind.Failed, null, Describe(e));
+            results[slot] = new Outcome(OutcomeKind.Failed, null, Describe(e));
         }
         finally
         {
@@ -270,8 +305,45 @@ public sealed class BotProvisioner : IDisposable
         using var response = await PostAsync("/auth/signup", name, password, ct).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.Conflict)
         {
-            // The account exists from an earlier run whose file we no longer have. Not an error.
-            return await LoginAsync(index, name, password, existing, ct).ConfigureAwait(false);
+            // The account exists from an earlier run whose file we no longer have. Not an error. No signup retry on a 401 from
+            // here: the signup that would be retried is the one that just answered 409.
+            return await LoginAsync(index, name, password, existing, signupOnUnauthorized: false, ct).ConfigureAwait(false);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return new Outcome(OutcomeKind.Failed, null, await RefusalAsync(response, "signup", ct).ConfigureAwait(false));
+        }
+
+        var minted = await response.Content.ReadFromJsonAsync(BotAccountJson.Default.BotAuthResponse, ct).ConfigureAwait(false);
+        return minted == null
+            ? new Outcome(OutcomeKind.Failed, null, "signup answered 200 with no body")
+            : new Outcome(OutcomeKind.Created, Record(index, minted, existing), null);
+    }
+
+    /// <summary>Signs up after a login was refused, which is what tells the two causes of a 401 apart.</summary>
+    /// <param name="index">The bot index.</param>
+    /// <param name="name">The account name.</param>
+    /// <param name="password">The derived password.</param>
+    /// <param name="existing">What the file knows.</param>
+    /// <param name="refusal">What the login answered, kept for the message a 409 then earns.</param>
+    /// <param name="ct">Cancels the call.</param>
+    /// <returns>The outcome.</returns>
+    /// <remarks>
+    /// <b>The signup is the probe.</b> A 401 is the server's answer both for a wrong password and for a name it does not know, so
+    /// only trying to create the name separates them: 201 means the account was simply gone and the fleet carries on, while 409
+    /// means the name is taken by a password that is not ours — and that is the one case where the key really is to blame.
+    /// </remarks>
+    private async Task<Outcome> SignupAfterUnauthorizedAsync(int index, string name, string password, BotAccountRecord existing, string refusal,
+        CancellationToken ct)
+    {
+        using var response = await PostAsync("/auth/signup", name, password, ct).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            return new Outcome(
+                OutcomeKind.Failed,
+                null,
+                refusal + $" — the account exists but {BotCredentials.KeyVariable} does not match the one it was created with");
         }
 
         if (!response.IsSuccessStatusCode)
@@ -290,22 +362,30 @@ public sealed class BotProvisioner : IDisposable
     /// <param name="name">The account name.</param>
     /// <param name="password">The derived password.</param>
     /// <param name="existing">What the file knows.</param>
+    /// <param name="signupOnUnauthorized">
+    /// Whether a 401 should try a signup before giving up. True when the login was chosen because the file claims the account
+    /// exists, false when a signup has already answered 409 — see <see cref="SignupAfterUnauthorizedAsync"/>.
+    /// </param>
     /// <param name="ct">Cancels the call.</param>
     /// <returns>The outcome.</returns>
-    private async Task<Outcome> LoginAsync(int index, string name, string password, BotAccountRecord existing, CancellationToken ct)
+    private async Task<Outcome> LoginAsync(int index, string name, string password, BotAccountRecord existing, bool signupOnUnauthorized,
+        CancellationToken ct)
     {
         using var response = await PostAsync("/auth/login", name, password, ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             var refusal = await RefusalAsync(response, "login", ct).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            if (response.StatusCode != HttpStatusCode.Unauthorized || !signupOnUnauthorized)
             {
-                // Named for what it almost always is. A derived password cannot drift on its own, so a 401 against an account the
-                // file says exists means the key is not the key that created it.
-                refusal += $" — the account exists but {BotCredentials.KeyVariable} does not match the one it was created with";
+                return new Outcome(OutcomeKind.Failed, null, refusal);
             }
 
-            return new Outcome(OutcomeKind.Failed, null, refusal);
+            // <b>A 401 does not mean the account exists.</b> The server answers the same "that name and password do not match an
+            // account" for a name it has never heard of — deliberately, so that probing cannot enumerate accounts — and this code
+            // used to read it as a key mismatch and stop. An accounts file outliving the server's database is not an error at
+            // all: it is what a wiped database, a rebuilt instance or a fresh box looks like, and it cost a 10 000-bot fleet
+            // every one of its sessions, reported as "no session opened; check the scheme and the port".
+            return await SignupAfterUnauthorizedAsync(index, name, password, existing, refusal, ct).ConfigureAwait(false);
         }
 
         var minted = await response.Content.ReadFromJsonAsync(BotAccountJson.Default.BotAuthResponse, ct).ConfigureAwait(false);

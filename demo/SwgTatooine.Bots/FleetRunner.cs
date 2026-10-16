@@ -19,11 +19,35 @@ public sealed class FleetSettings
     /// <summary>Where the server is.</summary>
     public string Endpoint { get; set; } = "ws://127.0.0.1:9100/ws";
 
-    /// <summary>How many sessions to open.</summary>
+    /// <summary>How many sessions to open to begin with.</summary>
     public int Count { get; set; } = 100;
 
+    /// <summary>
+    /// The largest population this run may be turned up to while it is running; 0 means <see cref="Count"/> is also the ceiling.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Count"/> because the session array is allocated for the ceiling while the ramp aims at the count.
+    /// It no longer costs anything up front: accounts are signed up a chunk at a time as the ramp reaches them, so starting at 500
+    /// with a ceiling of 10 000 provisions about 500 and lets an operator climb later without a restart.
+    /// </remarks>
+    public int MaxCount { get; set; }
+
+    /// <summary>Bots carried through provision → connect → drive as one step; 0 means 250.</summary>
+    /// <remarks>
+    /// The pipeline's unit of work. Bigger amortises per-chunk overhead, smaller gets the first bots walking sooner — 250 puts them
+    /// on screen in about a second at any population.
+    /// </remarks>
+    public int ChunkSize { get; set; } = 250;
+
     /// <summary><c>god</c> for an anonymous camera, <c>player</c> for a real account.</summary>
-    public string Kind { get; set; } = "god";
+    /// <remarks>
+    /// <b><c>player</c> by default, where the swarm's own default is <c>god</c>, and the difference is deliberate.</b> The swarm is a
+    /// library and a god camera is the cheaper, keyless thing to default to; this panel is the bot box's operator surface, and what
+    /// an operator opens it to do is put a population of real players on a server. A god fleet exercises admission, subscription and
+    /// replication and touches the intent path, the spatial index and cluster migration not at all — so defaulting to it means the
+    /// obvious first run measures half the system while looking like it measured all of it.
+    /// </remarks>
+    public string Kind { get; set; } = "player";
 
     /// <summary>How often the shared driver fires, in hertz.</summary>
     public int TickHz { get; set; } = 4;
@@ -33,6 +57,9 @@ public sealed class FleetSettings
 
     /// <summary>A camera's region edge, in metres.</summary>
     public double RegionRadiusM { get; set; } = 256;
+
+    /// <summary>Seconds a <c>player</c> bot holds one heading before turning; 0 leaves the population standing still.</summary>
+    public double WanderSeconds { get; set; } = 12;
 
     /// <summary>The accounts file, required for <c>player</c>.</summary>
     public string AccountsFile { get; set; } = "bots.jsonl";
@@ -121,7 +148,20 @@ public readonly record struct FleetSnapshot(
     IReadOnlyDictionary<ushort, int> Disconnects,
     TimeSpan Elapsed,
     string Shaping,
-    string Fault);
+    string Fault,
+    int Target,
+    int Capacity,
+    long Retired,
+    long OpenFailures,
+    string FirstOpenFailure,
+    long IntentsSent,
+    long MessagesPerSecond,
+    long BytesPerSecond,
+    double IntentsPerSecond,
+    int InRealm,
+    double ServerTickP99Worst,
+    long ServerOverruns,
+    int ServerSessions);
 
 /// <summary>
 /// One fleet run, start to stop, as an object a console or a control panel can both drive.
@@ -140,6 +180,29 @@ public readonly record struct FleetSnapshot(
 public sealed class FleetRunner : IAsyncDisposable
 {
     private readonly object _gate = new();
+
+    /// <summary>Guards the rate baseline, which <see cref="Snapshot"/> both reads and advances.</summary>
+    /// <remarks>
+    /// Its own lock rather than <see cref="_gate"/>: the baseline is updated on every snapshot, and taking the run's lock to do it
+    /// would put a writer on the path a control panel calls once a second for every connected browser.
+    /// </remarks>
+    private readonly object _rateGate = new();
+
+    private long _rateAt;
+    private long _rateMessages;
+    private long _rateBytes;
+    private long _rateIntents;
+
+    /// <summary>The worst server tick p99 seen in this run, which a p99 sampled once a second otherwise forgets.</summary>
+    private double _worstTickP99;
+
+    /// <summary>Samples in which the server's tick p99 exceeded its budget. The fleet's own count: the catalog publishes no overrun metric.</summary>
+    private long _tickOverBudget;
+
+    /// <summary>NaN as zero, for the figures a panel renders as a count.</summary>
+    /// <param name="value">The metric.</param>
+    /// <returns>The value, or 0 when the server has not reported it.</returns>
+    private static double Safe(double value) => double.IsNaN(value) ? 0 : value;
     private readonly List<string> _log = [];
 
     /// <summary>
@@ -166,6 +229,9 @@ public sealed class FleetRunner : IAsyncDisposable
 
     private BotSwarm _swarm;
     private BotAccountStore _accounts;
+
+    /// <summary>Signs chunks up as the ramp reaches them; owned here because it owns the HTTP client and the key.</summary>
+    private BotProvisioner _provisioner;
     private CancellationTokenSource _stopping;
     private Task _run;
     private FleetPhase _phase;
@@ -241,13 +307,66 @@ public sealed class FleetRunner : IAsyncDisposable
 
         if (swarm == null)
         {
-            return new FleetSnapshot(phase, requested, 0, 0, provisioned, 0, 0, 0, 0, 0, 0, 0, new Dictionary<ushort, int>(), elapsed, shaping, fault);
+            return new FleetSnapshot(
+                phase, requested, 0, 0, provisioned, 0, 0, 0, 0, 0, 0, 0, new Dictionary<ushort, int>(), elapsed, shaping, fault,
+                0, 0, 0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         var seconds = Math.Max(1.0, elapsed.TotalSeconds);
         var bytes = swarm.BytesReceived;
-        var perSession = requested > 0 ? (bytes - bytesAtStart) / seconds / requested : 0;
+        // <b>Divided by the LIVE population, not by the count the run started with.</b> This is the capacity figure — the one whose
+        // tooltip says it multiplies by the population you are planning for, and quotes a monthly bill from it — so dialling 500 up
+        // to 5 000 made it ten times too high, on first use of the very feature this change exists for.
+        var population = Math.Max(1, swarm.Connected);
+        var perSession = (bytes - bytesAtStart) / seconds / population;
         var (protocolKinds, _) = swarm.ProtocolFaults();
+        var messages = swarm.MessagesReceived;
+        var intents = swarm.IntentsSent();
+        var (refused, firstRefusal) = swarm.OpenFailures;
+        var (_, _, _, inRealm) = swarm.Realms();
+
+        // <b>RATES, differenced against the last snapshot rather than averaged over the run.</b> A run-long average cannot show an
+        // operator what just happened: turn the population up and the cumulative figure drifts for a minute while the thing worth
+        // watching -- what the fleet is doing NOW -- is the derivative. The sampler calls this once a second, so the difference is a
+        // per-second rate with no extra bookkeeping.
+        long messageRate;
+        long byteRate;
+        double intentRate;
+        lock (_rateGate)
+        {
+            var now = Stopwatch.GetTimestamp();
+            var since = _rateAt == 0 ? 1.0 : Math.Max(0.001, Stopwatch.GetElapsedTime(_rateAt, now).TotalSeconds);
+            messageRate = (long)((messages - _rateMessages) / since);
+            byteRate = (long)((bytes - _rateBytes) / since);
+            intentRate = (intents - _rateIntents) / since;
+            _rateAt = now;
+            _rateMessages = messages;
+            _rateBytes = bytes;
+            _rateIntents = intents;
+        }
+
+        var p99 = swarm.ServerMetric("typhon.tick.p99");
+
+        // <b>NaN-checked, because ServerMetric answers NaN until the first STATS block arrives and Math.Max(x, NaN) is NaN.</b> The
+        // very first snapshot is taken before any block, so one unguarded Max poisoned this for the life of the process and the panel
+        // showed "worst p99 —" forever — which reads as "the server has not reported one yet" rather than as a broken figure.
+        if (!double.IsNaN(p99))
+        {
+            _worstTickP99 = Math.Max(_worstTickP99, p99);
+
+            // The budget is one tick period. Counted per SAMPLE, not per tick, so this is "seconds in which the p99 was over budget"
+            // and the field is named and documented as such rather than pretending to be the server's own counter.
+            var budgetMs = swarm.ServerMetric("typhon.tick.period.ms");
+            if (double.IsNaN(budgetMs) || budgetMs <= 0)
+            {
+                budgetMs = 20;
+            }
+
+            if (p99 > budgetMs)
+            {
+                _tickOverBudget++;
+            }
+        }
 
         return new FleetSnapshot(
             phase,
@@ -255,17 +374,131 @@ public sealed class FleetRunner : IAsyncDisposable
             opened,
             swarm.Connected,
             provisioned,
-            swarm.MessagesReceived,
+            messages,
             bytes,
             perSession,
             swarm.Faults,
             protocolKinds,
-            swarm.ServerMetric("typhon.tick.duration.p50"),
-            swarm.ServerMetric("typhon.tick.duration.p99"),
+            swarm.ServerMetric("typhon.tick.p50"),
+            p99,
             swarm.Disconnects,
             elapsed,
             shaping,
-            fault);
+            fault,
+            swarm.Target,
+            swarm.Capacity,
+            swarm.Retired,
+            refused,
+            firstRefusal,
+            intents,
+            messageRate,
+            byteRate,
+            intentRate,
+            inRealm,
+            _worstTickP99,
+
+            // <b>Overruns are NOT published by the catalog, so this is the fleet's own count and says so.</b> It asked for
+            // "typhon.tick.overruns", which does not exist: ServerMetric answered NaN, the cast saturated to 0, and the panel printed
+            // a reassuring green "no overruns" about a number nobody had measured. A tick over its budget is now counted here, from
+            // the p99 the catalog does publish, which is a weaker claim honestly made rather than a strong one invented.
+            _tickOverBudget,
+
+            // "typhon.sessions" is the catalog's name; "typhon.replication.sessions" does not exist and read 0, under a tooltip
+            // telling the operator that a disagreement with the connected count means avatars are being held.
+            (int)Safe(swarm.ServerMetric("typhon.sessions")));
+    }
+
+    /// <summary>
+    /// Replaces the interface's shaping while the fleet keeps running, so latency becomes a dial rather than a restart.
+    /// </summary>
+    /// <param name="latencyMs">One-way delay, milliseconds; 0 clears the shaping.</param>
+    /// <param name="jitterMs">Jitter around it, milliseconds.</param>
+    /// <param name="ct">Cancels the call.</param>
+    /// <returns>What the interface is doing now.</returns>
+    /// <remarks>
+    /// <b>The cheap half of changing a run in flight, and worth having on its own.</b> <c>tc netem</c> replaces a qdisc in place, so
+    /// re-shaping costs one command and disturbs no session — where changing the population has to open or close sockets. It means a
+    /// single measurement window can carry a latency sweep instead of being one run per value, and the population stays identical
+    /// across the arms, which is the thing that makes the arms comparable.
+    /// </remarks>
+    public async Task<string> ReshapeAsync(int latencyMs, int jitterMs, CancellationToken ct = default)
+    {
+        string device;
+        string endpoint;
+        lock (_gate)
+        {
+            if (_swarm == null)
+            {
+                return "no run to shape";
+            }
+
+            device = _shapedDevice ?? _settings?.NetworkInterface ?? string.Empty;
+            endpoint = _settings?.Endpoint;
+        }
+
+        var host = Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+        try
+        {
+            if (latencyMs <= 0)
+            {
+                await NetemShaper.ClearAsync(device, ct).ConfigureAwait(false);
+                lock (_gate)
+                {
+                    _shaping = null;
+                }
+
+                Say("shaping cleared");
+                Notify();
+                return "unshaped";
+            }
+
+            var shaped = await NetemShaper.ApplyAsync(device, latencyMs, jitterMs, host, ct).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _shaping = shaped.Description;
+                _shapedDevice = shaped.Device;
+            }
+
+            Say("shaping: " + shaped.Description);
+            Notify();
+            return shaped.Description;
+        }
+        catch (InvalidOperationException e)
+        {
+            // Reported, not thrown: the panel's job is to say the shaping did not take, and a run that is otherwise healthy must not
+            // be torn down because the box cannot shape — which on Windows it never can.
+            Say("shaping refused: " + e.Message);
+            Notify();
+            return "refused: " + e.Message;
+        }
+    }
+
+    /// <summary>
+    /// Moves the live population. The reconciler opens or closes sessions to match, at the connect rate.
+    /// </summary>
+    /// <param name="target">The population asked for; clamped to the swarm's capacity.</param>
+    /// <returns>What the swarm will now aim for, or 0 when nothing is running.</returns>
+    /// <remarks>
+    /// <b>This is the action the whole re-architecture was for.</b> Changing a population used to mean Stop, edit, Start — a full
+    /// teardown, a fresh ramp and a new measurement window, which makes "what happens at five thousand" a different run rather than a
+    /// different moment in the same one. On AWS that distinction is the difference between an experiment and a morning.
+    /// </remarks>
+    public int SetTarget(int target)
+    {
+        BotSwarm swarm;
+        lock (_gate)
+        {
+            swarm = _swarm;
+        }
+
+        if (swarm == null)
+        {
+            return 0;
+        }
+
+        swarm.Target = target;
+        Notify();
+        return swarm.Target;
     }
 
     /// <summary>How long the run has been up, or how long it ran. The caller holds <see cref="_gate"/>.</summary>
@@ -316,6 +549,16 @@ public sealed class FleetRunner : IAsyncDisposable
             _bytesAtStart = 0;
             _startedAt = 0;
             _stoppedAt = 0;
+
+            // The same defect, three more times over: the per-second rates difference against these, so a second run's first sample
+            // was "this run's total minus the last run's total" — negative msg/s, B/s and intents/s on the page. And the two tick
+            // figures are cumulative over a run, so carrying them across made run two inherit run one's worst moment.
+            _rateAt = 0;
+            _rateMessages = 0;
+            _rateBytes = 0;
+            _rateIntents = 0;
+            _worstTickP99 = 0;
+            _tickOverBudget = 0;
             _log.Clear();
 
             // <b>Created BEFORE provisioning, which is the whole point.</b> It used to be created after the ramp, so Stop during
@@ -495,43 +738,67 @@ public sealed class FleetRunner : IAsyncDisposable
             ?? throw new InvalidOperationException($"{endpoint} has no HTTP side to sign up against");
 
         var key = BotCredentials.ReadKeyOrThrow();
-        var accounts = new BotAccountStore(settings.AccountsFile, settings.Count);
+
+        // <b>The store is sized to the ceiling; the SIGNUPS are not.</b> The array is a few bytes per slot and has to cover every
+        // index the dial can reach, but provisioning now happens a chunk at a time inside the ramp — so asking for headroom costs
+        // an allocation rather than ten thousand HTTP round trips before the first bot exists.
+        var capacity = settings.MaxCount > 0 ? Math.Max(settings.Count, settings.MaxCount) : settings.Count;
+        var accounts = new BotAccountStore(settings.AccountsFile, capacity);
+        var provisioner = new BotProvisioner(authBase, accounts, key, settings.SignupConcurrency);
         lock (_gate)
         {
             _accounts = accounts;
+            _provisioner = provisioner;
         }
 
-        Say($"accounts: {accounts.FilePath} ({accounts.UsableTokens(BotProvisioner.RefreshWindowSeconds)} of {settings.Count} tokens usable)");
-        using var provisioner = new BotProvisioner(authBase, accounts, key, settings.SignupConcurrency);
-        var report = await provisioner.EnsureAsync(
-            settings.Count,
-            (done, total) =>
-            {
-                lock (_gate)
-                {
-                    _provisioned = done;
-                }
+        Say($"accounts: {accounts.FilePath} ({accounts.UsableTokens(BotProvisioner.RefreshWindowSeconds)} of {capacity} tokens already usable)");
+    }
 
-                Notify();
-                _ = total;
-            },
-            ct).ConfigureAwait(false);
-
-        Say($"accounts ready in {report.Elapsed.TotalSeconds.ToString("F1", CultureInfo.InvariantCulture)}s: "
-            + $"{report.Created} created, {report.LoggedIn} logged in, {report.Reused} reused, {report.Failed} failed");
-
-        if (!report.Complete)
+    /// <summary>
+    /// Signs up one chunk's accounts, called by the swarm as the ramp reaches them.
+    /// </summary>
+    /// <param name="from">The first bot index in the chunk.</param>
+    /// <param name="count">How many bots the chunk wants.</param>
+    /// <param name="ct">Cancels the pass.</param>
+    /// <returns>How many of the chunk can be opened.</returns>
+    /// <remarks>
+    /// <b>A partial chunk still opens.</b> Returning the usable count rather than throwing means 180 of a 250-bot chunk signing up
+    /// gives 180 sessions and a retry for the rest, where the old all-or-nothing pass threw and ended the run — one bad account in
+    /// ten thousand took the whole fleet with it.
+    /// </remarks>
+    private async Task<int> EnsureChunkAsync(int from, int count, CancellationToken ct)
+    {
+        BotProvisioner provisioner;
+        lock (_gate)
         {
-            throw new InvalidOperationException($"{report.Failed} account(s) could not be provisioned; first failure: {report.FirstFailure}");
+            provisioner = _provisioner;
         }
+
+        if (provisioner == null)
+        {
+            return count;
+        }
+
+        var report = await provisioner.EnsureRangeAsync(from, count, null, ct).ConfigureAwait(false);
+        var ready = report.Created + report.LoggedIn + report.Reused;
 
         lock (_gate)
         {
-            // The accounts that are actually READY, not the population. Assigning the population here reported a fleet as fully
-            // provisioned on a pass that had failures -- and since the throw above only fires when there are failures, the two
-            // lines together made the number unfalsifiable.
-            _provisioned = report.Created + report.LoggedIn + report.Reused;
+            // <b>A high-water mark, not a sum.</b> Accumulating counted the same accounts again every time a range was re-provisioned
+            // — which a stalled ramp does repeatedly, and a shrink-then-regrow does by design — so the panel could show
+            // "Accounts ready 12500 of 500" within a minute.
+            _provisioned = Math.Max(_provisioned, from + ready);
         }
+
+        if (report.Failed > 0)
+        {
+            // Said, not thrown, and said once per chunk: at a chunk of 250 a flaky endpoint would otherwise produce a log nobody
+            // can read, and the run's own open-failure counter carries the total.
+            Say($"chunk {from}..{from + count - 1}: {report.Failed} account(s) failed, first: {report.FirstFailure}");
+        }
+
+        Notify();
+        return ready;
     }
 
     /// <summary>Turns the editable settings into the swarm's immutable options.</summary>
@@ -545,10 +812,19 @@ public sealed class FleetRunner : IAsyncDisposable
         {
             Endpoint = endpoint,
             Count = settings.Count,
+
+            // The ceiling the slider may be turned up to, and the session array's size. NOT a provisioning count any more: the
+            // accounts for a chunk are signed up as the ramp reaches it.
+            MaxCount = settings.MaxCount > 0 ? settings.MaxCount : settings.Count,
+            ChunkSize = settings.ChunkSize > 0 ? settings.ChunkSize : 250,
+
+            // Null for a god fleet, which provisions nothing: the swarm then opens each chunk straight away.
+            EnsureAccounts = settings.IsPlayer ? EnsureChunkAsync : null,
             Kind = settings.Kind,
             TickHz = settings.TickHz,
             ConnectRatePerSecond = settings.ConnectRatePerSecond,
             RegionRadiusM = settings.RegionRadiusM,
+            WanderSeconds = settings.WanderSeconds,
             TokenFor = accounts == null ? null : index => accounts[index]?.Token,
             ResumeFor = accounts == null ? null : accounts.Resume,
             OnResumeToken = accounts == null
@@ -600,11 +876,18 @@ public sealed class FleetRunner : IAsyncDisposable
         }
 
         BotAccountStore accounts;
+        BotProvisioner provisioner;
         string shaping;
         string device;
         lock (_gate)
         {
             accounts = _accounts;
+
+            // Disposed HERE rather than with a `using` in the provisioning step, because it now outlives that step: the swarm calls
+            // back into it for every chunk of the ramp, and a dial turned up an hour later needs it still alive. It owns an
+            // HttpClient, so nothing else may own its lifetime.
+            provisioner = _provisioner;
+            _provisioner = null;
             shaping = _shaping;
             device = _shapedDevice;
 
@@ -614,6 +897,9 @@ public sealed class FleetRunner : IAsyncDisposable
                 _stoppedAt = Stopwatch.GetTimestamp();
             }
         }
+
+        // After the swarm is down, so no chunk can be mid-signup when its HttpClient goes away.
+        provisioner?.Dispose();
 
         // Unconditional, because FlushIfDue leaves up to a threshold's worth of resume tokens unwritten and those are exactly what
         // a restarted fleet needs. Outside the lock: it writes a file.

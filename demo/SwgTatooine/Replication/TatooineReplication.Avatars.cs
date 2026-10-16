@@ -56,6 +56,32 @@ public static partial class TatooineReplication
     private static ushort DefaultSpawnRealm;
 
     /// <summary>
+    /// The towns new characters are distributed across, with the cumulative weight that selects one; empty spawns everybody on
+    /// <see cref="DefaultSpawn"/>.
+    /// </summary>
+    private static SpawnArea[] SpawnAreas = [];
+
+    /// <summary>One town new characters may arrive in: where it is, how wide, and what share of arrivals it takes.</summary>
+    /// <param name="X">The centre's world x.</param>
+    /// <param name="Z">The centre's world z.</param>
+    /// <param name="RadiusM">The disc arrivals are spread over, metres.</param>
+    /// <param name="Weight">
+    /// The share of arrivals, relative to the other areas — normalised by <see cref="ConfigureAvatars"/>, so the map's own figures can
+    /// be passed as they are. Replaced in place by the CUMULATIVE share once normalised.
+    /// </param>
+    /// <remarks>
+    /// <b>Several towns rather than one, because one town is a stampede at any interesting population.</b> Ten thousand arrivals in the
+    /// capital's 456 m disc put roughly 1 770 bodies inside every session's 192 m sphere, which at 50 Hz is 124 records a frame and
+    /// 54 GB of traffic in ninety seconds — the fleet's own process died of it while the server stayed inside its tick budget. Tatooine
+    /// has seven towns, up to 8.8 km apart, and <c>TatooineData.Cities</c> has carried a <c>playerWeight</c> per town summing to 1.00
+    /// since it was written. Spreading arrivals across them is using data that was already there.
+    /// </remarks>
+    public readonly record struct SpawnArea(float X, float Z, double RadiusM, double Weight);
+
+    /// <summary>Ground height at a point, so a scattered spawn lands ON the terrain rather than at the capital's height.</summary>
+    private static Func<float, float, float> SpawnGroundAt;
+
+    /// <summary>
     /// Refuses to start a server that cannot host characters.
     /// </summary>
     /// <exception cref="InvalidOperationException"><see cref="ConfigureAvatars"/> was never called.</exception>
@@ -228,17 +254,58 @@ public static partial class TatooineReplication
         Point3F spawn,
         ushort realm,
         int tickRateHz,
-        double saveIntervalSeconds = DefaultSaveIntervalSeconds)
+        double saveIntervalSeconds = DefaultSaveIntervalSeconds,
+        SpawnArea[] spawnAreas = null,
+        Func<float, float, float> groundAt = null)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickRateHz);
         ArgumentOutOfRangeException.ThrowIfNegative(saveIntervalSeconds);
+
+        // Refused rather than ignored, and refused rather than falling back to one height for every town. Towns are kilometres apart on
+        // a dune field: arrivals that all sat at the capital's altitude would be underground in one town and in the air in the next,
+        // which reads as a terrain bug a long way from here.
+        if (spawnAreas is { Length: > 0 } && groundAt == null)
+        {
+            throw new ArgumentNullException(nameof(groundAt), "spawn areas need a ground probe, or arrivals would sit at one town's height in all of them.");
+        }
 
         // Resolved once: an IndexRef captures a layout version and is reusable at no cost, and the alternative is resolving it per
         // login inside the tick, where the expression-tree walk GetIndexRef does would be the most expensive thing a login did.
         CharacterByAccount = dbe.GetIndexRef<Character, EntityLink<AccountArch>>(c => c.Account);
         DefaultSpawn = spawn;
         DefaultSpawnRealm = realm;
+        SpawnGroundAt = groundAt;
+
+        // Normalised to a CUMULATIVE weight here rather than at every login: the selection is a binary-search-free walk over seven
+        // entries, and doing the division once means a caller can pass the map's own weights without being asked to make them sum.
+        if (spawnAreas is { Length: > 0 })
+        {
+            var total = 0d;
+            foreach (var area in spawnAreas)
+            {
+                total += Math.Max(0d, area.Weight);
+            }
+
+            if (total <= 0d)
+            {
+                throw new ArgumentException("the spawn areas carry no weight, so no town could ever be chosen.", nameof(spawnAreas));
+            }
+
+            var cumulative = new SpawnArea[spawnAreas.Length];
+            var running = 0d;
+            for (var i = 0; i < spawnAreas.Length; i++)
+            {
+                running += Math.Max(0d, spawnAreas[i].Weight) / total;
+                cumulative[i] = spawnAreas[i] with { Weight = i == spawnAreas.Length - 1 ? 1d : running };
+            }
+
+            SpawnAreas = cumulative;
+        }
+        else
+        {
+            SpawnAreas = [];
+        }
 
         // Rounded UP to one tick, so a cadence shorter than a tick saves every tick rather than every tick being skipped by an
         // interval of zero — which `% 0` would make a divide-by-zero rather than a fast path.
@@ -594,7 +661,7 @@ public static partial class TatooineReplication
                 Account = account,
                 Name = (String64)DisplayNameFor(account),
                 Credits = CharacterStore.StartingCredits,
-                LastPosition = DefaultSpawn,
+                LastPosition = SpawnFor(account),
                 LastRealm = DefaultSpawnRealm,
                 LastSavedUtcTicks = DateTime.UtcNow.Ticks,
             };
@@ -1049,6 +1116,64 @@ public static partial class TatooineReplication
     /// not built. Until it is, the name is a placeholder nobody renders; A8's login screen is where a person gets to choose one.
     /// </remarks>
     private static string DisplayNameFor(EntityId account) => "player_" + account.RawValue.ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Where a brand-new character for this account arrives: a point in the spawn disc, or its centre when there is no disc.</summary>
+    /// <param name="account">The account, which is also the seed.</param>
+    /// <returns>The position, on the ground.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Derived from the account and not drawn at random, which is the part worth keeping.</b> The same account comes back to the
+    /// same doorstep every time its character is re-created, a test gets a reproducible world without pinning a seed, and there is no
+    /// shared RNG for a parallel bind to contend on — <see cref="BindAvatars"/> is serial today and this does not quietly depend on it
+    /// staying that way.
+    /// </para>
+    /// <para>
+    /// splitmix64's finalising mix, because the account ids are a counter and the thing being asked of them is that NEIGHBOURING ids
+    /// land in unrelated places. The square root is what makes the disc uniform: without it, half the arrivals would be inside the
+    /// inner 25 % of the area and the stack this exists to break up would simply be smaller.
+    /// </para>
+    /// </remarks>
+    private static Point3F SpawnFor(EntityId account)
+    {
+        if (SpawnAreas.Length == 0 || SpawnGroundAt == null)
+        {
+            return DefaultSpawn;
+        }
+
+        // Two rounds of splitmix64's finalising mix: one picks the town, the other places the arrival inside it. One round does not
+        // have the bits to spare — the town needs its own stream, and carving a third field out of 64 bits would correlate the choice
+        // of town with the position inside it, which is the one pair that must stay independent.
+        var h = Mix(account.RawValue);
+        var pick = (h >> 32) / 4294967296d;
+
+        var area = SpawnAreas[^1];
+        foreach (var candidate in SpawnAreas)
+        {
+            if (pick < candidate.Weight)
+            {
+                area = candidate;
+                break;
+            }
+        }
+
+        var p = Mix(h);
+        var r = Math.Sqrt((p & 0xFFFFFFFFUL) / 4294967296d) * area.RadiusM;
+        var a = (p >> 32) / 4294967296d * Math.PI * 2d;
+        var x = (float)(area.X + (r * Math.Cos(a)));
+        var z = (float)(area.Z + (r * Math.Sin(a)));
+
+        return new Point3F { X = x, Y = SpawnGroundAt(x, z), Z = z };
+    }
+
+    /// <summary>splitmix64's finalising mix: decorrelates the near-sequential account ids this is seeded from.</summary>
+    /// <param name="value">The seed.</param>
+    /// <returns>The mixed value.</returns>
+    private static ulong Mix(ulong value)
+    {
+        value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9UL;
+        value = (value ^ (value >> 27)) * 0x94D049BB133111EBUL;
+        return value ^ (value >> 31);
+    }
 
     /// <summary>
     /// How many sessions the avatar bookkeeping is tracking, by map: for the checks that a session leaves nothing behind.

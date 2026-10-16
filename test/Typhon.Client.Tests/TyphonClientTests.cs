@@ -296,7 +296,7 @@ public class TyphonClientTests
             return ValueTask.CompletedTask;
         }
 
-        public async Task<byte[]> ReceiveAsync(CancellationToken ct)
+        public async ValueTask<byte[]> ReceiveAsync(CancellationToken ct)
         {
             byte[] message;
             try

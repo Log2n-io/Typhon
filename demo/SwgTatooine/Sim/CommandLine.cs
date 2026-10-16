@@ -134,6 +134,10 @@ public static class CommandLine
         c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
         c.AvatarSaveIntervalS = r.Dbl(
             "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);
+        c.SpawnSpread = r.Dbl(
+            "--spawn-spread", c.SpawnSpread, "scale on every town's radius for new arrivals; 1 is the map, 0 is one point", min: 0d);
+        c.MaxSessions = r.Int(
+            "--max-sessions", c.MaxSessions, "clients connected at once; the engine's session table, 65535 is structural", min: 1, max: 65535);
         c.ResumeGraceS = r.Dbl(
             "--resume-grace", c.ResumeGraceS, "how long a link-dead session's avatar waits for its client, s; 0 disables resume", min: 0d);
         c.AuthBurst = r.Int("--auth-burst", c.AuthBurst, "/auth attempts one address may make at once; 0 keeps the default 10", min: 0);
