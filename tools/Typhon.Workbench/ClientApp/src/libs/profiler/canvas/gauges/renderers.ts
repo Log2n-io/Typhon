@@ -734,6 +734,7 @@ const TOOLTIP_GAUGES: Record<string, TooltipGaugeSpec[]> = {
   'gauge-persistence-overlay': [
     { id: GaugeId.PageCacheEpochProtectedPages, label: 'Epoch-held',  unit: 'count', colorIdx: 2 },
     { id: GaugeId.PageCachePendingIoReads,      label: 'Pending I/O', unit: 'count', colorIdx: 5 },
+    { id: GaugeId.PageCacheHealthState,         label: 'Health (0 ok, 3 starved)', unit: 'count', colorIdx: 7 },
   ],
   'gauge-transient': [
     { id: GaugeId.TransientStoreBytesUsed, label: 'Used', unit: 'bytes-compact', colorIdx: 1 },

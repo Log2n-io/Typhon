@@ -97,6 +97,14 @@ public class TimeoutOptions
     public TimeSpan CommitPublishBackpressureTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// How long a page allocation waits on back-pressure, in all, while the cache keeps serving other allocations (#1382, S1 of the starvation policy).
+    /// Past <see cref="PageCacheBackpressureTimeout"/> a wait goes on, a fresh timeout at a time, as long as pages were served since its last one: the
+    /// engine is slow, not stuck, and the work goes through. A wait that sees no page served for a whole timeout, or reaches this ceiling, throws
+    /// <see cref="PageCacheBackpressureTimeoutException"/>. The storage health state (<see cref="StorageHealthState"/>) reports such waits.
+    /// </summary>
+    public TimeSpan PageCacheOverloadWaitCeiling { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// Timeout for WAL commit buffer back-pressure waits.
     /// When the ring buffer is full, commit threads spin-wait for the WAL writer to drain it.
     /// </summary>

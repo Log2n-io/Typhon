@@ -1588,6 +1588,15 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         writer.WriteThroughput("CacheHits", metrics.MemPageCacheHit);
         writer.WriteThroughput("CacheMisses", metrics.MemPageCacheMiss);
         writer.WriteThroughput("Evictions", _evictionCount);
+
+        // #1382: how the cache keeps up, as monotonic counts: the back-pressure, the waits that went on past their timeout because pages were served,
+        // and how often the health state entered each degraded state (the state itself is a gauge: DatabaseEngine.StorageHealth, the profiler's).
+        EvaluateStorageHealth();
+        writer.WriteThroughput("BackpressureRounds", metrics.BackpressureWaitCount);
+        writer.WriteThroughput("OverloadWaitExtensions", OverloadWaitExtensions);
+        writer.WriteThroughput("PressuredEntries", HealthEntries(StorageHealthState.Pressured));
+        writer.WriteThroughput("OverloadedEntries", HealthEntries(StorageHealthState.Overloaded));
+        writer.WriteThroughput("StarvedEntries", HealthEntries(StorageHealthState.Starved));
     }
 
     /// <inheritdoc />

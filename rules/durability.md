@@ -2382,6 +2382,30 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 
 ---
 
+### PS-22: A back-pressure wait gives up only when nothing is being served `[correctness]`
+  invariant a page allocation waiting on back-pressure, and the restarts of an open or a first write (EP-02), go on past
+            PageCacheBackpressureTimeout one timeout at a time for as long as a page was served during the previous one, up to
+            PageCacheOverloadWaitCeiling (60 s): the engine is slow, not stuck, and the work goes through (#1382, S1). A whole timeout with no page
+            served is a stall, and the wait throws PageCacheBackpressureTimeoutException; so does the ceiling. A commit's publish keeps its own
+            bound (AP-03)
+  invariant the page cache publishes how it keeps up (StorageHealthState, PagedMMF.StorageHealth, DatabaseEngine.StorageHealth): Healthy without
+            back-pressure; Pressured while the pressure flag is set; Overloaded once it has lasted OverloadedAfter (1 s); Starved once no page has been
+            served for StarvedAfter (1 s) under pressure — a clock that runs only under pressure, so an idle stretch before a burst is not starvation. It escalates at once and steps down after CalmBeforeStepDown (1 s), so a burst does not flap
+            it. Every change is logged (a warning entering Overloaded or Starved), raised (DatabaseEngine.StorageHealthChanged), and published as the profiler gauge
+            PageCacheHealthState with the cumulative back-pressure rounds and overload extensions, and in the resource tree. Evaluated at most every
+            100 ms, from the back-pressure rounds, from allocations while degraded and from the checkpoint loop's wakes: nothing on the healthy path
+  scope: PagedMMF.OverloadBudget, PagedMMF.ServedUnderPressure, PagedMMF.OverloadWaitExtensions, PagedMMF.EvaluateStorageHealth, PagedMMF.StorageHealth,
+         TimeoutOptions.PageCacheOverloadWaitCeiling, StorageHealthState, DatabaseEngine.StorageHealth, DatabaseEngine.StorageHealthChanged
+  verified: StorageOverloadTests [VerifiesRule] — the budget: its first timeout, an extension per timeout with a page served, none without, the
+            ceiling, no grace period past a caller's own timeout; an open, and a page request outside one, held on back-pressure for three timeouts
+            go through while pages are served and give up while it lasts when none are; the state escalates Healthy, Pressured, Overloaded,
+            Starved and steps down once calm, raising the public event; an engine falling idle after a burst steps back to Healthy, never Starved.
+            Mutants killed: no extension (the served cases fail), an extension without progress (the unserved cases), the main loop's extension
+            removed (the page request), the starved clock running while idle (the idle case)
+  on_violation: a wait that throws while the cache is serving pages fails work the engine would have completed a moment later — under a 16-writer
+                storm over 64 MiB, the timeouts that made 35-45 % of the market's runs fail; a state never published leaves an application that
+                gave the engine too little cache or disk with slowness and no reason
+
 ## Module: WAL Recovery
 
 > **Scope note (post-#399, post-increment-D):** this module describes the **surviving v1 `WalRecovery` scan** only — the

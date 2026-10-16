@@ -1526,6 +1526,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public ManagedPagedMMF MMF { get; }
 
     /// <summary>
+    /// How the page cache keeps up with the work (#1382): <see cref="StorageHealthState.Healthy"/> while allocations find a slot at once, then
+    /// Pressured, Overloaded and Starved as back-pressure lasts and pages stop being served. The engine slows the work rather than failing it; this is
+    /// where an application sees that the cache or the disk it gave the engine is too small for its load — also in the log on every change, the
+    /// profiler's gauges and the resource tree.
+    /// </summary>
+    public StorageHealthState StorageHealth => MMF?.StorageHealth ?? StorageHealthState.Healthy;
+
+    /// <summary>
+    /// Raised on every change of <see cref="StorageHealth"/>, on the engine thread that saw it — an allocation's, or the checkpoint's. A handler must
+    /// return quickly and must not block or call back into the engine; one that throws is ignored.
+    /// </summary>
+    public event EventHandler<StorageHealthChangedEventArgs> StorageHealthChanged;
+
+    /// <summary>
     /// <see langword="true"/> when this open <b>created</b> the database bundle (it did not exist before); <see langword="false"/>
     /// when it reopened an existing one. Use it to gate one-time bootstrap work (initial data, first-run migrations). Note the
     /// engine already offers a crash-safe, declarative alternative via <see cref="TyphonOptions.Seed"/>; prefer that for
@@ -1927,6 +1941,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         // Engine initialization
         MMF = mmf;
+        if (mmf != null)
+        {
+            mmf.StorageHealthChanged = (from, to) => StorageHealthChanged?.Invoke(this, new StorageHealthChangedEventArgs(from, to));
+        }
         EpochManager = epochManager;
         Watchdog = watchdog;
         _logger = log;

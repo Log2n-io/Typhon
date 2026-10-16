@@ -148,6 +148,11 @@ internal static class GaugeSnapshotEmitter
             // Phase 5 — primary database FileSize gauge. Replaces the per-CAS TrackFileGrowth event spam
             // with a single end-of-tick reading; viewer plots a smooth growth curve.
             values[n++] = GaugeValue.FromU64(GaugeId.PageCacheFileSizeBytes, (ulong)pagedMmf.FileSize);
+
+            // #1382: the health state and the waits behind it, so a trace shows when the cache stopped keeping up and for how long.
+            values[n++] = GaugeValue.FromU32(GaugeId.PageCacheHealthState, (uint)pagedMmf.StorageHealth);
+            values[n++] = GaugeValue.FromU64(GaugeId.PageCacheBackpressureRoundsTotal, (ulong)pagedMmf.GetMetrics().BackpressureWaitCount);
+            values[n++] = GaugeValue.FromU64(GaugeId.PageCacheOverloadExtensionsTotal, (ulong)pagedMmf.OverloadWaitExtensions);
         }
 
         // ── Transaction chain ──

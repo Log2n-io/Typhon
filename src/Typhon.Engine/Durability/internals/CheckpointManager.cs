@@ -536,6 +536,9 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
                     _wakeEvent.Wait(waitMs);
                     _wakeEvent.Reset();
 
+                    // The storage health state steps down once the back-pressure is over even when no allocation comes to say so (#1382).
+                    _mmf.EvaluateStorageHealth();
+
                     force = Interlocked.Exchange(ref _forceRequested, 0) != 0;
 
                     // When the trigger is disabled the wait above IS the checkpoint interval, so any wake is a tick and

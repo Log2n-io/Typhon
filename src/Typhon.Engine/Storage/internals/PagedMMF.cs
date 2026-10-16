@@ -1957,24 +1957,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     [ThreadStatic] private static int t_restartableOpenDepth;
     /// <summary>
-    /// When the open now restarting met back-pressure first, a <see cref="Stopwatch"/> timestamp; 0 for none. Its restarts share one
-    /// <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> from there, which the open's end resets.
+    /// When the open now restarting met back-pressure first, a <see cref="Stopwatch"/> timestamp; 0 for none. Its restarts share one overload budget
+    /// from there (<see cref="OverloadBudget"/>), which the open's end resets.
     /// </summary>
-    internal static long OpenRestartSince
-    {
-        get => t_openRestartSince;
-        set => t_openRestartSince = value;
-    }
+    internal static long OpenRestartSince => t_openBudget.Since;
 
-    [ThreadStatic] private static long t_openRestartSince;
+    [ThreadStatic] private static OverloadBudget t_openBudget;
 
-    [ThreadStatic] private static long t_lockRestartSince;
+    [ThreadStatic] private static OverloadBudget t_lockBudget;
 
     /// <summary>Resets the restart budgets, page and lock alike, when the outermost restartable operation ends.</summary>
     internal static void ResetRestartBudgets()
     {
-        t_openRestartSince = 0;
-        t_lockRestartSince = 0;
+        t_openBudget = default;
+        t_lockBudget = default;
     }
 
     /// <summary>
@@ -2011,14 +2007,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal static void RestartForLockWithin(TimeSpan budget)
     {
-        // Its own clock, not the back-pressure restarts': shared, a lock met after seconds of page waits timed out after 5 ms of waiting on it.
-        var since = t_lockRestartSince;
-        if (since == 0)
-        {
-            t_lockRestartSince = since = Stopwatch.GetTimestamp();
-        }
-
-        if (Stopwatch.GetElapsedTime(since) < budget)
+        // Its own clock, not the back-pressure restarts': shared, a lock met after seconds of page waits timed out after 5 ms of waiting on it. Not
+        // extended on page progress: pages served say nothing about the lock's holder, and a stuck holder must still surface within the lock's timeout.
+        t_lockBudget.Start(0);
+        if (t_lockBudget.Waited < budget)
         {
             Interlocked.Increment(ref LockRestartedOpens);
             throw new BackpressureOpenRestart(lockWait: true);
@@ -2055,6 +2047,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     private struct PaddedPressureFlag
     {
         [FieldOffset(64)] public int Value;
+
+        /// <summary>The storage health state (<see cref="StorageHealthState"/>), on the same line: an allocation reads both.</summary>
+        [FieldOffset(68)] public int Health;
     }
 
     private PaddedPressureFlag _underPressure;
@@ -2079,15 +2074,26 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             _underPressure.Value = 1;
         }
+
+        EvaluateStorageHealth();
     }
 
     /// <summary>An allocation that found a slot: once the hold since the last back-pressure round has passed, the cache has recovered.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void NoteAllocated()
     {
-        if (_underPressure.Value != 0 && Stopwatch.GetTimestamp() >= Volatile.Read(ref _pressureClearAt))
+        if (_underPressure.Value != 0)
         {
-            _underPressure.Value = 0;
+            _servedUnderPressure.Value++;   // the progress an overload wait and the health state look for (S1, S3)
+            if (Stopwatch.GetTimestamp() >= Volatile.Read(ref _pressureClearAt))
+            {
+                _underPressure.Value = 0;
+            }
+        }
+
+        if (_underPressure.Health != 0)
+        {
+            EvaluateStorageHealth();   // a degraded state steps down as the allocations that prove the recovery come in
         }
     }
 
@@ -2118,6 +2124,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         long lapVisits = 0;
         int lapDirty = 0, lapEpochHeld = 0, dirtyCount = 0, epochCount = 0;
         long backpressureSince = 0;
+        var overload = default(OverloadBudget);
 
         while (true)
         {
@@ -2262,6 +2269,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     if (backpressureSince == 0)
                     {
                         backpressureSince = Stopwatch.GetTimestamp();
+                        overload.Start(ServedUnderPressure);
                     }
 
                     NotePressure();   // EP-03: transactions refresh their epoch on the shorter cadence while it lasts (#1230)
@@ -2304,20 +2312,22 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                             // #1230: an entity open does not wait with its pin. It unwinds to its start and moves its epoch there (RestartableOpenDepth),
                             // its restarts bounded together by one back-pressure timeout from its first round. From the first round, not the lap's end:
                             // above the sweep floor a lap is several rounds, each a wait the open would make with its pin.
-                            var openSince = t_openRestartSince;
-                            if (openSince == 0)
+                            // Past the timeout the restarts go on while the cache serves pages (S1): slow, not stuck.
+                            t_openBudget.Start(ServedUnderPressure);
+                            var timeouts = TimeoutOptions.Current;
+                            if (t_openBudget.Allows(timeouts.PageCacheBackpressureTimeout, timeouts.PageCacheOverloadWaitCeiling, ServedUnderPressure,
+                                    out var openExtended))
                             {
-                                t_openRestartSince = openSince = backpressureSince;
-                            }
+                                if (openExtended)
+                                {
+                                    Interlocked.Increment(ref _overloadWaitExtensions);
+                                }
 
-                            var openWaited = Stopwatch.GetElapsedTime(openSince);
-                            if (openWaited < TimeoutOptions.Current.PageCacheBackpressureTimeout)
-                            {
                                 Interlocked.Increment(ref RestartedOpens);
                                 throw new BackpressureOpenRestart();
                             }
 
-                            ThrowBackpressureTimeout(openWaited);
+                            ThrowBackpressureTimeout(t_openBudget.Waited);
                         }
 
                         // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
@@ -2341,9 +2351,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                     limit.TotalMilliseconds);
                                 bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
                             }
+                            else if (publishSince == 0
+                                     && overload.AllowsPastTimeout(TimeoutOptions.Current.PageCacheBackpressureTimeout,
+                                         TimeoutOptions.Current.PageCacheOverloadWaitCeiling, ServedUnderPressure))
+                            {
+                                Interlocked.Increment(ref _overloadWaitExtensions);
+                                // S1 (#1382): pages were served during this timeout, so the engine is slow, not stuck: the wait goes on, a fresh timeout at a
+                                // time, and the work goes through. The health state reports it.
+                                LogOverloadWaitExtended(Logger, dirtyCount, epochCount, overload.Waited.TotalMilliseconds);
+                                bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
+                            }
                             else
                             {
-                                ThrowBackpressureTimeout(publishSince != 0
+                                // The whole wait, extensions included, not its last timeout.
+                                ThrowBackpressureTimeout(publishSince != 0 || overload.Since != 0
                                     ? Stopwatch.GetElapsedTime(backpressureSince)
                                     : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
                             }
