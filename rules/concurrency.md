@@ -375,6 +375,10 @@ lock ordering and deadlock prevention are still to come.
   invariant the free-quarantine release waits with its epoch moved on too (#1382, FreeQuarantine.Free): a free holds no page address past
             its own fetch and write, and the page it fetched is tagged with the moved pin (PS-03). Waiting with its pin, the release worker was
             one of the oldest pins of the 32 MiB market's epoch-held cache, 3,991 epochs behind
+  invariant so do the drain's chunk frees (DeferredCleanupManager.FreeChunkWaitingRefreshed) and a revision-GC entry up to its chain lock — the
+            liveness check and the header read (DeferredCleanupManager.CleanupEntityRevisionsBatched) — for the same reason (#1382): between two
+            entries the drain holds only its accessors' slot-reference pins, and up to its fetch a free, or an entry up to its lock, holds nothing
+            more. Past the lock, the compaction waits with its pin. Waiting with its pin, the drain made 70 % of the 32 MiB market's pinned waits
   invariant a B+Tree write a commit's publish makes (AP-03) does not wait out back-pressure with its pin while it has made no logical change
             (#1382; a dirty mark before the latch, or a cache dropped, is idempotent). From its entry (BTree.Add, Remove, RemoveValue, Move,
             MoveValue; PagedMMF.BeginRestartableIndexWrite) until its first latch (OlcLatch.TryWriteLock, TryWriteLockOnSmoPath), chunk
@@ -414,7 +418,8 @@ lock ordering and deadlock prevention are still to come.
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
          DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData,
          FreeQuarantine.Free, PagedMMF.BeginRestartableIndexWrite, PagedMMF.EndRestartableIndexWrite, PagedMMF.DisarmIndexRestart,
-         PagedMMF.AwaitPageAfterIndexRestart, BackpressureIndexRestart, Transaction.RefreshBetweenPublishSteps, BTree.DeferredReclaim
+         PagedMMF.AwaitPageAfterIndexRestart, BackpressureIndexRestart, Transaction.RefreshBetweenPublishSteps, BTree.DeferredReclaim,
+         DeferredCleanupManager.FreeChunkWaitingRefreshed, DeferredCleanupManager.CleanupEntityRevisionsBatched
   on_violation: once the data outgrows the page cache, the read waits for evictions its own tags forbid —
                 `PageCacheBackpressureTimeoutException` with every slot epoch-protected and none dirty. MarketHardeningTests' trading
                 storm stalled that way after about 96 000 transfers (the free-list rebuild the room bits replaced, under a Versioned
@@ -446,7 +451,9 @@ lock ordering and deadlock prevention are still to come.
   verified: RevisionChunkRetentionTests.ATailsDrainThatThrows_StillLeavesItsEpochAndTheChain_AndGivesBackItsMarks [VerifiesRule] — the drain throws
             on its third entry: the dispose rethrows, the thread is in no epoch scope, the chain is empty, no page is marked, the engine goes on (the
             thread stays pinned with the finally removed); TheTailsDrain_GivesBackItsMarksAsItGoes [VerifiesRule] — refreshed between entries the
-            drain holds 1 marked page at most, 10 without the release
+            drain holds 1 marked page at most, 10 without the release; TheDrainsChunkFrees_WaitWithTheirEpochMoved [VerifiesRule] — three
+            back-pressure rounds forced on a drain's frees each move its epoch and draw nothing from the slot reserve (none move it with the scope
+            removed)
   verified: LockReleaseOnThrowTests.AnOpenWaitingOnAHeldChain_MovesItsEpochWhileItWaits_AndGoesOnOnceItIsReleased [VerifiesRule] — another thread
             holds the chain: the open restarts, its pin moves, and the write commits once the chain is released (no restart and no epoch move with the
             lock restart removed)

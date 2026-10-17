@@ -165,6 +165,9 @@ class StorageOverloadTests : TestBase<StorageOverloadTests>
             var me = Environment.CurrentManagedThreadId;
             var held = Stopwatch.StartNew();
             var extensions = dbe.MMF.OverloadWaitExtensions;
+            // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+            // reserve has served the others (PS-24).
+            dbe.MMF.SetSlotReserveTargetForTests(0);
             dbe.MMF.ForceBackpressureForTest = () =>
             {
                 if (Environment.CurrentManagedThreadId != me || held.ElapsedMilliseconds >= 350)

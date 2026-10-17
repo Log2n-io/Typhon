@@ -51,7 +51,10 @@ class IndexMoveLatchedFaultTests : TestBase<IndexMoveLatchedFaultTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.OpenMut(ids[Moved]).Set(StatsArch.Ranked, new StatsRanked(1, Moved));
-            dbe.MMF.EvictEvictablePagesForTest();   // the index's pages: the commit's move below meets them cold
+            // The index's pages: the commit's move below meets them cold. This thread's warm accessors would keep some slot-referenced, and evicted
+            // with them gone the move could meet every page it needs still resident.
+            ChunkBasedSegment<PersistentStore>.ReleaseWarmAccessorsForTests();
+            dbe.MMF.EvictEvictablePagesForTest();
             dbe.MMF.ForceBackpressureForTest = () =>
             {
                 if (Environment.CurrentManagedThreadId == mover)

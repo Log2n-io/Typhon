@@ -273,6 +273,9 @@ internal sealed class PostAppendFailureTests
         {
             _dbe = dbe;
             dbe.CommitAfterAppendProbe = () => _publisher = Environment.CurrentManagedThreadId;
+            // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+            // reserve has served the others (PS-24).
+            dbe.MMF.SetSlotReserveTargetForTests(0);
             dbe.MMF.ForceBackpressureForTest = () =>
             {
                 if (_publisher != Environment.CurrentManagedThreadId || !holdWhile())

@@ -457,11 +457,37 @@ internal class DeferredCleanupManager
     {
         if (entry.Revision)
         {
-            entry.Table.CompRevTableSegment.FreeChunk(entry.ChunkId);
+            FreeChunkWaitingRefreshed(entry.Table.CompRevTableSegment, entry.ChunkId);
         }
         else
         {
-            FreeContentChunk(entry.Table, entry.ChunkId);
+            if (entry.Table.HasCollections)
+            {
+                var accessor = entry.Table.ComponentSegment.CreateChunkAccessor();
+                ReleaseCollectionBuffers(entry.Table, accessor.GetChunkAsReadOnlySpan(entry.ChunkId));
+                accessor.Dispose();
+            }
+
+            FreeChunkWaitingRefreshed(entry.Table.ComponentSegment, entry.ChunkId);
+        }
+    }
+
+    /// <summary>
+    /// A drain's chunk free, whose back-pressure waits move this thread's epoch (EP-02, #1382). The free holds no page address past its bitmap page's
+    /// fetch, and between two entries the drain holds only slot-reference pins (<see cref="EpochYield"/>), so a refresh in that fetch releases nothing
+    /// anyone still reads; the page fetched is tagged with the moved pin (PS-03). Waiting with its pin instead, the transaction draining the queue at
+    /// its dispose was the cache's oldest pin in two of every three of a 32 MiB market's waits.
+    /// </summary>
+    private static void FreeChunkWaitingRefreshed(ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        PagedMMF.RefreshableWaitDepth++;
+        try
+        {
+            segment.FreeChunk(chunkId);
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth--;
         }
     }
 
@@ -607,8 +633,21 @@ internal class DeferredCleanupManager
 
                 // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
                 // all: compacting it would rearrange someone else's revisions (REAP-02).
-                if (!table.CompRevTableSegment.IsChunkLive(firstChunkId)
-                    || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
+                // Up to its chain lock an entry holds what it holds between two entries, its accessors' slot-reference pins: its page waits move the
+                // epoch (EP-02, #1382), as the refresh between entries does. Waiting with its pin, the drain was the oldest pin of a 32 MiB market.
+                PagedMMF.RefreshableWaitDepth++;
+                bool ours;
+                try
+                {
+                    ours = table.CompRevTableSegment.IsChunkLive(firstChunkId)
+                           && compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK == entry.PrimaryKey;
+                }
+                finally
+                {
+                    PagedMMF.RefreshableWaitDepth--;
+                }
+
+                if (!ours)
                 {
                     Interlocked.Increment(ref ForeignChainsSkipped);
                     continue;

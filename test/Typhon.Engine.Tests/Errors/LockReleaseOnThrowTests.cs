@@ -290,6 +290,9 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
                 try
                 {
                     var walker = Environment.CurrentManagedThreadId;
+                    // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                    // reserve has served the others (PS-24).
+                    dbe.MMF.SetSlotReserveTargetForTests(0);
                     dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
                     try
                     {
@@ -542,6 +545,9 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
 
                         // The root in the window: only the walk's fetch of the overflow chunk allocates, and every allocation of this thread fails.
                         var walker = Environment.CurrentManagedThreadId;
+                        // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                        // reserve has served the others (PS-24).
+                        dbe.MMF.SetSlotReserveTargetForTests(0);
                         dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
                         try
                         {
@@ -644,6 +650,9 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
                             "premise: the overflow chunk is on another page than the root");
 
                         var walker = Environment.CurrentManagedThreadId;
+                        // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                        // reserve has served the others (PS-24).
+                        dbe.MMF.SetSlotReserveTargetForTests(0);
                         dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
                         try
                         {

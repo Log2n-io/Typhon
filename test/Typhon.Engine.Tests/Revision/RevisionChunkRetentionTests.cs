@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Threading;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -244,6 +246,49 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         {
             Assert.That(pinnedAtLast, Is.EqualTo(pinnedInDrain), "premise: nothing refreshed between entries");
         }
+    }
+
+    /// <summary>
+    /// #1382: a drain's chunk frees wait on back-pressure with their epoch moved. A free holds no page address past its bitmap page's fetch, and between
+    /// two entries the drain holds only slot-reference pins; waiting with its pin, the tail's drain was the oldest pin of a 32 MiB market in two of every
+    /// three waits. Moved, it draws nothing from the slot reserve (PS-24), which serves only the waits that hold their pin.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // PagedMMF.RefreshedWaits is process-wide
+    public void TheDrainsChunkFrees_WaitWithTheirEpochMoved()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        GrowUnderAReaderThenTrim(dbe, ids, new Random(3), TraderChunks(dbe), WalletChunks(dbe));
+        var queued = dbe.DeferredCleanupManager.ChunkFreeQueueSize;
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
+
+        ChunkBasedSegment<PersistentStore>.ReleaseWarmAccessorsForTests();
+        dbe.MMF.EvictEvictablePagesForTest();
+        var drainer = Environment.CurrentManagedThreadId;
+        var forced = 0;
+        var refreshed = Interlocked.Read(ref PagedMMF.RefreshedWaits);
+        var draws = dbe.MMF.ReserveDraws;
+
+        // The next transfer's dispose drains the queue: its allocations miss once the drain has taken the frees, and its first three rounds find nothing.
+        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == drainer
+                                                 && dbe.DeferredCleanupManager.ChunkFreeQueueSize < queued && ++forced <= 3;
+        try
+        {
+            Transfer(dbe, ids, new Random(4));
+        }
+        finally
+        {
+            dbe.MMF.ForceBackpressureForTest = null;
+        }
+
+        Assert.That(forced, Is.GreaterThan(3), "premise: the drain met three back-pressure rounds");
+        Assert.That(dbe.DeferredCleanupManager.ChunkFreeQueueSize, Is.LessThan(queued), "premise: the drain freed queued chunks");
+        Assert.That(Interlocked.Read(ref PagedMMF.RefreshedWaits) - refreshed, Is.EqualTo(3), "each round moved the drain's epoch");
+        Assert.That(dbe.MMF.ReserveDraws - draws, Is.Zero, "none waited with its pin");
     }
 
     /// <summary>The tail, with other threads' transfers queued behind it for its drain.</summary>
