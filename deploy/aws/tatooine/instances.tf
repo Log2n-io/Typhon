@@ -18,6 +18,14 @@ locals {
   #
   # Consequence worth stating: an ephemeral world now survives a REDEPLOY within one instance's life, where it used to be
   # discarded with the release directory. It still dies with the instance, which is what "ephemeral" means here.
+
+  #
+  # <b>Both paths are MOUNT POINTS now, and the ephemeral one is the INSTANCE STORE.</b> It used to be a plain directory on
+  # the root gp3 -- which quietly threw away the reason the server runs on a c6id, whose local NVMe fsyncs in 68 us against
+  # gp3's 2.77 ms, so every durability number ever measured on an ephemeral stack was a network-disk number.
+  # `tatooine-data.service` formats and mounts it on every boot (cloud-init-server.yaml). The world still dies with the
+  # instance, which is both what "ephemeral" means here and exactly the instance store's own contract -- the two agree, which
+  # is why this is the right disk for it and not a trade.
   data_dir = var.persistent_data ? "/mnt/tatooine" : "/var/lib/tatooine/world"
 
   # BOTH names on one certificate, from the first issue. The apex is what a viewer types; `origin.` exists so that putting a

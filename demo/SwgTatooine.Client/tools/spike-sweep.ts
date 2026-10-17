@@ -103,7 +103,9 @@ const cases: [string, Partial<Knobs>][] = [
 ];
 
 console.log(`window ${POSTS} posts at ${POST_SPACING_M} m; a cone drops more than N m to ALL FOUR neighbours\n`);
-console.log(`${'variant'.padEnd(34)}${'>1m'.padStart(8)}${'>1.5m'.padStart(8)}${'>3m'.padStart(8)}${'relief'.padStart(10)}`);
+console.log(
+  `${'variant'.padEnd(34)}${'>1m'.padStart(8)}${'>1.5m'.padStart(8)}${'>3m'.padStart(8)}${'relief'.padStart(10)}`,
+);
 for (const [name, over] of cases) {
   const height = bake(build({ ...base, ...over }));
   const row = [cones(height, 1), cones(height, 1.5), cones(height, 3)].map((c) => String(c).padStart(8)).join('');

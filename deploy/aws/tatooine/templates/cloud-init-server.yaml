@@ -38,8 +38,13 @@ write_files:
     content: |
       [Unit]
       Description=SWG Tatooine game server (${stack})
-      After=network-online.target tatooine-dns.service tatooine-certificate.service
+      After=network-online.target tatooine-data.service tatooine-dns.service tatooine-certificate.service
       Wants=network-online.target tatooine-dns.service tatooine-certificate.service
+
+      # Requires, where dns and certificate are only Wants: a box whose delegation is unfinished should still come up
+      # serving plain HTTP, but one that could not place its world must not start a server that would create a fresh one
+      # on the root disk and serve it as though it were the world it was asked for.
+      Requires=tatooine-data.service
 
       [Service]
       Type=simple
@@ -329,40 +334,129 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # --- Prod's volume -------------------------------------------------------------------------------------------------
+  # --- The world's disk ----------------------------------------------------------------------------------------------
   #
-  # Formatted only if it has no filesystem, and that condition is the whole point: prod's world is on this volume and a
-  # script that mkfs'd unconditionally would destroy it on the first reboot. `blkid` answering nothing is the only safe
-  # signal that the volume is new.
+  # <b>Two disks, two meanings, and this script is where the instance type's whole reason for existing was being thrown
+  # away.</b> The server runs on a c6id, and the `d` is a local NVMe soldered to the host: an fsync on it measured 68 us
+  # against 2.77 ms on gp3, which is the difference between a durability wait that disappears into a tick and one that
+  # dominates it. Nothing mounted it. An ephemeral stack exited this script on its first line and put the world on the
+  # root gp3, so every durability number ever measured on this stack was an EBS number, and the instance family was paid
+  # for and not used.
+  #
+  #   persistent = true    prod. The world is on the attached EBS volume and must survive the instance, so the instance
+  #                        store is not an option at any speed. Formatted only when it has no filesystem -- prod's world
+  #                        is on it and an unconditional mkfs would destroy it on the first reboot; `blkid` answering
+  #                        nothing is the only safe signal that a volume is new.
+  #   persistent = false   ephemeral. The world dies with the instance by definition, which is exactly the instance
+  #                        store's own contract, so it goes there and gets the disk we are paying for. Formatted whenever
+  #                        it comes up blank, which is after every stop: a stopped instance gets a brand new one.
+  #
+  # <b>It also had prod's device discovery wrong, which is worse than slow.</b> The loop took the first of
+  # /dev/sdf, /dev/xvdf and `ls /dev/nvme*n1` that existed -- and on Nitro the EBS volume never appears as /dev/sdf, so
+  # the glob decided, in whatever order the kernel enumerated. On a c6id that glob includes the INSTANCE STORE: prod's
+  # world could be mkfs'd onto a disk that evaporates at the next stop, with the volume holding the real world sitting
+  # untouched beside it. Devices are classified by their controller model now, which is what actually distinguishes them.
   - path: /usr/local/sbin/tatooine-mount-data
     permissions: '0755'
     content: |
       #!/bin/sh
       set -eu
-      [ "${persistent}" = "true" ] || exit 0
 
-      # NVMe naming: the device asked for as /dev/sdf appears as a /dev/nvme*n1 whose serial carries the requested name.
-      dev=""
-      for candidate in /dev/sdf /dev/xvdf $(ls /dev/nvme*n1 2>/dev/null || true); do
-          [ -b "$candidate" ] || continue
-          dev="$candidate"
-          break
+      # The root disk, so no branch below can offer it as somewhere to put a filesystem. findmnt gives a partition
+      # (/dev/nvme0n1p1); the classifier works on devices, so the comparison is on the device name as a prefix.
+      root_src=$(findmnt -no SOURCE / 2>/dev/null || echo "")
+
+      # EBS and instance store are told apart by the NVMe controller's model string -- "Amazon Elastic Block Store" and
+      # "Amazon EC2 NVMe Instance Storage". A serial number would identify EBS (it carries the requested device name) and
+      # says nothing about an instance store, so the model is the one signal that classifies both.
+      ebs=""
+      store=""
+      for d in /dev/nvme*n1; do
+          [ -b "$d" ] || continue
+          case "$root_src" in
+              "$d"*) continue ;;
+          esac
+
+          ctrl=$(basename "$d"); ctrl=$${ctrl%n1}
+          model=$(cat "/sys/class/nvme/$ctrl/model" 2>/dev/null || echo "")
+          case "$model" in
+              *"Instance Storage"*) [ -n "$store" ] || store="$d" ;;
+              *"Elastic Block Store"*) [ -n "$ebs" ] || ebs="$d" ;;
+              *) echo "tatooine: $d has an unrecognised model '$model'; leaving it alone" >&2 ;;
+          esac
       done
 
-      if [ -z "$dev" ]; then
-          echo "tatooine: no data volume found; refusing to start with the world on the root disk" >&2
-          exit 1
-      fi
+      # Pre-Nitro names, kept as a fallback for the EBS half only: an instance store has never been reachable this way.
+      for candidate in /dev/sdf /dev/xvdf; do
+          [ -n "$ebs" ] && break
+          [ -b "$candidate" ] && ebs="$candidate"
+      done
 
-      if [ -z "$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)" ]; then
-          echo "tatooine: $dev has no filesystem, creating one"
-          mkfs.ext4 -F "$dev"
+      if [ "${persistent}" = "true" ]; then
+          dev="$ebs"
+          if [ -z "$dev" ]; then
+              echo "tatooine: no EBS data volume found; refusing to start with prod's world on the root disk" >&2
+              exit 1
+          fi
+
+          # NEVER unconditional: this is prod's world.
+          if [ -z "$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)" ]; then
+              echo "tatooine: $dev has no filesystem, creating one"
+              mkfs.ext4 -F "$dev"
+          fi
+
+          grep -q "^$dev " /etc/fstab || echo "$dev ${data_dir} ext4 defaults,nofail 0 2" >> /etc/fstab
+      else
+          dev="$store"
+          if [ -z "$dev" ]; then
+              # Not a failure: an instance family with no local disk is a legitimate choice for a small stack and the
+              # world on the root volume still works. Said out loud, because it changes what a durability number means.
+              echo "tatooine: no instance store on this instance type; the world stays on the root volume (EBS timings)" >&2
+              mkdir -p ${data_dir}
+              chown tatooine:tatooine ${data_dir}
+              exit 0
+          fi
+
+          # Safe to format whenever it is blank, and it IS blank after every stop, because an instance store does not
+          # survive one. An ephemeral world dies with the instance by contract, so a mkfs here destroys nothing the stop
+          # had not already taken.
+          if [ -z "$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)" ]; then
+              echo "tatooine: formatting instance store $dev for the world"
+              mkfs.ext4 -F "$dev"
+          fi
+
+          # And NO fstab entry for it. The device name is stable; its content is not. An entry would have the next boot
+          # try to mount a blank disk before this script could format it, and `nofail` would then leave the server writing
+          # its world into the mount point on the root disk instead -- silently back on gp3, which is the failure this
+          # whole script exists to end.
+          :
       fi
 
       mkdir -p ${data_dir}
-      grep -q "^$dev " /etc/fstab || echo "$dev ${data_dir} ext4 defaults,nofail 0 2" >> /etc/fstab
-      mount -a
+      mountpoint -q ${data_dir} || mount "$dev" ${data_dir}
       chown tatooine:tatooine ${data_dir}
+      echo "tatooine: world on $dev at ${data_dir} ($(findmnt -no FSTYPE ${data_dir}))"
+
+  # <b>A unit, not a runcmd, because runcmd runs ONCE per instance and this has to run on every boot.</b> The instance
+  # store comes up blank after a stop, so a first-boot-only mount left the world on the root disk from the second boot
+  # onwards -- and prod's fstab entry is not enough on its own either, since `nofail` turns a failed mount into a silent
+  # fallback onto the mount point. Ordered before the server with Requires, so a box that cannot place its world does not
+  # start a server that would quietly create one somewhere else.
+  - path: /etc/systemd/system/tatooine-data.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SWG Tatooine world disk (${stack})
+      After=local-fs.target
+      Before=tatooine.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/tatooine-mount-data
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   # <b>The AWS CLI, from AWS, because Ubuntu 24.04 does not package it.</b> `awscli` was in the package list above and
@@ -391,13 +485,17 @@ runcmd:
 
   # The service account is created in bootcmd above, before write_files needs it.
   #
-  # ${data_dir} is created HERE, before anything starts, for the reason the unit's ReadWritePaths comment gives. On prod it
-  # is the mount point tatooine-mount-data then mounts the volume over; on an ephemeral stack it is the world itself.
+  # ${data_dir} is created HERE, before anything starts, for the reason the unit's ReadWritePaths comment gives. It is a
+  # MOUNT POINT in both shapes now -- prod's EBS volume or an ephemeral stack's instance store goes over it -- and the
+  # directory still has to exist before the disk unit or the server can use it.
   - [ mkdir, -p, /opt/tatooine/releases, /etc/tatooine, '${data_dir}' ]
   - [ chown, '-R', 'tatooine:tatooine', '${data_dir}' ]
   - [ chown, '-R', 'tatooine:tatooine', /opt/tatooine ]
-  - [ /usr/local/sbin/tatooine-mount-data ]
   - [ systemctl, daemon-reload ]
+
+  # ENABLED and started: the disk has to be in place before the first deploy starts the server, and enabling it is what
+  # makes it run on every later boot -- which is the half runcmd could never do, since runcmd runs once per instance.
+  - [ systemctl, enable, '--now', tatooine-data.service ]
 
   # The record first, then the certificate for the name it points at. Both are started HERE as well as enabled, because they
   # must have run before the first deploy starts the server -- and both are oneshot, so a failure is visible in

@@ -126,7 +126,9 @@ const cases: [string, Float32Array][] = [
 ];
 
 const area = ((POSTS * POST_SPACING_M) / 1000) ** 2;
-console.log(`window ${POSTS} posts at ${POST_SPACING_M} m = ${area.toFixed(1)} km^2; a cone drops more than N m to ALL FOUR neighbours\n`);
+console.log(
+  `window ${POSTS} posts at ${POST_SPACING_M} m = ${area.toFixed(1)} km^2; a cone drops more than N m to ALL FOUR neighbours\n`,
+);
 console.log(`${'variant'.padEnd(28)}${DROPS_M.map((d) => `>${d}m`.padStart(9)).join('')}${'relief'.padStart(10)}`);
 for (const [name, height] of cases) {
   const counts = DROPS_M.map((d) => String(cones(height, d)).padStart(9)).join('');

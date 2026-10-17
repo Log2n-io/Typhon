@@ -1635,6 +1635,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal CommitCardTable CommitCards { get; }
 
     /// <summary>
+    /// The unique-index keys in-flight commits have validated and not yet published (#1390): what the tree cannot say yet, so a uniqueness race is refused
+    /// before the append rather than discovered in a publish that can only stop the engine.
+    /// </summary>
+    internal UniqueKeyClaims UniqueKeys { get; } = new();
+
+    /// <summary>
     /// The first supplies being committed (QENABLE-01): one per (entity, component type), claimed before PREPARE and released once the commit's publish set the
     /// record's chain root, or on any exit of the commit. A second supply of the same component waits for the claim, then finds the root
     /// (<c>Transaction.PrepareFirstSupply</c>).
@@ -8280,22 +8286,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var arch = persisted.Arch;
 
-        // Component count mismatch
+        // <b>The ARCHETYPE's component set, which is a different change from a component's own fields and has no migration path</b> (#1391, EN-8).
+        // Both messages used to end with "Run 'tsh migrate <dbpath>' to upgrade", and that advice is wrong here: `tsh migrate` walks COMPONENTS and
+        // reports a per-component diff, so an added component shows up as "NEW - will be created on first use" and nothing it does changes the persisted
+        // archetype's component count. The operator ran the tool, saw a clean report, reopened, and met this same refusal. Saying what is actually
+        // needed -- and that it does not exist yet -- costs nothing and does not send anybody round that loop.
+        //
+        // Named by the DURABLE name rather than the CLR type: identity is `[Archetype(Name = ...)]` and defaults to the type's simple name, so a stack
+        // that set one was told about a type whose name appears nowhere in its own schema.
         if (arch.ComponentCount != meta.ComponentCount)
         {
             throw new InvalidOperationException(
-                $"Schema mismatch for archetype '{meta.ArchetypeType.Name}' (Id={meta.ArchetypeId}): " +
+                $"Schema mismatch for archetype '{meta.Name}' (CLR type {meta.ArchetypeType.Name}, Id={meta.ArchetypeId}): " +
                 $"persisted with {arch.ComponentCount} components, runtime has {meta.ComponentCount}. " +
-                $"Run 'tsh migrate <dbpath>' to upgrade.");
+                "Adding or removing a COMPONENT of an archetype changes its cluster geometry and there is no migration for it yet (EN-8): " +
+                "`tsh migrate` resolves a component's own FIELDS and will report this database as clean. Either restore the previous component set, " +
+                "or recreate the world.");
         }
 
         // Revision mismatch
         if (arch.Revision != meta.Revision)
         {
             throw new InvalidOperationException(
-                $"Schema mismatch for archetype '{meta.ArchetypeType.Name}' (Id={meta.ArchetypeId}): " +
+                $"Schema mismatch for archetype '{meta.Name}' (CLR type {meta.ArchetypeType.Name}, Id={meta.ArchetypeId}): " +
                 $"persisted revision {arch.Revision}, runtime revision {meta.Revision}. " +
-                $"Run 'tsh migrate <dbpath>' to upgrade.");
+                "[Archetype(Revision)] is bumped when the component set changes, and that change has no migration yet (EN-8). If the set did NOT " +
+                "change, the revision was bumped on its own and putting it back opens this database.");
         }
 
         // Component name mismatch (per slot)

@@ -163,6 +163,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 # whole bot box is one key: at the defaults (burst 10, one attempt back every 6 s) 8 192 signups would take about fourteen
 # hours. Raise them for a load box and leave them alone for a public server -- this is the limiter that stands between
 # /auth and the tick loop, and a signup is PBKDF2.
+#
+# HZ is the tick rate, and it is here because a capacity measurement without it is not a measurement. The demo's default
+# is 10, a 100 ms budget -- generous enough that 5 000 sessions came in at a tick p99 of 19 ms and read as plenty of room.
+# The same work at 50 Hz has 20 ms to fit in, so that p99 IS the budget. Until this flag reached the deployed server there
+# was no way to ask the question on the box that answers it, and every number was quoted at the one rate that flatters it.
 exec "$here/__EXE__" \
     --serve "${PORT:-8080}" \
     --bind "${BIND:-127.0.0.1}" \
@@ -175,6 +180,7 @@ exec "$here/__EXE__" \
     ${MAX_SESSIONS:+--max-sessions "$MAX_SESSIONS"} \
     ${AUTH_BURST:+--auth-burst "$AUTH_BURST"} \
     ${AUTH_REFILL_MS:+--auth-refill-ms "$AUTH_REFILL_MS"} \
+    ${HZ:+--hz "$HZ"} \
     --client-dir "$here/client" \
     --db-dir "${DB_DIR:-$here/data}" \
     --persist \

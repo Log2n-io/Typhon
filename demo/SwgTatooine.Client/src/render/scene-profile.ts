@@ -103,6 +103,7 @@ export function cameraBoundsFor(view: RealmView): CameraBounds {
     // below zero on every axis — so it is the one realm whose pitch floor is NEGATIVE: the eye may orbit under the
     // ecliptic and look up at what is above it. Everywhere else there is a floor at y = 0 or terrain above it, and a
     // camera that went under would see the inside of the ground.
-    minPitch: view.scene === 'space' ? -SPACE_MAX_PITCH : view.scene === 'planet' ? PLANET_MIN_PITCH : INTERIOR_MIN_PITCH,
+    minPitch:
+      view.scene === 'space' ? -SPACE_MAX_PITCH : view.scene === 'planet' ? PLANET_MIN_PITCH : INTERIOR_MIN_PITCH,
   };
 }

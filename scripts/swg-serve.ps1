@@ -26,6 +26,18 @@
 .PARAMETER Trace
     Write a .typhon-trace capture here instead of the database's own profilings/ directory.
 
+.PARAMETER Workers
+    Engine worker threads. <b>16 by default, deliberately, and not the processor count.</b>
+
+    The engine's own default is 0, which resolves to Environment.ProcessorCount — 32 on a 7950X. That is the wrong number whenever the
+    bots run on the same workstation, which is the normal way this server is exercised: 32 engine workers and a load generator driving
+    thousands of sessions, on 16 physical cores, means the server's tick is partly a measure of how busy the bot process was and the
+    bots' connect rate partly a measure of how busy the server was. Neither figure is about the thing it names.
+
+    16 is also what the deployed c6id.4xlarge resolves to, so a local run and an AWS run are describing the same shape of machine.
+
+    Pass 0 for the engine's own default when the server has the box to itself and you want every thread on it.
+
 .PARAMETER Configuration
     Debug or Release. Release by default: the numbers in this repository are taken there.
 
@@ -54,6 +66,8 @@ param(
     [int] $Live = 0,
     [string] $BindAddress,
     [string] $Trace,
+    [ValidateRange(0, 4096)]
+    [int] $Workers = 16,
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release'
 )
@@ -65,6 +79,15 @@ $exe = Join-Path $repo "demo/SwgTatooine/bin/$Configuration/net10.0/SwgTatooine.
 # Always, not only when the exe is missing: building only when absent means an edited source file runs as its old binary,
 # which is the "stale test bin" failure this repository has been bitten by before. msbuild's own up-to-date check makes a
 # no-op build cheap.
+if ($Workers -gt 0)
+{
+    Write-Host "  workers $Workers (the engine's own default would be $([Environment]::ProcessorCount) here)" -ForegroundColor DarkGray
+}
+else
+{
+    Write-Host "  workers $([Environment]::ProcessorCount) — the processor count. Do NOT run the bots on this box at the same time." -ForegroundColor Yellow
+}
+
 Write-Host "Building SwgTatooine ($Configuration)..." -ForegroundColor Cyan
 & dotnet build (Join-Path $repo 'demo/SwgTatooine/SwgTatooine.csproj') -c $Configuration --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw "build failed with exit code $LASTEXITCODE" }
@@ -82,6 +105,10 @@ New-Item -ItemType Directory -Force $db | Out-Null
 # The splat sends each element as one argv entry whatever it contains; `--%` would also stop $exe itself expanding.
 # `Where-Object { $null -ne $_ }`, NOT `{ $_ }`: the latter is falsy for an empty string, so `--tag '' --hz 0` dropped the
 # empty value and shifted everything after it, leaving --tag to eat --hz.
-$all = @('--serve', "$Port", '--db-dir', $db) + @($ServerArgs | Where-Object { $null -ne $_ })
+# --workers BEFORE the pass-through, so an explicit `--workers N` among the trailing arguments wins: the engine's strict parser takes
+# the last occurrence, which keeps this default overridable without the launcher having to detect it.
+$all = @('--serve', "$Port", '--db-dir', $db)
+if ($Workers -gt 0) { $all += @('--workers', "$Workers") }
+$all += @($ServerArgs | Where-Object { $null -ne $_ })
 & $exe @all
 exit $LASTEXITCODE

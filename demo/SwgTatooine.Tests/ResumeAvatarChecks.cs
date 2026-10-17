@@ -257,6 +257,103 @@ internal sealed class ResumeAvatarChecks
         });
     }
 
+    // ── what the operator can see ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An expiry for a god session is not an orphan: it never had an avatar, and its close is resumable like any other.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the case that decides whether the counter is worth having.</b> <c>ResumeExpired</c> reaches the demo for every resumable close, and the
+    /// handler used to discard the ones with no hold behind them — correct for this session and indistinguishable from an avatar left standing for nobody,
+    /// which is the state 245 bot characters were once found in. A counter that fired here too would have a zero that means nothing, so the predicate is
+    /// what is under test as much as the count.
+    /// </remarks>
+    [Test]
+    public void AGodSessionsExpiryIsNotAnOrphan()
+    {
+        using var sim = Start(resumeGraceS: 0.25d);
+
+        var god = _harness.Connect(TatooineReplication.GodKind);
+        _harness.Ticks(2);
+        god.Close(LinkDied, "the link died");
+
+        // 40 ticks at 50 Hz is about 0.8 s of wall clock against a 0.25 s grace, so the expiry has certainly been delivered — and read — by the end of it.
+        // Waiting on the counter instead would be circular: the claim is that it stays at zero.
+        _harness.Ticks(40);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.ResumeExpiriesWithoutHold, Is.Zero,
+                "a god session has no body to leave standing, so its expiry is not a disagreement about one");
+            Assert.That(TatooineReplication.ResumeHoldsStanding, Is.Zero, "and nothing is being held for it");
+        });
+    }
+
+    /// <summary>
+    /// A held avatar is visible as a standing hold while it waits, and the count goes back to zero when the grace retires it.
+    /// </summary>
+    /// <remarks>
+    /// The population, not the events. A fleet whose sockets had all dropped reported 3 001 possessions taken and 0 released, which reads as a leak and
+    /// was in part a report that never mentioned the state every one of those sessions was in: held, by design, for the grace. The run report prints this
+    /// number now, and this case is what says the number tracks the thing.
+    /// </remarks>
+    [Test]
+    public void AHoldIsCountedWhileItStandsAndNotAfterwards()
+    {
+        using var sim = Start(resumeGraceS: 0.25d);
+        var account = AnAccount(0xA13_0009);
+
+        var (link, avatar) = LogIn(sim, account);
+        Assert.That(TatooineReplication.ResumeHoldsStanding, Is.Zero, "premise: nothing is held while the client is connected");
+
+        link.Close(LinkDied, "the link died");
+        _harness.Ticks(4);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1), "one body standing for a client that is not connected right now");
+            Assert.That(Exists(sim, avatar), Is.True);
+        });
+
+        SessionHarness.Until(() => TatooineReplication.ResumeHoldsExpired >= 1, "the grace to elapse");
+        _harness.Ticks(2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TatooineReplication.ResumeHoldsStanding, Is.Zero, "the hold is gone, so the population is back to zero");
+            Assert.That(TatooineReplication.ResumeExpiriesWithoutHold, Is.Zero,
+                "the expiry found its own hold, which is the whole of what this counter being zero claims");
+        });
+    }
+
+    /// <summary>
+    /// A takeover spends the hold, and the expiry that arrives afterwards is not counted as an orphan either.
+    /// </summary>
+    /// <remarks>
+    /// The second benign case. The engine still owes the old session exactly one of its two events (SUB-12) and delivers the expiry after the takeover has
+    /// already retired the hold, so the demo sees an expiry with nothing behind it — for a reason that is the system working.
+    /// </remarks>
+    [Test]
+    public void AnExpiryAfterATakeoverIsNotAnOrphan()
+    {
+        using var sim = Start(resumeGraceS: 0.25d);
+        var account = AnAccount(0xA13_000A);
+
+        var (first, _) = LogIn(sim, account);
+        first.Close(LinkDied, "the link died");
+        _harness.Ticks(4);
+        Assert.That(TatooineReplication.ResumeHoldsStanding, Is.EqualTo(1), "premise: the body is held");
+
+        // The same account logs in fresh rather than resuming: the takeover retires the hold and hands this session the body.
+        Bound(sim, _harness.Connect(TatooineReplication.PlayerKind, account), 2);
+        Assert.That(TatooineReplication.ResumeHoldsTakenOver, Is.EqualTo(1), "premise: the hold was taken over, not expired");
+
+        // Then the old session's grace runs out and the engine delivers its expiry.
+        _harness.Ticks(40);
+
+        Assert.That(TatooineReplication.ResumeExpiriesWithoutHold, Is.Zero,
+            "the hold was spent by the takeover, so its expiry arriving with nothing behind it is expected");
+    }
     // ── the takeover ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     [Test]

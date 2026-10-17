@@ -152,7 +152,9 @@ export function advance(state: TransitionState, nowMs: number): TransitionState 
     case 'hold':
       // The safety valve. An ask that is refused, rate-limited or simply never answered leaves the viewer here, and a
       // black screen over a running world is worse than a crossing that visibly did not happen.
-      return elapsed >= HOLD_LIMIT_MS ? { phase: 'in', sinceMs: nowMs, durationMs: 200, caption: '', settled: false } : state;
+      return elapsed >= HOLD_LIMIT_MS
+        ? { phase: 'in', sinceMs: nowMs, durationMs: 200, caption: '', settled: false }
+        : state;
 
     case 'in':
       return elapsed >= state.durationMs ? IDLE : state;

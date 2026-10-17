@@ -53,11 +53,21 @@ function buildInward(width: number, height: number, depth: number, ceiling: bool
 
   /** One quad, wound so that `(a→b→c)` faces `normal`. `uv` runs 0..1 across it for the grid to read. */
   const quad = (
-    ax: number, ay: number, az: number,
-    bx: number, by: number, bz: number,
-    cx: number, cy: number, cz: number,
-    dx: number, dy: number, dz: number,
-    nx: number, ny: number, nz: number,
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    nx: number,
+    ny: number,
+    nz: number,
   ): void => {
     const base = positions.length / 3;
     positions.push(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz);

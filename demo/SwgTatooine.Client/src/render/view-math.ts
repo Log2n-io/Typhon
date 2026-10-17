@@ -204,8 +204,13 @@ export function invertMatrix4(m: ArrayLike<number>, out: Float64Array): boolean 
   // nothing and reports no reason, which is the exact failure this guard exists to prevent. The scale is the largest
   // cofactor product in the sum, so the test is on the determinant's significance rather than on its magnitude.
   const scale = Math.max(
-    Math.abs(b00 * b11), Math.abs(b01 * b10), Math.abs(b02 * b09),
-    Math.abs(b03 * b08), Math.abs(b04 * b07), Math.abs(b05 * b06));
+    Math.abs(b00 * b11),
+    Math.abs(b01 * b10),
+    Math.abs(b02 * b09),
+    Math.abs(b03 * b08),
+    Math.abs(b04 * b07),
+    Math.abs(b05 * b06),
+  );
   if (!Number.isFinite(det) || !(Math.abs(det) > scale * 1e-12)) {
     return false;
   }

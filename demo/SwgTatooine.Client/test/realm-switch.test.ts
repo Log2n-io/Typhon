@@ -13,9 +13,7 @@ const PLANET: RealmView = realmViewOf(
 )!;
 
 /** An interior: `(0,0)..(64,64)`, and deliberately not centred on the origin. */
-const INTERIOR: RealmView = realmViewOf(
-  new RealmFrame(5, 1, 1, 0x10002005, 24, 64, false, [0, 0, 0], [64, 64, 64]),
-)!;
+const INTERIOR: RealmView = realmViewOf(new RealmFrame(5, 1, 1, 0x10002005, 24, 64, false, [0, 0, 0], [64, 64, 64]))!;
 
 interface Spy extends RealmSwitchTargets {
   jumps: { x: number; z: number; distanceM: number }[];
@@ -83,7 +81,7 @@ describe('resetForRealm', () => {
     expect(useUi.getState().cameraMode).toBe('god');
   });
 
-  it("clears the chat, because earshot does not reach across a realm", () => {
+  it('clears the chat, because earshot does not reach across a realm', () => {
     settleInARealm();
     expect(useChat.getState().lines.length).toBeGreaterThan(0);
     resetForRealm(INTERIOR, spy());

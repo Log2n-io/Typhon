@@ -57,7 +57,10 @@ export class SpaceProfile implements SceneProfile {
       'space',
       scene,
       { vertexSource: SPACE_VERTEX, fragmentSource: SPACE_FRAGMENT },
-      { attributes: ['position', 'normal', 'uv'], uniforms: ['world', 'viewProjection', 'uGridColor', 'uCellM', 'uGrid'] },
+      {
+        attributes: ['position', 'normal', 'uv'],
+        uniforms: ['world', 'viewProjection', 'uGridColor', 'uCellM', 'uGrid'],
+      },
     );
     this.material.setColor3('uGridColor', GRID);
 

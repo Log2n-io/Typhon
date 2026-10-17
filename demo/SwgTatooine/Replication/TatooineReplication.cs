@@ -1416,14 +1416,26 @@ public static partial class TatooineReplication
                     HoldForResume(tick.Transaction, e.Session);
                 }
             }
-            else if (e.Kind == SessionEventKind.ResumeExpired && TatooineReplication.HoldsResume(e.Session))
+            else if (e.Kind == SessionEventKind.ResumeExpired)
             {
                 // Nobody came back. Queued rather than retired here: the save needs the tick's player and character accessors, which BindAvatars rents once
                 // for the whole tick (see RetireAvatars).
                 //
                 // Only when there IS a hold behind it: a god session's close is resumable too, and queueing its expiry would defeat BindAvatars' early-out
                 // for a tick in order to run a no-op.
-                ResumesToRetire.Add(e.Session.Value);
+                if (TatooineReplication.HoldsResume(e.Session))
+                {
+                    ResumesToRetire.Add(e.Session.Value);
+                }
+                else
+                {
+                    // <b>Counted, where it used to be dropped on the floor.</b> The test is right — a god session's close is resumable too and queueing
+                    // its expiry would defeat BindAvatars' early-out in order to run a no-op — but it made the god case and a lost hold the same silent
+                    // non-event. The engine sends exactly one of Opened{ResumedFrom} or ResumeExpired per resumable close (SUB-12), so for a session that
+                    // HAD a hold this arriving with none means something else dropped it and an avatar is standing for nobody. Which of the two it is,
+                    // the number cannot say by itself; that it happens at all is what no observation on the box could previously establish.
+                    TatooineReplication.NoteResumeExpiryWithoutHold(e.Session);
+                }
             }
             else if (e.Kind == SessionEventKind.RealmClosed)
             {
@@ -2032,6 +2044,14 @@ public static partial class TatooineReplication
             Console.Error.WriteLine(
                 $"  intents: {it.Applied} applied of {it.Owned} owned, {it.Unowned} unowned, {it.RefusedSpeed} refused for speed; "
                 + $"targets {it.TargetsSet} set, {it.TargetsRefused} refused; possession {it.Possessions} taken, {it.Releases} released");
+
+            // <b>The holds, because "taken" minus "released" is not a leak until you know how many are being HELD.</b> A link-dead session's avatar stays
+            // standing for the resume grace (A13) and is counted by neither of those two, so a fleet whose sockets had dropped read as 3 001 possessions
+            // taken and 0 released — which looks exactly like a leak and was, in part, a report that did not mention the state every one of them was in.
+            // `standing` is the live population of holds; `orphan expiries` is zero unless the engine and this demo disagree about who holds what.
+            Console.Error.WriteLine(
+                $"  resume: {ResumesHeld} held, {ResumesRebound} rebound, {ResumeHoldsExpired} expired, {ResumeHoldsTakenOver} taken over; "
+                + $"{ResumeHoldsStanding} standing now, {ResumeExpiriesWithoutHold} orphan expiries");
             var sendPath = subs.SendPath;
             var st = subs.SendTotals;
             var now = System.Diagnostics.Stopwatch.GetTimestamp();

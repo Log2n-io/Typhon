@@ -211,9 +211,10 @@ export class LayerPacker {
       // Sampled at the PREDICTED ground position when the client owns the heightfield, or the predicted body walks a dune at
       // the height of where the server last confirmed it — a few centimetres, but it reads as the feet sinking. When the
       // server supplies altitude per entity there is nothing to re-sample and its figure stands.
-      const ry = own && fields.ground === null
-        ? at.y + view.ground.heightAt(predicted!.x, predicted!.z)
-        : altitudeOf(fields.ground, slot, at, view.ground);
+      const ry =
+        own && fields.ground === null
+          ? at.y + view.ground.heightAt(predicted!.x, predicted!.z)
+          : altitudeOf(fields.ground, slot, at, view.ground);
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;

@@ -9,6 +9,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { usePostApiSessionsAttach } from '@/api/generated/sessions/sessions';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useAttachEndpointsStore } from '@/stores/useAttachEndpointsStore';
 import { useOpenDatabaseFile } from '@/hooks/useOpenDatabaseFile';
 import { logError, logInfo } from '@/stores/useLogStore';
 import { extractDetail } from './connectErrors';
@@ -39,6 +40,9 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  // underlying mutation, kept for the pending spinner and the error pill below.
  const { openDatabaseFile, mutation: postFile } = useOpenDatabaseFile();
  const postAttach = usePostApiSessionsAttach();
+ // Recorded only on SUCCESS (below): an endpoint that refused the connect is a typo more often than a box that is
+ // down, and a saved list that filled up with typos would be worse than no list.
+ const recordEndpoint = useAttachEndpointsStore((s) => s.record);
 
  // Snap to the requested tab every time the dialog opens — the prop may have changed while the
  // dialog was closed (different Welcome button / MenuBar item).
@@ -64,6 +68,7 @@ export default function ConnectDialog({ open, initialTab, onOpenChange }: Props)
  const response = await postAttach.mutateAsync({ data: { endpointAddress: endpoint, cherryPick } });
  const dto = response.data;
  setSession(dto);
+ recordEndpoint(endpoint);
  logInfo(`Attach session opened`, { sessionId: dto.sessionId, endpoint });
  onOpenChange(false);
  toggleViewProfiler();

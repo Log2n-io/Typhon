@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { RealmFrame } from '@typhondb/client';
-import { crossingKindOf, decodeAppTag, interiorRealmOf, realmViewOf, sameRealm, type RealmView } from '../src/data/realm-view';
+import {
+  crossingKindOf,
+  decodeAppTag,
+  interiorRealmOf,
+  realmViewOf,
+  sameRealm,
+  type RealmView,
+} from '../src/data/realm-view';
 
 /**
  * The `AppTag` layout, restated here as literals rather than built from the decoder's own shifts.

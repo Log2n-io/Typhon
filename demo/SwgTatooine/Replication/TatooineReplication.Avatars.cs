@@ -191,6 +191,7 @@ public static partial class TatooineReplication
     private static long _resumesRebound;
     private static long _resumeHoldsExpired;
     private static long _resumeHoldsTakenOver;
+    private static long _resumeExpiriesWithoutHold;
 
     /// <summary>Avatars held for a link-dead session's possible return (A13).</summary>
     public static long ResumesHeld => System.Threading.Interlocked.Read(ref _resumesHeld);
@@ -203,6 +204,44 @@ public static partial class TatooineReplication
 
     /// <summary>Held avatars retired because their own account logged in fresh instead of resuming.</summary>
     public static long ResumeHoldsTakenOver => System.Threading.Interlocked.Read(ref _resumeHoldsTakenOver);
+
+    /// <summary>`ResumeExpired` events that arrived for a session this side was holding nothing for.</summary>
+    /// <remarks>
+    /// <b>Zero is the claim; a non-zero value is a disagreement between the engine and this demo about who is holding what.</b> The engine promises
+    /// exactly one of <c>Opened{ResumedFrom}</c> or <c>ResumeExpired</c> per resumable close (SUB-12), so an expiry with no hold behind it means the hold
+    /// was dropped by some other path first — and the avatar it was keeping standing is then nobody's.
+    /// <para>
+    /// It exists because the event was being discarded silently. A god session's close is resumable too and queueing its expiry would defeat
+    /// <c>BindAvatars</c>' early-out for a no-op, so the handler tests for a hold and drops the event when there is none — correct for the god case and
+    /// indistinguishable from the leak. 245 avatars were once left standing with no session long past their grace and this was the number that would have
+    /// said whether the expiries never arrived or arrived and were thrown away; it did not exist, so the question could not be answered from the box.
+    /// </para>
+    /// </remarks>
+    public static long ResumeExpiriesWithoutHold => System.Threading.Interlocked.Read(ref _resumeExpiriesWithoutHold);
+
+    /// <summary>
+    /// Records a <c>ResumeExpired</c> that arrived for a session this side was holding nothing for, when that session is one it should have been
+    /// (<see cref="ResumeExpiriesWithoutHold"/>).
+    /// </summary>
+    /// <param name="session">The session whose expiry arrived.</param>
+    /// <remarks>
+    /// <b>The predicate is the whole value of the counter, because three different things reach here legitimately.</b> A god session's close is resumable
+    /// and it never had an avatar; a session whose own account logged in fresh had its hold retired by the takeover; and a session whose hold was retired
+    /// for any other reason is in the same position. Counting all of those would ship a number whose zero means nothing, which is no better than the
+    /// silent drop it replaces.
+    /// <para>
+    /// So the test is <see cref="CharacterOfSession"/>: every one of the benign cases has left it — <c>ForgetHold</c> removes the character with the hold,
+    /// and a god session was never in it — while a PLAYER session this side still knows the character of, with no hold, is a body standing for nobody.
+    /// That is the one case where the engine's "exactly one of Opened{ResumedFrom} or ResumeExpired" (SUB-12) and this demo's own bookkeeping disagree.
+    /// </para>
+    /// </remarks>
+    internal static void NoteResumeExpiryWithoutHold(SessionId session)
+    {
+        if (CharacterOfSession.ContainsKey(session.Value))
+        {
+            System.Threading.Interlocked.Increment(ref _resumeExpiriesWithoutHold);
+        }
+    }
 
     /// <summary>Avatars standing for a client that is not connected right now.</summary>
     /// <remarks>
@@ -1206,6 +1245,7 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _resumesHeld, 0);
         System.Threading.Interlocked.Exchange(ref _resumesRebound, 0);
         System.Threading.Interlocked.Exchange(ref _resumeHoldsExpired, 0);
+        System.Threading.Interlocked.Exchange(ref _resumeExpiriesWithoutHold, 0);
         System.Threading.Interlocked.Exchange(ref _resumeHoldsTakenOver, 0);
         _shutdownFlushed = false;
         AvatarsConfigured = false;

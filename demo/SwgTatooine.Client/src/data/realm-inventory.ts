@@ -118,7 +118,18 @@ function readRow(value: unknown): RealmInventoryRow | null {
     return null;
   }
 
-  return { id, generation, appTag, state: state as RealmRunState, divisor, sleepAfterTicks, players, npcs, creatures, structures };
+  return {
+    id,
+    generation,
+    appTag,
+    state: state as RealmRunState,
+    divisor,
+    sleepAfterTicks,
+    players,
+    npcs,
+    creatures,
+    structures,
+  };
 }
 
 /**

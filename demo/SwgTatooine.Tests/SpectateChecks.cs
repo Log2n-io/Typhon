@@ -255,6 +255,10 @@ public sealed class SpectateChecks
     /// which is precisely the state rung 1 was already in.
     /// </remarks>
     [Test]
+    // Quarantined against #1395: a 10 s SpinUntil for the session to be told what it is riding, which is ample on an idle box and not always ample in a
+    // 379-test host. 6/6 in isolation at 3-5 s. Unlike its neighbour in that issue it has no identified mechanism beyond the timeout being a wall-clock
+    // one, so the first thing to try is waiting on the state rather than on a deadline.
+    [Category("Quarantine")]
     public void RidingABotAnchorsTheSessionOnIt()
     {
         using var sim = new TatooineSim(Config());

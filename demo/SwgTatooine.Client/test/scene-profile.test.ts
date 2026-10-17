@@ -127,7 +127,6 @@ describe('space, the one realm the camera is inside', () => {
     expect(space.stats.triangles).toBe(0);
   });
 
-
   it('is drawn on a CLOSED box, because every direction from inside it needs something to draw', () => {
     // A room has no lid — a map camera looks down into it. Space is the opposite case, and a missing face there is a
     // hole onto the clear colour wherever the camera looks up.

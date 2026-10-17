@@ -50,6 +50,13 @@ resource "aws_ssm_parameter" "server_env" {
     # Empty leaves the server's defaults, which is what a stack serving only humans wants.
     var.auth_burst == 0 ? null : "AUTH_BURST=${var.auth_burst}",
     var.auth_refill_ms == 0 ? null : "AUTH_REFILL_MS=${var.auth_refill_ms}",
+
+    # The tick rate. Here rather than in user_data for the reason the whole file exists, and worth carrying at all because
+    # a capacity number means nothing without it: the demo ticks at 10 Hz, so a tick p99 of 19 ms sits inside a 100 ms
+    # budget and reads as headroom -- at 50 Hz that same 19 ms is the whole budget. Changing it is "update the parameter,
+    # restart the unit", which is what makes a rate sweep on one box, one build and one world possible at all. Empty leaves
+    # the demo default of 10.
+    var.tick_hz == 0 ? null : "HZ=${var.tick_hz}",
   ]))
 
   description = "ORIGIN, the signing key and the front-door secret for the ${var.name} game server. Read at service start; update and restart to rotate."

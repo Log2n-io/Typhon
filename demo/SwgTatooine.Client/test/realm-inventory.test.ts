@@ -213,12 +213,21 @@ describe('what the panel draws', () => {
   });
 
   it('says so when the server has not counted anything yet', () => {
-    const fresh = view(LIVE_BODY.replace('"censusTick":120', '"censusTick":-1').replace('"omitted":1792', '"omitted":0'))?.freshness;
+    const fresh = view(
+      LIVE_BODY.replace('"censusTick":120', '"censusTick":-1').replace('"omitted":1792', '"omitted":0'),
+    )?.freshness;
     expect(fresh).toBe('populations not counted yet');
   });
 
   it('names every row the way the HUD names the realm the session is in', () => {
-    expect(view(LIVE_BODY)?.rows.map((row) => row.label)).toEqual(['Planet 0', 'Planet 1', 'Planet 2', 'Space', 'Interior 0', 'Interior 1']);
+    expect(view(LIVE_BODY)?.rows.map((row) => row.label)).toEqual([
+      'Planet 0',
+      'Planet 1',
+      'Planet 2',
+      'Space',
+      'Interior 0',
+      'Interior 1',
+    ]);
   });
 
   it('marks the realm the session is in, and only that one', () => {

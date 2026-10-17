@@ -36,9 +36,7 @@ export const NOT_RIDING: RideState = { phase: 'idle' };
  * has just dropped whatever was selected before.
  */
 export type RideAction =
-  | { readonly kind: 'none' }
-  | { readonly kind: 'adopt'; readonly netId: number }
-  | { readonly kind: 'release' };
+  { readonly kind: 'none' } | { readonly kind: 'adopt'; readonly netId: number } | { readonly kind: 'release' };
 
 const NONE: RideAction = { kind: 'none' };
 const RELEASE: RideAction = { kind: 'release' };
@@ -78,7 +76,9 @@ export function nextRide(
   // A different ask than the one being tracked — the viewer switched subjects — starts again from `asked`, whatever
   // the old ride had reached.
   const tracked: RideState =
-    prev.phase === 'idle' || prev.askedNetId !== asked ? { phase: 'asked', askedNetId: asked, resetsAtAsk: resets } : prev;
+    prev.phase === 'idle' || prev.askedNetId !== asked
+      ? { phase: 'asked', askedNetId: asked, resetsAtAsk: resets }
+      : prev;
 
   // `SELF` is only about THIS ask once a reset has answered it; before that it still describes the anchor being left.
   if (self !== 0 && (tracked.phase === 'held' || resets > tracked.resetsAtAsk)) {

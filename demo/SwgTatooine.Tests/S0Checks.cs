@@ -350,6 +350,12 @@ public sealed class SimulationDeterminismTests
     /// </para>
     /// </remarks>
     [Test]
+    // <b>Quarantined against #1395: this determinism test depends on wall-clock pacing, which is the one thing it must not.</b> It runs PACED at 50 Hz
+    // for 200 ticks because an unpaced run ends at an indeterminate tick, and on a loaded box a paced runtime does not do the same work in the same
+    // window: two runs of seed 12345 retired different players, which shows up as fingerprints of DIFFERENT LENGTH (708 against 703) diverging on the
+    // first player's X. 6/6 in isolation, red twice in a 379-test host. The fix it wants is an unpaced run with an exact tick limit — the affordance
+    // RunFingerprint's own comment says the runtime does not offer — so quarantining is a holding action, not an answer. What it tests is worth testing.
+    [Category("Quarantine")]
     public void SamePlayerSeed_ReproducesTheRun_AndADifferentSeedDoesNot()
     {
         var a = RunPlayerFingerprint(12345);

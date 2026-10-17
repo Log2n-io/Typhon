@@ -283,3 +283,25 @@ variable "auth_refill_ms" {
     error_message = "auth_refill_ms must be between 0 and 600000."
   }
 }
+
+variable "tick_hz" {
+  type        = number
+  default     = 0
+  description = <<-EOT
+    The server's tick rate. 0 leaves the demo's own default of 10 Hz.
+
+    Reaches the box through SSM Parameter Store, like the session table and the auth limits, so a rate sweep is "update the
+    parameter, restart the unit" on ONE instance against ONE world — which is the only way the comparison means anything.
+
+    Set it deliberately when you are measuring. 10 Hz is a 100 ms budget and it flatters every tick number: 5 000 player
+    sessions measured a tick p99 of 19.2 ms there, which is 19 % of the budget and reads as enormous headroom. The same work
+    at 50 Hz has 20 ms, and that p99 is all of it.
+  EOT
+
+  validation {
+    # The server itself accepts 1..100000. Refused here instead of on the box, where a bad value costs a boot: 0 means
+    # "leave the default", which is why the lower bound is not 1.
+    condition     = var.tick_hz == 0 || (var.tick_hz >= 1 && var.tick_hz <= 1000)
+    error_message = "tick_hz must be 0 (the demo default of 10) or between 1 and 1000."
+  }
+}

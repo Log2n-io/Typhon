@@ -576,7 +576,6 @@ describe('altitudeOf', () => {
   });
 });
 
-
 describe('the ground stands between the cursor and what is behind it', () => {
   /**
    * A 200 m wall of ground across the middle of an otherwise flat field.
@@ -658,12 +657,7 @@ describe('the view matrix inverse', () => {
     // false, and the pick selects nothing while reporting success.
     const out = new Float64Array(16);
     const tiny = 1e-110;
-    const nearSingular = [
-      tiny, 0, 0, 0,
-      0, tiny, 0, 0,
-      0, 0, tiny, 0,
-      0, 0, 0, 1,
-    ];
+    const nearSingular = [tiny, 0, 0, 0, 0, tiny, 0, 0, 0, 0, tiny, 0, 0, 0, 0, 1];
     expect(invertMatrix4(nearSingular, out)).toBe(false);
 
     // A well-conditioned matrix of the same shape still inverts.
