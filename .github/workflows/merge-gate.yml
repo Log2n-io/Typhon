@@ -231,7 +231,9 @@ jobs:
       && needs.changes.outputs.skip_ut != 'true'
       && needs.changes.outputs.is_fork != 'true'
       && (vars.GATE_RUNNER != 'selfhosted' || needs.changes.outputs.dispatch_pr != '')
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest (actions/runner-images#14748): a new image's Python decides whether `pip install skypilot`
+    # resolves, so moving it is a change we make, not one we receive. 26.04 (Python 3.14, SkyPilot 0.14.0) proven 2026-10-17.
+    runs-on: ubuntu-26.04
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
     # Same exposure as the self-hosted job below, by a different route: `sky launch` holds a billed VM for as long as this
     # step runs, so an uncapped step meant an uncapped VM. The step budget is larger than the self-hosted one because it
@@ -888,9 +890,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Linux legs pinned, not ubuntu-latest (actions/runner-images#14748): under -Werror a new image's default compiler can
+        # turn the gate red with no code change, so moving it is a change we make. 26.04 (gcc 15.2, clang 21.1) proven 2026-10-17.
         include:
-          - { name: gcc, os: ubuntu-latest, cc: gcc, cxx: g++, sanitize: 'OFF', live: true }
-          - { name: clang-asan, os: ubuntu-latest, cc: clang, cxx: clang++, sanitize: 'ON', live: false }
+          - { name: gcc, os: ubuntu-26.04, cc: gcc, cxx: g++, sanitize: 'OFF', live: true }
+          - { name: clang-asan, os: ubuntu-26.04, cc: clang, cxx: clang++, sanitize: 'ON', live: false }
           - { name: msvc, os: windows-latest, cc: '', cxx: '', sanitize: 'OFF', live: false }
     name: native-sdk (${{ matrix.name }})
     runs-on: ${{ matrix.os }}

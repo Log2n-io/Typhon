@@ -51,7 +51,9 @@ jobs:
     # from, and the only question here is whether the head is THIS repository.
     if: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
     environment: fork-pr-gate
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest (actions/runner-images#14748): a new image's Python decides whether `pip install skypilot`
+    # resolves, so moving it is a change we make, not one we receive. 26.04 (Python 3.14, SkyPilot 0.14.0) proven 2026-10-17.
+    runs-on: ubuntu-26.04
     # ---- COST FAIL-SAFE (#729). `sky launch` holds a billed VM for as long as this step runs. ----
     timeout-minutes: 30
     env:
