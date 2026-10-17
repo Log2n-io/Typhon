@@ -290,6 +290,9 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
                 try
                 {
                     var walker = Environment.CurrentManagedThreadId;
+                    // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                    // reserve has served the others (PS-24).
+                    dbe.MMF.SetSlotReserveTargetForTests(0);
                     dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
                     try
                     {
@@ -329,6 +332,145 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
 
     private static int PageOf(ChunkBasedSegment<PersistentStore> segment, int chunk) =>
         chunk < segment.ChunkCountRootPage ? 0 : 1 + (chunk - segment.ChunkCountRootPage) / segment.ChunkCountPerPage;
+
+    /// <summary>
+    /// #1382: an open, and a first write, that meet a chain another thread holds do not wait with their pin: each waits briefly, unwinds, moves its
+    /// epoch and tries again, until the holder lets go. Waiting with its pin, a writer queued behind a publish that held the chain while it waited on
+    /// back-pressure kept every page anyone touched, and the publish's page never came.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("EP-02")]
+    public void AnOpenWaitingOnAHeldChain_MovesItsEpochWhileItWaits_AndGoesOnOnceItIsReleased()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<MkTrader>();
+        dbe.RegisterComponentFromAccessor<MkWallet>();
+        dbe.InitializeArchetypes();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 1 }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 100 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var root = WalletRootOf(dbe, id);
+        var segment = dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using var guard = EpochGuard.Enter(dbe.EpochManager);
+            var accessor = segment.CreateChunkAccessor();
+            Assert.That(accessor.GetChunk<CompRevStorageHeader>(root).Control.TryEnterExclusiveAccess(), Is.True, "premise: the chain is held");
+            held.Set();
+            release.Wait();
+            accessor.GetChunk<CompRevStorageHeader>(root).Control.ExitExclusiveAccess();
+            accessor.Dispose();
+        });
+        holder.Start();
+        held.Wait();
+
+        var restarts = Interlocked.Read(ref PagedMMF.LockRestartedOpens);
+        var releaser = new Thread(() =>
+        {
+            // Let go once the open has restarted a few times: proof it was waiting, and unwinding, not stuck.
+            var spin = new SpinWait();
+            var until = Environment.TickCount64 + 2_000;
+            while (Interlocked.Read(ref PagedMMF.LockRestartedOpens) - restarts < 3 && Environment.TickCount64 < until)
+            {
+                spin.SpinOnce();
+            }
+
+            release.Set();
+        });
+        releaser.Start();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pinnedAtBegin = dbe.EpochManager.CurrentThreadPinnedEpoch;
+            var entity = tx.OpenMut(id);
+            Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinnedAtBegin), "the open moved its epoch while it waited");
+            var wallet = entity.Read(MkTraderArch.Wallet);
+            wallet.Credits++;
+            entity.Set(MkTraderArch.Wallet, wallet);
+            Assert.That(tx.Commit(), Is.True, "the write, once the chain was released");
+        }
+
+        releaser.Join();
+        holder.Join();
+        Assert.That(Interlocked.Read(ref PagedMMF.LockRestartedOpens) - restarts, Is.GreaterThanOrEqualTo(3), "the open unwound while it waited");
+        using var reader = dbe.CreateQuickTransaction();
+        Assert.That(reader.Open(id).Read(MkTraderArch.Wallet).Credits, Is.EqualTo(101));
+    }
+
+    /// <summary>
+    /// #1382, the first write's half: the open went through, then another thread shares the chain, so the copy-on-write's walk passes and its append
+    /// meets the exclusive lock held off. The write unwinds before its claim (CHAIN-02), moves its epoch and runs again, until the reader lets go; the
+    /// chain it then appends to is whole.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("EP-02")]
+    public void AFirstWriteWhoseAppendMeetsASharedChain_RestartsBeforeItsClaim_AndAppendsOnceItIsFree()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<MkTrader>();
+        dbe.RegisterComponentFromAccessor<MkWallet>();
+        dbe.InitializeArchetypes();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 1 }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 100 }));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var root = WalletRootOf(dbe, id);
+        var segment = dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var tx2 = dbe.CreateQuickTransaction();
+        var entity = tx2.OpenMut(id);
+        var wallet = entity.Read(MkTraderArch.Wallet);
+        var holder = new Thread(() =>
+        {
+            using var guard = EpochGuard.Enter(dbe.EpochManager);
+            var accessor = segment.CreateChunkAccessor();
+            var wc = WaitContext.FromTimeout(TimeSpan.FromSeconds(5));
+            Assert.That(accessor.GetChunk<CompRevStorageHeader>(root).Control.EnterSharedAccess(ref wc), Is.True, "premise: the chain is shared");
+            held.Set();
+            release.Wait();
+            accessor.GetChunk<CompRevStorageHeader>(root).Control.ExitSharedAccess();
+            accessor.Dispose();
+        });
+        holder.Start();
+        held.Wait();
+
+        var restarts = Interlocked.Read(ref PagedMMF.LockRestartedOpens);
+        var releaser = new Thread(() =>
+        {
+            var spin = new SpinWait();
+            var until = Environment.TickCount64 + 2_000;
+            while (Interlocked.Read(ref PagedMMF.LockRestartedOpens) - restarts < 3 && Environment.TickCount64 < until)
+            {
+                spin.SpinOnce();
+            }
+
+            release.Set();
+        });
+        releaser.Start();
+
+        wallet.Credits++;
+        entity.Set(MkTraderArch.Wallet, wallet);
+        Assert.That(tx2.Commit(), Is.True, "the write, once the chain was free");
+        releaser.Join();
+        holder.Join();
+
+        Assert.That(Interlocked.Read(ref PagedMMF.LockRestartedOpens) - restarts, Is.GreaterThanOrEqualTo(3), "the first write unwound while it waited");
+        Assert.That(PagedMMF.RestartableOpenDepth, Is.Zero, "no restart scope left behind");
+        using var reader = dbe.CreateQuickTransaction();
+        Assert.That(reader.Open(id).Read(MkTraderArch.Wallet).Credits, Is.EqualTo(101), "one revision appended, read back");
+    }
 
     private static void AddCredit(DatabaseEngine dbe, EntityId id)
     {
@@ -403,6 +545,9 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
 
                         // The root in the window: only the walk's fetch of the overflow chunk allocates, and every allocation of this thread fails.
                         var walker = Environment.CurrentManagedThreadId;
+                        // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                        // reserve has served the others (PS-24).
+                        dbe.MMF.SetSlotReserveTargetForTests(0);
                         dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
                         try
                         {
@@ -427,6 +572,113 @@ class LockReleaseOnThrowTests : TestBase<LockReleaseOnThrowTests>
 
                 Assert.That(thrown, Is.InstanceOf<PageCacheBackpressureTimeoutException>(), "premise: the walk threw, fetching the overflow chunk");
                 Assert.That(sharedHolds, Is.Zero, "the chain's shared holds, after the walk threw");
+            }
+            finally
+            {
+                TimeoutOptions.Current = saved;
+            }
+        }
+
+        AddCredit(dbe, id);
+    }
+
+    /// <summary>
+    /// A <see cref="RevisionEnumerator"/> takes the chain's lock, then steps to the chain's first live item, which in a circular chain can sit in an overflow
+    /// chunk: the step fetches a page and can throw, a back-pressure timeout, or an entity open's restart after which the transaction goes on (#1230). The
+    /// constructor never returned, so the caller's <c>using</c> disposed nothing, and the shared hold stayed: the open's retry took another over it.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnEnumeratorWhoseFirstStepThrows_ReleasesTheChainLock()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<MkTrader>();
+        dbe.RegisterComponentFromAccessor<MkWallet>();
+        dbe.InitializeArchetypes();
+        var segment = dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 1 }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 100 }));
+            for (var i = 0; i < segment.ChunkCountPerPage; i++)
+            {
+                tx.Spawn<MkTraderArch>(MkTraderArch.Trader.Set(new MkTrader { TraderNo = 2 + i }), MkTraderArch.Wallet.Set(new MkWallet { Credits = 1 }));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var root = WalletRootOf(dbe, id);
+        using (var pin = dbe.CreateReadOnlyTransaction())
+        {
+            for (var i = 0; i < ComponentRevisionManager.CompRevCountInRoot + 1; i++)
+            {
+                AddCredit(dbe, id);
+            }
+
+            // The chain's first live item in its overflow chunk, as once the root's revisions are trimmed: the enumerator's first step fetches that chunk.
+            short firstItem;
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                var writer = segment.CreateChunkAccessor();
+                ref var header = ref writer.GetChunk<CompRevStorageHeader>(root, true);
+                firstItem = header.FirstItemIndex;
+                header.FirstItemIndex = (short)ComponentRevisionManager.CompRevCountInRoot;
+                writer.Dispose();
+            }
+
+            dbe.EpochManager.RefreshScope();
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.MMF.EvictEvictablePagesForTest();
+
+            var saved = TimeoutOptions.Current;
+            var timeouts = saved.Clone();
+            timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(50);
+            timeouts.RevisionChainLockTimeout = TimeSpan.FromMilliseconds(200);
+            TimeoutOptions.Current = timeouts;
+            try
+            {
+                Exception thrown = null;
+                int sharedHolds;
+                using (EpochGuard.Enter(dbe.EpochManager))
+                {
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        ref var header = ref accessor.GetChunk<CompRevStorageHeader>(root);
+                        Assert.That(PageOf(segment, header.NextChunkId), Is.Not.EqualTo(PageOf(segment, root)),
+                            "premise: the overflow chunk is on another page than the root");
+
+                        var walker = Environment.CurrentManagedThreadId;
+                        // The wait itself is the subject: staged with the slot reserve drawn empty, as a waiter holding its pin meets it once the
+                        // reserve has served the others (PS-24).
+                        dbe.MMF.SetSlotReserveTargetForTests(0);
+                        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == walker;
+                        try
+                        {
+                            using var enumerator = new RevisionEnumerator(ref accessor, root, false, true,
+                                WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout));
+                        }
+                        catch (Exception e)
+                        {
+                            thrown = e;
+                        }
+                        finally
+                        {
+                            dbe.MMF.ForceBackpressureForTest = null;
+                        }
+
+                        sharedHolds = accessor.GetChunk<CompRevStorageHeader>(root).Control.SharedUsedCounter;
+                        accessor.GetChunk<CompRevStorageHeader>(root, true).FirstItemIndex = firstItem;
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                    }
+                }
+
+                Assert.That(thrown, Is.InstanceOf<PageCacheBackpressureTimeoutException>(), "premise: the first step threw, fetching the overflow chunk");
+                Assert.That(sharedHolds, Is.Zero, "the chain's shared holds, after the constructor threw");
             }
             finally
             {

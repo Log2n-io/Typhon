@@ -114,6 +114,7 @@ internal readonly ref struct OlcLatch
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
             OlcLatchHeld.Count++;
+            PagedMMF.DisarmIndexRestart();   // #1382: a latched write is no longer restartable
             return true;
         }
         TyphonEvent.EmitConcurrencyOlcLatchWriteLockAttempt((uint)v, false);
@@ -149,6 +150,7 @@ internal readonly ref struct OlcLatch
         if (Interlocked.CompareExchange(ref _version, v | 0b1, v) == v)
         {
             OlcLatchHeld.Count++;
+            PagedMMF.DisarmIndexRestart();   // #1382: a latched write is no longer restartable
             wasObsolete = (v & 0b10) != 0;
             return true;
         }
@@ -205,6 +207,9 @@ internal readonly ref struct OlcLatch
         Volatile.Write(ref _version, _version & ~0b1);  // Release-clear locked bit (bit 0), leaving version counter and obsolete bit unchanged
         OlcLatchHeld.Count--;
     }
+
+    /// <summary>The raw word, lock and obsolete bits included: a hold is one value of it, so a waiter tells one holder from the next (#1237).</summary>
+    public int Word => Volatile.Read(ref _version);
 
     /// <summary>Check if locked (for diagnostics only).</summary>
     public bool IsLocked => (_version & 0b1) != 0;

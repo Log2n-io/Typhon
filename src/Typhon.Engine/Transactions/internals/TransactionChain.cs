@@ -392,7 +392,18 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
 
         if (shouldPool)
         {
-            transaction.Reset();
+            // Reset unplaces a failed commit's spawns, which loads pages and can throw: the transaction is then dropped, and its spawn arena's native
+            // block given back, as below (#1382).
+            try
+            {
+                transaction.Reset();
+            }
+            catch
+            {
+                transaction.DisposeSpawnArena();
+                throw;
+            }
+
             _pool.Enqueue(transaction);
         }
         else

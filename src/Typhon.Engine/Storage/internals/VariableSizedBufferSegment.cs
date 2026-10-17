@@ -268,6 +268,33 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         return count == capacity && firstFreeChunkId == 0 ? 1 : 0;
     }
 
+    /// <summary>
+    /// Brings in, before an index writer latches its leaf, the pages it touches in this buffer under the latch (#1237): the root and the append cursor's
+    /// chunk, and the chunk of the element it removes when <paramref name="elementChunkId"/> names one. A page missed under the latch while the cache was
+    /// under back-pressure kept the leaf's other writers waiting for seconds, each holding its epoch, and those epochs were what kept the miss from being
+    /// served. The ids are read unlatched: hints, bounds-checked, never written and never followed further. Each page is tagged with the caller's epoch,
+    /// so it stays resident until that epoch moves.
+    /// </summary>
+    internal void Prefetch(int bufferId, int elementChunkId, ref ChunkAccessor<TStore> accessor)
+    {
+        var capacity = accessor.Segment.ChunkCapacity;
+        if (elementChunkId > 0 && elementChunkId < capacity)
+        {
+            accessor.GetChunkAddress(elementChunkId);
+        }
+
+        if (bufferId <= 0 || bufferId >= capacity)
+        {
+            return;
+        }
+
+        var appendChunkId = accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId).FirstStoredChunkId;
+        if (appendChunkId > 0 && appendChunkId < capacity && appendChunkId != bufferId)
+        {
+            accessor.GetChunkAddress(appendChunkId);
+        }
+    }
+
     /// <summary>Total number of elements currently stored in <paramref name="bufferId"/>; <c>0</c> for the null buffer.</summary>
     internal int GetElementCount(int bufferId, ref ChunkAccessor<TStore> accessor)
     {

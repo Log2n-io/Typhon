@@ -109,6 +109,29 @@ public enum GaugeId : ushort
     /// <summary>Total file size in bytes for the primary database's <see cref="System.IO.MemoryMappedFiles.MemoryMappedFile"/>. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>
     PageCacheFileSizeBytes = 0x0208,
 
+    /// <summary>The storage health state, 0 Healthy, 1 Pressured, 2 Overloaded, 3 Starved (#1382). Value kind:
+    /// <see cref="GaugeValueKind.U32Count"/>.</summary>
+    PageCacheHealthState = 0x0209,
+
+    /// <summary>
+    /// Back-pressure rounds since the engine opened, cumulative: the viewer derives the rate. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.
+    /// </summary>
+    PageCacheBackpressureRoundsTotal = 0x020A,
+
+    /// <summary>
+    /// Waits that went on past their back-pressure timeout because pages were being served, cumulative (#1382). Value kind:
+    /// <see cref="GaugeValueKind.U64Bytes"/>.
+    /// </summary>
+    PageCacheOverloadExtensionsTotal = 0x020B,
+
+    /// <summary>
+    /// How many units of work the storage gate lets run at once, 0 when it is off (#1382, S4). Value kind: <see cref="GaugeValueKind.U32Count"/>.
+    /// </summary>
+    PageCacheAdmissionLimit = 0x020C,
+
+    /// <summary>Units of work that waited at the storage gate, cumulative (#1382). Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>
+    PageCacheAdmissionWaitsTotal = 0x020D,
+
     // ── TransientStore ─────────────────────────────────────────────────── 0x0210
 
     /// <summary>Bytes currently in use by the transient store. Value kind: <see cref="GaugeValueKind.U64Bytes"/>.</summary>

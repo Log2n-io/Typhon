@@ -578,6 +578,7 @@ public class MarketHardeningTests
             Log($"free quarantine (CK-17){(DatabaseEngine.DisableFreeQuarantineForTest ? " OFF" : "")}: {dbe.MMF.QuarantinedBytes / 1048576.0:F1} MiB held now, " +
                 $"peak {dbe.MMF.QuarantinePeakBytes / 1048576.0:F1} MiB of a {dbe.MMF.FreeQuarantineBudgetBytes / 1048576.0:F0} MiB budget, " +
                 $"{dbe.MMF.QuarantineCheckpointRequests:N0} checkpoint(s) asked, {dbe.CheckpointManager.TotalCheckpoints:N0} checkpoint(s) in all");
+            Log($"census after the storm: {dbe.MMF.DescribeEvictionBlockers()}");
             AssertNoErrors("during the storm");
             runAudits = auditIds.Count;
 
@@ -718,8 +719,14 @@ public class MarketHardeningTests
         }
     }
 
-    private void AssertNoErrors(string phase) =>
+    private void AssertNoErrors(string phase)
+    {
+        Log($"{phase}: back-pressure rounds (process-wide) {Interlocked.Read(ref PagedMMF.TotalBackpressureRounds):N0}, under a B+Tree latch "
+            + $"{Interlocked.Read(ref PagedMMF.LatchedBackpressureRounds):N0}, in a publish {Interlocked.Read(ref PagedMMF.PublishBackpressureRounds):N0}; "
+            + $"publish index writes restarted {Interlocked.Read(ref PagedMMF.RestartedIndexWrites):N0}, publish steps refreshed "
+            + $"{Interlocked.Read(ref PagedMMF.PublishStepRefreshes):N0}");
         Assert.That(_errors, Is.Empty, $"{phase}: {_errors.Count} problem(s)\n  " + string.Join("\n  ", _errors));
+    }
 
     #region Sampling
 
@@ -736,7 +743,8 @@ public class MarketHardeningTests
     private sealed class Sampler : IDisposable
     {
         private const string Header =
-            "t_s,phase,slots_used,debt,acw,slot_ref,epoch_held,unevictable,pages_read,pages_written,bp_rounds,bp_peak_debt,bp_peak_epoch_held," +
+            "t_s,phase,slots_used,debt,acw,slot_ref,epoch_held,marked,epoch_only,unevictable,pages_read,pages_written,bp_rounds,bp_peak_debt," +
+            "bp_peak_epoch_held," +
             "bp_longest_wait_ms,ckpt_cycles,ckpt_pressure_cycles,ckpt_pages_written,ops,private_mib,working_set_mib,managed_mib";
 
         private readonly StreamWriter _out;
@@ -825,17 +833,18 @@ public class MarketHardeningTests
                 if (dbe != null)
                 {
                     var mmf = dbe.MMF;
-                    var (debt, acw, slotRef, epochHeld, unevictable, total) = mmf.CountUnevictablePages();
+                    var (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total) = mmf.CountUnevictablePages();
                     var m = mmf.GetMetrics();
                     var ck = dbe.CheckpointManager;
                     var waitMs = Stopwatch.GetElapsedTime(0, Volatile.Read(ref mmf.PeakBackpressureWaitTicks)).TotalMilliseconds;
-                    row.Append($",{total},{debt},{acw},{slotRef},{epochHeld},{unevictable},{m.ReadFromDiskCount},{m.PageWrittenToDiskCount}");
+                    row.Append($",{total},{debt},{acw},{slotRef},{epochHeld},{marked},{epochOnly},{unevictable}");
+                    row.Append($",{m.ReadFromDiskCount},{m.PageWrittenToDiskCount}");
                     row.Append($",{m.BackpressureWaitCount},{mmf.PeakBackpressureDebt},{mmf.PeakBackpressureEpochHeld},{waitMs:F0}");
                     row.Append($",{ck?.TotalCheckpoints},{ck?.TotalPressureCheckpoints},{ck?.TotalPagesWritten},{_operations?.Invoke()}");
                 }
                 else
                 {
-                    row.Append(",,,,,,,,,,,,,,,,");
+                    row.Append(",,,,,,,,,,,,,,,,,,");
                 }
             }
 

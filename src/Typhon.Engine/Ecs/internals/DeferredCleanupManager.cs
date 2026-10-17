@@ -94,6 +94,9 @@ internal class DeferredCleanupManager
     /// compaction.</summary>
     internal Action<int> EntityCleanupProbeForTest { get; set; }
 
+    /// <summary>Test seam: called with the entry's index as its pre-lock ownership check starts (EP-02).</summary>
+    internal Action<int> ChainCheckProbeForTest { get; set; }
+
     public DeferredCleanupManager(DeferredCleanupOptions options, ILogger log = null)
     {
         _options = options;
@@ -422,18 +425,31 @@ internal class DeferredCleanupManager
             _refreshedAt = Stopwatch.GetTimestamp();
         }
 
-        /// <summary>Between two entries: refreshes the thread's epoch if the interval has passed.</summary>
-        internal void BetweenEntries()
-        {
-            if (_epochManager == null || EntityAccessor.LiveIndexCursors != 0
-                || Stopwatch.GetElapsedTime(_refreshedAt) < EntityAccessor.ScanEpochRefreshInterval)
-            {
-                return;
-            }
+        /// <summary>Whether the interval has passed, with no live index cursor: the drain may move its epoch here (<see cref="Refresh"/>).</summary>
+        internal bool Due => _epochManager != null && EntityAccessor.LiveIndexCursors == 0
+                             && Stopwatch.GetElapsedTime(_refreshedAt) >= EntityAccessor.ScanEpochRefreshInterval;
 
+        /// <summary>
+        /// Between two entries, once due: gives back <paramref name="marks"/>' dirty marks and moves the thread's epoch. The drain's accessors must have
+        /// committed their changes (a disposed accessor has). Kept, the marks held every page the drain had touched unevictable until it ended, and the
+        /// drain is unbounded: one held 3,434 pages of a 64 MiB cache while it waited on back-pressure itself (#1382). Released, a page is held by its
+        /// writeback debt until the checkpoint writes it (PS-10), as at a transaction's epoch refresh.
+        /// </summary>
+        internal void Refresh(ChangeSet marks)
+        {
+            marks?.ReleaseDirtyMarks();
             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
             _refreshedAt = Stopwatch.GetTimestamp();
             Interlocked.Increment(ref DrainEpochRefreshes);
+        }
+
+        /// <summary>Between two entries whose accessors are disposed: <see cref="Refresh"/> if due.</summary>
+        internal void BetweenEntries(ChangeSet marks = null)
+        {
+            if (Due)
+            {
+                Refresh(marks);
+            }
         }
     }
 
@@ -444,11 +460,37 @@ internal class DeferredCleanupManager
     {
         if (entry.Revision)
         {
-            entry.Table.CompRevTableSegment.FreeChunk(entry.ChunkId);
+            FreeChunkWaitingRefreshed(entry.Table.CompRevTableSegment, entry.ChunkId);
         }
-        else
+        else if (entry.ChunkId != 0)
         {
-            FreeContentChunk(entry.Table, entry.ChunkId);
+            if (entry.Table.HasCollections)
+            {
+                var accessor = entry.Table.ComponentSegment.CreateChunkAccessor();
+                ReleaseCollectionBuffers(entry.Table, accessor.GetChunkAsReadOnlySpan(entry.ChunkId));
+                accessor.Dispose();
+            }
+
+            FreeChunkWaitingRefreshed(entry.Table.ComponentSegment, entry.ChunkId);
+        }
+    }
+
+    /// <summary>
+    /// A drain's chunk free, whose back-pressure waits move this thread's epoch (EP-02, #1382). The free holds no page address past its bitmap page's
+    /// fetch, and between two entries the drain holds only slot-reference pins (<see cref="EpochYield"/>), so a refresh in that fetch releases nothing
+    /// anyone still reads; the page fetched is tagged with the moved pin (PS-03). Waiting with its pin instead, the transaction draining the queue at
+    /// its dispose was the cache's oldest pin in two of every three of a 32 MiB market's waits.
+    /// </summary>
+    private static void FreeChunkWaitingRefreshed(ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    {
+        PagedMMF.RefreshableWaitDepth++;
+        try
+        {
+            segment.FreeChunk(chunkId);
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth--;
         }
     }
 
@@ -579,7 +621,14 @@ internal class DeferredCleanupManager
         {
             for (var i = 0; i < entries.Length; i++)
             {
-                epochYield.BetweenEntries();
+                // The batch's accessors are shared: their changes committed first, so the marks can go with the epoch (#1382).
+                if (epochYield.Due)
+                {
+                    compRevTableAccessor.CommitChanges();
+                    compContentAccessor.CommitChanges();
+                    epochYield.Refresh(changeSet);
+                }
+
                 ref var entry = ref entries[i];
                 Debug.Assert(ReferenceEquals(entry.Table, table));
 
@@ -587,8 +636,22 @@ internal class DeferredCleanupManager
 
                 // Still this entry's chain? A chain an entity's cleanup released and the allocator handed out again names another owner, or is not allocated at
                 // all: compacting it would rearrange someone else's revisions (REAP-02).
-                if (!table.CompRevTableSegment.IsChunkLive(firstChunkId)
-                    || compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK != entry.PrimaryKey)
+                // Up to its chain lock an entry holds what it holds between two entries, its accessors' slot-reference pins: its page waits move the
+                // epoch (EP-02, #1382), as the refresh between entries does. Waiting with its pin, the drain was the oldest pin of a 32 MiB market.
+                ChainCheckProbeForTest?.Invoke(i);
+                PagedMMF.RefreshableWaitDepth++;
+                bool ours;
+                try
+                {
+                    ours = table.CompRevTableSegment.IsChunkLive(firstChunkId)
+                           && compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId).EntityPK == entry.PrimaryKey;
+                }
+                finally
+                {
+                    PagedMMF.RefreshableWaitDepth--;
+                }
+
+                if (!ours)
                 {
                     Interlocked.Increment(ref ForeignChainsSkipped);
                     continue;

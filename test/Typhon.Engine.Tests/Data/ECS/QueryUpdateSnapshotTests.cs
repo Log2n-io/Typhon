@@ -462,5 +462,77 @@ class QueryUpdateSnapshotTests : TestBase<QueryUpdateSnapshotTests>
                 QueryPathProbe.Reset();
             }
         }
+
+        // The ordered merge: its first read and, the count unchanged, its second walk nothing for the newer reader.
+        QueryPathProbe.Reset();
+        try
+        {
+            var merged = 0;
+            QueryPathProbe.OrderedAfterUpdateReadHook = () => merged++;
+            EcsQuery<StatsArch> Ordered(Transaction tx) =>
+                tx.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == 5).OrderByField<StatsRanked, int>(x => x.Tier);
+            Assert.That(Ordered(newer).ExecuteOrdered(), Is.EqualTo(new[] { ids[1] }), "newer, ordered");
+            Assert.That(merged, Is.EqualTo(1), "premise: the merge answered");
+            Assert.That(QueryPathProbe.UpdateWatermarkWalks, Is.Zero, "a reader newer than every update walks nothing in the merge");
+            Assert.That(Ordered(older).ExecuteOrdered(), Is.EquivalentTo(new[] { ids[0], ids[1] }), "older, ordered");
+            Assert.That(QueryPathProbe.UpdateWatermarkWalks, Is.GreaterThan(0), "premise: the older reader's merge walked the watermarks");
+        }
+        finally
+        {
+            QueryPathProbe.Reset();
+        }
+    }
+
+    /// <summary>
+    /// The snapshot column grows when a later query needs a wider one: a transaction reads a narrow component at its snapshot first, then one whose
+    /// cluster column outgrows the first allocation. Both answer at the snapshot. The floor is lowered: no spawnable component outgrows the default.
+    /// </summary>
+    [Test]
+    [VerifiesRule("VIS-12")]
+    public void TheSnapshotColumn_GrowsForAWiderComponent_AndBothAnswerAtTheSnapshot()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<StatsRanked>();
+        dbe.RegisterComponentFromAccessor<StatsTag>();
+        dbe.RegisterComponentFromAccessor<QsFat>();
+        dbe.InitializeArchetypes();
+        var narrow = Spawn(dbe, 5, 5, 5, 5);
+        var wide = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 64; i++)
+            {
+                wide.Add(tx.Spawn<QsFatArch>(QsFatArch.Fat.Set(new QsFat { Key = i })));   // a unique index
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var reader = dbe.CreateQuickTransaction();
+        Update(dbe, narrow[0], 7, 70);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(wide[0]).Set(QsFatArch.Fat, new QsFat { Key = -1 });
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        QueryPathProbe.Reset();
+        QueryPathProbe.Forced = ClusterScanPath.FullScan;   // the scan path fills the column for every cluster an update touched
+        var floor = Transaction.SnapshotColumnMinBytes;
+        Transaction.SnapshotColumnMinBytes = 64;
+        try
+        {
+            Assert.That(reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == 5).Execute(), Is.EquivalentTo(narrow), "the narrow component");
+            var first = reader.SnapshotColumnBytes;
+            Assert.That(first, Is.GreaterThan(0), "premise: the narrow query read a cluster at the snapshot");
+            Assert.That(reader.Query<QsFatArch>().WhereField<QsFat>(x => x.Key >= 0).Execute(), Is.EquivalentTo(wide), "the wide component");
+            Assert.That(reader.SnapshotColumnBytes, Is.GreaterThan(first), "premise: the wide component's column outgrew the first");
+            Assert.That(reader.Query<StatsArch>().WhereField<StatsRanked>(x => x.Tier == 5).Execute(), Is.EquivalentTo(narrow), "the narrow one again, grown");
+        }
+        finally
+        {
+            Transaction.SnapshotColumnMinBytes = floor;
+            QueryPathProbe.Reset();
+        }
     }
 }

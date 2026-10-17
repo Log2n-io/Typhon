@@ -766,6 +766,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
 
     private int AllocateChunkInternal(bool clearContent, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
     {
+        Debug.Assert(!PagedMMF.IndexRestartArmed, "a restartable B+Tree write allocates a chunk: a restart would leak it (#1382, EP-02)");
         AllocateFaultForTest?.Invoke(this);
         while (true)
         {
@@ -1132,6 +1133,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// </summary>
     public void FreeChunk(int chunkId)
     {
+        Debug.Assert(!PagedMMF.IndexRestartArmed, "a restartable B+Tree write frees a chunk: a restart would replay the free (#1382, EP-02)");
         if (_freeQuarantine != null && chunkId != 0 && _quarantineOwner.FreeQuarantineEnabled)
         {
             // A chunk already free, or already held, is a second free: counted, as the bitmap counts it below.
@@ -1634,6 +1636,29 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         cache.Epoch = newEpoch;
         var sibCache = WarmSiblingAccessorCache.Instance;
         sibCache.Epoch = newEpoch;
+    }
+
+    /// <summary>
+    /// Test seam: disposes this thread's two warm accessors. Between operations they keep the pages they hold slot-referenced, which no eviction takes: a
+    /// test that stages a miss on pages this thread's last B+Tree operations touched releases them first.
+    /// </summary>
+    internal static void ReleaseWarmAccessorsForTests()
+    {
+        var cache = WarmAccessorCache.Instance;
+        Debug.Assert(!cache.IsRented && !cache.SuppressCommitChanges, "released while rented, or in batch mode");
+        if (cache.Segment != null)
+        {
+            cache.Accessor.Dispose();
+            cache.Segment = null;
+        }
+
+        var sibCache = WarmSiblingAccessorCache.Instance;
+        Debug.Assert(!sibCache.IsRented && !sibCache.SuppressCommitChanges, "released while rented, or in batch mode");
+        if (sibCache.Segment != null)
+        {
+            sibCache.Accessor.Dispose();
+            sibCache.Segment = null;
+        }
     }
 
     /// <summary>

@@ -24,6 +24,31 @@ public partial class PagedMMF
 
     [LoggerMessage(
         Level = LogLevel.Warning,
+        Message = "Page cache overloaded: an allocation still waiting after {WaitedMs}ms (dirty={DirtyCount} epoch={EpochCount}) waits on while pages are "
+                + "served — slow, not stuck")]
+    private static partial void LogOverloadWaitExtended(ILogger logger, int dirtyCount, int epochCount, double waitedMs);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Storage health {From} -> {To}: the page cache cannot keep up with the work (back-pressure for {PressureMs}ms, last page served "
+                + "{SinceServedMs}ms ago, writeback debt {DebtPercent}% of the cache). The engine slows the work down and it goes through; staying "
+                + "here means the cache or the disk is too small for the load")]
+    private static partial void LogStorageHealthDegraded(ILogger logger, StorageHealthState from, StorageHealthState to, double pressureMs,
+        double sinceServedMs, int debtPercent);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Storage admission ({State}): at most {Limit} units of work at once, was {Previous} (0 = no limit), {Running} running — new work waits "
+                + "at its start, holding nothing, so the work already running gets the cache")]
+    private static partial void LogAdmissionLimitChanged(ILogger logger, StorageHealthState state, int previous, int limit, int running);
+
+    [LoggerMessage(
+        Level = LogLevel.Information,
+        Message = "Storage health {From} -> {To} after {DurationMs}ms")]
+    private static partial void LogStorageHealthChanged(ILogger logger, StorageHealthState from, StorageHealthState to, double durationMs);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
         Message = "CopyPageWithSeqlock: page {MemPageIndex} has odd ModificationCounter={Counter} but is not Exclusive-latched — "
                 + "stale seqlock counter, skipping without wait.")]
     private static partial void LogStaleSeqlockCounterSkip(ILogger logger, int memPageIndex, int counter);

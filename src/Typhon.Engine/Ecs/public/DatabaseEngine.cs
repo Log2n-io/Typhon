@@ -1526,6 +1526,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public ManagedPagedMMF MMF { get; }
 
     /// <summary>
+    /// How the page cache keeps up with the work (#1382): <see cref="StorageHealthState.Healthy"/> while allocations find a slot at once, then
+    /// Pressured, Overloaded and Starved as back-pressure lasts and pages stop being served. The engine slows the work rather than failing it; this is
+    /// where an application sees that the cache or the disk it gave the engine is too small for its load — also in the log on every change, the
+    /// profiler's gauges and the resource tree.
+    /// </summary>
+    public StorageHealthState StorageHealth => MMF?.StorageHealth ?? StorageHealthState.Healthy;
+
+    /// <summary>
+    /// Raised on every change of <see cref="StorageHealth"/>, on the engine thread that saw it — an allocation's, or the checkpoint's. A handler must
+    /// return quickly and must not block or call back into the engine; one that throws is ignored.
+    /// </summary>
+    public event EventHandler<StorageHealthChangedEventArgs> StorageHealthChanged;
+
+    /// <summary>
     /// <see langword="true"/> when this open <b>created</b> the database bundle (it did not exist before); <see langword="false"/>
     /// when it reopened an existing one. Use it to gate one-time bootstrap work (initial data, first-run migrations). Note the
     /// engine already offers a crash-safe, declarative alternative via <see cref="TyphonOptions.Seed"/>; prefer that for
@@ -1644,7 +1658,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             for (; processed < toProcess.Count; processed++)
             {
-                epochYield.BetweenEntries();
+                epochYield.BetweenEntries(changeSet);   // each entry disposes its accessors: its marks can go with the epoch (#1382)
                 var freesBefore = frees?.Count ?? 0;
                 try
                 {
@@ -1895,17 +1909,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var effectiveTimeout = timeout == TimeSpan.Zero ? TimeoutOptions.Current.DefaultUowTimeout : timeout;
         var wc = WaitContext.FromTimeout(effectiveTimeout);
 
-        // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
-        // the registry page mutation in it (avoiding a synchronous SaveChanges).
-        var changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
-        LogUowLifecycle("ChangeSet created");
+        // S4 (#1382): while the page cache cannot keep up, new work waits here, before it holds anything (PS-23); bounded by its own deadline.
+        MMF.Admit(ref wc);
+        ChangeSet changeSet = null;
+        try
+        {
+            // For Deferred/GroupCommit: create the ChangeSet early so AllocateUowId can track
+            // the registry page mutation in it (avoiding a synchronous SaveChanges).
+            changeSet = durabilityMode != DurabilityMode.Immediate ? MMF.CreateChangeSet(drainedByCheckpoint: true) : null;
+            LogUowLifecycle("ChangeSet created");
 
-        // Back-pressure: if registry is full, wait for a slot to be freed.
-        // The admission check is a fast-path optimization — AllocateUowId's CAS provides the real atomicity (TOCTOU by design).
-        var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
-        LogUowIdAllocated(uowId);
+            // Back-pressure: if registry is full, wait for a slot to be freed.
+            // The admission check is a fast-path optimization — AllocateUowId's CAS provides the real atomicity (TOCTOU by design).
+            var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
+            LogUowIdAllocated(uowId);
 
-        return new UnitOfWork(this, durabilityMode, uowId, effectiveTimeout, changeSet);
+            return new UnitOfWork(this, durabilityMode, uowId, effectiveTimeout, changeSet) { Admitted = true };
+        }
+        catch
+        {
+            changeSet?.ReleaseDirtyMarks();
+            MMF.ReleaseAdmission(Environment.CurrentManagedThreadId);
+            throw;
+        }
     }
 
     /// <summary>Records that a transaction was created (for observability counters).</summary>
@@ -1927,6 +1953,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     {
         // Engine initialization
         MMF = mmf;
+        if (mmf != null)
+        {
+            mmf.StorageHealthChanged = (from, to) => StorageHealthChanged?.Invoke(this, new StorageHealthChangedEventArgs(from, to));
+        }
         EpochManager = epochManager;
         Watchdog = watchdog;
         _logger = log;
@@ -3655,6 +3685,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         using var guard = EpochGuard.Enter(EpochManager);
         var cs = MMF.CreateChangeSet();
+        // A throw before the save (a back-pressure round, or the checkpoint's deferral of this hook: CK-14, #1382) must not keep the marks: held, they
+        // left the archetype table's pages unevictable for good. The pages updated so far keep their debt and their records; a later cycle writes them.
+        var saved = false;
+        try
+        {
+            if (PersistArchetypeStateInto(archetypesTable, cs))
+            {
+                cs.SaveChanges();
+            }
+
+            saved = true;
+        }
+        finally
+        {
+            if (!saved)
+            {
+                cs.ReleaseDirtyMarks();
+            }
+        }
+    }
+
+    /// <summary>The archetypes whose persisted state is stale, updated through <paramref name="cs"/>; true when any was.</summary>
+    private bool PersistArchetypeStateInto(ComponentTable archetypesTable, ChangeSet cs)
+    {
         var anyUpdated = false;
 
         foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -3716,10 +3770,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             anyUpdated = true;
         }
 
-        if (anyUpdated)
-        {
-            cs.SaveChanges();
-        }
+        return anyUpdated;
     }
 
     /// <summary>

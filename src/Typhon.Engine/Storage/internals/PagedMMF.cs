@@ -184,6 +184,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             switch (pi.PageState)
             {
                 case PageState.Free:
+                case PageState.Reserved:
                     free++;
                     break;
                 case PageState.Allocating:
@@ -353,6 +354,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             switch (pi.PageState)
             {
                 case PageState.Free:
+                case PageState.Reserved:
                     c.Free++;
                     break;
                 case PageState.Idle:
@@ -394,6 +396,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         Allocating   = 1,   // The page is being allocating by a call to AllocateMemoryPage.
         Idle         = 2,   // The page is allocated but idle. Protected from eviction by epoch tag and/or DirtyCounter > 0.
         Exclusive    = 4,   // The page is allocated and accessed exclusively by a given thread via PageExclusiveLatch.
+        Reserved     = 8,   // Free, but kept for an allocation that would wait with its epoch pinned (PS-24): no sweep takes it.
     }
 
     protected readonly PagedMMFOptions Options;
@@ -691,9 +694,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         _memPagesAddr = MemPages.DataAsPointer;
+        InitSlotReserve();
         if (PoisonCacheForProcess)
         {
             NativeMemory.Fill(_memPagesAddr, (nuint)cacheSize, 0xA5);
+        }
+
+        if (EvictionGuardDepthForProcess > 0)
+        {
+            _evictionGuard = new EvictionGuard(_memPagesAddr, pageCount, EvictionGuardDepthForProcess);
         }
 
         _windows = PageCacheWindow.Build(_memPagesAddr, pageCount);
@@ -1140,6 +1149,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // The quarantine's release worker frees chunks in this cache: stopped before it goes (a close ends it earlier, EndFreeQuarantine).
             StopReleaseWorker();
             _releaseSignal.Dispose();
+            var guard = _evictionGuard;
+            _evictionGuard = null;
+            guard?.ReleaseAll();   // the quarantined slots made accessible before the block is freed
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);
@@ -1175,6 +1187,24 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     }
     
     /// <summary>
+    /// The epoch a fetched page is tagged with: <paramref name="currentEpoch"/>, or the calling thread's pin when that is later. Callers read the epoch
+    /// before the fetch, and a back-pressure wait inside the fetch may move the thread's pin past it (a refreshable wait, #1230): tagged with the value
+    /// read before, the page would be older than every pin and evictable while the caller uses it (PS-01) — the release worker's bitmap write did (#1382).
+    /// Only a refreshable wait moves a pin inside a fetch, so outside one the hit path pays a single thread-static read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private long TagEpoch(long currentEpoch)
+    {
+        if (t_refreshableWaitDepth == 0)
+        {
+            return currentEpoch;
+        }
+
+        var pinned = EpochManager?.CurrentThreadPinnedEpoch ?? 0;
+        return pinned > currentEpoch ? pinned : currentEpoch;
+    }
+
+    /// <summary>
     /// Request epoch-tagged shared access to a page. The page is protected from eviction
     /// by its AccessEpoch tag rather than by ref-counting. Caller must be inside an
     /// <see cref="EpochGuard"/> scope.
@@ -1198,15 +1228,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
 
             // Tag the page with the current epoch (atomic max — never go backward)
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             // Race detection: the page may have been evicted, or be being reclaimed, between FetchPageToMemory and the epoch tag (PS-15). Also takes
             // a freshly prepared slot out of Allocating.
@@ -1251,15 +1282,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 continue;
             }
 
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             if (!ValidateTaggedSlot(pi, filePageIndex))
             {
@@ -1384,15 +1416,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 continue;
             }
 
+            var tag = TagEpoch(currentEpoch);
             long existing;
             do
             {
                 existing = Volatile.Read(ref pi.AccessEpoch);   // acquire: ordered before ValidateTaggedSlot's reads (PS-15)
-                if (currentEpoch <= existing)
+                if (tag <= existing)
                 {
                     break;
                 }
-            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, currentEpoch, existing) != existing);
+            } while (Interlocked.CompareExchange(ref pi.AccessEpoch, tag, existing) != existing);
 
             if (!ValidateTaggedSlot(pi, filePageIndex))
             {
@@ -1940,8 +1973,186 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     [ThreadStatic] private static int t_refreshableWaitDepth;
 
+    /// <summary>Back-pressure rounds waited while holding a B+Tree write latch (#1382): each one a wait no epoch refresh can lift. Diagnostic.</summary>
+    internal static long LatchedBackpressureRounds;
+
+    /// <summary>Back-pressure rounds waited in a commit's publish, past its append (AP-03). Diagnostic.</summary>
+    internal static long PublishBackpressureRounds;
+
+    /// <summary>Back-pressure rounds waited, all threads and caches. Diagnostic.</summary>
+    internal static long TotalBackpressureRounds;
+
+    private static void CountBackpressureRound()
+    {
+        Interlocked.Increment(ref TotalBackpressureRounds);
+        if (OlcLatchHeld.Count > 0)
+        {
+            Interlocked.Increment(ref LatchedBackpressureRounds);
+        }
+
+        if (t_publishSince != 0)
+        {
+            Interlocked.Increment(ref PublishBackpressureRounds);
+        }
+    }
+
     /// <summary>How many back-pressure waits moved their thread's epoch (<see cref="RefreshableWaitDepth"/>).</summary>
     internal static long RefreshedWaits;
+
+    /// <summary>
+    /// Non-zero on a thread inside an entity open (<c>Transaction.ResolveEntity</c>), which keeps nothing it read until it returns, so it can be unwound to
+    /// its start and run again (#1230). A back-pressure round there throws <see cref="BackpressureOpenRestart"/> instead of waiting: the open moves its
+    /// epoch at its start, where a refresh is already safe (#1199), waits there for a page, and runs again. Waiting with its pin, a point reader protected
+    /// every page the other threads tagged meanwhile: at 16 readers over 32 MiB the whole cache, nothing dirty, its pin 1,177 epochs behind.
+    /// </summary>
+    internal static int RestartableOpenDepth
+    {
+        get => t_restartableOpenDepth;
+        set => t_restartableOpenDepth = value;
+    }
+
+    [ThreadStatic] private static int t_restartableOpenDepth;
+    /// <summary>
+    /// When the open now restarting met back-pressure first, a <see cref="Stopwatch"/> timestamp; 0 for none. Its restarts share one overload budget
+    /// from there (<see cref="OverloadBudget"/>), which the open's end resets.
+    /// </summary>
+    internal static long OpenRestartSince => t_openBudget.Since;
+
+    [ThreadStatic] private static OverloadBudget t_openBudget;
+
+    [ThreadStatic] private static OverloadBudget t_lockBudget;
+
+    /// <summary>Resets the restart budgets, page and lock alike, when the outermost restartable operation ends.</summary>
+    internal static void ResetRestartBudgets()
+    {
+        t_openBudget = default;
+        t_lockBudget = default;
+    }
+
+    /// <summary>
+    /// Non-zero on the checkpoint thread while its cycle runs the durable-metadata hook (CK-14, #1382). A back-pressure round there throws
+    /// <see cref="BackpressureCheckpointDeferral"/> instead of waiting: only the checkpoint turns owed slots into free ones, so a hook waiting for a
+    /// slot waited for its own cycle, for the whole timeout, and every writer behind it timed out too. The cycle then only writes, and the next runs the
+    /// hook again (<c>CheckpointManager.RunHookOrDefer</c>).
+    /// </summary>
+    internal static int NoBackpressureWaitDepth
+    {
+        get => t_noBackpressureWaitDepth;
+        set => t_noBackpressureWaitDepth = value;
+    }
+
+    [ThreadStatic] private static int t_noBackpressureWaitDepth;
+
+    /// <summary>How many back-pressure rounds unwound their entity open to move its epoch (<see cref="RestartableOpenDepth"/>).</summary>
+    internal static long RestartedOpens;
+
+    /// <summary>
+    /// True on a thread inside a B+Tree write a commit's publish makes (AP-03), from the write's start until its first latch, chunk reservation or node
+    /// allocation (#1382): a write that has taken none of them has changed nothing, so it can be unwound to its start and run again. A back-pressure
+    /// round there throws <see cref="BackpressureIndexRestart"/> instead of waiting; the write's entry moves the thread's epoch, waits for a page and
+    /// runs the write again (<see cref="AwaitPageAfterIndexRestart"/>). Waiting with its pin, a publish kept every page the other threads tagged
+    /// meanwhile: at 32 MiB the publishes' were the oldest pins of the epoch-held cache, 4,599 of the 4,649 waits 2,000 epochs or more behind.
+    /// </summary>
+    [ThreadStatic] private static bool t_indexRestartArmed;
+
+    /// <summary>True on a thread inside a restartable B+Tree write (<see cref="BeginRestartableIndexWrite"/>), whether or not it is still armed.</summary>
+    [ThreadStatic] private static bool t_indexWriteOpen;
+
+    /// <summary>
+    /// The start of a B+Tree write: arms its restart (<see cref="t_indexRestartArmed"/>) when the thread publishes a commit and is not already inside
+    /// one. Returns whether this call armed it, which the write passes to <see cref="EndRestartableIndexWrite"/> and which alone lets it catch the
+    /// restart: a nested write's frames sit below the outer one's, which may keep an address the epoch alone protects.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool BeginRestartableIndexWrite()
+    {
+        if (t_publishSince == 0 || t_indexWriteOpen)
+        {
+            return false;
+        }
+
+        t_indexWriteOpen = true;
+        t_indexRestartArmed = true;
+        return true;
+    }
+
+    /// <summary>The end of a write <see cref="BeginRestartableIndexWrite"/> armed, however it ends.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void EndRestartableIndexWrite(bool began)
+    {
+        if (began)
+        {
+            t_indexWriteOpen = false;
+            t_indexRestartArmed = false;
+        }
+    }
+
+    /// <summary>
+    /// The write took a latch, a chunk reservation or a node: from here a throw would leave its change half made, so its back-pressure rounds wait
+    /// with its pin as before. One store, unconditional: it sits on every latch acquisition.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void DisarmIndexRestart() => t_indexRestartArmed = false;
+
+    /// <summary>Whether the calling thread's B+Tree write is still restartable: a chunk allocation or free asserts it is not (Debug).</summary>
+    internal static bool IndexRestartArmed => t_indexRestartArmed;
+
+    /// <summary>How many back-pressure rounds unwound a publish's B+Tree write to move its epoch (<see cref="BeginRestartableIndexWrite"/>).</summary>
+    internal static long RestartedIndexWrites;
+
+    /// <summary>How many times a publish moved its epoch between its entries while the cache was under pressure (#1382).</summary>
+    internal static long PublishStepRefreshes;
+
+    /// <summary>
+    /// A publish's B+Tree write between its restarts (<see cref="BeginRestartableIndexWrite"/>): moves the thread's epoch, with its warm accessors', at
+    /// the write's entry, where its frames keep nothing it read, then waits for a page as an open's restart does.
+    /// </summary>
+    internal void AwaitPageAfterIndexRestart()
+    {
+        ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(EpochManager.RefreshScope());
+        AwaitPageAfterOpenRestart();
+    }
+
+    /// <summary>How many contended chain locks unwound their entity open or first write to move its epoch (#1382).</summary>
+    internal static long LockRestartedOpens;
+
+    /// <summary>
+    /// Whether the calling thread may give up a wait and unwind its operation (<see cref="BackpressureOpenRestart"/>): inside an open or a first write
+    /// before its claim, not under a live index cursor, not in a commit's publish.
+    /// </summary>
+    internal static bool OpenRestartAllowed => t_restartableOpenDepth > 0 && t_publishSince == 0 && EntityAccessor.LiveIndexCursors == 0;
+
+    /// <summary>
+    /// A contended chain lock inside a restartable operation (#1382): throws <see cref="BackpressureOpenRestart"/> unless the operation's restarts
+    /// have used <paramref name="budget"/> since its first, in which case it returns and the caller throws its own timeout. Waiting with its pin, a
+    /// thread queued behind a publish that waited on back-pressure while holding the chain kept every page anyone touched meanwhile, and the
+    /// publish's page could never come: one such pin was 4,239 epochs behind when the market's 16 writers timed out together.
+    /// </summary>
+    internal static void RestartForLockWithin(TimeSpan budget)
+    {
+        // Its own clock, not the back-pressure restarts': shared, a lock met after seconds of page waits timed out after 5 ms of waiting on it. Not
+        // extended on page progress: pages served say nothing about the lock's holder, and a stuck holder must still surface within the lock's timeout.
+        t_lockBudget.Start(0);
+        if (t_lockBudget.Waited < budget)
+        {
+            Interlocked.Increment(ref LockRestartedOpens);
+            throw new BackpressureOpenRestart(lockWait: true);
+        }
+    }
+
+    /// <summary>How long a restartable operation waits for a contended chain lock before it unwinds instead (#1382).</summary>
+    internal static readonly TimeSpan LockWaitBeforeRestart = TimeSpan.FromMilliseconds(5);
+
+    /// <summary>
+    /// An open's wait between its restarts (<see cref="RestartableOpenDepth"/>), its epoch moved: the round's remedies, then one wait of the strategy, which
+    /// a page made evictable ends early.
+    /// </summary>
+    internal void AwaitPageAfterOpenRestart()
+    {
+        OnBackpressure?.Invoke();
+        var ctx = new BackpressureContext("Storage/PagedMMF/OpenRestart", TimeoutOptions.Current.PageCacheBackpressureTimeout);
+        _backpressureStrategy.OnPressure(ref ctx, 0, 0);
+    }
 
     /// <summary>How many times a publish's allocation outlasted <see cref="TimeoutOptions.PageCacheBackpressureTimeout"/> and went on waiting.</summary>
     internal long PublishBackpressureExtensions => Interlocked.Read(ref _publishBackpressureExtensions);
@@ -1950,6 +2161,70 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Test seam: while it returns true, every allocation round finds no slot, a whole lap's worth — back-pressure, on demand.</summary>
     internal Func<bool> ForceBackpressureForTest;
+
+    /// <summary>
+    /// The pressure flag, alone on its cache line: every transaction reads it every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> operations,
+    /// and it is written only when the cache enters or leaves back-pressure.
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit, Size = 128)]
+    private struct PaddedPressureFlag
+    {
+        [FieldOffset(64)] public int Value;
+
+        /// <summary>The storage health state (<see cref="StorageHealthState"/>), on the same line: an allocation reads both.</summary>
+        [FieldOffset(68)] public int Health;
+    }
+
+    private PaddedPressureFlag _underPressure;
+    private long _pressureClearAt;
+
+    /// <summary>How long the cache stays under pressure after its last back-pressure round: past it, the next allocation clears the flag.</summary>
+    internal static TimeSpan PressureHold = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// True while an allocation waits on back-pressure, and for <see cref="PressureHold"/> after the last such round (EP-03, #1230). Transactions refresh
+    /// their epoch every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> operations meanwhile instead of every
+    /// <see cref="EntityAccessor.EpochRefreshInterval"/>: the pages every thread touched since the oldest pin are what the epoch keeps, so a shorter
+    /// interval shrinks that set by the same factor. A hint: a plain read, a stale value only delays the cadence change by a few operations.
+    /// </summary>
+    internal bool UnderPressure => _underPressure.Value != 0;
+
+    /// <summary>A back-pressure round: the cache is under pressure for at least <see cref="PressureHold"/> from now.</summary>
+    private void NotePressure()
+    {
+        Volatile.Write(ref _pressureClearAt, Stopwatch.GetTimestamp() + (long)(PressureHold.TotalSeconds * Stopwatch.Frequency));
+        if (_underPressure.Value == 0)
+        {
+            _underPressure.Value = 1;
+        }
+
+        EvaluateStorageHealth();
+    }
+
+    /// <summary>An allocation that found a slot: once the hold since the last back-pressure round has passed, the cache has recovered.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteAllocated()
+    {
+        if (_underPressure.Value != 0)
+        {
+            _servedUnderPressure.Value++;   // the progress an overload wait and the health state look for (S1, S3)
+            if (Stopwatch.GetTimestamp() >= Volatile.Read(ref _pressureClearAt))
+            {
+                _underPressure.Value = 0;
+            }
+        }
+
+        if (_underPressure.Health != 0)
+        {
+            EvaluateStorageHealth();   // a degraded state steps down as the allocations that prove the recovery come in
+        }
+    }
+
+    /// <summary>Test seam: a back-pressure round, as an allocation that found nothing makes one.</summary>
+    internal void NotePressureForTests() => NotePressure();
+
+    /// <summary>Test seam: an allocation that found a slot.</summary>
+    internal void NoteAllocatedForTests() => NoteAllocated();
 
     private bool AllocateMemoryPageCore(int filePageIndex, out int memPageIndex, out bool owner, long timeout = Timeout.Infinite,
         CancellationToken cancellationToken = default)
@@ -1972,6 +2247,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         long lapVisits = 0;
         int lapDirty = 0, lapEpochHeld = 0, dirtyCount = 0, epochCount = 0;
         long backpressureSince = 0;
+        var overload = default(OverloadBudget);
 
         while (true)
         {
@@ -1993,6 +2269,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
 
             bool found = false;
+            var drawn = false;
             PageInfo pi = default;
             memPageIndex = -1;
             int evictedFilePageIndex = -1;
@@ -2116,7 +2393,10 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     if (backpressureSince == 0)
                     {
                         backpressureSince = Stopwatch.GetTimestamp();
+                        overload.Start(ServedUnderPressure);
                     }
+
+                    NotePressure();   // EP-03: transactions refresh their epoch on the shorter cadence while it lasts (#1230)
 
                     try
                     {
@@ -2125,6 +2405,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         bpScope.EpochCount = epochCount;
 
                         ++_metrics.BackpressureWaitCount;
+                        CountBackpressureRound();
                         if (lapComplete)
                         {
                             // High-water marks, kept because this is the ONLY place the engine looks at the cache while it is
@@ -2138,41 +2419,105 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                                 bpCtx.WaitContext.Remaining.TotalMilliseconds);
                         }
 
+                        // CK-14 (#1382): the checkpoint's hook does not wait for a slot only its own cycle frees; the cycle writes instead.
+                        // At a lap's end: above the sweep floor a lap is several rounds, and evictable slots further along the clock serve the hook.
+                        if (t_noBackpressureWaitDepth > 0 && lapComplete)
+                        {
+                            throw new BackpressureCheckpointDeferral();
+                        }
+
                         // #1230: a walk holding only slot-reference pins waits with its epoch moved on, so it no longer protects what others tag meanwhile.
+                        var refreshed = false;
                         if (t_refreshableWaitDepth > 0 && EntityAccessor.LiveIndexCursors == 0)
                         {
                             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(EpochManager.RefreshScope());
                             Interlocked.Increment(ref RefreshedWaits);
+                            refreshed = true;
+                        }
+                        else if (t_restartableOpenDepth > 0 && t_publishSince == 0 && EntityAccessor.LiveIndexCursors == 0)
+                        {
+                            // #1230: an entity open does not wait with its pin. It unwinds to its start and moves its epoch there (RestartableOpenDepth),
+                            // its restarts bounded together by one back-pressure timeout from its first round. From the first round, not the lap's end:
+                            // above the sweep floor a lap is several rounds, each a wait the open would make with its pin.
+                            // Past the timeout the restarts go on while the cache serves pages (S1): slow, not stuck.
+                            t_openBudget.Start(ServedUnderPressure);
+                            var timeouts = TimeoutOptions.Current;
+                            if (t_openBudget.Allows(timeouts.PageCacheBackpressureTimeout, timeouts.PageCacheOverloadWaitCeiling, ServedUnderPressure,
+                                    out var openExtended))
+                            {
+                                if (openExtended)
+                                {
+                                    Interlocked.Increment(ref _overloadWaitExtensions);
+                                }
+
+                                Interlocked.Increment(ref RestartedOpens);
+                                throw new BackpressureOpenRestart();
+                            }
+
+                            ThrowBackpressureTimeout(t_openBudget.Waited);
+                        }
+                        else if (t_indexRestartArmed && OlcLatchHeld.Count == 0 && t_noBackpressureWaitDepth == 0 && EntityAccessor.LiveIndexCursors == 0
+                                 && Stopwatch.GetElapsedTime(t_publishSince) < TimeoutOptions.Current.CommitPublishBackpressureTimeout)
+                        {
+                            // #1382: a publish's B+Tree write that has changed nothing yet does not wait with its pin either. It unwinds to its entry, which
+                            // moves the epoch there and runs it again, within the publish's own bound (AP-03); past it, the wait below reports the publish.
+                            // Disarmed before the throw: the unwind runs the write's finally blocks (a deferred-node reclaim among them), and a round
+                            // there must wait, not throw a second restart through a half-done free. The entry catches by its own local, not the flag.
+                            t_indexRestartArmed = false;
+                            Interlocked.Increment(ref RestartedIndexWrites);
+                            throw new BackpressureIndexRestart(this);
                         }
 
-                        // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
-                        // DecrementDirty → SignalPageAvailable → waiter wakes, and let go of the spatial queries' pinned pages. Not once per lap:
+                        // Demand-driven flush, every round as before, a draw's included: wake the checkpoint manager so dirty pages get written to
+                        // disk → DecrementDirty → SignalPageAvailable → waiter wakes, and let go of the spatial queries' pinned pages. Not once per lap:
                         // above 524 288 slots a lap is many rounds, and the remedies must not wait for it.
                         OnBackpressure?.Invoke();
 
-                        // The timeout is honoured only at the end of a lap (#1137): a page that stays evictable is found before the allocation
-                        // gives up, whatever the cache size or the configured timeout — so the timeout can be overrun by at most one lap. Until
-                        // then a strategy that gives up just does not wait.
-                        if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount) && lapComplete)
+                        // PS-24 (#1382): a thread that would wait here with its epoch pinned may hold the cache's floor, and nothing tagged since its
+                        // pin can be evicted for it: it takes a reserved slot instead, finishes, and moves its epoch. A wait that moved its epoch
+                        // does not hold the floor, and waits.
+                        if (!refreshed && TryDrawReserve(minActiveEpoch, out var reservedSlot))
                         {
-                            // AP-03: past a commit's WAL append, a give-up cannot roll the commit back, only stop the engine. The publish waits on, a
-                            // fresh PageCacheBackpressureTimeout at a time, up to CommitPublishBackpressureTimeout from the end of its append.
-                            var publishSince = t_publishSince;
-                            var limit = TimeoutOptions.Current.CommitPublishBackpressureTimeout;
-                            if (publishSince != 0 && Stopwatch.GetElapsedTime(publishSince) < limit)
+                            memPageIndex = reservedSlot;
+                            pi = Slot(reservedSlot);
+                            evictedFilePageIndex = -1;
+                            drawn = true;
+                        }
+                        else
+                        {
+                            // The timeout is honoured only at the end of a lap (#1137): a page that stays evictable is found before the allocation
+                            // gives up, whatever the cache size or the configured timeout — so the timeout can be overrun by at most one lap. Until
+                            // then a strategy that gives up just does not wait.
+                            if (!_backpressureStrategy.OnPressure(ref bpCtx, dirtyCount, epochCount) && lapComplete)
                             {
-                                Interlocked.Increment(ref _publishBackpressureExtensions);
-                                LogPublishBackpressureWaitExtended(Logger, dirtyCount, epochCount, Stopwatch.GetElapsedTime(publishSince).TotalMilliseconds,
-                                    limit.TotalMilliseconds);
-                                bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
-                            }
-                            else
-                            {
-                                ThrowHelper.ThrowPageCacheBackpressureTimeout(
-                                    dirtyCount, epochCount,
-                                    publishSince != 0
+                                // AP-03: past a commit's WAL append, a give-up cannot roll the commit back, only stop the engine. The publish waits on, a
+                                // fresh PageCacheBackpressureTimeout at a time, up to CommitPublishBackpressureTimeout from the end of its append.
+                                var publishSince = t_publishSince;
+                                var limit = TimeoutOptions.Current.CommitPublishBackpressureTimeout;
+                                if (publishSince != 0 && Stopwatch.GetElapsedTime(publishSince) < limit)
+                                {
+                                    Interlocked.Increment(ref _publishBackpressureExtensions);
+                                    LogPublishBackpressureWaitExtended(Logger, dirtyCount, epochCount, Stopwatch.GetElapsedTime(publishSince).TotalMilliseconds,
+                                        limit.TotalMilliseconds);
+                                    bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
+                                }
+                                else if (publishSince == 0
+                                         && overload.AllowsPastTimeout(TimeoutOptions.Current.PageCacheBackpressureTimeout,
+                                             TimeoutOptions.Current.PageCacheOverloadWaitCeiling, ServedUnderPressure))
+                                {
+                                    Interlocked.Increment(ref _overloadWaitExtensions);
+                                    // S1 (#1382): pages were served during this timeout, so the engine is slow, not stuck: the wait goes on, a fresh
+                                    // timeout at a time, and the work goes through. The health state reports it.
+                                    LogOverloadWaitExtended(Logger, dirtyCount, epochCount, overload.Waited.TotalMilliseconds);
+                                    bpCtx = new BackpressureContext(bpCtx.ResourcePath, TimeoutOptions.Current.PageCacheBackpressureTimeout);
+                                }
+                                else
+                                {
+                                    // The whole wait, extensions included, not its last timeout.
+                                    ThrowBackpressureTimeout(publishSince != 0 || overload.Since != 0
                                         ? Stopwatch.GetElapsedTime(backpressureSince)
                                         : TimeoutOptions.Current.PageCacheBackpressureTimeout - bpCtx.WaitContext.Remaining);
+                                }
                             }
                         }
                     }
@@ -2182,11 +2527,41 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         bpScope.Dispose();
                     }
 
-                    continue;
+                    if (!drawn)
+                    {
+                        continue;
+                    }
                 }
             }
 
+            // Test-only (#1382, EvictionGuardDepthForProcess): the reclaimed slot sits out a quarantine, inaccessible, and an older one serves instead.
+            // Before the reserve takes it, so a reserved slot has sat out its quarantine: a drawn one goes straight to its new page.
+            var displacedSlot = memPageIndex;
+            var evictionGuard = _evictionGuard;
+            if (!drawn && evictionGuard != null)
+            {
+                if (!evictionGuard.Exchange(ref memPageIndex))
+                {
+                    continue;   // the quarantine is filling: it kept the slot, look for another
+                }
+
+                pi = Slot(memPageIndex);
+            }
+
+            // PS-24 (#1382): while the reserve is short, the slot found refills it and the allocation looks for another. Not a slot that ends a wait:
+            // its waiter would wait again for the next one, and a pinned waiter would draw back the slot it had found.
+            if (!drawn && backpressureSince == 0 && TryStockReserve(memPageIndex))
+            {
+                if (evictedFilePageIndex >= 0)
+                {
+                    TyphonEvent.EmitPageEvicted(evictedFilePageIndex, 0);
+                }
+
+                continue;
+            }
+
             ++_metrics.TotalMemPageAllocatedCount;
+            NoteAllocated();
 
             // Record the eviction as a zero-duration marker span, parented under the enclosing PageCacheAllocatePage scope via TLS. Default-
             // suppressed alongside the other PageCache.* kinds — when the profiler is off or this kind is suppressed the whole call
@@ -2194,7 +2569,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (evictedFilePageIndex >= 0)
             {
                 // Phase 5: dirtyBit reflects whether the displaced page was dirty at eviction time (still under the lock that gates clean reuse).
-                var dirtyBit = (byte)(HasWritebackDebt(memPageIndex) ? 1 : 0);
+                var dirtyBit = (byte)(HasWritebackDebt(displacedSlot) ? 1 : 0);
                 TyphonEvent.EmitPageEvicted(evictedFilePageIndex, dirtyBit);
             }
 
@@ -3037,28 +3412,30 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// The full unevictability breakdown, taken in ONE pass so the parts are mutually consistent.
     /// </summary>
     /// <remarks>
-    /// A page is unevictable if ANY of the four holds, so the individual counts overlap and do not sum — <c>Unevictable</c>
+    /// A page is unevictable if ANY of the five holds, so the individual counts overlap and do not sum — <c>Unevictable</c>
     /// is the union and is the only one that answers "how much of the cache is unavailable". Reporting the parts
     /// separately is what distinguishes the failure modes: writeback debt means the checkpoint is behind, ACW means a
-    /// writer is mid-mutation, and epoch means some scope is old enough to pin everything touched since it opened —
-    /// which, unlike the other three, is bounded by transaction LIFETIME rather than by anything the storage layer does.
+    /// writer is mid-mutation, a dirty mark means a write set still in flight (a transaction's, a cleanup drain's), and epoch means some scope is old
+    /// enough to pin everything touched since it opened — which, unlike the others, is bounded by transaction LIFETIME rather than by anything the
+    /// storage layer does. <c>EpochOnly</c> counts the pages nothing else holds: what a refreshed epoch alone would free. Marks were not counted
+    /// before #1382, and a cache 7,887 pages under them read as epoch-held.
     /// </remarks>
-    internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountUnevictablePages()
+    internal (int Debt, int Acw, int SlotRef, int EpochHeld, int Marked, int EpochOnly, int Unevictable, int Total) CountUnevictablePages()
     {
         var slots = _slots;
         if (slots == null)
         {
-            return (0, 0, 0, 0, 0, 0);
+            return (0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
-        int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, unevictable = 0, total = 0;
+        int debt = 0, acw = 0, slotRef = 0, epochHeld = 0, marked = 0, epochOnly = 0, unevictable = 0, total = 0;
 
         // Read through the local: a diagnostic (the demo's census, a test) may call this after the store is disposed, which nulls the field.
         for (var i = 0; i < slots.Count; i++)
         {
             var pi = slots[i];
-            if (pi.PageState == PageState.Free)
+            if (pi.PageState is PageState.Free or PageState.Reserved)
             {
                 continue;
             }
@@ -3068,15 +3445,30 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var a = Volatile.Read(ref pi.ActiveChunkWriters) != 0;
             var s = Volatile.Read(ref pi.SlotRefCount) > 0;
             var e = Volatile.Read(ref pi.AccessEpoch) >= minActiveEpoch;
+            var m = Volatile.Read(ref pi.DirtyCounter) > 0;
 
             if (d) { debt++; }
             if (a) { acw++; }
             if (s) { slotRef++; }
             if (e) { epochHeld++; }
-            if (d || a || s || e) { unevictable++; }
+            if (m) { marked++; }
+            if (e && !(d || a || s || m)) { epochOnly++; }
+            if (d || a || s || e || m) { unevictable++; }
         }
 
-        return (debt, acw, slotRef, epochHeld, unevictable, total);
+        return (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total);
+    }
+
+    /// <summary>
+    /// The back-pressure timeout, with the cache's breakdown taken in one pass at the throw (#1382): what held the slots, not only the lap census's
+    /// debt and epoch counts, which leave marks out and count every epoch-tagged page as epoch-held. One pass over the cache, against a wait of seconds.
+    /// </summary>
+    [DoesNotReturn]
+    internal void ThrowBackpressureTimeout(TimeSpan waited)
+    {
+        var census = CountUnevictablePages();
+        ThrowHelper.ThrowPageCacheBackpressureTimeout(census.Debt, census.EpochHeld, waited, EpochManager?.ActiveSlotCount ?? 0,
+            EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0, census.Marked, census.EpochOnly);
     }
 
     /// <summary>
@@ -3092,7 +3484,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
 
         var minActiveEpoch = EpochManager?.MinActiveEpoch ?? long.MaxValue;
-        int free = 0, allocating = 0, exclusive = 0, idle = 0, slotRef = 0, acw = 0, dirtyMarks = 0, debt = 0, epochHeld = 0, evictable = 0;
+        int free = 0, allocating = 0, exclusive = 0, idle = 0, slotRef = 0, acw = 0, dirtyMarks = 0, debt = 0, epochHeld = 0, evictable = 0, reserved = 0;
         for (var i = 0; i < slots.Count; i++)
         {
             var pi = slots[i];
@@ -3100,6 +3492,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             {
                 case PageState.Free:
                     free++;
+                    continue;
+                case PageState.Reserved:
+                    reserved++;
                     continue;
                 case PageState.Allocating:
                     allocating++;
@@ -3123,7 +3518,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (!(s || a || m || d || e)) { evictable++; }
         }
 
-        return $"slots {slots.Count:N0}: free {free:N0}, allocating {allocating:N0}, exclusive {exclusive:N0}, idle {idle:N0} — of the idle: slot-referenced "
+        return $"slots {slots.Count:N0}: free {free:N0}, reserved {reserved:N0} of {_reserveTarget:N0} ({ReserveDraws:N0} drawn), allocating {allocating:N0}, "
+               + $"exclusive {exclusive:N0}, idle {idle:N0} — of the idle: slot-referenced "
                + $"{slotRef:N0}, active writers {acw:N0}, dirty marks {dirtyMarks:N0}, writeback debt {debt:N0}, epoch-held {epochHeld:N0} (min active epoch "
                + $"{minActiveEpoch}), evictable {evictable:N0}";
     }

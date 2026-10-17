@@ -215,7 +215,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   invariant past the append, page-cache back-pressure is waited out: the committing thread publishes with
             `PagedMMF.PublishSince` set when its append returns, so an allocation that outlasts `PageCacheBackpressureTimeout`
             logs and waits on, a fresh timeout at a time, until `TimeoutOptions.CommitPublishBackpressureTimeout` (60 s) after
-            it — one bound for the whole publish
+            it — one bound for the whole publish. It waits without its pin where it can (#1382, EP-02): between its entries while
+            the cache is under pressure, and in a B+Tree write that has taken no latch, reservation or node yet, which unwinds to its
+            entry and runs again within the same bound
   invariant any other failure between the append and the end of the publish (`CompleteAfterFailedPublish`): the engine latches
             `CommitPipelineFailure` and pins the commit's first LSN below the checkpoint (`PinnedCommitFloor`, CK-13), then
             the transaction is Committed — never rolled back (AP-02) — and only then is anything that can throw done: the
@@ -251,7 +253,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
          DatabaseEngine.LatchCommitPipelineFailure, DatabaseEngine.CommitPipelineFailure, DatabaseEngine.PinnedCommitFloor,
          DatabaseEngine.WriteTickFence, DatabaseEngine.FenceMustNotAppend, DurabilityLog.Stop, DurabilityLog.Append,
          CheckpointManager.PrepareCrashStop, DatabaseEngine.AppendFenceBatch, DatabaseEngine.AppendFenceBlockBatch,
-         DatabaseEngine.RemoveEmptyClosingRealms
+         DatabaseEngine.RemoveEmptyClosingRealms, Transaction.RefreshBetweenPublishSteps, BackpressureIndexRestart
   status: the component publish's acts under the chain lock cannot throw: its handle is rebuilt from PREPARE's coordinates,
           re-checked under the lock taken with an unbounded wait (AP-05), and its acts are field writes and copies. Its Phase A
           (indexes and views, AP-07), under the lock since #1263, allocates and can throw: B+Tree nodes past the publish limit,
@@ -1066,8 +1068,19 @@ CK-08 (flush-only cycles) are later increments.
             once the writeback debt reaches the dirty-page trigger's threshold, capped at 50 % of the cache
   invariant that early write keeps CK-02 (the WAL is durable through what the copies can reflect before the data fsync) and CP-03 (a page is
             settled only after it), and does not move CheckpointLSN: the hook's records still precede the cycle's own barrier and advance
+  invariant the write ahead is not enough under contention, so the hook also never waits (#1382): it runs with PagedMMF.NoBackpressureWaitDepth
+            set, a back-pressure round there throws BackpressureCheckpointDeferral, and the cycle completes as a flush-only one (CK-08's mode: it
+            writes and settles every owed page, runs no barrier, moves no CheckpointLSN); the next cycle runs the hook again. Once the hook has not
+            run for CheckpointManager.HookDeferralWindow (10 s) it must run, and waits for its pages outside its epoch
+            (CheckpointManager.RunHookWaitingOutsideItsEpoch): it gives up at a lap's end as a deferral would, waits for a page with its scope unwound,
+            and runs again — idempotent — while pages are served (PS-22); past that, the back-pressure timeout is thrown between two runs, never
+            after a wait with its pin (a last run that waited as before held the oldest pin for a whole timeout). Waiting inside its allocation,
+            the checkpoint thread's pin was the oldest of a 32 MiB cache gone epoch-held (3,841 epochs behind). So CheckpointLSN cannot stall behind a hook never served — a time bound, not a count of cycles, which back-to-back cycles under a storm used up in a second. The
+            shutdown cycle never defers. The deferral is taken at a lap's end, so on a cache above the sweep floor the clock is searched whole first A hook given up midway leaves some archetypes updated — records and dirty pages, as a full run's — and
+            releases its ChangeSet's marks (PS-05)
   scope: CheckpointManager.RunCheckpointCycleCore, CheckpointManager.WriteAheadOfTheHook, CheckpointManager.WriteDirtyPages,
-         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState
+         CheckpointManager.PersistDurableMetadataHook, DatabaseEngine.PersistArchetypeState, CheckpointManager.RunHookOrDefer,
+         PagedMMF.NoBackpressureWaitDepth, BackpressureCheckpointDeferral, CheckpointManager.RunHookWaitingOutsideItsEpoch
   on_violation: the checkpoint is the only thing that turns owed slots into free ones. When a step of its own cycle waits for a free slot while every
                 slot is owed, it waits for itself until the back-pressure timeout: the cycle ends Degraded and every writer waiting behind it times out
                 too. Measured (#1184): MarketHardeningTests, a 0.76 GiB file over a 256 MiB cache, 16 threads. PersistArchetypeState, which writes
@@ -1075,6 +1088,12 @@ CK-08 (flush-only cycles) are later increments.
                 twice); the storm died at 36 639 operations on main
   verified: CheckpointManagerTests.HookLoadingAPage_OnAFullyOwedCache_DoesNotWait [VerifiesRule] — every slot owes a write, the loop is not
             running, and the hook loads a page not in the cache: 56 ms, healthy; with the write ahead disabled the cycle fails after 5 s
+  verified: CheckpointHookDeferralTests [VerifiesRule] — back-pressure forced while the hook loads the evicted archetype-table page: the hook gives
+            up, the cycle only writes, CheckpointLSN does not move, no page is left marked, well inside the timeout (5 s and a Degraded cycle with
+            the no-wait mode removed); the next cycle advances; past its window the hook waits; past its window and served, it waits outside its
+            epoch — no round inside its allocation — and completes, advancing CheckpointLSN (mutant: the hook run plainly, waiting with its pin)
+  on_violation (#1382): with the write ahead in place, the freed slots went to the 16 writers waiting for them first; the hook still waited out the
+                5 s with writeback at zero, in 3 of 3 instrumented market failures (64 MiB, 16 writers), and every writer timed out behind it
 
 ### CK-15: A checkpoint pass frees pages while it writes `[correctness]`
   invariant a pass is written in batches — at most WriteBatchMaxPages pages, or WriteBatchMaxTicks (100 ms) of writing — and each batch is settled
@@ -1843,7 +1862,11 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-03: AccessEpoch uses CAS-max, never decreases `[correctness]`
   invariant AccessEpoch = max(existing, globalEpoch) via CAS
   invariant AccessEpoch only reset to 0 inside UnlatchPageExclusive
-  scope: PagedMMF.RequestPageEpoch, PagedMMF.UnlatchPageExclusive
+  invariant a fetched page is tagged with max(the epoch its caller read, the caller's pin at the tag): a wait inside
+            the fetch may move the pin past the value read before it (#1230); tagged with that value, the page is
+            older than every pin and evictable while the caller uses it (#1382, PagedMMF.TagEpoch)
+  scope: PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked, PagedMMF.RequestPageEpochNoSweep, PagedMMF.TagEpoch,
+         PagedMMF.UnlatchPageExclusive
   on_violation: decreasing epoch makes page appear stale;
     eviction while transaction still holds pointer
   note: the reset clears every thread's tag, not the unlatcher's alone: an address kept into a page for longer than the
@@ -1870,8 +1893,13 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never retain a mark "for the checkpoint to consume" (that is #824's leak)
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
+  invariant an owner releases its marks on its throw path too (#1382): a transaction's and a unit of work's dispose release them in a finally,
+            whatever their rollback, drain or registry write threw, and so does the checkpoint's metadata hook for its local set. A cleanup drain
+            releases the marks of the entries it has committed whenever it moves its epoch (DeferredCleanupManager.EpochYield.Refresh): it is
+            unbounded, and kept to its end its marks held every page it had touched — 3,434 of a 64 MiB cache, while it waited on back-pressure
   scope: ChangeSet.AddByMemPageIndex / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally)
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally),
+         DeferredCleanupManager.EpochYield, DatabaseEngine.PersistArchetypeState
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
             throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected;
             ChangeSetCallSiteRecordingTests.ReleasingOneOwnersMarks_LeavesTheOtherOwnersMarkInPlace (an over-release, which Release's clamp
@@ -2363,6 +2391,81 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             SegmentGrowthTests — a grow under a saved change set is read back whole
 
 ---
+
+### PS-22: A back-pressure wait gives up only when nothing is being served `[correctness]`
+  invariant a page allocation waiting on back-pressure, and the restarts of an open or a first write (EP-02), go on past
+            PageCacheBackpressureTimeout one timeout at a time for as long as a page was served during the previous one, up to
+            PageCacheOverloadWaitCeiling (60 s): the engine is slow, not stuck, and the work goes through (#1382, S1). A whole timeout with no page
+            served is a stall, and the wait throws PageCacheBackpressureTimeoutException; so does the ceiling. A commit's publish keeps its own
+            bound (AP-03)
+  invariant the page cache publishes how it keeps up (StorageHealthState, PagedMMF.StorageHealth, DatabaseEngine.StorageHealth): Healthy without
+            back-pressure; Pressured while the pressure flag is set; Overloaded once it has lasted OverloadedAfter (1 s); Starved once no page has been
+            served for StarvedAfter (1 s) under pressure — a clock that runs only under pressure, so an idle stretch before a burst is not starvation. It escalates at once and steps down after CalmBeforeStepDown (1 s), so a burst does not flap
+            it. Every change is logged (a warning entering Overloaded or Starved), raised (DatabaseEngine.StorageHealthChanged), and published as the profiler gauge
+            PageCacheHealthState with the cumulative back-pressure rounds and overload extensions, and in the resource tree. Evaluated at most every
+            100 ms, from the back-pressure rounds, from allocations while degraded and from the checkpoint loop's wakes: nothing on the healthy path
+  scope: PagedMMF.OverloadBudget, PagedMMF.ServedUnderPressure, PagedMMF.OverloadWaitExtensions, PagedMMF.EvaluateStorageHealth, PagedMMF.StorageHealth,
+         TimeoutOptions.PageCacheOverloadWaitCeiling, StorageHealthState, DatabaseEngine.StorageHealth, DatabaseEngine.StorageHealthChanged
+  verified: StorageOverloadTests [VerifiesRule] — the budget: its first timeout, an extension per timeout with a page served, none without, the
+            ceiling, no grace period past a caller's own timeout; an open, and a page request outside one, held on back-pressure for three timeouts
+            go through while pages are served and give up while it lasts when none are; the state escalates Healthy, Pressured, Overloaded,
+            Starved and steps down once calm, raising the public event; an engine falling idle after a burst steps back to Healthy, never Starved.
+            Mutants killed: no extension (the served cases fail), an extension without progress (the unserved cases), the main loop's extension
+            removed (the page request), the starved clock running while idle (the idle case)
+  on_violation: a wait that throws while the cache is serving pages fails work the engine would have completed a moment later — under a 16-writer
+                storm over 64 MiB, the timeouts that made 35-45 % of the market's runs fail; a state never published leaves an application that
+                gave the engine too little cache or disk with slowness and no reason
+
+---
+
+### PS-23: Work is paced at its start, holding nothing, and never refused for being slow `[correctness]`
+  invariant while the storage gate is on (AdmissionLimit > 0), DatabaseEngine.CreateUnitOfWork admits a unit of work only once fewer than the limit
+            run, waiting before it creates its ChangeSet or claims a registry slot: no pin, latch or lock is held, and no append has happened (#1382, S4)
+  invariant a thread already inside an epoch scope is never held at the gate: it would wait with its pin, protecting the pages every other thread tags;
+            nor is a thread that holds an admitted unit already: it would wait holding that unit's marks and registry slot, at a limit of one for
+            itself. Units made outside CreateUnitOfWork (a bulk load's) are not gated
+  invariant past its own deadline (the unit of work's timeout) a waiting unit is admitted all the same: the gate slows work, it never refuses it
+  invariant every admitted unit is released exactly once, at its dispose or when its creation throws; the limit is never below one, so the gate alone
+            never stops the engine
+  invariant the limit follows the health state at each evaluation (S5): off when Healthy; Overloaded turns it on at three quarters of the units
+            running and holds it, never below a quarter of the cores; Starved halves it, down to one, once what runs is within it; Pressured
+            raises it by a quarter. Every change is logged and published as the gauge
+            PageCacheAdmissionLimit, with PageCacheAdmissionWaitsTotal
+  scope: PagedMMF.Admit, PagedMMF.ReleaseAdmission, PagedMMF.AdjustAdmission, PagedMMF.AdmissionLimit, DatabaseEngine.CreateUnitOfWork, UnitOfWork.Admitted
+  verified: StorageAdmissionTests [VerifiesRule] — a unit waits at a full gate until one ends; a thread inside an epoch scope, and a thread holding
+            a unit, pass a full gate; past its deadline a unit is admitted; the limit's steps per state, and every unit released at its dispose.
+            Mutants killed: no epoch-scope bypass, no held-unit bypass, no deadline admit, no release at dispose
+  on_violation: a unit made to wait while it holds a pin keeps the cache epoch-held for the work already running — the stall the gate exists to
+                prevent; a unit refused for slowness fails work the engine would have completed
+
+### PS-24: A wait that holds the cache's floor is served from a reserve `[correctness]`
+  invariant a page cache of SlotReserveMinPages (1,024) pages or more keeps one slot in SlotReserveDivisor (32), at most SlotReserveMaxSlots (256),
+            out of every sweep (PageState.Reserved). An allocation that would wait on back-pressure with its thread's epoch pinned, its wait not
+            moving the epoch (EP-02), takes a reserved slot instead and is served at once; a wait that moves its epoch never takes one
+  invariant the last 1 / SlotReserveFloorShareDivisor (a quarter) of the reserve is drawn only by the thread whose pin is the cache's floor
+            (MinActiveEpoch): a younger pin can be served once the floor moves, the floor-holder by nothing a sweep finds, so younger waiters never
+            empty the reserve before it
+  invariant while the reserve is short, an allocation that finds a slot on its first try gives it to the reserve and looks for another; a slot that
+            ends a back-pressure wait serves its waiter. A reserved slot counts as free (the gauges and FreeMemPageCount agree), holds no page, no
+            epoch tag and no debt, and under the eviction guard it has sat out its quarantine before the reserve takes it
+  invariant that waiter holds the cache's floor: no page tagged after its pin can be evicted, and every thread then touching pages tags them after
+            it, so on an epoch-held cache nothing a sweep can find frees it; served, it finishes and its epoch moves. Waits that hold their pin
+            are the publish's B+Tree writes past their first latch (EP-02), the checkpoint's meta persist, a transaction's own reads, a compaction
+            under its chain lock; served first, they cannot hold every other wait behind them for a timeout. The reserve emptied, they wait as
+            before
+  scope: PagedMMF.TryDrawReserve, PagedMMF.TryStockReserve, PagedMMF.SlotReserveTarget, PagedMMF.ReservedSlotCount, PagedMMF.ReserveDraws,
+         PagedMMF.AllocateMemoryPageCore
+  verified: SlotReserveTests [VerifiesRule] — a cache under 1,024 pages reserves nothing; the first allocation fills the reserve and 4,096 more
+            never take a reserved slot, every slot counted free or serving; with every round finding nothing, a pinned request is served at once
+            from the reserve, which the next allocation refills, and with no reserve the same request times out; a wait that moves its epoch draws
+            nothing; a younger pin draws down to the floor's share and then waits, and the floor-holder draws from it; a slot that ends a wait
+            serves its waiter, not the reserve; under the eviction guard every reserved slot that held a page was quarantined first. Mutants
+            killed: no draw (the pinned request times out), a draw for a wait that moved its epoch, no floor share, a waiter's slot stocked, a slot
+            stocked unquarantined, a stock or a draw left out of the free count; [RuleMutant] Mutant_WithNoReserve_APinnedWaiterTimesOut
+  on_violation: the 32 MiB market (16 threads) failed every run of nine: after the storm, the checkpoint's CheckpointLSN flip (PersistMetaNow)
+                waited for the meta page with its pin, 4,399 epochs behind, and every reader timed out behind it; during the storm, publishes waiting
+                past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
+                longest back-pressure wait is 68-352 ms
 
 ## Module: WAL Recovery
 

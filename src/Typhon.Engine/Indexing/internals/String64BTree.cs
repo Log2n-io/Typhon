@@ -863,6 +863,8 @@ internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStor
         public override int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.AllocateBuffer(ref bufferAccessor);
         public override int BufferChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.ChunksNeededToAppend(bufferId, ref bufferAccessor);
+        public override void PrefetchBuffer(int bufferId, int elementChunkId, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.Prefetch(bufferId, elementChunkId, ref bufferAccessor);
         public override int TryAppendReserved(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.TryAddElementReserved(bufferId, value, ref bufferAccessor);
 

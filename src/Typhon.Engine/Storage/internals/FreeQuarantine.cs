@@ -165,17 +165,38 @@ internal sealed class FreeQuarantine
                     continue;
                 }
 
+                // A free holds no page address past its own fetch and write, so its back-pressure waits move this thread's epoch (#1230, #1382): left
+                // at the minimum, the worker's pin held every page tagged while it waited. Safe since the page it fetched is tagged with the moved pin
+                // (PS-03, PagedMMF.TagEpoch); before that, a refresh in the fetch left it older than every pin, evictable under the bitmap write.
+                // Only in a scope of its own: a refresh moves the thread's pin whatever its depth, so under a caller's scope it would release what
+                // that scope protects.
+                var refreshable = !epochManager.IsCurrentThreadInScope;
                 using var guard = EpochGuard.Enter(epochManager);
-                for (var w = from; w < from + WordsPerEpochScope; w++)
+                if (refreshable)
                 {
-                    var word = Volatile.Read(ref block[w]);
-                    while (word != 0)
+                    PagedMMF.RefreshableWaitDepth++;
+                }
+
+                try
+                {
+                    for (var w = from; w < from + WordsPerEpochScope; w++)
                     {
-                        var bit = BitOperations.TrailingZeroCount(word);
-                        word &= word - 1;
-                        free((b << BlockShift) | (w << 6) | bit);
-                        Interlocked.And(ref block[w], ~(1UL << bit));
-                        freed++;
+                        var word = Volatile.Read(ref block[w]);
+                        while (word != 0)
+                        {
+                            var bit = BitOperations.TrailingZeroCount(word);
+                            word &= word - 1;
+                            free((b << BlockShift) | (w << 6) | bit);
+                            Interlocked.And(ref block[w], ~(1UL << bit));
+                            freed++;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (refreshable)
+                    {
+                        PagedMMF.RefreshableWaitDepth--;
                     }
                 }
             }

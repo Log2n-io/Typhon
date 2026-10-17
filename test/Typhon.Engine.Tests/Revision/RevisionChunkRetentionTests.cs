@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
+using System.Threading;
+using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
 
@@ -244,6 +246,205 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         {
             Assert.That(pinnedAtLast, Is.EqualTo(pinnedInDrain), "premise: nothing refreshed between entries");
         }
+    }
+
+    /// <summary>
+    /// #1382: a drain's chunk frees wait on back-pressure with their epoch moved. A free holds no page address past its bitmap page's fetch, and between
+    /// two entries the drain holds only slot-reference pins; waiting with its pin, the tail's drain was the oldest pin of a 32 MiB market in two of every
+    /// three waits. Moved, it draws nothing from the slot reserve (PS-24), which serves only the waits that hold their pin.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // PagedMMF.RefreshedWaits is process-wide
+    public void TheDrainsChunkFrees_WaitWithTheirEpochMoved()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+        GrowUnderAReaderThenTrim(dbe, ids, new Random(3), TraderChunks(dbe), WalletChunks(dbe));
+        var queued = dbe.DeferredCleanupManager.ChunkFreeQueueSize;
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
+
+        ChunkBasedSegment<PersistentStore>.ReleaseWarmAccessorsForTests();
+        dbe.MMF.EvictEvictablePagesForTest();
+        var drainer = Environment.CurrentManagedThreadId;
+        var forced = 0;
+        var refreshed = Interlocked.Read(ref PagedMMF.RefreshedWaits);
+        var draws = dbe.MMF.ReserveDraws;
+        Assert.That(dbe.MMF.ReservedSlotCount, Is.GreaterThan(0), "premise: a pinned wait would draw from the reserve");
+
+        // The next transfer's dispose drains the queue: its allocations miss once the drain has taken the frees, and its first three rounds find nothing.
+        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == drainer
+                                                 && dbe.DeferredCleanupManager.ChunkFreeQueueSize < queued && ++forced <= 3;
+        try
+        {
+            Transfer(dbe, ids, new Random(4));
+        }
+        finally
+        {
+            dbe.MMF.ForceBackpressureForTest = null;
+        }
+
+        Assert.That(forced, Is.GreaterThan(3), "premise: the drain met three back-pressure rounds");
+        Assert.That(dbe.DeferredCleanupManager.ChunkFreeQueueSize, Is.LessThan(queued), "premise: the drain freed queued chunks");
+        Assert.That(Interlocked.Read(ref PagedMMF.RefreshedWaits) - refreshed, Is.EqualTo(3), "each round moved the drain's epoch");
+        Assert.That(dbe.MMF.ReserveDraws - draws, Is.Zero, "none waited with its pin");
+    }
+
+    /// <summary>
+    /// #1382: a revision cleanup's ownership check, before it takes the chain lock, waits with its epoch moved (EP-02). Up to that lock the entry holds
+    /// only its accessors' slot-reference pins; waiting with its pin, the drain was the oldest pin of a 32 MiB market.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // PagedMMF.RefreshedWaits is process-wide
+    public void ARevisionCleanupsChainCheck_WaitsWithItsEpochMoved()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, _) = TailWithABacklog(dbe);
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
+
+        var drainer = Environment.CurrentManagedThreadId;
+        var inCheck = false;
+        var checks = 0;
+        var evicted = 0;
+        var forced = 0;
+        var refreshed = Interlocked.Read(ref PagedMMF.RefreshedWaits);
+        var draws = dbe.MMF.ReserveDraws;
+        Assert.That(dbe.MMF.ReservedSlotCount, Is.GreaterThan(0), "premise: a pinned wait would draw from the reserve");
+        // The tail's pin protects every page until its drain starts: the first check evicts what the drain's own pin leaves evictable, so it misses.
+        dbe.DeferredCleanupManager.ChainCheckProbeForTest = _ =>
+        {
+            if (checks++ == 0)
+            {
+                ChunkBasedSegment<PersistentStore>.ReleaseWarmAccessorsForTests();
+                evicted = dbe.MMF.EvictEvictablePagesForTest();
+            }
+
+            inCheck = true;
+        };
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ => inCheck = false;
+        // The tail's dispose drains the backlog: its first check that misses meets three rounds that find nothing.
+        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == drainer && inCheck && ++forced <= 3;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            dbe.MMF.ForceBackpressureForTest = null;
+            dbe.DeferredCleanupManager.ChainCheckProbeForTest = null;
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        Assert.That(checks, Is.GreaterThan(0), "premise: the drain checked chains");
+        Assert.That(evicted, Is.GreaterThan(0), "premise: the first check found its pages evicted");
+        Assert.That(forced, Is.GreaterThan(3), "premise: a check met three back-pressure rounds");
+        Assert.That(Interlocked.Read(ref PagedMMF.RefreshedWaits) - refreshed, Is.EqualTo(3), "each round moved the drain's epoch");
+        Assert.That(dbe.MMF.ReserveDraws - draws, Is.Zero, "none waited with its pin");
+    }
+
+    /// <summary>The tail, with other threads' transfers queued behind it for its drain.</summary>
+    private static (Transaction Tail, EntityId[] Ids) TailWithABacklog(DatabaseEngine dbe)
+    {
+        Register(dbe);
+        var ids = SpawnTraders(dbe);
+#pragma warning disable TYPHON004 // the caller disposes the tail: its dispose is what the tests observe
+        var tail = dbe.CreateQuickTransaction();
+#pragma warning restore TYPHON004
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var rng = new Random(1);
+            for (var k = 0; k < Transfers; k++)
+            {
+                Transfer(dbe, ids, rng);
+            }
+        }).Wait();
+        Assert.That(dbe.DeferredCleanupManager.QueueSize, Is.GreaterThan(0), "premise: cleanups wait for the tail");
+        return (tail, ids);
+    }
+
+    /// <summary>
+    /// #1382: the drain gives back its dirty marks with its epoch, between its entries. It runs every transaction's cleanups and kept a mark on every page
+    /// it touched until it ended: on a 64 MiB market one drain held 3,434 pages unevictable while it waited on back-pressure itself.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // the refresh interval is process-wide
+    public void TheTailsDrain_GivesBackItsMarksAsItGoes([Values] bool betweenEntries)
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, _) = TailWithABacklog(dbe);
+        var entries = 0;
+        var mostMarked = 0;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ =>
+        {
+            entries++;
+            mostMarked = Math.Max(mostMarked, dbe.MMF.CountUnevictablePages().Marked);
+        };
+        var interval = EntityAccessor.ScanEpochRefreshInterval;
+        EntityAccessor.ScanEpochRefreshInterval = betweenEntries ? TimeSpan.Zero : TimeSpan.MaxValue;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            EntityAccessor.ScanEpochRefreshInterval = interval;
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        TestContext.Out.WriteLine($"entries {entries}, most pages marked during the drain {mostMarked}");
+        Assert.That(entries, Is.GreaterThan(Traders), "premise: the tail drained the backlog");
+        if (betweenEntries)
+        {
+            Assert.That(mostMarked, Is.LessThanOrEqualTo(MarkedByOneEntry), "the drain held the marks of one entry at a time");
+        }
+        else
+        {
+            Assert.That(mostMarked, Is.GreaterThan(MarkedByOneEntry), "premise: never refreshed, the drain's marks pile up");
+        }
+    }
+
+    /// <summary>The pages one cleanup entry marks: its chain's root, its content chunk, at most an overflow chunk and the next content chunk.</summary>
+    private const int MarkedByOneEntry = 4;
+
+    /// <summary>
+    /// #1382: a tail whose drain throws — a back-pressure timeout on a small cache, here the probe — still leaves its epoch scope and the chain, and gives
+    /// back its marks. It did not: the dispose ended at the throw, the thread kept its pin (every page anyone touched after it unevictable) and the chain
+    /// its node (the cleanup cutoff held), for good — one transient timeout made a permanent stall.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    public void ATailsDrainThatThrows_StillLeavesItsEpochAndTheChain_AndGivesBackItsMarks()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, ids) = TailWithABacklog(dbe);
+        var entries = 0;
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ =>
+        {
+            if (++entries == 3)
+            {
+                throw new InvalidOperationException("the drain's fault");
+            }
+        };
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => tail.Dispose(), "premise: the drain threw out of the dispose");
+        }
+        finally
+        {
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        Assert.That(dbe.EpochManager.IsCurrentThreadInScope, Is.False, "the tail's epoch scope, left");
+        Assert.That(dbe.TransactionChain.ActiveCount, Is.Zero, "the tail's chain node, removed");
+        Assert.That(dbe.MMF.CountUnevictablePages().Marked, Is.Zero, "no page left under a mark");
+        Transfer(dbe, ids, new Random(2));   // and the engine goes on
     }
 
     /// <summary>

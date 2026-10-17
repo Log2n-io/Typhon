@@ -149,7 +149,7 @@ class PageSlotRecordTests
         // nothing.
         Assert.That(mmf.WritebackDebtPercent(), Is.Zero);
         Assert.That(mmf.GetGaugeSnapshot().TotalPages, Is.Zero);
-        Assert.That(mmf.CountUnevictablePages(), Is.EqualTo((0, 0, 0, 0, 0, 0)));
+        Assert.That(mmf.CountUnevictablePages(), Is.EqualTo((0, 0, 0, 0, 0, 0, 0, 0)));
         Assert.That(mmf.CollectDirtyMemPageIndices(), Is.Empty);
         Assert.That(mmf.EstimatedMemorySize, Is.Zero);
         Assert.DoesNotThrow(() => mmf.DecrementDirtyByDelta(0, 1));

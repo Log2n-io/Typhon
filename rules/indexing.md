@@ -505,18 +505,30 @@ written for the read path; these are the write-path obligations that went unwrit
             baseline) from OBSOLETE (permanent - restart immediately; the node will never become valid)
   invariant the pessimistic descent (BTree.FindLeaf) counts against its restart bound only the passes that found the path MODIFIED; a pass that
             stopped at a node a writer holds now — locked, not obsolete (a failed `OptimisticDescendToLeaf` names the node it stopped at in its version slot, and `FindLeaf` reads that node's latch) — waits, yielding, and
-            throws only once the same hold has outlasted `BTreeHeldNode.MaxWait` (30 s). A holder can legitimately wait seconds under its latch: a
-            multi-value buffer is read under its leaf's latch (IXW-06), and on a small cache a page of it waits on page-cache back-pressure. Counted,
-            10 000 passes of at most 38 us each named that wait a liveness defect after ~380 ms, past the WAL append in a commit (#1237)
+            throws only once the same hold has outlasted `BTreeHeldNode.MaxWait` (30 s). A hold is one (node, latch word) pair: an unlock bumps the
+            version, so a hot node taken by writer after writer starts the clock again at each holder (`OlcLatch.Word`); an abort does not, so holders
+            that abort back to back, each changing nothing, read as one hold. Summed over its holders, the
+            market key's leaf was named a defect past a commit's WAL append and the engine stopped. A holder can legitimately wait seconds under its
+            latch: a multi-value buffer is read under its leaf's latch (IXW-06), and on a small cache a page of it waits on page-cache back-pressure.
+            Counted, 10 000 passes of at most 38 us each named that wait a liveness defect after ~380 ms, past the WAL append in a commit (#1237)
+  invariant a multi-value writer brings in the pages its latched buffer step touches before it latches (BTree.PrefetchEntryBuffer,
+            VariableSizedBufferSegmentBase.Prefetch): the buffer's root and append chunk, and the chunk of the element it removes. Tagged with the
+            writer's epoch, they stay resident through the latch. Missed under the latch while the cache was under back-pressure, each such page held
+            the hot key's leaf for seconds, and its waiters' epochs were what kept the miss from being served: 16 threads at 1,300–2,600 transfers/s,
+            every storm failing, against 6,100–7,500 with the pages brought in first (#1237)
   never waiting on, or retrying against, a node whose obsolete bit is set
   never an unbounded retry loop around a step that can report "not completed" for a permanent condition
   enforce `OlcLatch.IsObsolete` is checked before the `SpinWriteLock` in the `leafVersion == 0` branch of both iterative paths;
           the pessimistic retry loops are bounded by `BTree.MaxPessimisticRestarts` and THROW on exhaustion
   scope: BTree.Insert.cs (`InsertIterative` leaf-lock branch; the `AddOrUpdateCorePessimistic` retry loop),
          BTree.Remove.cs (`RemoveIterative` leaf-lock branch; the `RemoveCorePessimistic` retry loop), OlcLatch.IsObsolete, BTree.FindLeaf,
-         BTree.OptimisticDescendToLeaf, BTreeHeldNode.MaxWait
+         BTree.OptimisticDescendToLeaf, BTreeHeldNode.MaxWait, OlcLatch.Word, BTree.PrefetchEntryBuffer, VariableSizedBufferSegmentBase.Prefetch
   verified: BTreeDescentHopAtomicityTests.ADescentMeetingANodeAWriterHoldsForASecond_WaitsItOut — the root held a second; the mutant counting the
             held passes throws IXW-01
+  verified: BTreeDescentHopAtomicityTests.ADescentMeetingANodeHeldByWriterAfterWriter_WaitsPastTheBoundOfOneHold — seven holders of 60 ms against a
+            100 ms bound; the mutant summing the holds throws IXW-01
+  verified: IndexMoveLatchedFaultTests.AMoveOffAHotKey_FaultsNoPageWhileItHoldsALeafLatch — a commit moves an element off a 50 000-value key whose
+            pages were evicted: no page faults in while the thread holds a latch (one does with the prefetch removed)
   on_violation: livelock in the commit PUBLISH phase - after the WAL append, so the transaction is already durable and cannot be
                 abandoned. Measured: four threads, 24+ minutes, CPU climbing, no progress, no exception, no timeout, and no exit
                 but killing the process.

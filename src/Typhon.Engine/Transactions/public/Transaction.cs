@@ -118,6 +118,9 @@ public unsafe partial class Transaction : EntityAccessor
     // mid-drain throw the abort path releases only [_publishDrainIndex, Count), so each retained lock is released exactly once.
     private int _publishDrainIndex;
 
+    /// <summary>The publish's entries so far, for its pressured epoch refresh cadence (<see cref="RefreshBetweenPublishSteps"/>).</summary>
+    private int _publishStepCount;
+
     /// <summary>
     /// Blittable per-component-entry publish descriptor recorded by <see cref="PrepareComponent"/> and consumed by <see cref="PublishComponent"/>
     /// after the WAL Append (AP-01). Carries everything publish needs to re-derive the revision handle and finish the commit without re-reading
@@ -413,10 +416,17 @@ public unsafe partial class Transaction : EntityAccessor
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
             // would be draining on someone else's behalf, having already lost the right to say whether it was the tail.
-            ProcessReadOnlyDeferredCleanups();
+            // A drain that throws still leaves the epoch and the chain (#1382), as below.
+            try
+            {
+                ProcessReadOnlyDeferredCleanups();
+            }
+            finally
+            {
+                _isDisposed = true;
+                ExitEpochAndRemove();
+            }
 
-            _isDisposed = true;
-            ExitEpochAndRemove();
             return;
         }
 
@@ -424,34 +434,55 @@ public unsafe partial class Transaction : EntityAccessor
         var dbe = _dbe;
         var tsn = TSN;
 
-        dbe.LogTxDispose(tsn, "EnsureCompleted");
-        EnsureCompleted();
-        dbe.LogTxDispose(tsn, "ProcessDeferredCleanups");
-        ProcessDeferredCleanups();
-        dbe.LogTxDispose(tsn, "FlushAccessors");
-        FlushAccessors();
-        DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
-        if (_hasEntityMapCache)
+        // #1382: whatever the auto-rollback or the drain throws (a back-pressure timeout among them), the transaction still lets go of what it holds, and
+        // the exception surfaces after. Left, its epoch pin kept every page anyone touched after it unevictable and its chain node held the cleanup
+        // cutoff, for good: one transient timeout became a permanent stall. A rollback cut short leaves entries flagged by a TSN that never gets a card,
+        // which every reader resolves as invisible (VIS-01).
+        try
         {
-            _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
-            _hasEntityMapCache = false;
+            dbe.LogTxDispose(tsn, "EnsureCompleted");
+            EnsureCompleted();
+            dbe.LogTxDispose(tsn, "ProcessDeferredCleanups");
+            ProcessDeferredCleanups();
         }
-
-        // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
-        // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
-        // #385 was.
-        if (_ownsChangeSet && _changeSet != null)
+        finally
         {
-            _changeSet.ReleaseDirtyMarks();
-            dbe.MMF.ReturnChangeSet(_changeSet);
-            _changeSet = null;
+            try
+            {
+                try
+                {
+                    dbe.LogTxDispose(tsn, "FlushAccessors");
+                    FlushAccessors();
+                    DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
+                    if (_hasEntityMapCache)
+                    {
+                        _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
+                        _hasEntityMapCache = false;
+                    }
+                }
+                finally
+                {
+                    // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still
+                    // dirty pages through it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another
+                    // owner's marks is the over-release that #385 was.
+                    if (_ownsChangeSet && _changeSet != null)
+                    {
+                        _changeSet.ReleaseDirtyMarks();
+                        dbe.MMF.ReturnChangeSet(_changeSet);
+                        _changeSet = null;
+                    }
+                }
+            }
+            finally
+            {
+                // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
+                // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd
+                // overwrite the new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
+                _isDisposed = true;
+                dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
+                ExitEpochAndRemove();
+            }
         }
-        // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
-        // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
-        // new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
-        _isDisposed = true;
-        dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
-        ExitEpochAndRemove();
     }
 
     /// <summary>Auto-rollback if not yet committed. Phase 6: tagged with <see cref="Typhon.Profiler.TransactionRollbackReason.AutoOnDispose"/>.</summary>
@@ -606,12 +637,21 @@ public unsafe partial class Transaction : EntityAccessor
         _epochManager.ExitScopeUnordered();
         var owningUow = OwnsUnitOfWork ? OwningUnitOfWork : null;
         dbe.LogTxDispose(tsn, "ChainRemove");
-        _dbe.TransactionChain.Remove(this);
-        if (owningUow != null)
+        // The pool's Reset unplaces a failed commit's spawns, which loads pages and can throw: the unit of work is disposed all the same, or its marks and
+        // its registry slot were held for good (#1382).
+        try
         {
-            dbe.LogTxDispose(tsn, "UoWDispose");
-            owningUow.Dispose();
+            _dbe.TransactionChain.Remove(this);
         }
+        finally
+        {
+            if (owningUow != null)
+            {
+                dbe.LogTxDispose(tsn, "UoWDispose");
+                owningUow.Dispose();
+            }
+        }
+
         dbe.LogTxDispose(tsn, "ExitEpochAndRemoveDone");
     }
 
@@ -1147,7 +1187,9 @@ public unsafe partial class Transaction : EntityAccessor
                 _currentPK = entityRaw;
                 _currentKey = key;
 
-                if (++_entityCount % EpochRefreshInterval == 0)
+                // EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).
+                if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
+                    && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))
                 {
                     _tx.EnumerateRefreshEpoch();
                 }
@@ -2337,6 +2379,24 @@ public unsafe partial class Transaction : EntityAccessor
         element.IsolationFlag && (contentChunkId != 0 ? element.ComponentChunkId == contentChunkId : element.ComponentChunkId == 0 && element.TSN == TSN);
 
     /// <summary>
+    /// Between two entries of a commit's publish — component entries, spawns, destroys, staged writes — while the cache is under pressure: moves the
+    /// thread's epoch, with its warm accessors', every <see cref="EntityAccessor.PressuredEpochRefreshInterval"/> entries (#1382), the transactions'
+    /// pressured cadence (EP-03). An entry keeps nothing it read for the next: what it wrote is dirty-marked, and the accessors it shares with the next
+    /// re-resolve every address. Held for the whole publish instead, its pin kept every page the other threads tagged meanwhile, for as long as the
+    /// publish's back-pressure waits lasted (AP-03). Every entry would bump the global epoch 1.3 million times a storm, each one sending every other
+    /// thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a commit made inside an index scan.
+    /// </summary>
+    private void RefreshBetweenPublishSteps()
+    {
+        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0 && _dbe.MMF.UnderPressure
+            && EntityAccessor.LiveIndexCursors == 0)
+        {
+            ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
+        }
+    }
+
+    /// <summary>
     /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.
     /// </summary>
     private void PublishPreparedComponents()
@@ -2363,6 +2423,7 @@ public unsafe partial class Transaction : EntityAccessor
             {
                 PublishComponent(_publishEntries[_publishDrainIndex]);
                 _publishDrainIndex++;
+                RefreshBetweenPublishSteps();
                 if ((_publishDrainIndex & 0x3FF) == 0)
                 {
                     ChunkBasedSegment<PersistentStore>.ExitBatchMode();
@@ -2942,6 +3003,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 PublishStagedEntry(info, staged.Key, staged.Value);
+                RefreshBetweenPublishSteps();
             }
         }
 

@@ -22,6 +22,15 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
     private const int SubBatchPages = 4;
     private const int BatchPages = 16;   // waves of four sub-batches of four pages
 
+    // Only the tests' forced cycles. The suite's 100 ms cadence (TestWalProfile) ran a periodic cycle in the middle of the staging rewrite whenever the
+    // machine's load made the rewrite outlast it: it settled part of the debt before the measured cycle sampled it — 177 owed pages down to 17-163 in
+    // 57 of 64 runs over 16 concurrent processes, 22 of them under the premise. The dirty-page trigger stays armed; the staging owes about 4 % of the cache.
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Resources.CheckpointIntervalMs = int.MaxValue;
+    }
+
     private static EntityId[] Spawn(DatabaseEngine dbe)
     {
         var ids = new EntityId[30 * 400];
@@ -41,8 +50,7 @@ internal sealed class CheckpointBatchSettleTests : TestBase<CheckpointBatchSettl
     }
 
     /// <summary>
-    /// Stages the debt the measured cycle settles, right before it: a forced cycle drains what the spawns left — a background cycle may already have
-    /// taken part of it, by an amount the machine's load decides (99, then 55 owed pages under a loaded gate) — and one transaction then rewrites every
+    /// Stages the debt the measured cycle settles, right before it: a forced cycle drains what the spawns left, and one transaction then rewrites every
     /// entity, owing the same pages again in one burst.
     /// </summary>
     private static void StageDebt(DatabaseEngine dbe, EntityId[] ids)

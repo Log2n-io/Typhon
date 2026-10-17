@@ -1552,9 +1552,27 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
     {
+        while (true)
+        {
+            var restartable = PagedMMF.BeginRestartableIndexWrite();
+            try
+            {
+                return AddOnce(key, value, ref accessor, out bufferRootId);
+            }
+            catch (BackpressureIndexRestart restart) when (restartable)
+            {
+                RestartIndexWrite(restart);
+            }
+            finally
+            {
+                PagedMMF.EndRestartableIndexWrite(restartable);
+            }
+        }
+    }
+
+    private int AddOnce(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
+    {
         NoteLatchedMutation("BTree.Add");
-        // The outer `using var` was adding a second EH region on a per-key hot path; we keep the inner try/finally for accessor return and rely on the body
-        // being throw-free in practice.
         var scope = TyphonEvent.BeginBTreeInsert();
 
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
@@ -1563,26 +1581,43 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         int elementId;
         try
         {
-            // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. AddOrUpdateCore + SyncHeader are engine-internal storage manipulation. If a future change
-            // adds a throw path here, this site MUST be re-tagged to variant B — a throw silently drops the span AND leaves CurrentOpenSpanId dangling,
-            // corrupting parent-linkage for every subsequent span on this thread.
             var args = new InsertArguments(key, value, Comparer, ref opAccessor, ref sibAccessor);
             AddOrUpdateCore(ref args);
             SyncHeader(ref opAccessor);
             bufferRootId = args.BufferRootId;
             elementId = args.ElementId;
-            // PROFILING-SPAN-NO-THROW-END
         }
         finally
         {
             _segment.ReturnWarmSiblingAccessor();
             _segment.ReturnWarmAccessor();
+            scope.Dispose();   // in the finally: a publish's restart (#1382) throws through, and a dropped span would leave CurrentOpenSpanId dangling
         }
-        scope.Dispose();
+
         return elementId;
     }
 
     public bool Remove(TKey key, out int value, ref ChunkAccessor<TStore> accessor)
+    {
+        while (true)
+        {
+            var restartable = PagedMMF.BeginRestartableIndexWrite();
+            try
+            {
+                return RemoveOnce(key, out value, ref accessor);
+            }
+            catch (BackpressureIndexRestart restart) when (restartable)
+            {
+                RestartIndexWrite(restart);
+            }
+            finally
+            {
+                PagedMMF.EndRestartableIndexWrite(restartable);
+            }
+        }
+    }
+
+    private bool RemoveOnce(TKey key, out int value, ref ChunkAccessor<TStore> accessor)
     {
         NoteLatchedMutation("BTree.Remove");
         var scope = TyphonEvent.BeginBTreeDelete();
@@ -1593,22 +1628,31 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         bool removed;
         try
         {
-            // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. RemoveCore + SyncHeader are engine-internal storage manipulation. If a future change adds
-            // a throw path, re-tag to variant B.
             var args = new RemoveArguments(key, Comparer, ref opAccessor, ref sibAccessor);
             RemoveCore(ref args);
             SyncHeader(ref opAccessor);
             value = args.Value;
             removed = args.Removed;
-            // PROFILING-SPAN-NO-THROW-END
         }
         finally
         {
             _segment.ReturnWarmSiblingAccessor();
             _segment.ReturnWarmAccessor();
+            scope.Dispose();   // as AddOnce
         }
-        scope.Dispose();
+
         return removed;
+    }
+
+    /// <summary>
+    /// A publish's B+Tree write gave up a back-pressure wait before it changed anything (<see cref="BackpressureIndexRestart"/>, #1382): its accessors are
+    /// back, its keys are copies and every node it read is retired by epoch, so its entry moves the thread's epoch, waits for a page and runs it again.
+    /// Disarmed first: nothing in the wait may unwind it a second time.
+    /// </summary>
+    private static void RestartIndexWrite(BackpressureIndexRestart restart)
+    {
+        PagedMMF.DisarmIndexRestart();
+        restart.Cache.AwaitPageAfterIndexRestart();
     }
 
     /// <summary>
@@ -2344,16 +2388,28 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
-        ThrowIfFaulted();
-        var held = OlcLatchHeld.Count;
-        try
+        while (true)
         {
-            return RemoveValueUnguarded(key, elementId, value, ref accessor);
-        }
-        catch (Exception e)
-        {
-            OnWriteException(e, held);   // #1321
-            throw;
+            ThrowIfFaulted();
+            var held = OlcLatchHeld.Count;
+            var restartable = PagedMMF.BeginRestartableIndexWrite();
+            try
+            {
+                return RemoveValueUnguarded(key, elementId, value, ref accessor);
+            }
+            catch (BackpressureIndexRestart restart) when (restartable)
+            {
+                RestartIndexWrite(restart);
+            }
+            catch (Exception e)
+            {
+                OnWriteException(e, held);   // #1321
+                throw;
+            }
+            finally
+            {
+                PagedMMF.EndRestartableIndexWrite(restartable);
+            }
         }
     }
 
@@ -2368,8 +2424,6 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         bool result = true;
         try
         {
-            // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. FindLeaf, latch lock/unlock, _storage.* and RemoveCorePessimistic are all engine-internal
-            // storage manipulation.
             var remaining = RemoveElementLatched(key, elementId, value, ref opAccessor, ref sibAccessor, out _);
             if (remaining < 0)
             {
@@ -2379,16 +2433,25 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             {
                 RemoveKeyIfBufferStillEmpty(key, ref opAccessor, ref sibAccessor);
             }
-            // PROFILING-SPAN-NO-THROW-END
         }
         finally
         {
             _segment.ReturnWarmSiblingAccessor();
             _segment.ReturnWarmAccessor();
+            scope.Dispose();   // as AddOnce
         }
-        scope.Dispose();
+
         return result;
     }
+
+    /// <summary>
+    /// Brings in, before a latch, the pages a latched step then touches in the buffer of <paramref name="leaf"/>'s entry at <paramref name="index"/>
+    /// (#1237): see <see cref="BaseNodeStorage.PrefetchBuffer"/>. The leaf is read unlatched, so the buffer id is a hint.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PrefetchEntryBuffer(NodeWrapper leaf, int index, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> bufferAccessor,
+        int elementChunkId = 0)
+        => _storage.PrefetchBuffer(leaf.GetItem(index, ref accessor).Value, elementChunkId, ref bufferAccessor);
 
     /// <summary>
     /// Removes one element from <paramref name="key"/>'s buffer under the write latch of the leaf that holds the key, and returns how many the buffer still
@@ -2411,6 +2474,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         out int bufferId)
     {
         bufferId = -1;
+        _storage.PrefetchBuffer(0, elementId, ref sibAccessor);   // #1237: the element's chunk, before the latch
         if (!TryLatchAuthoritativeLeaf(key, ref opAccessor, out var leaf))
         {
             return -1;
@@ -2635,6 +2699,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// </remarks>
     protected internal NodeWrapper AllocNode(NodeStates states, ref ChunkAccessor<TStore> accessor)
     {
+        PagedMMF.DisarmIndexRestart();   // #1382: a write that allocated a node is no longer restartable
         var chunkId = ChunkReservation<TStore>.AllocateUnderLatch(_segment, accessor.ChangeSet, ref accessor);
         var node = new NodeWrapper(_storage, chunkId, (states & NodeStates.IsLeaf) != 0);
         _storage.InitializeNode(node, states, ref accessor);
@@ -2856,6 +2921,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void DeferredReclaim()
     {
+        // #1382: it frees chunks, so a publish's write that reaches it unlatched (a not-found return, a pessimistic path's finally) is no longer
+        // restartable: a restart thrown mid-reclaim would leave the freed entries in the list, to be freed again.
+        PagedMMF.DisarmIndexRestart();
         bool lockTaken = false;
         _deferredLock.Enter(ref lockTaken);
         try
@@ -2900,6 +2968,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         PureSpin spin = default;
         SpinWait heldSpin = default;
         long heldSince = 0;
+        int heldNodeId = 0, heldNodeWord = 0;
         for (var attempt = 0; ;)
         {
             var (leafChunkId, stoppedAt, keyIndex) = OptimisticDescendToLeaf(key, ref accessor, followRightLink);
@@ -2924,19 +2993,26 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             // Only when this thread holds no latch itself: waiting while holding one could close a cycle the counted bound used to break.
             // The pass names the node it stopped at in the version slot (OptimisticDescendToLeaf): held now — locked, not obsolete — means a writer has it.
             // Re-resolved by chunk id, as every latch read after other reads must be; a node reused since only answers the question wrong, never unsafely.
+            // The bound is on one hold: a hot node taken by writer after writer, each briefly, is contention, and summing their holds named it a defect.
+            // A hold is one (node, latch word) pair: an unlock bumps the version, so the next holder's word differs. An abort does not, so holders that
+            // abort back to back read as one hold: each changed nothing, which is the livelock the bound is for.
             var heldNode = false;
+            var heldWord = 0;
             if (stoppedAt != 0 && OlcLatchHeld.Count == 0)
             {
                 var stoppedLatch = _storage.LoadNode(stoppedAt).GetLatch(ref accessor);
-                heldNode = stoppedLatch.IsLocked && !stoppedLatch.IsObsolete;
+                heldWord = stoppedLatch.Word;
+                heldNode = (heldWord & 0b11) == 0b01;   // locked, not obsolete
             }
 
             if (heldNode)
             {
                 var now = Stopwatch.GetTimestamp();
-                if (heldSince == 0)
+                if (heldSince == 0 || stoppedAt != heldNodeId || heldWord != heldNodeWord)
                 {
                     heldSince = now;
+                    heldNodeId = stoppedAt;
+                    heldNodeWord = heldWord;
                 }
                 else if (Stopwatch.GetElapsedTime(heldSince, now) > BTreeHeldNode.MaxWait)
                 {

@@ -89,10 +89,32 @@ internal ref struct RevisionEnumerator : IDisposable
                 var acquired = _exclusiveAccess ? _header.Control.TryEnterExclusiveAccess() : _header.Control.TryEnterSharedAccess();
                 if (!acquired)
                 {
-                    lockWc = budgetOwner.ChainLockWaitContext();
-                    if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+                    // #1382: inside an open or a first write, a contended chain is waited on briefly, then the operation unwinds and moves its epoch
+                    // instead of waiting with its pin (PagedMMF.RestartForLockWithin). The ticket is a snapshot: nothing to end when no lock was taken.
+                    if (PagedMMF.OpenRestartAllowed)
                     {
-                        ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        // The caller's budget still bounds it: its deadline and cancellation end the restarts too (CX-06).
+                        lockWc = budgetOwner.ChainLockWaitContext();
+                        if (lockWc.ShouldStop)
+                        {
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
+
+                        var briefSpan = lockWc.Remaining < PagedMMF.LockWaitBeforeRestart ? lockWc.Remaining : PagedMMF.LockWaitBeforeRestart;
+                        var brief = WaitContext.FromTimeout(briefSpan);
+                        if (!_header.Control.Enter(_exclusiveAccess, ref brief))
+                        {
+                            PagedMMF.RestartForLockWithin(TimeoutOptions.Current.RevisionChainLockTimeout);
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
+                    }
+                    else
+                    {
+                        lockWc = budgetOwner.ChainLockWaitContext();
+                        if (!_header.Control.Enter(_exclusiveAccess, ref lockWc))
+                        {
+                            ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
+                        }
                     }
                 }
             }
@@ -101,23 +123,35 @@ internal ref struct RevisionEnumerator : IDisposable
                 ThrowHelper.ThrowLockTimeout("RevisionChain/Enumerate", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
-        _itemCountLeft = _header.ItemCount;
-        _nextChunkId = ref _header.NextChunkId;
+        // The step to an overflow chunk fetches a page, and a fetch can throw: a back-pressure timeout, or an entity open's restart (#1230), after which
+        // the transaction goes on. The constructor never returned, so the caller's using has nothing to dispose: the hold is released here, or the
+        // retry takes the shared lock again over one never given back and the next writer of the entity waits out its lock timeout (as #1278).
+        try
+        {
+            _itemCountLeft = _header.ItemCount;
+            _nextChunkId = ref _header.NextChunkId;
 
-        _indexInChunk = goToFirstItem ? _header.FirstItemIndex : (short)0;
-        if (_indexInChunk < ComponentRevisionManager.CompRevCountInRoot)
-        {
-            var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId, false);
-            _nextChunkId = ref chunkContent.Cast<byte, int>()[0];
-            _elements = chunkContent.Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
-            CurChunkId = compRevFirstChunkId;
+            _indexInChunk = goToFirstItem ? _header.FirstItemIndex : (short)0;
+            if (_indexInChunk < ComponentRevisionManager.CompRevCountInRoot)
+            {
+                var chunkContent = compRevTableAccessor.GetChunkAsSpan(compRevFirstChunkId, false);
+                _nextChunkId = ref chunkContent.Cast<byte, int>()[0];
+                _elements = chunkContent.Slice(sizeof(CompRevStorageHeader)).Cast<byte, CompRevStorageElement>();
+                CurChunkId = compRevFirstChunkId;
+            }
+            else
+            {
+                var (chunkIndexInChain, index) = CompRevStorageHeader.GetRevisionLocation(_indexInChunk);
+                _indexInChunk = (short)index;
+                StepToChunk(chunkIndexInChain, false);
+            }
         }
-        else
+        catch
         {
-            var (chunkIndexInChain, index) = CompRevStorageHeader.GetRevisionLocation(_indexInChunk);
-            _indexInChunk = (short)index;
-            StepToChunk(chunkIndexInChain, false);
+            Dispose();
+            throw;
         }
+
         --_indexInChunk;        // We pre-increment in MoveNext, so we start one before
         _revisionIndex = -1;
     }

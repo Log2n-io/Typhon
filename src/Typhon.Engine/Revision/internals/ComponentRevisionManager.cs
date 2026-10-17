@@ -115,6 +115,14 @@ internal ref struct ComponentRevisionManager
     // compaction, rollback) — not a transaction's per-entity hot path — so a freshly-armed per-call deadline is fine.
     private static WaitContext CleanupLockWc => WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
 
+    /// <summary>The highest revision index a chain may name: its indices and count are 16-bit (CompRevStorageHeader).</summary>
+    internal static int MaxChainRevisionIndex = short.MaxValue;
+
+    private static long s_chainFullRefusals;
+
+    /// <summary>Appends refused because their chain was full (<see cref="MaxChainRevisionIndex"/>), restarts included. Diagnostic.</summary>
+    internal static long ChainFullRefusals => Interlocked.Read(ref s_chainFullRefusals);
+
     internal static unsafe void AddCompRev(ComponentInfo info, ref ComponentInfo.CompRevInfo compRevInfo, long tsn, ushort uowId, bool isDelete,
         bool lockAlreadyHeld = false)
     {
@@ -125,18 +133,48 @@ internal ref struct ComponentRevisionManager
 
         // Enter exclusive access for the Revision Table (skip if caller already holds the lock)
         var ticket = default(PagedMMF.CaptureTicket);
+        var canRestart = !lockAlreadyHeld && PagedMMF.OpenRestartAllowed;
         if (!lockAlreadyHeld)
         {
             ticket = ChainLockTicket(ref compRevTableAccessor, ref firstHeader);
-            var wc = WaitContext.FromTimeout(TimeoutOptions.Current.RevisionChainLockTimeout);
+            // #1382: a first write waits for a contended chain briefly, then unwinds and moves its epoch instead of waiting with its pin; nothing is
+            // written before the lock, so the write starts over clean (CHAIN-02).
+            var restartable = PagedMMF.OpenRestartAllowed;
+            var lockTimeout = TimeoutOptions.Current.RevisionChainLockTimeout;
+            var wc = WaitContext.FromTimeout(restartable && PagedMMF.LockWaitBeforeRestart < lockTimeout ? PagedMMF.LockWaitBeforeRestart : lockTimeout);
             if (!firstHeader.Control.EnterExclusiveAccess(ref wc))
             {
+                if (restartable)
+                {
+                    PagedMMF.RestartForLockWithin(TimeoutOptions.Current.RevisionChainLockTimeout);
+                }
+
                 ThrowHelper.ThrowLockTimeout("RevisionChain/AddRevision", TimeoutOptions.Current.RevisionChainLockTimeout);
             }
         }
 
+        // Under the lock the append is not restartable (#1382): its steps write the chain one after the other, and a restart thrown between two of them
+        // (a back-pressure round on a page) left it half-written for the retry. It waits as before, and only its timeout can interrupt it.
+        var restartDepth = PagedMMF.RestartableOpenDepth;
+        PagedMMF.RestartableOpenDepth = 0;
         try
         {
+            // A chain's indices are 16-bit (#1382): FirstItemIndex + ItemCount names the new entry, and a grow shifts FirstItemIndex by a chunk. Past
+            // short.MaxValue the count wrapped negative — every reader of the chain misread it, and the compaction's stackalloc of a negative length
+            // overflowed the stack (market, 4 desks under 16 writers: 32,768 revisions of one desk, kept by the oldest snapshot). Refused before any write:
+            // a first write waits for the compaction outside its pin, within the chain lock's timeout (EP-02); past it, or where it cannot restart, the
+            // chain is full.
+            if (firstHeader.FirstItemIndex + firstHeader.ItemCount + CompRevCountInNext >= MaxChainRevisionIndex)
+            {
+                Interlocked.Increment(ref s_chainFullRefusals);
+                if (canRestart)
+                {
+                    PagedMMF.RestartForLockWithin(TimeoutOptions.Current.RevisionChainLockTimeout);
+                }
+
+                ThrowHelper.ThrowResourceExhausted("RevisionChain/AddRevision", ResourceType.ComponentTable, firstHeader.ItemCount, MaxChainRevisionIndex);
+            }
+
             // Check if we need to add one more chunk to the chain
             if (ComputeRevElementCount(firstHeader.ChainLength) == firstHeader.ItemCount)
             {
@@ -182,6 +220,7 @@ internal ref struct ComponentRevisionManager
         }
         finally
         {
+            PagedMMF.RestartableOpenDepth = restartDepth;
             if (!lockAlreadyHeld)
             {
                 firstHeader.Control.ExitExclusiveAccess();
@@ -1603,13 +1642,15 @@ internal ref struct ComponentRevisionManager
 
             // Add a new chunk after the last in the chain
             var newChunkId = compRevTable.AllocateChunk(true, info.CompRevTableAccessor.ChangeSet); // Clear content to make sure the next chunk ID is 0
+
+            // Copy the elements from the first chunk to the new chunk, then link it: both fetches can throw (a back-pressure timeout), and linked first,
+            // a throw left the chain last → new → 0 with its length and first index unchanged — the retry grew it again from the orphan (#1382).
+            var newChunkElements = compRevTableAccessor.GetChunkAsSpan(newChunkId, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
+            var firstChunkElements = compRevTableAccessor.GetChunkAsSpan(firstChunkIndexInChain, true).Slice(sizeof(int))
+                .Cast<byte, CompRevStorageElement>();
+            firstChunkElements.Slice(0, firstItemIndexInChunk).CopyTo(newChunkElements);
             enumerator.NextChunkId = newChunkId;
             compRevTableAccessor.DirtyChunk(enumerator.CurChunkId);
-
-            // Copy the elements from the first chunk to the new chunk
-            var newChunkElements = compRevTableAccessor.GetChunkAsSpan(newChunkId, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
-            var firstChunkElements = compRevTableAccessor.GetChunkAsSpan(firstChunkIndexInChain, true).Slice(sizeof(int)).Cast<byte, CompRevStorageElement>();
-            firstChunkElements.Slice(0, firstItemIndexInChunk).CopyTo(newChunkElements);
 
             firstHeader.ChainLength++;                                              // One more item in the chain
             firstHeader.FirstItemIndex += (short)CompRevCountInNext; // We added a chunk before, the first item index gets shifted
