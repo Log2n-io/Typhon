@@ -1,0 +1,61 @@
+name: trial-ubuntu-2604
+
+# THROWAWAY (actions/runner-images#14748): proves what moving to ubuntu-26.04 costs before ubuntu-latest moves there on 2026-10-19.
+# Runs only on pushes to its own branch; delete it before the PR merges.
+on:
+  push:
+    branches: [feature/ci-pin-ubuntu-2404]
+
+permissions:
+  contents: read
+
+jobs:
+  # merge-gate's native-sdk Linux legs, same steps, on the new image: gcc 15 / clang 21+ under -Werror.
+  native-sdk:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc, cc: gcc, cxx: g++, sanitize: 'OFF', live: true }
+          - { name: clang-asan, cc: clang, cxx: clang++, sanitize: 'ON', live: false }
+    name: native-sdk (${{ matrix.name }}, 26.04)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: ${{ matrix.cc }} --version; cmake --version
+      - name: Configure
+        run: cmake -S src/Typhon.Client.Native -B build/native -DCMAKE_BUILD_TYPE=Release -DTYPHON_NATIVE_SANITIZE=${{ matrix.sanitize }} -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build/native --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build/native -C Release --output-on-failure
+      - uses: actions/setup-dotnet@v5
+        if: matrix.live
+        with:
+          dotnet-version: '10.0.x'
+      - name: Live differential test
+        if: matrix.live
+        run: python3 scripts/native-live-test.py --live build/native/typhon_client_live --config Release
+
+  # The SkyPilot launchers' install step on Python 3.14. No AWS credential: install + import is the question.
+  skypilot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - run: python3 --version
+      - name: Install SkyPilot
+        run: python3 -m pip install --quiet "skypilot[aws]"
+      - name: Import
+        run: sky --version && python3 -c "import sky, sky.clouds; print(sky.__version__)"
+
+  # The invariants job is NOT pinned (it floats on ubuntu-latest): its policy scripts must pass on Python 3.14.
+  policy:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 --version
+      - name: Policy checks
+        run: bash scripts/pre-push.sh --policy

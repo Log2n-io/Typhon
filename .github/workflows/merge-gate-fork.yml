@@ -51,7 +51,9 @@ jobs:
     # from, and the only question here is whether the head is THIS repository.
     if: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
     environment: fork-pr-gate
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: -latest moves to 26.04 (Python 3.14) from 2026-10-19 (actions/runner-images#14748), and
+    # SkyPilot lists 3.9-3.13. Move to ubuntu-26.04 explicitly once `pip install skypilot[aws]` is proven there.
+    runs-on: ubuntu-24.04
     # ---- COST FAIL-SAFE (#729). `sky launch` holds a billed VM for as long as this step runs. ----
     timeout-minutes: 30
     env:
