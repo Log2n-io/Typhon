@@ -491,6 +491,16 @@ export interface SubscriptionsSessionTelemetry {
   framesSkipped: number;
   /** The engine's own "this client is struggling" signal, before a skip is forced. Zero is healthy. */
   degradeLevel: number;
+  /**
+   * Frames published to this session per second, over the same window as {@link bytesPerSec}.
+   *
+   * The two share a window so that `bytesPerSec / framesPerSec` is this session's average frame payload — see
+   * {@link averagePayloadBytes}. Zero from a producer that predates the field, and zero for a session served no frame in the window;
+   * the derivation has to treat those the same, because the wire cannot tell them apart.
+   */
+  framesPerSec: number;
+  /** Frames published to this session since it opened. Cumulative, like {@link framesSkipped}. */
+  framesProduced: number;
 }
 
 /**
@@ -1246,6 +1256,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
           bytesPerSec: evt.bytesPerSec ?? 0,
           framesSkipped: evt.framesSkipped ?? 0,
           degradeLevel: evt.degradeLevel ?? 0,
+          framesPerSec: evt.framesPerSec ?? 0,
+          framesProduced: evt.framesProduced ?? 0,
         });
         break;
       }

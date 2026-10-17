@@ -154,6 +154,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 # TLS_CHAIN/TLS_KEY arrive from the unit's EnvironmentFile and are empty on a box with no certificate, in which case the
 # server serves plain HTTP on the game port and says so. AUTH_LOCAL_ONLY keeps /auth off the public internet -- required
 # whenever this is reachable without a CDN in front, because a signup costs the server ~51 ms of a core.
+#
+# MAX_SESSIONS is the engine's session table and it is allocated once at start-up, so it cannot be raised later by a client
+# arriving: past it, admission is refused at connect time. Unset leaves the demo's own default of 8 192, which is exactly
+# what a fleet asking for 8 192 plus one browser hits -- so a stack sized for a full fleet sets this ABOVE the fleet.
+#
+# AUTH_BURST/AUTH_REFILL_MS are what make a PLAYER fleet possible at all. The /auth limiter keys on the caller's /24, so a
+# whole bot box is one key: at the defaults (burst 10, one attempt back every 6 s) 8 192 signups would take about fourteen
+# hours. Raise them for a load box and leave them alone for a public server -- this is the limiter that stands between
+# /auth and the tick loop, and a signup is PBKDF2.
 exec "$here/__EXE__" \
     --serve "${PORT:-8080}" \
     --bind "${BIND:-127.0.0.1}" \
@@ -163,6 +172,9 @@ exec "$here/__EXE__" \
     ${TLS_CHAIN:+--tls-port "${TLS_PORT:-443}"} \
     ${TLS_CHAIN:+--redirect-port "${REDIRECT_PORT:-80}"} \
     ${AUTH_LOCAL_ONLY:+--auth-local-only}     ${AUTH_ITERATIONS:+--auth-iterations "$AUTH_ITERATIONS"} \
+    ${MAX_SESSIONS:+--max-sessions "$MAX_SESSIONS"} \
+    ${AUTH_BURST:+--auth-burst "$AUTH_BURST"} \
+    ${AUTH_REFILL_MS:+--auth-refill-ms "$AUTH_REFILL_MS"} \
     --client-dir "$here/client" \
     --db-dir "${DB_DIR:-$here/data}" \
     --persist \

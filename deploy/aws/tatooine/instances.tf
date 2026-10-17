@@ -244,6 +244,8 @@ resource "aws_instance" "bots" {
     stack           = var.name
     server_endpoint = "ws://${aws_instance.server.private_ip}:${var.game_port}/ws"
     console_port    = var.console_port
+    bot_sessions    = var.bot_sessions
+    bot_kind        = var.bot_kind
   }))
 
   tags = {

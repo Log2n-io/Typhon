@@ -234,6 +234,27 @@
             </tr>
             <tr><th title="Cumulative messages and bytes received since the run started. Use the per-second row above to see what the fleet is doing now; these drift for a minute after any change.">Totals</th><td>@_snapshot.Messages.ToString("N0", CultureInfo.InvariantCulture) messages · @Mib(_snapshot.Bytes) total</td></tr>
             <tr><th title="Bytes per second per session, averaged over the run — the capacity number, since it is what multiplies by the population you are planning for. Across AZs this is also the bill: 1000 sessions at 20 KB/s is about $1050 a month.">Wire per session</th><td>@_snapshot.BytesPerSessionPerSecond.ToString("N0", CultureInfo.InvariantCulture) B/s</td></tr>
+            <tr>
+                <th title="What the SERVER says it closed, read from its own stats endpoint rather than inferred from close codes. A session closed for silence (4001) reaches this process as 1006 - an abnormal close with no code - because the server's close drain overtakes the code, so the Disconnects row below cannot tell you this and used to leave it to be guessed at. Silence means this box failed to ping inside 3/pingHz seconds; lagging means the server shed a client whose backlog it could not drain.">Closed by the server</th>
+                <td>
+                    @if (_snapshot.ServerStatsError != null)
+                    {
+                        <span>stats unavailable: @_snapshot.ServerStatsError</span>
+                    }
+                    else
+                    {
+                        @($"silence {_snapshot.ServerClosedSilent:N0} · lagging {_snapshot.ServerClosedLagging:N0}")
+                    }
+                </td>
+            </tr>
+            <tr>
+                <th title="Sessions this fleet found closed and replaced. The reconciler reads every bot's socket each round, takes the dead ones out of the population and re-opens to the target - so a run whose target never moved and whose figure here is in the thousands HELD its population by replacing it, which is a weaker claim than having kept it. Before this existed a closed session stayed in the count forever and the dial never recovered a single loss.">Replaced after loss</th>
+                <td>@_snapshot.RetiredDead.ToString("N0", CultureInfo.InvariantCulture)</td>
+            </tr>
+            <tr>
+                <th title="How long one pass of pinging every session takes, last and worst. This is the number that decides whether the fleet keeps its population: the server closes a session it has not heard from within 3/pingHz seconds - 750 ms at 4 Hz - and the ping loop has its own cadence, so a sweep approaching that window is the warning that precedes a silence close. Beside it, total GC pause in this process, because a collection long enough to delay a sweep is the usual cause.">Ping sweep · GC</th>
+                <td>@($"{_snapshot.PingSweepMs:F0} ms (worst {_snapshot.PingSweepWorstMs:F0}) · GC paused {_snapshot.GcPauseMs:F0} ms")</td>
+            </tr>
             <tr><th title="Exceptions raised inside the clients' own receive loops. Not disconnects: a fault is a decode or protocol error on a session that may still be up, and any non-zero value makes the figures suspect.">Receive-loop faults</th><td>@_snapshot.Faults</td></tr>
             <tr>
                 <th title="Sessions asked for that never opened, with the first reason. The reason matters more than the count: a server refusing because its session table is full looks exactly like a generator that stopped trying, and the close reason used to be discarded one line above the counter that said something had failed.">Could not open</th>

@@ -39,6 +39,17 @@ resource "aws_ssm_parameter" "server_env" {
     # experiences it as being silently logged out. Generated once and kept in state, which is part of why the state bucket
     # is private and encrypted.
     "SWG_AUTH_KEY=${random_password.auth_key.result}",
+
+    # The session table (`--max-sessions`). Here rather than in user_data for the same reason as ORIGIN: the table is sized
+    # once at start-up, so raising it is "update the parameter, restart the unit" and not "replace the instance". Empty
+    # leaves the demo's default of 8 192.
+    var.max_sessions == 0 ? null : "MAX_SESSIONS=${var.max_sessions}",
+
+    # The /auth limiter, raised for a stack that a bot fleet signs up against. It keys on the caller's /24 and a bot box is
+    # ONE key, so the defaults (burst 10, one attempt back every 6 s) make a player fleet of any size a matter of hours.
+    # Empty leaves the server's defaults, which is what a stack serving only humans wants.
+    var.auth_burst == 0 ? null : "AUTH_BURST=${var.auth_burst}",
+    var.auth_refill_ms == 0 ? null : "AUTH_REFILL_MS=${var.auth_refill_ms}",
   ]))
 
   description = "ORIGIN, the signing key and the front-door secret for the ${var.name} game server. Read at service start; update and restart to rotate."

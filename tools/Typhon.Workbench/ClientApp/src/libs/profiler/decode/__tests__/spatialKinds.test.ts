@@ -349,7 +349,9 @@ describe('#WB-02 subscriptions trace kinds — wire layout', () => {
       v.setFloat32(o + 10, 48_000, true);             // bytesPerSec
       v.setBigInt64(o + 14, 12n, true);               // framesSkipped
       v.setInt32(o + 22, 2, true);                    // degradeLevel
-      return o + 26;
+      v.setFloat32(o + 26, 20, true);                 // framesPerSec — an f32 at 2 mod 4, like bytesPerSec at 10
+      v.setBigInt64(o + 30, 9_413n, true);            // framesProduced
+      return o + 38;
     });
 
     const e = decodeOne(bytes);
@@ -359,6 +361,10 @@ describe('#WB-02 subscriptions trace kinds — wire layout', () => {
     expect(e.bytesPerSec).toBe(48_000);
     expect(e.framesSkipped).toBe(12);
     expect(e.degradeLevel).toBe(2);
+    expect(e.framesPerSec).toBe(20);
+    expect(e.framesProduced).toBe(9_413);
+    // The reason both are on the record: 48 000 B/s over 20 frames/s is 2 400 B a frame, derived within one row.
+    expect(e.bytesPerSec! / e.framesPerSec!).toBe(2_400);
   });
 });
 
@@ -396,6 +402,26 @@ describe('append-only prefixes decode without reading past the record', () => {
     expect(e.realmId).toBe(0xffff);
     expect(e.bytesPerSec).toBe(0);
     expect(e.degradeLevel).toBe(0);
+  });
+
+  it('kind 69: a 26-byte row from a producer without the frame pair reads both as zero', () => {
+    // The shape every capture taken before the frame fields has. The panel must render the payload column as unknown
+    // for these rows rather than as 0 B — a derivation over a zero denominator, which `averagePayloadBytes` returns
+    // null for.
+    const bytes = record(69, false, (v, o) => {
+      v.setBigUint64(o, 5n, true);
+      v.setUint16(o + 8, 3, true);
+      v.setFloat32(o + 10, 1_000, true);
+      v.setBigInt64(o + 14, 4n, true);
+      v.setInt32(o + 22, 0, true);
+      return o + 26; // pre-append: stops exactly where framesPerSec would start
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.bytesPerSec).toBe(1_000);
+    expect(e.framesSkipped).toBe(4);
+    expect(e.framesPerSec).toBe(0);
+    expect(e.framesProduced).toBe(0);
   });
 
   it('a truncated record as the LAST in its block does not throw', () => {

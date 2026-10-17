@@ -191,3 +191,95 @@ variable "monthly_budget_usd" {
   default     = 450
   description = "08-hosting § 9's always-on minimal row is ~420/month. Alerts at 50/80/100 % and on the forecast."
 }
+
+variable "max_sessions" {
+  type        = number
+  default     = 0
+  description = <<-EOT
+    The server's session table (`--max-sessions`): how many clients may be connected at once. 0 leaves the demo's own
+    default of 8 192.
+
+    Set it ABOVE the fleet you intend to run, not equal to it. The table is allocated once at start-up and admission past
+    it is refused at connect time, so a stack sized at exactly 8 192 for an 8 192-bot fleet has no slot left for the
+    browser you watch it from — which is the failure SimConfig's own remarks describe: the fleet "simply stopped" at the
+    ceiling and the generator reported the ceiling as though it were the number it had asked for.
+
+    It reaches the instance through SSM Parameter Store (not user_data), so it can be changed with a parameter update and a
+    service restart rather than an instance replacement.
+  EOT
+
+  validation {
+    condition     = var.max_sessions == 0 || (var.max_sessions >= 1 && var.max_sessions <= 65535)
+    error_message = "max_sessions must be 0 (the demo's default) or between 1 and 65535; 65 535 is structural — a session identity packs a 16-bit slot."
+  }
+}
+
+variable "bot_sessions" {
+  type        = number
+  default     = 1000
+  description = <<-EOT
+    How many bots ONE bot box runs (the `BOTS` line in /etc/tatooine/bots.env). 07-bots § 5 measures ~5-10k per
+    c7g.2xlarge; a bigger fleet on one box wants a bigger box rather than a bigger number.
+
+    It is baked into user_data, so changing it on an existing stack does nothing (the instance carries
+    `ignore_changes = [user_data_base64]`, which it needs or a new Canonical AMI would replace the box). Edit bots.env over
+    SSM for a running stack; this is for what a fresh one starts with.
+  EOT
+
+  validation {
+    condition     = var.bot_sessions >= 1 && var.bot_sessions <= 65535
+    error_message = "bot_sessions must be between 1 and 65535."
+  }
+}
+
+variable "bot_kind" {
+  type        = string
+  default     = "god"
+  description = <<-EOT
+    What the fleet connects as: `god` (anonymous, read-only camera — no account, no key) or `player` (a real avatar with
+    an account, which is what exercises the write path: player mode writes Inventory on every loot, and that is why the
+    server is on local NVMe).
+
+    `player` needs TWO things this module cannot supply for you:
+      * SWG_BOT_KEY on the bot box. Bot passwords are derived from it and never stored, so the accounts file authorises
+        nothing without it, and the SAME value must be used every run or every account already signed up is orphaned.
+      * a raised /auth limit on the server (auth_burst / auth_refill_ms). The limiter keys on the caller's /24, so the
+        whole bot box is one key.
+  EOT
+
+  validation {
+    condition     = contains(["god", "player"], var.bot_kind)
+    error_message = "bot_kind must be \"god\" or \"player\"."
+  }
+}
+
+variable "auth_burst" {
+  type        = number
+  default     = 0
+  description = <<-EOT
+    `--auth-burst`: how many /auth attempts one address may make at once. 0 keeps the server's default of 10.
+
+    Raise it only for a stack a bot fleet signs up against, and remember what it is protecting: a signup is PBKDF2 behind a
+    semaphore of ProcessorCount/4 on the same box that runs the tick loop, so this limiter is what stands between /auth and
+    the frame budget. At AUTH_ITERATIONS=100000 a signup is ~8.3 ms of a core.
+  EOT
+
+  validation {
+    condition     = var.auth_burst >= 0 && var.auth_burst <= 65535
+    error_message = "auth_burst must be between 0 and 65535."
+  }
+}
+
+variable "auth_refill_ms" {
+  type        = number
+  default     = 0
+  description = <<-EOT
+    `--auth-refill-ms`: milliseconds for one /auth attempt to come back. 0 keeps the server's default of 6 000 — one attempt
+    every six seconds per /24, which is right for humans and is fourteen hours for 8 192 bot signups.
+  EOT
+
+  validation {
+    condition     = var.auth_refill_ms >= 0 && var.auth_refill_ms <= 600000
+    error_message = "auth_refill_ms must be between 0 and 600000."
+  }
+}

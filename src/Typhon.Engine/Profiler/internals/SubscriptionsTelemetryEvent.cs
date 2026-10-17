@@ -114,6 +114,23 @@ internal ref partial struct SubscriptionsSessionTelemetryEvent
     /// not reachable from the emission site. Zero is healthy.
     /// </remarks>
     [BeginParam] public int DegradeLevel;
+    /// <summary>
+    /// Frames published to this session per second, over the same window as <see cref="BytesPerSec"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Here so that the session's average PAYLOAD is derivable from one row.</b> <see cref="BytesPerSec"/> alone says how much a session costs; divided by
+    /// this it says how much one frame to that session carries, which is the figure that separates "this client is subscribed to too much" from "this client is
+    /// served too often". Windowed rather than cumulative for exactly that reason: a consumer must not have to join two emissions — or two sessions' rows from
+    /// different emissions — to divide one number by another, and a cumulative pair divided against itself would give the session's lifetime average instead
+    /// of this window's. Zero when the session was served no frame in the window, which is a reading and not an absence.
+    /// </remarks>
+    [BeginParam] public float FramesPerSec;
+    /// <summary>Frames published to this session since it opened. Cumulative, beside <see cref="FramesSkipped"/>.</summary>
+    /// <remarks>
+    /// The denominator's provenance, and free: <c>SessionFrameState.FramesProduced</c> is already counted on the publish path beside the byte total. Read
+    /// against <see cref="FramesSkipped"/> it is the session's whole service history — how many frames it was owed and how many it got.
+    /// </remarks>
+    [BeginParam] public long FramesProduced;
 }
 
 /// <summary>

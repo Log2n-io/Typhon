@@ -100,8 +100,8 @@ write_files:
       ENDPOINT=${server_endpoint}
       PORT=${console_port}
       BIND=127.0.0.1
-      BOTS=1000
-      KIND=god
+      BOTS=${bot_sessions}
+      KIND=${bot_kind}
       CONNECT_RATE=200
       SECONDS_TO_RUN=3600
       ACCOUNTS_FILE=/var/lib/tatooine/bots.jsonl

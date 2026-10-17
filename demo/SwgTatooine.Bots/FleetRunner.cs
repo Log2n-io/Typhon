@@ -161,7 +161,15 @@ public readonly record struct FleetSnapshot(
     int InRealm,
     double ServerTickP99Worst,
     long ServerOverruns,
-    int ServerSessions);
+    int ServerSessions,
+    long RetiredDead,
+    long ServerClosedSilent,
+    long ServerClosedLagging,
+    long ServerStatsSessions,
+    string ServerStatsError,
+    double PingSweepMs,
+    double PingSweepWorstMs,
+    double GcPauseMs);
 
 /// <summary>
 /// One fleet run, start to stop, as an object a console or a control panel can both drive.
@@ -309,7 +317,8 @@ public sealed class FleetRunner : IAsyncDisposable
         {
             return new FleetSnapshot(
                 phase, requested, 0, 0, provisioned, 0, 0, 0, 0, 0, 0, 0, new Dictionary<ushort, int>(), elapsed, shaping, fault,
-                0, 0, 0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0);
+                0, 0, 0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, null, 0, 0, 0);
         }
 
         var seconds = Math.Max(1.0, elapsed.TotalSeconds);
@@ -368,6 +377,11 @@ public sealed class FleetRunner : IAsyncDisposable
             }
         }
 
+        // Read once each: the panel renders these beside the fleet's own count, and two reads of a moving counter would let the rows
+        // disagree with each other inside one paint.
+        var closes = swarm.ServerCloses();
+        var pingSweep = swarm.PingSweepMs;
+
         return new FleetSnapshot(
             phase,
             requested,
@@ -405,7 +419,15 @@ public sealed class FleetRunner : IAsyncDisposable
 
             // "typhon.sessions" is the catalog's name; "typhon.replication.sessions" does not exist and read 0, under a tooltip
             // telling the operator that a disagreement with the connected count means avatars are being held.
-            (int)Safe(swarm.ServerMetric("typhon.sessions")));
+            (int)Safe(swarm.ServerMetric("typhon.sessions")),
+            swarm.RetiredDead,
+            closes.ClosedSilent,
+            closes.ClosedLagging,
+            closes.Sessions,
+            closes.Error,
+            pingSweep.Last,
+            pingSweep.Worst,
+            GC.GetTotalPauseDuration().TotalMilliseconds);
     }
 
     /// <summary>
@@ -827,6 +849,7 @@ public sealed class FleetRunner : IAsyncDisposable
             WanderSeconds = settings.WanderSeconds,
             TokenFor = accounts == null ? null : index => accounts[index]?.Token,
             ResumeFor = accounts == null ? null : accounts.Resume,
+            OnNote = Say,
             OnResumeToken = accounts == null
                 ? null
                 : (index, token) =>

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net.Http;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Client;
@@ -154,6 +156,14 @@ public sealed class BotSwarmOptions
     /// not to be the expensive part.
     /// </remarks>
     public Action<int, byte[]> OnResumeToken { get; init; }
+
+    /// <summary>Told something an operator needs to read, once, in words rather than as a counter.</summary>
+    /// <remarks>
+    /// For the conditions a number cannot express on its own. "Replaced 21 665 sessions" is a counter; "every session is dying as
+    /// fast as it opens, so the dial has stopped trying at full speed" is the sentence that stops somebody staring at a panel for
+    /// five minutes wondering why the population will not move.
+    /// </remarks>
+    public Action<string> OnNote { get; init; }
 }
 
 /// <summary>
@@ -212,17 +222,6 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private const int DriveBatch = 512;
 
-    /// <summary>Bots PINGED concurrently within one tick, which is deliberately far larger than <see cref="DriveBatch"/>.</summary>
-    /// <remarks>
-    /// <b>Because the ping is the session's life and it was queued behind everything else.</b> A ping is a few bytes with no
-    /// encode; a wander is a command built against the catalog. Driving both in one pass meant a bot in the sixteenth batch
-    /// waited for fifteen batches of MOVEMENT before its ping went out, and the server closes a session it has not heard from
-    /// for <c>3 / pingHz</c> seconds — 750 ms at the 4 Hz this server advertises. That is the ceiling a fleet kept hitting at a
-    /// few thousand sessions: the sweep grew past the silence window, the tail was closed with 4001, and the population settled
-    /// wherever the sweep happened to fit.
-    /// </remarks>
-    private const int PingBatch = 4096;
-
     /// <summary>Serialises the slot a freshly opened bot takes, because handshakes complete concurrently.</summary>
     private readonly object _appendLock = new();
 
@@ -240,6 +239,7 @@ public sealed class BotSwarm : IAsyncDisposable
     private Task _driver;
     private Task _pinger;
     private Task _reconciler;
+    private Task _statsPoller;
 
     /// <summary>How long the reconciler waits between polls when the population already matches the target.</summary>
     private static readonly TimeSpan IdlePoll = TimeSpan.FromMilliseconds(100);
@@ -251,17 +251,41 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private static readonly TimeSpan StalledPoll = TimeSpan.FromSeconds(2);
 
+    /// <summary>Sessions a churning fleet opens per round, instead of a whole chunk.</summary>
+    /// <remarks>
+    /// Small enough that a hopeless retry costs the server almost nothing, large enough that one round is a fair test of whether
+    /// the condition has cleared — a single session can fail for its own reasons, sixteen failing together is the condition.
+    /// </remarks>
+    private const int ChurnProbe = 16;
+
     /// <summary>The population asked for, which an operator may move while the swarm runs.</summary>
     private int _target;
+
+    /// <summary>Sessions found closed and taken out of the population, which the reconciler then re-opens.</summary>
+    /// <remarks>
+    /// Counted apart from <see cref="_retired"/> because the two mean opposite things: a shrink is an operator's decision, and this
+    /// is a loss the fleet is recovering from. A run whose target never moved and whose figure here is thousands held its population
+    /// by replacing it, which is a different claim from having kept it.
+    /// </remarks>
+    private long _retiredDead;
+
+    /// <summary>What the server's own stats endpoint last said, under <see cref="_reportLock"/>.</summary>
+    /// <remarks>
+    /// <b>Polled over HTTP because the wire catalog does not carry it.</b> The close reasons that decide whether a fleet keeps its
+    /// population — a session closed for silence, a session closed for lagging — are published at <c>/typhon/stats.json</c> and
+    /// nowhere else, so a client that reads only replicated metrics sees the 1006 the close drain leaves behind and has to guess.
+    /// Guessing cost an afternoon once; it is one GET every two seconds.
+    /// </remarks>
+    private long _serverClosedSilent;
+    private long _serverClosedLagging;
+    private long _serverSessionsSeen;
+    private string _serverStatsError;
 
     /// <summary>Sessions closed by a shrink, so a report can tell a deliberate cut from a disconnect.</summary>
     private long _retired;
 
     /// <summary>Abnormal closes by their local cause, under <see cref="_reportLock"/>.</summary>
     private readonly Dictionary<string, int> _closeDetails = [];
-
-    /// <summary>Guards the bot-index allocator: the high-water mark and the one released run.</summary>
-    private readonly object _indexLock = new();
 
     private BotIndexPool _indices;
 
@@ -312,6 +336,25 @@ public sealed class BotSwarm : IAsyncDisposable
 
     /// <summary>The largest population this swarm can be turned up to.</summary>
     public int Capacity => _bots.Length;
+
+    /// <summary>Sessions the fleet found closed and replaced, which is what a dial recovering from a loss looks like.</summary>
+    public long RetiredDead => Interlocked.Read(ref _retiredDead);
+
+    /// <summary>
+    /// What the server says about closes it made, and how many sessions it holds: silence closes, lagging closes, its own count.
+    /// </summary>
+    /// <remarks>
+    /// The first of these is the number no report in this repository used to read. A fleet losing sessions sees 1006 — an abnormal
+    /// close with no code — because the server's 4001 is overtaken by its close drain; the server knows it closed them for silence
+    /// and says so here. Never diagnose a lost population from close codes while this is available.
+    /// </remarks>
+    public (long ClosedSilent, long ClosedLagging, long Sessions, string Error) ServerCloses()
+    {
+        lock (_reportLock)
+        {
+            return (_serverClosedSilent, _serverClosedLagging, _serverSessionsSeen, _serverStatsError);
+        }
+    }
 
     /// <summary>Sessions closed by a shrink rather than lost.</summary>
     public long Retired => Interlocked.Read(ref _retired);
@@ -904,6 +947,9 @@ public sealed class BotSwarm : IAsyncDisposable
         _driver = Task.Run(() => DriveAsync(_stopping.Token), CancellationToken.None);
         _reconciler = Task.Run(() => ReconcileAsync(_stopping.Token), CancellationToken.None);
 
+        // The server's own close reasons, polled rather than inferred from close codes. See PollServerStatsAsync.
+        _statsPoller = Task.Run(() => PollServerStatsAsync(_stopping.Token), CancellationToken.None);
+
         await _settled.Task.WaitAsync(ct).ConfigureAwait(false);
         return BotCount;
     }
@@ -963,14 +1009,39 @@ public sealed class BotSwarm : IAsyncDisposable
         var nextDue = TimeSpan.Zero;
         var stalls = 0;
 
+        // <b>Rounds that replaced sessions without gaining any, which is a different failure from a round that opened nothing.</b>
+        // Retirement turns a permanent loss into a retry, and a retry against a condition that is not going to change turns into a
+        // hot loop: measured with the server's hot spinners disabled, every handshake died on arrival and the fleet replaced 21 665
+        // sessions in five minutes — about seventy a second — while the population sat at 154 and the panel reported "Running".
+        // The per-chunk stall counter cannot see it, because each chunk DOES open sessions; what it does not do is keep them.
+        var churnRounds = 0;
+        var churnReported = false;
+
         while (!ct.IsCancellationRequested)
         {
             var target = Math.Clamp(Volatile.Read(ref _target), 0, _bots.Length);
+            var liveBefore = BotCount;
+
+            // <b>Reality before intent, every round.</b> Without this the population was "slots ever filled": a session the SERVER
+            // closed stayed in its slot and in the count, so `live` counted corpses, compared them against the target, and decided
+            // there was nothing to do. One lost session was permanent. Measured on the control panel before this line existed:
+            // 8 000 opened, 4 407 closed by the server for silence, the dial stuck at 3 593 for ten minutes while the panel still
+            // said it was aiming for 8 000 — and growth never ran again because 7 997 of 8 000 slots were full of closed sockets.
+            await RetireDisconnectedAsync().ConfigureAwait(false);
             var live = BotCount;
 
             if (live < target)
             {
                 var size = Math.Min(chunk, target - live);
+
+                // <b>A churning fleet probes rather than charges.</b> Backing the CADENCE off to one round every two seconds still
+                // threw 250 handshakes at a server that was closing all of them — 44 a second, measured, against 72 with no backoff
+                // at all, which is not a fix so much as a discount. A chunk of this size is enough to notice the moment the
+                // condition clears, and the round that gains ground clears the churn counter and restores the full chunk.
+                if (churnRounds >= 3)
+                {
+                    size = Math.Min(size, ChurnProbe);
+                }
 
                 // <b>Accounts for THIS chunk, here, rather than for the whole population before the loop starts.</b> That is the
                 // pipeline: these are signing up while the chunk before them is already walking. A chunk whose accounts are already
@@ -1050,8 +1121,38 @@ public sealed class BotSwarm : IAsyncDisposable
                 // A ramp that stops making progress is settled too, or StartAsync would wait forever for sessions the server is
                 // refusing — which is exactly what a full session table does.
                 stalls = added > 0 ? 0 : stalls + 1;
+
+                // <b>NET progress, not sessions opened.</b> A round that opens 250 and loses 250 has opened a chunk and gained
+                // nothing, and at the connect pacing it will do it again in a second and a half, forever. Three such rounds and the
+                // ramp drops to the stalled poll: the fleet still replaces what it loses, at a rate an operator can watch, and the
+                // dial still answers a lower target. The alternative measured itself: seventy handshakes a second against a server
+                // that closed every one of them.
+                churnRounds = BotCount > liveBefore ? 0 : churnRounds + 1;
+                if (churnRounds >= 3 && !churnReported)
+                {
+                    churnReported = true;
+                    var note = $"sessions are closing as fast as they open — {RetiredDead:N0} replaced so far, population {BotCount:N0} "
+                        + $"of {target:N0}. Backing off to one chunk every {StalledPoll.TotalSeconds:F0}s. Read 'Closed by the server' "
+                        + "and the disconnect codes: this is the server refusing or dropping them, not the ramp being slow.";
+                    _options.OnNote?.Invoke(note);
+                    Console.WriteLine($"  !! {note}");
+                }
+                else if (churnRounds == 0)
+                {
+                    churnReported = false;
+                }
+
                 if (added > 0 || stalls < 3)
                 {
+                    if (churnRounds >= 3)
+                    {
+                        // Re-based, because the slow poll owns the cadence while the fleet is churning; the connect deadline is
+                        // picked up again by the round that finally gains ground.
+                        nextDue = clock.Elapsed;
+                        await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                        continue;
+                    }
+
                     nextDue += perBatch;
                     var remaining = nextDue - clock.Elapsed;
                     if (remaining > TimeSpan.Zero)
@@ -1083,6 +1184,147 @@ public sealed class BotSwarm : IAsyncDisposable
             // notices when the operator lowers the target or the server recovers.
             nextDue = clock.Elapsed;
             await Task.Delay(stalls >= 3 ? StalledPoll : IdlePoll, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Takes every session the server has closed out of the population, so the reconciler can re-open it.</summary>
+    /// <returns>How many were removed.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the fleet's one closed loop.</b> Everything else here states an intention — a target, a connect rate, a chunk —
+    /// and a load generator that only ever counts what it opened cannot tell "eight thousand sessions" from "eight thousand
+    /// handshakes, half of them now closed". A bot is alive if and only if its socket is open, and that is read from the socket
+    /// rather than remembered.
+    /// </para>
+    /// <para>
+    /// <b>Under the append lock, with the count lowered before the slots are emptied</b>, which is the ordering the shrink already
+    /// uses and for the same reason: the driver and the ping loop read the count and then the slot, so a bot has to become
+    /// unreachable before its socket is disposed. The arithmetic is <see cref="BotRoster.Compact"/>'s, where it has tests.
+    /// </para>
+    /// <para>
+    /// <b>The index goes back to the pool, which is what lets the next chunk re-open the SAME account.</b> A dead bot whose index
+    /// leaked would cost the fleet its reach permanently — the failure <see cref="BotIndexPool"/> was extracted over.
+    /// </para>
+    /// </remarks>
+    private async Task<int> RetireDisconnectedAsync()
+    {
+        List<Bot> victims;
+
+        lock (_appendLock)
+        {
+            var live = _botCount;
+            if (live == 0)
+            {
+                return 0;
+            }
+
+            victims = [];
+            var kept = BotRoster.Compact(_bots, live, static bot => bot.Client.IsConnected, victims);
+            if (victims.Count == 0)
+            {
+                return 0;
+            }
+
+            Volatile.Write(ref _botCount, kept);
+        }
+
+        // <b>Disposed, not closed.</b> The server has already closed these: a CloseAsync would wait on a handshake that cannot
+        // arrive, and a shrink's reason for sending one — so the server does not hold the avatar for the whole resume grace — does
+        // not apply, because the server is the party that ended it. Concurrently, since a few thousand can die at once.
+        var releasing = new Task[victims.Count];
+        for (var i = 0; i < victims.Count; i++)
+        {
+            releasing[i] = DisposeQuietlyAsync(victims[i]);
+        }
+
+        await Task.WhenAll(releasing).ConfigureAwait(false);
+
+        // After the dispose, so an index cannot be re-opened while the socket it names is still being torn down.
+        foreach (var bot in victims)
+        {
+            ReleaseIndices(bot.Index, 1);
+        }
+
+        Interlocked.Add(ref _retiredDead, victims.Count);
+        return victims.Count;
+    }
+
+    /// <summary>Disposes one dead bot's client, swallowing whatever a socket that is already gone says on the way out.</summary>
+    /// <param name="bot">The bot.</param>
+    /// <returns>The dispose.</returns>
+    private static async Task DisposeQuietlyAsync(Bot bot)
+    {
+        try
+        {
+            await bot.Client.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A retirement pass must not fail because one socket was further gone than another.
+        }
+    }
+
+    /// <summary>Reads the server's close reasons and session count, every two seconds, for as long as the swarm lives.</summary>
+    /// <param name="ct">Stops the poll.</param>
+    /// <returns>The loop.</returns>
+    /// <remarks>
+    /// <b>Failures are recorded, not thrown.</b> A fleet whose stats poll cannot reach the server must still run — the poll is an
+    /// instrument, not a dependency — so the error is published for the panel to show instead of taking the swarm down with it.
+    /// </remarks>
+    private async Task PollServerStatsAsync(CancellationToken ct)
+    {
+        Uri statsUri;
+        try
+        {
+            statsUri = new Uri(BotProvisioner.AuthBaseFrom(_options.Endpoint), "typhon/stats.json");
+        }
+        catch (UriFormatException e)
+        {
+            lock (_reportLock)
+            {
+                _serverStatsError = e.Message;
+            }
+
+            return;
+        }
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+
+        while (await SafeWaitAsync(timer, ct).ConfigureAwait(false))
+        {
+            try
+            {
+                var json = await http.GetStringAsync(statsUri, ct).ConfigureAwait(false);
+                using var document = JsonDocument.Parse(json);
+                if (!document.RootElement.TryGetProperty("replication", out var replication))
+                {
+                    continue;
+                }
+
+                var silent = replication.TryGetProperty("closedSilent", out var a) ? a.GetInt64() : 0L;
+                var lagging = replication.TryGetProperty("closedLagging", out var b) ? b.GetInt64() : 0L;
+                var sessions = replication.TryGetProperty("sessions", out var c) ? c.GetInt64() : 0L;
+
+                lock (_reportLock)
+                {
+                    _serverClosedSilent = silent;
+                    _serverClosedLagging = lagging;
+                    _serverSessionsSeen = sessions;
+                    _serverStatsError = null;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception e) when (e is HttpRequestException or JsonException)
+            {
+                lock (_reportLock)
+                {
+                    _serverStatsError = e.Message;
+                }
+            }
         }
     }
 
@@ -1405,7 +1647,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // Both, and the reconciler first: it is the one that opens sockets, so letting it run while the bots are being closed would
         // race a new session into an array the teardown has already walked.
-        foreach (var task in new[] { _reconciler, _driver, _pinger })
+        foreach (var task in new[] { _reconciler, _driver, _pinger, _statsPoller })
         {
             if (task == null)
             {
@@ -1546,39 +1788,77 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <b>Decoupled from the driver's schedule, NOT from its sends, and the difference bounds what this loop can promise.</b> Both
     /// paths send through one <see cref="TyphonClient"/>, and the transport serialises them behind a single send lock — which is
     /// what makes concurrent sends safe, and equally what makes them queue. A bot whose kernel send buffer has filled blocks its own
-    /// ping behind whatever the driver is sending to it, and because a sweep awaits its whole batch, the batch's next ping waits
-    /// with it; <see cref="PingBatch"/> being eight times <see cref="DriveBatch"/> makes that exposure eight times wider than the
-    /// driver's. So this removes the movement pass from the ping INTERVAL, which is what was costing sessions, and does not make a
-    /// ping immune to a stalled socket. Measured at 8 000 of 8 000 on one process; a fleet that outgrows that needs the ping to stop
-    /// sharing a lock with the commands, not a faster sweep.
+    /// ping behind whatever the driver is sending to it. What this loop guarantees is that the stall stays that bot's: a ping is
+    /// issued and not awaited, so a stuck socket costs one permit of the population's worth and never another bot's cadence. It
+    /// used to await a batch of 4 096, which is how one stalled socket took a batch's worth of sessions with it.
     /// </para>
     /// </remarks>
     private async Task PingLoopAsync(CancellationToken ct)
     {
         var hz = Math.Max(1, _options.TickHz);
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1000.0 / hz));
+
+        // <b>Backpressure instead of a barrier, and one permit per POSSIBLE bot.</b> The permit is released when a ping completes, so
+        // a stalled socket costs one permit and not the rest of the sweep. Capping the permits below the population brings the
+        // barrier back in another shape: measured at 8 000 with a cap of 4 096, the sweep took 432 ms merely to ISSUE and its worst
+        // was 786 ms — past the silence window again — because the second half of the fleet was waiting on the first half's
+        // completions. A ping is a few bytes with no encode, so the population is the only bound it needs; the burst this used to
+        // guard against is the driver's, and DriveBatch still bounds that.
+        var inFlight = Math.Max(1, _bots.Length);
+        using var permits = new SemaphoreSlim(inFlight, inFlight);
+
         while (await SafeWaitAsync(timer, ct).ConfigureAwait(false))
         {
             var live = BotCount;
             var start = Stopwatch.GetTimestamp();
-            for (var b = 0; b < live; b += PingBatch)
+            for (var b = 0; b < live; b++)
             {
                 if (ct.IsCancellationRequested)
                 {
                     return;
                 }
 
-                var size = Math.Min(PingBatch, live - b);
-                var pinging = new Task[size];
-                for (var k = 0; k < size; k++)
+                try
                 {
-                    pinging[k] = PingOneAsync(_bots[b + k], ct);
+                    await permits.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
                 }
 
-                await Task.WhenAll(pinging).ConfigureAwait(false);
+                // Not awaited: every exception is contained inside, and the permit is released in its finally. Awaiting here — even
+                // a batch at a time, as this loop used to — makes the slowest socket in the batch the sweep's own latency, and a
+                // sweep slower than the server's silence window costs the whole batch its session. Measured on the control panel at
+                // 8 000: worst sweep 932 ms against a 750 ms window, and the server closed 927 sessions for silence in one burst.
+                _ = PingThenReleaseAsync(_bots[b], permits, ct);
             }
 
+            // <b>This is now the time to ISSUE a sweep, not to complete one</b>, which is the number that matters: a ping's own cost
+            // is PingCost's, and what decides whether a session lives is how long it waits to be sent at all.
             NotePingSweep(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
+    }
+
+    /// <summary>Pings one bot and releases its permit, whatever happened.</summary>
+    /// <param name="bot">The bot, which may be null if a retirement emptied its slot.</param>
+    /// <param name="permits">The in-flight bound to release.</param>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The ping.</returns>
+    /// <remarks>
+    /// <b>Nothing may escape this method</b>, because the sweep does not await it: an exception here would be an unobserved task
+    /// fault, and a permit never released would shrink the fleet's ping capacity by one for the rest of the run.
+    /// <see cref="PingOneAsync"/> already contains every exception; the finally is what makes the permit safe regardless.
+    /// </remarks>
+    private async Task PingThenReleaseAsync(Bot bot, SemaphoreSlim permits, CancellationToken ct)
+    {
+        try
+        {
+            await PingOneAsync(bot, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            permits.Release();
         }
     }
 
@@ -1683,7 +1963,7 @@ public sealed class BotSwarm : IAsyncDisposable
         try
         {
             // The ping is NOT here any more: it goes out in its own pass ahead of this one, because queueing it behind the
-            // movement of every earlier batch is what pushed sessions past the server's silence window. See PingBatch.
+            // movement of every earlier batch is what pushed sessions past the server's silence window. See PingLoopAsync.
             //
             // Staggered by bot: every camera switching on one tick would be N whole-planet RESETs in one server tick.
             if (touring && (Ticks + position) % tourPeriod == 0)
@@ -1704,6 +1984,14 @@ public sealed class BotSwarm : IAsyncDisposable
         catch (OperationCanceledException)
         {
             // The batch's own check returns from the loop; one cancelled send must not fault its neighbours' WhenAll.
+        }
+        catch (ObjectDisposedException)
+        {
+            // <b>A lifecycle race, not a catalog mismatch, and it must not be filed as one.</b> ObjectDisposedException derives from
+            // InvalidOperationException, so the arm below took it and the panel declared "PROTOCOL FAULTS … the figures below are NOT
+            // a clean measurement" over a bot that was retired mid-tick: the driver reads the count and then the slot, so it can hold
+            // a reference to a session the reconciler has just disposed. That is the window the count-first ordering accepts, and the
+            // send failing is the intended outcome. Counted as a disconnect by its own handler, not as our send bug.
         }
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or NotSupportedException or FormatException)
         {
