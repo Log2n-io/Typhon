@@ -37,6 +37,7 @@ invisible to a caller and shows up only in storage footprint and commit cost.
 |-------------|-------------|----------------|------------------------|
 | [Unique (single-value) secondary index](./unique-secondary-index.md) | `[Index]` (default) | Key → chunk-id, directly | none |
 | [Multi-value secondary index (AllowMultiple)](./multi-value-secondary-index.md) | `[Index(AllowMultiple = true)]` | Key → HEAD buffer of chunk-ids | +4 bytes (`ElementId`) |
+| [Sparse secondary index](./sparse-secondary-index.md) | `[Index(Sparse = true)]`, with or without `AllowMultiple` | Either of the above; key 0 never filed | as the mode it modifies |
 
 ## ⚠️ Guarantees & limits
 

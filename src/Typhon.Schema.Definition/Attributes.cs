@@ -86,6 +86,13 @@ public sealed class IndexAttribute : Attribute
     public bool AllowMultiple { get; set; }
 
     /// <summary>
+    /// <c>true</c> for a sparse index: an entity whose key is <c>0</c> — "no data", the engine's rule for an optional value — is not indexed at all, so an
+    /// index over a field most entities leave at 0 costs only the entities that set it. A lookup or range never returns key 0, and a unique sparse index lets
+    /// any number of entities hold 0. Integer key types only (byte, short, int, long, their unsigned forms, and char).
+    /// </summary>
+    public bool Sparse { get; set; }
+
+    /// <summary>
     /// Cascade action when the parent entity (referenced by an <c>EntityLink&lt;T&gt;</c> FK field) is deleted.
     /// Only applicable to indexed EntityLink fields. Default is <see cref="CascadeAction.None"/>.
     /// </summary>

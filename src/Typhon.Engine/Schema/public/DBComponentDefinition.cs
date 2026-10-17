@@ -172,6 +172,9 @@ public class DBComponentDefinition
         /// <summary>True when the index permits multiple entities per key (non-unique). Only meaningful when <see cref="HasIndex"/> is <c>true</c>.</summary>
         public bool IndexAllowMultiple { get; set; }
 
+        /// <summary>True when the index skips key 0, "no data" (<c>[Index(Sparse = true)]</c>, IX-09). Only meaningful when <see cref="HasIndex"/> is <c>true</c>.</summary>
+        public bool IndexSparse { get; set; }
+
         /// <summary>True when the index was created implicitly by the engine rather than declared with an explicit <c>[Index]</c> attribute.</summary>
         public bool IsIndexAuto { get; set; }
 

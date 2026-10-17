@@ -35,6 +35,11 @@ namespace Typhon.Engine.Internals;
 /// </remarks>
 internal static class KeyRange
 {
+    /// <summary>
+    /// Whether the encoded range holds key 0: the key a sparse index never holds (IX-09), so a scan of that range over one misses every entity holding 0.
+    /// </summary>
+    internal static bool AdmitsZero(KeyType kt, long min, long max) => IsIntegerKeyType(kt) && Compare(min, 0, kt) <= 0 && Compare(max, 0, kt) >= 0;
+
     /// <summary>Whether the key type's encoded bounds are ordered by plain signed <c>long</c> comparison.</summary>
     internal static bool IsIntegerKeyType(KeyType kt) =>
         kt is KeyType.Bool or KeyType.Byte or KeyType.SByte or KeyType.Short or KeyType.UShort or KeyType.Int or KeyType.UInt or KeyType.Long or KeyType.ULong;

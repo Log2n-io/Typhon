@@ -181,6 +181,8 @@
           href: Indexing/secondary-index-storage-modes/multi-value-secondary-index.md
         - name: Unique (Single-Value) Secondary Index
           href: Indexing/secondary-index-storage-modes/unique-secondary-index.md
+        - name: Sparse Secondary Index
+          href: Indexing/secondary-index-storage-modes/sparse-secondary-index.md
 - name: Observability
   href: Observability/README.md
   items:

@@ -1550,8 +1550,20 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor) => Add(key, value, ref accessor, out _);
 
+    /// <summary>A key this tree never holds: 0 on a <see cref="BTreeBase{TStore}.Sparse"/> tree (IX-09).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool SkipsKey(TKey key) => Sparse && EqualityComparer<TKey>.Default.Equals(key, default);
+
+    public override unsafe bool SkipsKey(void* key) => Sparse && EqualityComparer<TKey>.Default.Equals(*(TKey*)key, default);
+
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
     {
+        if (SkipsKey(key))
+        {
+            bufferRootId = 0;
+            return 0;
+        }
+
         while (true)
         {
             var restartable = PagedMMF.BeginRestartableIndexWrite();
@@ -1599,6 +1611,12 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool Remove(TKey key, out int value, ref ChunkAccessor<TStore> accessor)
     {
+        if (SkipsKey(key))
+        {
+            value = 0;
+            return true;
+        }
+
         while (true)
         {
             var restartable = PagedMMF.BeginRestartableIndexWrite();
@@ -2306,6 +2324,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public Result<int, BTreeLookupStatus> TryGet(TKey key, ref ChunkAccessor<TStore> accessor)
     {
+        if (SkipsKey(key))
+        {
+            return new Result<int, BTreeLookupStatus>(BTreeLookupStatus.NotFound);
+        }
+
         // OLC optimistic path: zero locks, zero writes to shared state
         for (int attempt = 0; attempt < MaxOptimisticRestarts; attempt++)
         {
@@ -2388,6 +2411,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
+        if (SkipsKey(key))
+        {
+            return true;
+        }
+
         while (true)
         {
             ThrowIfFaulted();
@@ -2608,6 +2636,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public VariableSizedBufferAccessor<int, TStore> TryGetMultiple(TKey key, ref ChunkAccessor<TStore> accessor)
     {
+        if (SkipsKey(key))
+        {
+            return default;
+        }
+
         // OLC optimistic path: zero locks, zero writes to shared state
         for (int attempt = 0; attempt < MaxOptimisticRestarts; attempt++)
         {

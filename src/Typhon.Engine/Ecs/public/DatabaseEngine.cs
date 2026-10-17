@@ -56,6 +56,10 @@ public struct FieldR1
     /// the realm is what places every entity, and losing it silently would merge every realm's clusters into realm 0. Occupies what was padding.</summary>
     public bool IsRealmKey;
 
+    /// <summary><c>true</c> when the field's index skips key 0, "no data" (<c>[Index(Sparse = true)]</c>, IX-09). Persisted so turning it on or off rebuilds the
+    /// index: a tree built dense holds key-0 entries a sparse one never removes, and one built sparse is missing the entities a dense one must find.</summary>
+    public bool IndexSparse;
+
     /// <summary>Element count when the field is a fixed-length array; 0 for scalar fields (see <see cref="IsArray"/>).</summary>
     public int ArrayLength;
 
@@ -3076,6 +3080,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IndexSparse = field.IndexSparse,
                     IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,
@@ -3207,6 +3212,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IndexSparse = field.IndexSparse,
                     IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,

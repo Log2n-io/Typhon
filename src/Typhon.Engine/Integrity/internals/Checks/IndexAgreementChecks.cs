@@ -138,7 +138,7 @@ internal static class IndexAgreementChecks
         var label = $"'{archetype.Name}.{field.Name}'";
 
         ReportForward(ctx, locus, label, nodeLayout, expected, actual);
-        ReportReverse(ctx, locus, label, expected, actual);
+        ReportReverse(ctx, locus, label, expected, actual, field.IndexSparse);
         return true;
     }
 
@@ -328,14 +328,15 @@ internal static class IndexAgreementChecks
 
     /// <summary><c>IDX-04</c> — a live entity whose indexed field has no entry at all.</summary>
     private static void ReportReverse(ScanContext ctx, Locus locus, string label,
-        Dictionary<int, byte[]> expected, Dictionary<int, byte[]> actual)
+        Dictionary<int, byte[]> expected, Dictionary<int, byte[]> actual, bool sparse)
     {
         var missing = 0;
         var firstLocation = 0;
 
-        foreach (var location in expected.Keys)
+        foreach (var (location, value) in expected)
         {
-            if (actual.ContainsKey(location))
+            // A sparse index files no entity holding 0 (IX-09): its absence is the index being right.
+            if (actual.ContainsKey(location) || (sparse && value.AsSpan().IndexOfAnyExcept((byte)0) < 0))
             {
                 continue;
             }

@@ -97,7 +97,7 @@ internal static class SchemaValidator
             {
                 indexChanges.Add(new IndexChange(FieldChangeKind.IndexRemoved, rField.Name, fieldId));
             }
-            else if (pField.HasIndex && rField.HasIndex && pField.IndexAllowMultiple != rField.IndexAllowMultiple)
+            else if (pField.HasIndex && rField.HasIndex && (pField.IndexAllowMultiple != rField.IndexAllowMultiple || pField.IndexSparse != rField.IndexSparse))
             {
                 indexChanges.Add(new IndexChange(FieldChangeKind.IndexTypeChanged, rField.Name, fieldId));
             }

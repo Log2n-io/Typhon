@@ -96,6 +96,9 @@ public readonly struct ComponentFieldSpec
     /// <summary>True when the index permits multiple entities per key (non-unique). Only meaningful when <see cref="HasIndex"/> is true.</summary>
     public bool IndexAllowMultiple { get; }
 
+    /// <summary>True when the index skips key 0 (<see cref="IndexAttribute.Sparse"/>). Only meaningful when <see cref="HasIndex"/> is true.</summary>
+    public bool IndexSparse { get; }
+
     /// <summary>True when the field is a foreign key (<see cref="ForeignKeyAttribute"/>) referencing another component's entities.</summary>
     public bool IsForeignKey { get; }
 
@@ -134,6 +137,7 @@ public readonly struct ComponentFieldSpec
     /// <param name="spatialMode">Spatial mode (see <see cref="SpatialMode"/>).</param>
     /// <param name="spatialCategory">Spatial category bitmask (see <see cref="SpatialCategory"/>).</param>
     /// <param name="isRealmKey">Realm-key flag (see <see cref="IsRealmKey"/>).</param>
+    /// <param name="indexSparse">Sparse-index flag (see <see cref="IndexSparse"/>).</param>
     public ComponentFieldSpec(
         string name,
         Type dotNetType,
@@ -150,7 +154,8 @@ public readonly struct ComponentFieldSpec
         float spatialCellSize = 0f,
         SpatialMode spatialMode = SpatialMode.Dynamic,
         uint spatialCategory = uint.MaxValue,
-        bool isRealmKey = false)
+        bool isRealmKey = false,
+        bool indexSparse = false)
     {
         Name = name;
         DotNetType = dotNetType;
@@ -168,5 +173,6 @@ public readonly struct ComponentFieldSpec
         SpatialMode = spatialMode;
         SpatialCategory = spatialCategory;
         IsRealmKey = isRealmKey;
+        IndexSparse = indexSparse;
     }
 }

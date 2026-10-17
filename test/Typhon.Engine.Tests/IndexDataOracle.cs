@@ -145,6 +145,14 @@ internal static unsafe class IndexDataOracle
             }
         }
 
+        // A sparse index files no entity holding 0 (IX-09): the data's 0s are expected ABSENT, and any number of entities may hold it on a unique one. A
+        // key-0 entry is then an over-population, which the unique side's EntryCount and the multi side's walk both report.
+        var sparse = field.Index.Sparse;
+        if (sparse)
+        {
+            expected.Remove(0);
+        }
+
         var idxAccessor = field.Index.Segment.CreateChunkAccessor();
         try
         {
@@ -197,6 +205,11 @@ internal static unsafe class IndexDataOracle
             using var e = intTree.EnumerateRangeMultiple(int.MinValue, int.MaxValue);
             while (e.MoveNextKey())
             {
+                if (sparse && e.CurrentKey == 0)
+                {
+                    problems.Add($"{label}: the SPARSE index holds key 0, which it must never file (IX-09) — an insert or a move onto 0 that indexed it.");
+                }
+
                 // The enumerator is TWO-LEVEL and this loop must be too. `CurrentValues` is one CHUNK of the key's VSBS buffer, not the whole of it —
                 // `NextChunk()` walks the rest, which is what EcsQuery's own `do { ... } while (enumerator.NextChunk())` does.
                 //

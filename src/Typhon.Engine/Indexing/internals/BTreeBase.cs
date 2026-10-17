@@ -22,6 +22,16 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     public abstract bool AllowMultiple { get; }
     public abstract int EntryCount { get; }
 
+    /// <summary>
+    /// Key 0 is never indexed (IX-09, <c>[Index(Sparse = true)]</c>): 0 is "no data", so an entity holding it has no entry. Every entry point treats key 0 as
+    /// the state it asks for — an insert of it adds nothing, a removal of it succeeds, a move to it removes, a move from it inserts, a lookup of it finds
+    /// nothing — so no caller tests for it. Set once at creation, before the tree is used.
+    /// </summary>
+    public bool Sparse { get; set; }
+
+    /// <inheritdoc/>
+    public abstract unsafe bool SkipsKey(void* key);
+
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
     public abstract unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore>accessor);

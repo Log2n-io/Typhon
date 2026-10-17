@@ -2828,6 +2828,11 @@ public unsafe partial class Transaction
     /// <summary>Records a key this transaction puts in a unique index; a second put of one key — by the index's own comparison — is a violation.</summary>
     private static void ClaimOwnKey(IBTreeIndex index, byte* key)
     {
+        if (index.SkipsKey(key))
+        {
+            return;   // key 0 of a sparse index is no entry, so any number of entities hold it (IX-09)
+        }
+
         t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
         if (!t_validationOwnKeys.Add(new UniqueKeyRef(index, key)))
         {

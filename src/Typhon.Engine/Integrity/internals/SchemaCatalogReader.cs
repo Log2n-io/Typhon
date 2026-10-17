@@ -35,6 +35,9 @@ internal sealed class FieldView
     /// <summary>Whether that index permits several entries per key.</summary>
     public bool IndexAllowMultiple { get; init; }
 
+    /// <summary>Whether that index skips key 0 (IX-09): an entity holding 0 has no entry, by design.</summary>
+    public bool IndexSparse { get; init; }
+
     /// <summary>Root page of the field's own index segment, or <c>0</c>; already range-checked.</summary>
     public int IndexRoot { get; init; }
 
@@ -350,6 +353,7 @@ internal sealed class SchemaCatalogReader
                 Size = f.SizeInComponentStorage,
                 HasIndex = f.HasIndex,
                 IndexAllowMultiple = f.IndexAllowMultiple,
+                IndexSparse = f.IndexSparse,
                 IsStatic = f.IsStatic,
                 IndexRoot = Resolve((int)f.IndexSPI, $"{owner}.{name}", nameof(FieldR1.IndexSPI))
             });

@@ -252,6 +252,37 @@ scoped.
             compaction); MigrateUniqueIndexTests [VerifiesRule] (#1348: the loser's migration repointed the holder's key) and
             BTreeBulkUpdateTests.UpdateValues_AnEntryExpectingAnotherValue_IsSkipped (every applier path)
 
+### IX-09: A sparse index never files key 0, and nothing reads one as if it had `[silent]`
+  invariant a field declared `[Index(Sparse = true)]` (integer key types only) indexes no entity whose key is 0 — "no data", the engine's rule for an
+            optional value. The tree itself enforces it, at every entry point (`BTreeBase.Sparse`, `BTree.SkipsKey`): an insert of 0 stores nothing and
+            returns element id 0; a removal of 0 succeeds; a lookup of 0 finds nothing; a move off 0 is an insert, a move onto 0 a removal (the entity's
+            element id becomes 0); 0 to 0 is nothing. The fence's batch gathers only the non-zero side of a move (a departure alone, an arrival alone —
+            the unbalanced moves IX-08 applies), samples its cuts from non-zero keys only, and hands back element id 0 for a move onto 0
+  invariant a unique sparse index lets any number of entities hold 0, and still refuses two entities one real key (`Transaction.ClaimOwnKey`)
+  invariant no reader answers a range that admits 0 from a sparse tree: the selective scan is refused before any forcing
+            (`EcsQuery.ScanMissesSparseZero`, `KeyRange.AdmitsZero`) and the ordered merge falls back to the sort over data; a range that excludes 0 reads
+            the tree as before. The integrity check's missing-entry finding (IDX-04) does not count a sparse field's 0s
+  invariant the flag is persisted (`FieldR1.IndexSparse`); turning it on or off is an index-kind change, and the tree is rebuilt from the data at
+            open rather than loaded (`SchemaEvolutionEngine.GetNewIndexFieldIds`)
+  scope: BTreeBase.Sparse, BTree.SkipsKey, BTree.Add, BTree.Remove, BTree.TryGet, BTree.RemoveValue, BTree.TryGetMultiple, BTree.Move,
+         BTree.MoveValue, BTree.GatherMoveEvents, BTree.SampleMoveKeys, BTree.DeferredMultiMoves, ComponentTable.CreateIndexForFieldCore,
+         EcsQuery.ScanMissesSparseZero, KeyRange.AdmitsZero, Transaction.ClaimOwnKey, SchemaEvolutionEngine.GetNewIndexFieldIds, FieldR1.IndexSparse
+  on_violation: a key-0 entry makes the index's size scale with every entity instead of the ones that set the field, and is never removed by a sparse
+                tree; a reader that trusts the tree for a range holding 0 silently drops every entity holding it; a unique sparse index that counts 0 as a
+                key refuses the second entity with no value
+  rationale: #1027 Phase 4 groups (step 4.0b): membership is an integer key field indexed `AllowMultiple`, and most entities belong to no group. A dense
+             index files them all under 0 — one VSBS buffer holding most of the archetype, rewritten by every join and leave. The guard lives in the tree
+             so that no caller (~25 index call sites across commit, fence, migration and destroy) tests for 0
+  requires IX-08 (the unbalanced moves the batch already applies), IX-07
+  verified: SparseBTreeTests [VerifiesRule] — every single-entry entry point on both kinds; a batch on and off 0 whole (element ids handed back move
+            each value out again; 0 for a move onto 0) and partitioned over mostly-0 keys (red with the gather's skip removed: misses and stray events;
+            red with the write-back of 0 removed: stale ids from the previous batch; red with the all-0 sample guard removed: cuts on a stale sample);
+            SparseIndexTests [VerifiesRule] — spawn, moves on and off 0 over ticks, destroy, on the SingleVersion (fence) and Versioned (commit)
+            archetypes, every query on the planner's path and both forced paths, IndexDataOracle both directions (red with the planner refusal removed;
+            red with ClaimOwnKey's skip removed); the ordered query (red with its fallback removed); SparseSchemaToggleTests [VerifiesRule] (red with
+            IndexTypeChanged not rebuilt). Mutants: SparseIndexTests.Mutant_AKeyZeroEntry_IsReportedByTheOracle,
+            Mutant_APlannerBlindToSparse_MissesTheZeros [RuleMutant]
+
 ## Module: IXS — Ordered index reads
 
 An ordered query reads its index through an OLC (optimistic lock coupling) scan: no locks, a version snapshot per leaf,

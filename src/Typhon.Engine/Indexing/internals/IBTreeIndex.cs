@@ -22,6 +22,12 @@ internal interface IBTreeIndex
     /// <summary>Whether this index allows multiple values per key.</summary>
     bool AllowMultiple { get; }
 
+    /// <summary>Whether this index skips key 0, "no data" (IX-09).</summary>
+    bool Sparse { get; }
+
+    /// <summary>Whether the key at <paramref name="key"/> is one this index never holds: 0, on a <see cref="Sparse"/> index.</summary>
+    unsafe bool SkipsKey(void* key);
+
     /// <summary>Returns the minimum key encoded as a <see cref="long"/>.</summary>
     long GetMinKeyAsLong();
 

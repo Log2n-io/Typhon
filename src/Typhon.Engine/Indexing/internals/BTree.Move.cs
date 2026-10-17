@@ -28,6 +28,27 @@ internal abstract partial class BTree<TKey, TStore>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
     public bool Move(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
+        // A sparse tree holds no key 0 (IX-09): a move off it is an insert, a move onto it a removal.
+        if (Sparse)
+        {
+            var fromNone = SkipsKey(oldKey);
+            var toNone = SkipsKey(newKey);
+            if (fromNone || toNone)
+            {
+                if (!fromNone)
+                {
+                    return Remove(oldKey, out _, ref accessor);
+                }
+
+                if (!toNone)
+                {
+                    Add(newKey, value, ref accessor, out _);
+                }
+
+                return true;
+            }
+        }
+
         while (true)
         {
             ThrowIfFaulted();
@@ -383,6 +404,24 @@ internal abstract partial class BTree<TKey, TStore>
     public int MoveValue(TKey oldKey, TKey newKey, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
+        // As Move. Onto key 0 the entity keeps no element, so its id is 0; a removal that misses still reports -1, which MoveValueOrReindex counts.
+        if (Sparse)
+        {
+            var fromNone = SkipsKey(oldKey);
+            var toNone = SkipsKey(newKey);
+            if (fromNone || toNone)
+            {
+                oldHeadBufferId = 0;
+                newHeadBufferId = 0;
+                if (!fromNone)
+                {
+                    return RemoveValue(oldKey, elementId, value, ref accessor) ? 0 : -1;
+                }
+
+                return toNone ? 0 : Add(newKey, value, ref accessor, out newHeadBufferId);
+            }
+        }
+
         while (true)
         {
             ThrowIfFaulted();

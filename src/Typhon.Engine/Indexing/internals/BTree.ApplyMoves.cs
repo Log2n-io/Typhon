@@ -199,6 +199,11 @@ internal abstract partial class BTree<TKey, TStore>
         var events = 2L * moves.Length;
         desiredParts = (int)Math.Max(1, Math.Min(Math.Min(desiredParts, ranges.Length), events / Math.Max(1, IndexMoveBatch.MinEventsPerRange)));
         var sampled = desiredParts > 1 ? SampleMoveKeys(moves, desiredParts) : 0;
+        if (sampled == 0)
+        {
+            desiredParts = 1;   // every sampled key was a sparse tree's 0: no quantile to cut on
+        }
+
         var parts = 0;
         TKey low = default;
         var hasLow = false;
@@ -237,15 +242,26 @@ internal abstract partial class BTree<TKey, TStore>
             _moveSample = new TKey[n];
         }
 
+        // Key 0 on a sparse tree is no event (IX-09): sampled, a batch of mostly-unset keys would cut every range at 0 and leave one range all the work.
+        var sampled = 0;
         for (var k = 0; k < picks; k++)
         {
             ref var m = ref moves[(int)((long)k * moves.Length / picks)];
-            _moveSample[2 * k] = KeyOf(m.OldKey);
-            _moveSample[2 * k + 1] = KeyOf(m.NewKey);
+            var oldKey = KeyOf(m.OldKey);
+            var newKey = KeyOf(m.NewKey);
+            if (!SkipsKey(oldKey))
+            {
+                _moveSample[sampled++] = oldKey;
+            }
+
+            if (!SkipsKey(newKey))
+            {
+                _moveSample[sampled++] = newKey;
+            }
         }
 
-        Array.Sort(_moveSample, 0, n, Comparer);
-        return n;
+        Array.Sort(_moveSample, 0, sampled, Comparer);
+        return sampled;
     }
 
     private void SetMoveRange(Span<IndexMoveRange> ranges, int slot, bool hasLow, TKey low, bool hasHigh, TKey high, int sampled, long events)
@@ -448,11 +464,15 @@ internal abstract partial class BTree<TKey, TStore>
         var hasHigh = state.HasHigh;
         var lowRadix = state.LowRadix;
         var highRadix = state.HighRadix;
+        // A sparse tree holds no key 0 (IX-09): a move off it is an arrival alone, a move onto it a departure alone — the unbalanced moves IX-08 already
+        // applies, so nothing below knows about it.
+        var sparse = Sparse;
         for (var i = 0; i < moves.Length; i++)
         {
             ref var m = ref moves[i];
             var oldKey = KeyOf(m.OldKey);
-            if (radix ? InRadix(RadixKeyOf(oldKey), hasLow, lowRadix, hasHigh, highRadix) : state.Holds(oldKey, comparer))
+            if (!(sparse && SkipsKey(oldKey))
+                && (radix ? InRadix(RadixKeyOf(oldKey), hasLow, lowRadix, hasHigh, highRadix) : state.Holds(oldKey, comparer)))
             {
                 if (d == departures.Length)
                 {
@@ -464,7 +484,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             var newKey = KeyOf(m.NewKey);
-            if (radix ? InRadix(RadixKeyOf(newKey), hasLow, lowRadix, hasHigh, highRadix) : state.Holds(newKey, comparer))
+            if (!(sparse && SkipsKey(newKey))
+                && (radix ? InRadix(RadixKeyOf(newKey), hasLow, lowRadix, hasHigh, highRadix) : state.Holds(newKey, comparer)))
             {
                 if (a == arrivals.Length)
                 {
@@ -719,9 +740,11 @@ internal abstract partial class BTree<TKey, TStore>
     {
         // Every range has applied: no one gathers from the moves any more. An arrival the bulk pass deferred is overwritten by its Add below.
         var newElementIds = _moveNewElementIds;
+        var sparse = Sparse;
         for (var m = 0; m < moves.Length; m++)
         {
-            moves[m].ElementId = newElementIds[m];
+            // A move onto key 0 of a sparse tree had no arrival to write its id: the entity holds no element (IX-09).
+            moves[m].ElementId = sparse && SkipsKey(KeyOf(moves[m].NewKey)) ? 0 : newElementIds[m];
         }
 
         var anyEmptied = false;

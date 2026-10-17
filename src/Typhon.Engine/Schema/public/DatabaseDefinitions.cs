@@ -284,7 +284,8 @@ public class DatabaseDefinitions
                 spatialCategory: spa?.Category ?? uint.MaxValue,
                 isRealmKey: rka != null,
                 hasIndex: ia != null,
-                indexAllowMultiple: ia?.AllowMultiple ?? false));
+                indexAllowMultiple: ia?.AllowMultiple ?? false,
+                indexSparse: ia?.Sparse ?? false));
         }
 
         return new ComponentSchemaSpec(ca.Name ?? t.Name, ca.Revision, fields.ToArray(), ca.StorageMode, ca.DefaultDiscipline);
@@ -428,6 +429,15 @@ public class DatabaseDefinitions
                 field.HasIndex = true;
                 field.IndexAllowMultiple = f.IndexAllowMultiple;
                 field.IsIndexAuto = false;
+                if (f.IndexSparse)
+                {
+                    // Key 0 is "no data" only where 0 is one value: a float's -0 compares equal to it, and a String64 key has no zero the tree compares by.
+                    if (fieldType is FieldType.Float or FieldType.Double or FieldType.String64 || field.IsArray)
+                    {
+                        throw new InvalidOperationException($"[Index(Sparse = true)] on field '{f.Name}' requires an integer key type, but found {fieldType}.");
+                    }
+                    field.IndexSparse = true;
+                }
             }
         }
 
