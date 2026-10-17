@@ -2295,15 +2295,6 @@ public partial class DatabaseEngine
             // still moved, and a trace that skipped the record would sum to less than the accessors do.
             EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, PrimaryGrid);
 
-            // The changed-cluster list is published on THIS branch too (#205). A GetSpan write to a non-spatial column raises nothing the branch
-            // selection looks at, so an archetype can reach here with content bits set; skipping the publish would leave them to be drained by some later
-            // tick and reported as that tick's change, which is a stale answer rather than a missing one — worse, because it is believable.
-            clusterState.PublishChangedClusters(null, tickNumber);
-
-            // Branch 0 ran no refresh, so nothing moved and the list is legitimately empty. Publishing the EMPTY list rather than skipping the call is the
-            // point: a consumer distinguishes "this tick named no movers" from "this tick did not answer" by the tick stamp alone, and a skipped publish
-            // would leave the stamp at the last tick that did run and be read as that tick's answer.
-            clusterState.PublishAabbMovedClusters(tickNumber);
             clusterState.PublishRetirements(tickNumber);
             clusterState.PublishStructureChanges(tickNumber);
             return false;
@@ -2324,19 +2315,6 @@ public partial class DatabaseEngine
         //
         // The bookkeeping clear lives here (single-threaded, per-archetype) — it ran inside the legacy RecomputeDirtyClusterAabbs tail before and must run
         // AFTER all AABB slices finished, which the phase barrier guarantees.
-        // ── The changed-cluster list, published from what this method already holds (#205) ──────────────────────────────────────────────────────
-        //
-        // HERE, and the position is the whole of its correctness. Before ClearAabbRefreshBookkeeping, which zeroes the process bitmap this reads;
-        // and before branch path 1's early return below, because path 1 IS the WriteSpatial-only path — the case whose signal lives in the process
-        // bitmap rather than in the dirty bits. Published after the migration compaction and the pending-finalization drain above, so the ids it
-        // names are the ones the tick ends with.
-        clusterState.PublishChangedClusters(dirtyBits, tickNumber);
-
-        // The AABB-moved list, from the same window and for the same reason. Its producer is NoteAabbChange inside the refresh slices, which the phase
-        // barrier above has already joined, so the bitmap is complete; ClearAabbRefreshBookkeeping below does not touch it, but keeping the two publishes
-        // adjacent is what stops a later edit from separating one of them from the barrier it depends on.
-        clusterState.PublishAabbMovedClusters(tickNumber);
-
         // AFTER DrainPendingClusterFinalizations at the top, which is where a cluster emptied this tick is actually retired — publishing before it would stamp
         // the retirement onto the NEXT tick, and a consumer on this tick would read the retired cluster as merely unchanged.
         clusterState.PublishRetirements(tickNumber);

@@ -258,26 +258,6 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             _state.NoteStructureSlots(_chunkId, ulong.MaxValue);
         }
 
-        // ── The same claim, for replication, and it has to be a SEPARATE flag (#205) ────────────────────────────────────────────────────────────
-        //
-        // The flag above is deliberately narrowed to the spatial column, because setting it from a span over any other column would mark a cluster
-        // "visit and republish" on a pure READ and make a refused repair relocate entities — the measured regression this method's remarks record.
-        //
-        // The changed-cluster list has no such hazard: a false positive there costs re-reading bytes that turn out to be identical, and nothing else.
-        // It has the opposite problem — a write through a span over a NON-spatial durable column signals nothing anywhere in the engine, so without a
-        // claim here the list's "if anything changed, the cluster is named" invariant is simply false.
-        //
-        // Per CLUSTER, not per archetype, and the difference is the whole value of the signal. This method is already called once per cluster and has
-        // its chunk id in hand, so naming it costs one bitmap bit; naming the ARCHETYPE instead — which is what the first cut did, by symmetry with the
-        // flag above — degrades every tick that touches any span to "everything changed". Measured on the SWG demo at d06: 100 % of archetype-ticks, so
-        // the list carried no information at all on the one workload it was built for.
-        //
-        // And the slot is passed, because this method has it and the claim is otherwise blind. A projection reads a FIXED set of components, decided when
-        // it is compiled, so a span over a component outside that set cannot reach any subscriber however the caller writes through it. One bit test
-        // against a mask computed at registration drops the claim before it costs a bitmap word — the difference between "this archetype is replicated"
-        // and "this COLUMN is replicated", which nothing was making.
-        _state.NoteSpanContentChanged(_chunkId, slot);
-
         return new Span<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
     }
 
@@ -776,8 +756,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             RecordSpatialWriteIfKeysChange(slot, slotIndex, in newValue);
         }
 
-        // Same claim as the batched overload, for the one-slot form: this path raises no dirty bit either, and the slot is named right here (#205).
-        _state.NoteSlotsChanged(_chunkId, 1UL << slotIndex);
+        // Same claim as the batched overload, for the one-slot form: this path raises no dirty bit either, and the slot is named right here.
         _state.NoteStructureSlots(_chunkId, 1UL << slotIndex);
         NotePageWritten(slot);
 
@@ -870,10 +849,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         CheckStride<T>(slot);
 
-        // The caller handed us the exact set of slots it is writing, and until now that mask was used to drive the loop and then dropped (#205). It is
-        // the most precise change signal anywhere in the engine for this path — WriteSpatial raises no dirty bit by design — and recording it costs one
-        // interlocked OR per CALL, not per entity, on a call that already dispatches a field type and unions boxes.
-        _state.NoteSlotsChanged(_chunkId, slots);
+        // The caller handed us the exact set of slots it is writing: the most precise move signal anywhere in the engine for this path — WriteSpatial
+        // raises no dirty bit by design — and recording it costs one interlocked OR per CALL, not per entity.
         _state.NoteStructureSlots(_chunkId, slots);
         NotePageWritten(slot);
 
