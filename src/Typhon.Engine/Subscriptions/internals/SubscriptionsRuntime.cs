@@ -286,7 +286,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // bound between a single client and the transport threads' decode work, and only the application knows what its commands cost.
             ValidateIngressRails(Options, CommandTypes.Count);
             _ingressPolicy = new IngressPolicy(Options.IngressBytesPerSecond, (long)(Options.AbuseWindow.TotalSeconds * Stopwatch.Frequency),
-                Options.AbuseRefusalsPerWindow, Options.AbuseWindows);
+                Options.AbuseRefusalsPerWindow, Options.AbuseWindows, IngressPolicy.PingAllowance * Math.Max(1, Options.PingHz));
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);

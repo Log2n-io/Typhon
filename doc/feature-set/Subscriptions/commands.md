@@ -62,8 +62,9 @@ foreach (ref readonly var cmd in ctx.Subscriptions.Commands<Attack>())
 - **A session places at most 8 transport-side refusals per tick** in the shared acknowledgement log; beyond, refusals settle through
   `lastSeq` and are counted, so one client cannot crowd out others' acknowledgements.
 - The built-in `ClientRegion` command (a `ClientRegion` profile's footprint) is rate-limited to 5 Hz and coalesced.
-- **Known gap:** a `PING` is charged against the budget but never refused, and each one wakes the session's send pump; a client flooding
-  pings is not closed by the abuse rule ([#1025](https://github.com/Log2n-io/Typhon/issues/1025)).
+- **`PING`s are capped too:** at most 4 × the declared keepalive rate (16 a second at the default 4 Hz) are answered; one past that, or over the
+  byte budget, gets no `PONG` and counts towards the abuse rule (its acknowledgement is still recorded), so a ping flood is closed with 1008 like a
+  command flood. A client at the declared rate never meets the cap ([#1025](https://github.com/Log2n-io/Typhon/issues/1025)).
 
 ## 🧪 Tests
 

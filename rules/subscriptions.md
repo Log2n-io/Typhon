@@ -714,13 +714,18 @@
     session up to 2 048 (CommandTypeBuffers.AckCapacity): past its share a refusal settles through lastSeq alone and is counted (RefusalAcksCapped),
     so no session's refusals crowd out another's; nothing else is unanswered but what the session's own ring overflowed, which is counted too
   invariant the inbound budget (SubscriptionsOptions.IngressBytesPerSecond) is required whenever the catalog has commands, and at least
-    ClientMessageBytes — both refused at Start; every open-session message is charged, only a COMMANDS message is refused (a PING, a BYE and a
-    protocol error are never delayed), and the bucket is exact (bytes × clock ticks, no fraction lost)
-  invariant a session whose refused commands — over budget, per command, plus the ingress's rate and role refusals — pass AbuseRefusalsPerWindow in
-    AbuseWindows adjacent windows is closed with 1008, its KICK sent by its pump (SUB-14); a single abusive window, a gap of two windows or more,
-    a window at the threshold, or a client that stopped sending, is not; a pre-check or region refusal is a game outcome and is not counted
+    ClientMessageBytes — both refused at Start; every open-session message is charged, a COMMANDS message over it is refused and acknowledged, a
+    PING over it is dropped unanswered, a BYE and a protocol error are never delayed, and the bucket is exact (bytes × clock ticks, no fraction lost)
+  invariant a session's PINGs are answered at most IngressPolicy.PingAllowance × PingHz a second, one second deep; one past that, or over the byte budget,
+    gets no PONG and no charge and is counted as a refusal (#1025), but its acknowledgement and heard-from mark are kept, since the lag rule closes on
+    them (4001); a client keeping the declared rate, or catching up a second it fell behind, never meets the cap
+  invariant a session whose refused messages — commands over budget, per command, dropped PINGs, plus the ingress's rate and role refusals —
+    pass AbuseRefusalsPerWindow in AbuseWindows adjacent windows is closed with 1008, its KICK sent by its pump (SUB-14); a single abusive window,
+    a gap of two windows or more, a window at the threshold, or a client that stopped sending, is not; a pre-check or region refusal is a game
+    outcome and is not counted
   invariant the abuse rule is always on: AbuseWindow in (0, 1 h], AbuseRefusalsPerWindow and AbuseWindows positive, or Start refuses
-  scope: SubscriptionConnection.HandleOpen, SubscriptionConnection.CheckAbuse, SubscriptionsIngress.RefuseCommands, SubscriptionsIngress.Publish,
+  scope: SubscriptionConnection.HandleOpen, SubscriptionConnection.CheckAbuse, SubscriptionConnection.RefusePing, IngressPolicy.PingAllowance,
+    SubscriptionsIngress.RefuseCommands, SubscriptionsIngress.Publish,
     SubscriptionsIngress.RefusalAcksPerTick, IngressCommandSink.Refuse, CommandTypeBuffers.AckCapacity, IngressPolicy,
     SubscriptionsRuntime.ValidateIngressRails, SubscriptionsOptions.IngressBytesPerSecond
   on_violation: silent. A command dropped with no answer leaves a predicting client waiting on it forever, or replaying it into a divergence; one
@@ -731,7 +736,10 @@
     .OneSessionsRefusalsCannotCrowdOutAnothersAcknowledgements, IngressHardeningTests.SustainedRefusalsCloseTheSessionWith1008 (closed at the third
     window, not before; a single abusive window then calm stays open), IngressHardeningTests.RailsThatWouldNotHoldAreRefusedAtStart,
     IngressRailsTests (the test's clock: EverythingIsChargedAndOnlyCommandsAreRefused, ARefillInFractionalStepsLosesNothing,
-    OverBudgetAByeAndAProtocolErrorStillClose, AbuseCountsCommandsFromBothSidesAndClosesAfterTheRun, AGapOrACalmWindowBreaksTheRun);
+    OverBudgetAByeAndAProtocolErrorStillClose, AbuseCountsCommandsFromBothSidesAndClosesAfterTheRun, AGapOrACalmWindowBreaksTheRun,
+    APingOverTheBudgetIsDroppedNotAnswered); the PING cap: IngressHardeningTests.APingFloodIsCappedAndClosedWith1008 (200 a window at a still clock: exactly
+    the cap answered, closed at the third window; red without the cap, and red when a dropped PING is not counted) and
+    IngressHardeningTests.AClientAtTheDeclaredPingRateIsNeverRefused;
     SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
 
 
