@@ -1,3 +1,4 @@
+using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -5,8 +6,9 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// A cluster's in-memory words: its claim word, its pending-death count and its two visibility watermarks (<see cref="ClusterMaxBorn"/>,
-/// <see cref="ClusterMaxDied"/>), side by side in one 32-byte entry, so the cluster gate reads one entry (<see cref="SlotWords"/>).
+/// A cluster's in-memory words: its claim word, its pending-death count, its visibility watermarks (<see cref="ClusterMaxBorn"/>,
+/// <see cref="ClusterMaxDied"/>, <see cref="ClusterMaxUpdated"/>) and its slots' index locks (<see cref="LockSlotIndexes"/>), side by side in
+/// one entry, so the cluster gate reads one entry (<see cref="SlotWords"/>).
 /// <para>
 /// The claim word (VIS-08, VIS-09, plan 06 steps 5.2–5.3): every slot claimed at run time, in memory beside the cluster. A slot is claimed from its claim to
 /// its final release, while its page occupancy bit — the published set HEAD readers trust — is set only while the entity is published: a spawn placed in
@@ -38,12 +40,13 @@ internal sealed unsafe partial class ArchetypeClusterState
 {
     private const int ClaimBlockShift = 10;
     private const int ClaimBlockSize = 1 << ClaimBlockShift;
-    private const int ClusterWords = 5;   // five words a cluster
+    private const int ClusterWords = 6;   // six words a cluster
     private const int ClaimWordIndex = 0;
     private const int PendingDeathWordIndex = 1;
     private const int MaxBornWordIndex = 2;
     private const int MaxDiedWordIndex = 3;
     private const int MaxUpdatedWordIndex = 4;
+    private const int SlotIndexLockWordIndex = 5;
     private long[][] _slotWordBlocks = [];
     private readonly Lock _claimGrowLock = new();
 
@@ -321,6 +324,111 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>A destroy marked pending (+1), or published or aborted (-1). The publish decrements after it folded the watermark and hid the slot.</summary>
     internal void AddPendingDeath(int clusterChunkId, int delta) => Interlocked.Add(ref PendingDeathWord(clusterChunkId), delta);
+
+    /// <summary>
+    /// Takes <paramref name="slotIndex"/>'s index lock (VIS-08): the right to maintain its entity's B+Tree entries and element-id tails, and the keys its
+    /// slot holds. A spawn holds it from its placement in PREPARE — before the card makes the entity visible — to the end of its PUBLISH; a commit that
+    /// moves an indexed component's entries, publishes a staged write of one, or removes a destroyed entity's entries holds it for that step, and decides
+    /// under it whether the slot still holds the entity alive (<see cref="HoldsLive"/>). Spins, unbounded, for a holder: none waits for anything a waiter
+    /// can hold — the order is chain lock, then slot lock, then the trees' latches, and a commit that takes an entity's chain lock first waits, holding
+    /// none, for a spawn still publishing it (<see cref="WaitSlotIndexesUnlocked(int, int)"/>): the spawner's component publish, which runs before its spawns',
+    /// takes chain locks. A spawn that fails its publish releases its locks too (the engine stops committing then).
+    /// </summary>
+    internal void LockSlotIndexes(int clusterChunkId, int slotIndex)
+    {
+        ref var word = ref BlockWord(clusterChunkId, SlotIndexLockWordIndex);
+        var bit = 1L << slotIndex;
+        var current = Volatile.Read(ref word);
+        if ((current & bit) == 0 && Interlocked.CompareExchange(ref word, current | bit, current) == current)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref SlotIndexLockWaits);
+        SlotIndexLockWaitProbe?.Invoke();
+        var waiter = new AdaptiveWaiter();
+        while (true)
+        {
+            current = Volatile.Read(ref word);
+            if ((current & bit) == 0 && Interlocked.CompareExchange(ref word, current | bit, current) == current)
+            {
+                return;
+            }
+
+            waiter.Wait();
+        }
+    }
+
+    /// <summary>Releases <see cref="LockSlotIndexes"/>. A full barrier: the next holder reads every write this one made.</summary>
+    internal void UnlockSlotIndexes(int clusterChunkId, int slotIndex) =>
+        Interlocked.And(ref BlockWord(clusterChunkId, SlotIndexLockWordIndex), ~(1L << slotIndex));
+
+    /// <summary>
+    /// Whether <paramref name="slotIndex"/>'s index lock is held (<see cref="LockSlotIndexes"/>) — a spawn still publishing, among others — by acquire.
+    /// </summary>
+    internal bool IsSlotIndexLocked(int clusterChunkId, int slotIndex)
+    {
+        ref var words = ref SlotWords(SlotWordTable, clusterChunkId);
+        return !Unsafe.IsNullRef(ref words)
+               && (Volatile.Read(ref Unsafe.Add(ref words, SlotIndexLockWordIndex - ClaimWordIndex)) & (1L << slotIndex)) != 0;
+    }
+
+    /// <summary>
+    /// Waits, unbounded, until <paramref name="slotIndex"/>'s index lock is free, without taking it: before a commit takes the entity's chain lock, and for
+    /// an in-place write whose keys the fence moves, which must not record keys a spawn still publishing has not indexed yet. One acquire load when free.
+    /// </summary>
+    internal void WaitSlotIndexesUnlocked(int clusterChunkId, int slotIndex)
+    {
+        if (!IsSlotIndexLocked(clusterChunkId, slotIndex))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref SlotIndexLockWaits);
+        SlotIndexLockWaitProbe?.Invoke();
+        var waiter = new AdaptiveWaiter();
+        while (IsSlotIndexLocked(clusterChunkId, slotIndex))
+        {
+            waiter.Wait();
+        }
+    }
+
+    /// <summary><see cref="WaitSlotIndexesUnlocked(int, int)"/>, bounded by <paramref name="wc"/>: false when it ran out first.</summary>
+    internal bool WaitSlotIndexesUnlocked(int clusterChunkId, int slotIndex, ref WaitContext wc)
+    {
+        if (!IsSlotIndexLocked(clusterChunkId, slotIndex))
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref SlotIndexLockWaits);
+        SlotIndexLockWaitProbe?.Invoke();
+        var waiter = new AdaptiveWaiter();
+        while (IsSlotIndexLocked(clusterChunkId, slotIndex))
+        {
+            if (!waiter.Wait(ref wc))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether the slot at <paramref name="clusterBase"/> still holds <paramref name="entityId"/> alive: occupied, and its entity id the entity's. A destroy
+    /// clears the occupancy bit as it removes the entity's entries (hides or releases the slot), and a released slot can hold another entity since. Read under
+    /// the slot's index lock, it is stable.
+    /// </summary>
+    internal bool HoldsLive(byte* clusterBase, int slotIndex, EntityId entityId) =>
+        (Volatile.Read(ref *(ulong*)clusterBase) & (1UL << slotIndex)) != 0
+        && *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8) == (long)entityId.RawValue;
+
+    /// <summary>The waits <see cref="LockSlotIndexes"/> and <see cref="WaitSlotIndexesUnlocked(int, int)"/> made: a slot's index lock found held.</summary>
+    internal long SlotIndexLockWaits;
+
+    /// <summary>Test seam: fires when a slot's index lock is found held, before the wait. Null in production.</summary>
+    internal Action SlotIndexLockWaitProbe;
 
     /// <summary>
     /// PUBLISH of a placed spawn's slot: the born watermark folds the commit stamp first (BIND-04), then the occupancy bit is set. The claim stays. The caller

@@ -2099,9 +2099,10 @@ public unsafe partial class Transaction : EntityAccessor
             // the lock while no publish entry owns it.
             if (conflictSolver != null)
             {
+                var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+                AwaitSpawnPublished(pk, info, ref wcCommit);
                 ref var lockHeader = ref compRevTableAccessor.GetChunk<CompRevStorageHeader>(firstChunkId, true);
                 lockTicket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref lockHeader);
-                var wcCommit = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
                 if (!lockHeader.Control.EnterExclusiveAccess(ref wcCommit))
                 {
                     ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
@@ -2165,12 +2166,21 @@ public unsafe partial class Transaction : EntityAccessor
 
             if (indexPending && _dbe.PrepareReconcilesIndexesForTest)
             {
-                // AP-07's mutant: the pre-#1262 order, Phase A in PREPARE.
-                PublishClusterIndexes(new PublishEntry
+                // AP-07's mutant: the pre-#1262 order, Phase A in PREPARE — under the slot's index lock, as the publish takes it (VIS-08).
+                var mutantClusterState = _dbe._stateByRouting[archId].ClusterState;
+                mutantClusterState.LockSlotIndexes(clusterChunkId, slotIndex);
+                try
                 {
-                    Info = info, CurCompContentChunkId = compRevInfo.CurCompContentChunkId, ArchId = archId, ClusterChunkId = clusterChunkId,
-                    SlotIndex = slotIndex, CompSlot = compSlot, Pk = pk, ReadCompChunkId = readCompChunkId,
-                }, readCompChunkId);
+                    PublishClusterIndexes(new PublishEntry
+                    {
+                        Info = info, CurCompContentChunkId = compRevInfo.CurCompContentChunkId, ArchId = archId, ClusterChunkId = clusterChunkId,
+                        SlotIndex = slotIndex, CompSlot = compSlot, Pk = pk, ReadCompChunkId = readCompChunkId,
+                    }, readCompChunkId);
+                }
+                finally
+                {
+                    mutantClusterState.UnlockSlotIndexes(clusterChunkId, slotIndex);
+                }
                 indexPending = false;
                 slotIndexed = false;
             }
@@ -2272,6 +2282,14 @@ public unsafe partial class Transaction : EntityAccessor
         var ticket = e.LockTicket;
         if (!e.LockHeld)
         {
+            // A spawn of another commit still publishing (VIS-08) holds the entity's slot index lock, and its own component publish, which runs first, takes
+            // chain locks: waited for under this one, the spawner could be waiting for it. So before it, holding no chain lock — the handler path waited in
+            // its PREPARE (AwaitSpawnPublished). Once the spawn is published nothing locks the slot for long, and never while waiting for a chain lock.
+            if (e.SlotIndexed)
+            {
+                _dbe._stateByRouting[e.ArchId].ClusterState.WaitSlotIndexesUnlocked(e.ClusterChunkId, e.SlotIndex);
+            }
+
             ticket = ComponentRevisionManager.ChainLockTicket(ref compRevTableAccessor, ref header);
             var unbounded = new WaitContext(Deadline.Infinite, default);
             header.Control.EnterExclusiveAccess(ref unbounded);
@@ -2320,6 +2338,9 @@ public unsafe partial class Transaction : EntityAccessor
             }
 
             var becomesNewest = _commitStamp > newestStamp;
+            // A destroy published before this revision, at a lower stamp: the entity is dead, and its destroy owns its index entries — it removes them by
+            // the keys its cluster slot holds (VIS-09).
+            var overTombstone = newestStamp != 0 && newestChunkId == 0;
 
             // VIS-12 (#674): an update that moves this entity's index entries or its HEAD says so first — its cluster's watermark, then its archetype's stamp
             // and count — so a reader older than it that finds either moved reads the cluster at its snapshot instead.
@@ -2333,27 +2354,49 @@ public unsafe partial class Transaction : EntityAccessor
             // the entry off the read key — moving from it then found nothing and changed nothing, and the index kept the other writer's key for good. A
             // publish below the newest moves nothing, as Phase B copies nothing (AP-06); one over a tombstone neither — the destroy owns the entity's entries.
             // Readers of this entity wait out the index update, which the conflict-handler path already paid.
-            if (e.SlotIndexed && becomesNewest && (e.IndexPending || newestChunkId != e.BaseCompChunkId) && (newestStamp == 0 || newestChunkId != 0))
+            //
+            // A move, and the slot copy after it, serialized with a destroy of another commit, which reads the keys to remove from the slot (VIS-08,
+            // VIS-09): by this chain lock, which the destroy's tombstone publish takes — or, for a chain the destroy did not tombstone (created after its
+            // snapshot), which its index removal takes. A first supply's chain may not be in the entity's record yet, so a supply takes the slot's index
+            // lock too. Either way a slot that no longer holds the entity alive moves nothing and copies nothing: its destroy removed the entries, and a
+            // move from the key it removed missed and reindexed a dead entity (#1370). The slot lock on every move cost a key-moving update 3 %
+            // (measured: a lock-prefixed CAS waits for the move's stores), and on every indexed update the unchanged-key one 4 %.
+            var moves = e.SlotIndexed && becomesNewest && !overTombstone && (e.IndexPending || newestChunkId != e.BaseCompChunkId);
+            var slotLocked = moves && e.Created;
+            var live = !moves || (slotLocked ? LockLiveSlotIndexes(in e) : SlotHoldsEntityAlive(in e));
+            try
             {
-                PublishClusterIndexes(in e, newestChunkId);
-                _dbe.PublishAfterIndexesProbe?.Invoke();
+                if (moves && live)
+                {
+                    PublishClusterIndexes(in e, newestChunkId);
+                    _dbe.PublishAfterIndexesProbe?.Invoke();
+                }
+
+                elementHandle.Publish(_commitStamp);   // THE publication act: the commit stamp replaces the owner's TSN, IsolationFlag cleared (VIS-04)
+                _dbe.PublishUnderLockProbe?.Invoke();
+
+                // The revision number, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it.
+                if (!e.Created)
+                {
+                    header.CommitSequence++;
+                }
+
+                // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this
+                // revision is the newest published one by stamp (VIS-05). Two transactions updating one entity publish in either order of their stamps:
+                // the later publish of the older stamp must not land in the slot. A writer still unpublished copies at its own publish if its stamp is the
+                // higher. Nor over a tombstone, as Phase A: the destroy reads the keys to remove from the slot, and an update prepared before the destroy
+                // and stamped after it copied keys the index never held there — the destroy removed those, missing its own (#1370).
+                if (e.ClusterCopyPending && becomesNewest && !overTombstone && live)
+                {
+                    PublishClusterVersionedSlot(e);
+                }
             }
-
-            elementHandle.Publish(_commitStamp);   // THE publication act: the commit stamp replaces the owner's TSN, IsolationFlag cleared (VIS-04)
-            _dbe.PublishUnderLockProbe?.Invoke();
-
-            // The revision number, under the chain lock — a compaction rewrites the header too, and a lock-free increment raced it.
-            if (!e.Created)
+            finally
             {
-                header.CommitSequence++;
-            }
-
-            // Cluster Phase B: copy the committed HEAD value into the cluster slot (visible to bulk iteration) — under the lock, and only when this revision
-            // is the newest published one by stamp (VIS-05). Two transactions updating one entity publish in either order of their stamps: the later
-            // publish of the older stamp must not land in the slot. A writer still unpublished copies at its own publish if its stamp is the higher.
-            if (e.ClusterCopyPending && becomesNewest)
-            {
-                PublishClusterVersionedSlot(e);
+                if (slotLocked)
+                {
+                    _dbe._stateByRouting[e.ArchId].ClusterState.UnlockSlotIndexes(e.ClusterChunkId, e.SlotIndex);
+                }
             }
 
             completed = true;
@@ -2369,6 +2412,61 @@ public unsafe partial class Transaction : EntityAccessor
                 ComponentRevisionManager.EndChainLockHold(ref compRevTableAccessor, in ticket);
             }
         }
+    }
+
+    /// <summary>
+    /// The handler path's wait for a spawn of another commit still publishing the entity (VIS-08), before PREPARE takes the entity's chain lock and retains
+    /// it to the publish: held, the spawner — whose component publish runs before its spawns' — could wait for it while this commit's publish waited for the
+    /// spawn's slot index lock. Bounded by the chain lock's own wait: a commit that holds another chain this spawner needs times out and rolls back, as a
+    /// handler PREPARE waiting on a chain the other holds does (PublishComponent's remarks).
+    /// </summary>
+    private void AwaitSpawnPublished(long pk, ComponentInfo info, ref WaitContext wc)
+    {
+        var id = EntityId.FromRaw(pk);
+        var es = _dbe._stateByRouting[id.ArchetypeId];
+        var clusterState = es?.ClusterState;
+        if (clusterState?.IndexSlots == null || es.EntityMap == null || SpawnedContains(id))
+        {
+            return;
+        }
+
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
+        if (meta == null || !meta.IsClusterEligible)
+        {
+            return;
+        }
+
+        // The commit's cached accessors, which this PREPARE's cluster pass (PrepareClusterVersionedSlot) reads the same record through next.
+        EnsureClusterCommitAccessors(id.ArchetypeId, es, info.ComponentTable.ComponentSegment, clusterState);
+        byte* recordBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        if (!es.EntityMap.TryGet(id.EntityKey, recordBuf, ref _clusterCommitMapAccessor))
+        {
+            return;
+        }
+
+        if (!clusterState.WaitSlotIndexesUnlocked(ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf), ClusterEntityRecordAccessor.GetSlotIndex(recordBuf),
+                ref wc))
+        {
+            ThrowHelper.ThrowLockTimeout("RevisionChain/CommitConflict", TimeoutOptions.Current.RevisionChainLockTimeout);
+        }
+    }
+
+    /// <summary>
+    /// Takes the index lock of <paramref name="e"/>'s cluster slot (VIS-08) and says whether the slot still holds the entity alive
+    /// (<see cref="ArchetypeClusterState.HoldsLive"/>). The caller releases the lock.
+    /// </summary>
+    private bool LockLiveSlotIndexes(in PublishEntry e)
+    {
+        _dbe._stateByRouting[e.ArchId].ClusterState.LockSlotIndexes(e.ClusterChunkId, e.SlotIndex);
+        return SlotHoldsEntityAlive(in e);
+    }
+
+    /// <summary>Whether <paramref name="e"/>'s cluster slot still holds the entity alive (<see cref="ArchetypeClusterState.HoldsLive"/>).</summary>
+    private bool SlotHoldsEntityAlive(in PublishEntry e)
+    {
+        var es = _dbe._stateByRouting[e.ArchId];
+        EnsureClusterCommitAccessors(e.ArchId, es, e.Info.ComponentTable.ComponentSegment, es.ClusterState);
+        return es.ClusterState.HoldsLive(_clusterCommitClusterAccessor.GetChunkAddress(e.ClusterChunkId), e.SlotIndex, EntityId.FromRaw(e.Pk));
     }
 
     /// <summary>
@@ -2815,6 +2913,10 @@ public unsafe partial class Transaction : EntityAccessor
 
         var layout = clusterState.Layout;
         int slotIndex = clusterLocation & 63;
+
+        // The caller is serialized with the spawn and the destroys of this entity (VIS-08): an entity another commit spawned is visible from its card before
+        // its PUBLISH writes its entries and tails, and moved then, the move missed, reindexed, and the spawn's PUBLISH added its own entry — two entries,
+        // one stale (#1370).
         // Cluster chunk base holding the per-entity index element-id tail slot for AllowMultiple fields. Resolved lazily on the first AllowMultiple field
         // (fetching it forWrite marks the cluster chunk dirty — only wanted when we actually write an element id back). Both callers of this method have just
         // (re)established _clusterCommitClusterAccessor for this archetype before calling.
@@ -3055,11 +3157,58 @@ public unsafe partial class Transaction : EntityAccessor
         // whose SingleVersion keys a TickFence writer recorded this tick: the tree holds those, not HEAD's, and the fence moves the entry from there to
         // whatever HEAD holds then (#1339). A move from HEAD here would miss the tree's key, and the fence's from the recorded one would find the entry
         // already moved. The entity is in the TickFence window already (QFENCE).
-        if (clusterState.IndexSlots != null && !clusterState.SvKeysRecorded(clusterLocation))
+        //
+        // Under the slot's index lock (VIS-08) with the HEAD copy, as an update's move: a destroy of another commit reads the keys to remove from HEAD. A slot
+        // that no longer holds the entity alive takes nothing — its destroy removed the entries, and a released slot may hold another entity since — and the
+        // staged value's collection references are given back instead of HEAD's.
+        var slotLocked = clusterState.IndexSlots != null;
+        if (slotLocked)
         {
-            ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
+            clusterState.LockSlotIndexes(clusterChunkId, slotIndex);
         }
 
+        try
+        {
+            if (slotLocked && !clusterState.HoldsLive(clusterBase, slotIndex, entityId))
+            {
+                ReleaseStagedCollections(info.ComponentTable, staged);
+                return;
+            }
+
+            if (slotLocked && !clusterState.SvKeysRecorded(clusterLocation))
+            {
+                ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
+            }
+
+            PublishStagedValue(info, clusterState, compSlot, clusterChunkId, slotIndex, headPtr, staged, compSize);
+        }
+        finally
+        {
+            if (slotLocked)
+            {
+                clusterState.UnlockSlotIndexes(clusterChunkId, slotIndex);
+            }
+        }
+    }
+
+    /// <summary>The staged value's collection references given back: a staged write <see cref="PublishStagedEntry"/> drops, its entity destroyed.</summary>
+    private static void ReleaseStagedCollections(ComponentTable table, byte* staged)
+    {
+        if (!table.HasCollections)
+        {
+            return;
+        }
+
+        foreach (var field in table.CollectionFields)
+        {
+            ReleaseCollectionBuffer(field, Unsafe.ReadUnaligned<int>(staged + field.OffsetInComponentStorage));
+        }
+    }
+
+    /// <summary>The HEAD half of <see cref="PublishStagedEntry"/>: the staged value copied over HEAD, HEAD's collection references given back.</summary>
+    private void PublishStagedValue(ComponentInfo info, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId, byte slotIndex, byte* headPtr,
+        byte* staged, int compSize)
+    {
         // HEAD's collection handles, read before the memcpy replaces them: HEAD's references are given back once the staged value — which holds its own
         // (ShareStagedCollections) — has taken HEAD's place (#1362). Never before: HEAD would name a buffer freed under it.
         var table = info.ComponentTable;

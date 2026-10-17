@@ -1033,6 +1033,14 @@ public partial class DatabaseEngine
                     continue;
                 }
 
+                // 1c. A slot whose index lock is held (VIS-08) — a spawn still publishing, occupied with its index entries and element-id tails not written
+                //     yet, or a commit maintaining them. Moved now, the tails copied were stale and the holder then wrote them, and its entries, at the source
+                //     location. Left for a later fence.
+                if (clusterState.IsSlotIndexLocked(srcChunkId, srcSlot))
+                {
+                    continue;
+                }
+
                 // 2. Claim destination slot in the target cell. May allocate a new cluster (new chunk id).
                 //    ClaimSlotInCell maintains cell.EntityCount / cell.ClusterCount + ClusterCellMap.
                 //    H1 bound: the claim publishes the destination occupancy bit, so the destination's visibility summary has to bound this entity BEFORE that

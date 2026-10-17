@@ -83,12 +83,13 @@ class QueryStressOracleTests : TestBase<QueryStressOracleTests>
     public void EveryPathAndTerminal_AgreeWithPointReads_UnderConcurrentChurn([Values(2_000)] int milliseconds) => Run(milliseconds, false);
 
     /// <summary>
-    /// The same churn with a mover changing the indexed tier: the value half of snapshot isolation (VIS-12, #674) under load. Known-red on two pre-existing
-    /// defects the mover exposed, #1370 (an index entry left at an old key, the QUIET check below) and #1369 (an access violation in the ordered merge's
-    /// row admission), about one run in ten between them.
+    /// The same churn with a mover changing the indexed tier: the value half of snapshot isolation (VIS-12, #674) under load. It exposed #1370 (an index
+    /// entry left at an old key, the QUIET check below) and #1369 (an access violation in the ordered merge), about one cold run in ten between them: a
+    /// commit maintaining an entity's index entries while another commit's spawn of it, destroy of it or update over its tombstone was half done (VIS-08's
+    /// slot index lock). Still known-red, about one cold run in a hundred, on #1381: the revision segment's allocated and free counts above its capacity.
     /// </summary>
     [Test]
-    [Category("Quarantine")]   // #1369, #1370
+    [Category("Quarantine")]   // #1381
     [VerifiesRule("VIS-12")]
     public void EveryPathAndTerminal_AgreeWithPointReads_UnderConcurrentChurnAndTierMoves([Values(2_000)] int milliseconds) => Run(milliseconds, true);
 

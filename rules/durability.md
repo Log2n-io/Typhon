@@ -358,7 +358,9 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
 
 ### AP-06: The cluster slot holds the newest committed revision `[fatal]` `[silent]`
   invariant a publish copies its value into the entity's cluster slot only under the chain's exclusive lock (AP-05), and only when
-            its revision is the newest committed one: its stamp above every other published revision's (VIS-05)
+            its revision is the newest committed one: its stamp above every other published revision's (VIS-05). Over a tombstone it
+            copies nothing: the destroy reads the keys to remove from the slot, and an update prepared before the destroy and stamped
+            after it copied keys the index never held — the destroy removed those, and its own entries stayed (#1370)
   invariant so two publishes of one entity never copy concurrently, and the slot never moves back to an older revision
   invariant the entity's index entries follow the same revision: a publish's index and view reconcile (Phase A) runs under the chain's
             exclusive lock, before its stamp, and moves the entries from the newest published revision's value — not the one its transaction
@@ -387,10 +389,12 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
   verified: VersionedPublishOrderTests.TwoUpdatesPublishedOutOfOrder_LeaveTheNewerValueInTheClusterSlot (the older publish held
             after its append while the newer one commits) [VerifiesRule]; LastWriterWinsIndexTests [VerifiesRule] — two updates from one read
             leave the unique and the multi-value index on the last writer's key alone; a write that keeps its read key moves the entry back
-            from an intervening commit; an older update published last moves nothing. Mutations killed: the move from the read value, the
-            intervening commit ignored, the older publish moving; a write back onto a key taken since its read is rejected before
-            the append, the engine going on (mutation killed: PREPARE measuring against the read); a commit landing between PREPARE and
-            the append is moved back from (mutation killed: the publish's intervening-commit term dropped)
+            from an intervening commit; an older update published last moves nothing; an update prepared before a destroy and
+            published between its tombstone and its index removal leaves no entry (mutant copying over the tombstone: red).
+            Mutations killed: the move from the read value, the intervening commit ignored, the older publish moving; a write back onto a
+            key taken since its read is rejected before the append, the engine going on (mutation killed: PREPARE measuring against the
+            read); a commit landing between PREPARE and the append is moved back from (mutation killed: the publish's intervening-commit
+            term dropped)
 
 ### AP-07: An abort before the append leaves no trace `[fatal]` `[silent]`
   invariant PREPARE changes nothing another transaction reads or builds on beyond the transaction's own pending effects, each

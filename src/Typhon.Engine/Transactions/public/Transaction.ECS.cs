@@ -1860,6 +1860,7 @@ public unsafe partial class Transaction
         FlushPendingEnableDisable();
         // Spawns placed in PREPARE (PlaceSpawns): stamp their records, set their occupancy bits, maintain their indexes (VIS-08).
         PublishSpawns();
+        _dbe.DestroysBeforeIndexRemovalProbe?.Invoke();
         FlushPendingDestroys();
         PublishMembershipDeltas();
     }
@@ -3138,6 +3139,10 @@ public unsafe partial class Transaction
                     }
 
                     // The slot is claimed and not occupied: out of the published set until PUBLISH, so no page ever holds its occupancy bit (VIS-08, CM-01).
+                    // Its index lock taken before the card makes the entity visible, held until its PUBLISH has written its index entries: another commit that
+                    // sees it waits before maintaining them or hiding its slot (ArchetypeClusterState.LockSlotIndexes). A slot just claimed: at most the
+                    // previous occupant's destroy is still releasing the lock.
+                    ctx.ClusterState.LockSlotIndexes(clusterChunkId, slotIdx);
                     _dbe.SpawnClaimedProbe?.Invoke();
 
                     // Copy component data from per-component chunks to cluster SoA slots.
@@ -3290,7 +3295,9 @@ public unsafe partial class Transaction
     /// <summary>
     /// PUBLISH half of a spawn (VIS-08): for every spawn <see cref="PlaceSpawns"/> placed, the record's born takes the commit stamp, then the cluster's
     /// born watermark folds it and the occupancy bit is set (<see cref="ArchetypeClusterState.PublishReservedSlot"/>), then the per-archetype B+Tree entries
-    /// — a structure of HEAD values (design 05's non-goal, #674), maintained at publish as before (AP-07: an abort leaves no key no commit made).
+    /// — a structure of HEAD values (design 05's non-goal, #674), maintained at publish as before (AP-07: an abort leaves no key no commit made). Then the
+    /// spawn's index lock is released: another commit that saw the entity through the card waited for it before touching its index entries or its slot —
+    /// and before taking the entity's chain lock, which this commit's component publish, run before this one, may need.
     /// </summary>
     private void PublishSpawns()
     {
@@ -3306,6 +3313,7 @@ public unsafe partial class Transaction
         Span<int> trSlots = stackalloc int[16];
         Span<int> trIdxAccessorBase = stackalloc int[16];
         var stamp = PublishStamp;
+        var completed = false;
 
         try
         {
@@ -3352,15 +3360,107 @@ public unsafe partial class Transaction
                     }
 
                     ctx.ClusterState.PublishReservedSlot(clusterBase, clusterChunkId, slotIdx, stamp);
+                    _dbe.SpawnBeforeIndexesProbe?.Invoke(entry.Id);
                     PublishClusterSpawnIndexes(ref ctx, in entry, clusterChunkId, slotIdx, clusterBase, clusterTransientBase);
+                    ctx.ClusterState.UnlockSlotIndexes(clusterChunkId, slotIdx);
                 }
 
                 entry.Placed = false;
             }
+
+            completed = true;
         }
         finally
         {
             DisposeSpawnAccessors(ref ctx);
+            if (!completed)
+            {
+                // A publish that failed past the commit point stops the engine (AP-03); its waiters must not wait for it for good.
+                ReleasePendingSpawnLocks();
+            }
+        }
+    }
+
+    /// <summary>A revision chain's exclusive lock a destroy holds across its index removal (<see cref="LockUntombstonedChains"/>).</summary>
+    private sealed class ChainHold
+    {
+        public ChunkAccessor<PersistentStore> Accessor;
+        public int FirstChunkId;
+        public PagedMMF.CaptureTicket Ticket;
+    }
+
+    /// <summary>
+    /// The exclusive locks of the chains of <paramref name="entityId"/>'s indexed Versioned components that this commit did not tombstone — present in the
+    /// record at the publish, absent at the destroy's snapshot: a supply's, published since (VIS-09). A tombstoned chain needs none: its tombstone's publish
+    /// took it, and an update publishing after that moves nothing over the tombstone. Null when there is none, the common case. Taken in component order,
+    /// unbounded, as the publish's own chain locks (AP-03), holding no slot lock. Released by <see cref="ReleaseChainHolds"/>.
+    /// </summary>
+    private List<ChainHold> LockUntombstonedChains(ArchetypeMetadata meta, ArchetypeEngineState es, byte* record, EntityId entityId)
+    {
+        var layout = meta.ClusterLayout;
+        var ixSlots = es.ClusterState?.IndexSlots;
+        if (ixSlots == null || layout?.SlotToVersionedIndex == null || meta.VersionedSlotMask == 0)
+        {
+            return null;
+        }
+
+        List<ChainHold> holds = null;
+        var pk = (long)entityId.RawValue;
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            var slot = ixSlots[s].Slot;
+            var vi = layout.SlotToVersionedIndex[slot];
+            if (vi < 0)
+            {
+                continue;
+            }
+
+            var root = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(record, vi);
+            if (root == 0 || (_componentInfos.TryGetValue(meta._slotToComponentType[slot], out var info) && info.SingleCache.TryGetValue(pk, out var cri)
+                              && (cri.Operations & ComponentInfo.OperationType.Deleted) != 0 && cri.CompRevTableFirstChunkId == root))
+            {
+                continue;
+            }
+
+            var hold = new ChainHold { Accessor = es.SlotToComponentTable[slot].CompRevTableSegment.CreateChunkAccessor(_changeSet), FirstChunkId = root };
+            ref var header = ref hold.Accessor.GetChunk<CompRevStorageHeader>(root, true);
+            hold.Ticket = ComponentRevisionManager.ChainLockTicket(ref hold.Accessor, ref header);
+            _dbe.DestroyChainLockProbe?.Invoke();
+            var unbounded = new WaitContext(Deadline.Infinite, default);
+            header.Control.EnterExclusiveAccess(ref unbounded);
+            (holds ??= []).Add(hold);
+        }
+
+        return holds;
+    }
+
+    /// <summary>The chain locks <see cref="LockUntombstonedChains"/> took, released in reverse order, their accessors disposed.</summary>
+    private static void ReleaseChainHolds(List<ChainHold> holds)
+    {
+        if (holds == null)
+        {
+            return;
+        }
+
+        for (var i = holds.Count - 1; i >= 0; i--)
+        {
+            var hold = holds[i];
+            ref var header = ref hold.Accessor.GetChunk<CompRevStorageHeader>(hold.FirstChunkId, true);
+            header.Control.ExitExclusiveAccess();
+            ComponentRevisionManager.EndChainLockHold(ref hold.Accessor, in hold.Ticket);
+            hold.Accessor.Dispose();
+        }
+    }
+
+    /// <summary>The index locks of the spawns still placed, released: a PUBLISH that failed part-way, whose waiters must not wait for good.</summary>
+    private void ReleasePendingSpawnLocks()
+    {
+        foreach (ref var entry in CollectionsMarshal.AsSpan(_spawnedEntities))
+        {
+            if (entry.Placed && entry.PlacedClusterChunkId >= 0)
+            {
+                _dbe._stateByRouting[entry.Id.ArchetypeId]?.ClusterState?.UnlockSlotIndexes(entry.PlacedClusterChunkId, entry.PlacedSlot);
+            }
         }
     }
 
@@ -3603,6 +3703,8 @@ public unsafe partial class Transaction
                     var clusterBase = ctx.ClusterState.ClusterSegment != null
                         ? ctx.ClusterAccessor.GetChunkAddress(clusterChunkId, true)
                         : ctx.ClusterTransientAccessor.GetChunkAddress(clusterChunkId, true);
+                    // No card was registered, so no commit saw the entity: the lock only has to be released before the slot can be claimed again.
+                    ctx.ClusterState.UnlockSlotIndexes(clusterChunkId, entry.PlacedSlot);
                     ctx.ClusterState.UnreserveSlot(clusterBase, clusterChunkId, entry.PlacedSlot, ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid);
                 }
 
@@ -4242,70 +4344,98 @@ public unsafe partial class Transaction
                         // path whose tree read misses them reads the archetype's destroy stamp and this watermark above its snapshot, and looks at the cluster.
                         destroyClusterState?.NoteDestroyPublished(clusterChunkId, PublishStamp);
 
-                        // Remove per-archetype B+Tree entries before releasing the slot.
-                        // If the entity was written this tick (shadow bitmap set), the tick fence's ProcessClusterShadowEntries detects occupancy=0 and
-                        // removes the OLD key — which is the only correct key, because the cluster data may already hold the post-mutation value while the
-                        // B+Tree still holds the pre-mutation one (the Move has not happened yet).
-                        //
-                        // #711: that hand-off is only valid for the slots the fence actually shadows. ShadowClusterIndexedFields captures every indexed
-                        // NON-Versioned slot and skips Versioned ones (their index is maintained on the commit path instead), while the shadow BITMAP is
-                        // per-entity — set, since #1344 / #1346, by a key-changing write to any fence-indexed component. So one such write was enough to make
-                        // this branch skip
-                        // a Versioned slot's removal and hand it to a fence that never had an entry for it — nobody removed it, and the index kept an entry
-                        // for a released slot. Silent for AllowMultiple, loud on the next rebuild for Unique. No key move is needed to reach it.
-                        //
-                        // So the skip is scoped to the shadowed slots: when a shadow is pending, Versioned slots are still removed here, and only those.
-                        // Remove from BOTH index homes (#655). The elementId tail lives on the cluster (primary) base even for a Transient slot, whose
-                        // component bytes live in the Transient segment.
+                        // Under the slot's index lock (VIS-08): a spawn still publishing holds it until its entries and tails are written and its slot
+                        // occupied — removed before, nothing was removed, and the spawn then indexed, and occupied, a dead entity. An update of an indexed
+                        // component holds it across its move and its slot copy, so the keys read here are the ones the index holds. And a slot that no
+                        // longer holds the entity alive is skipped: another destroy removed its entries and hid or released the slot, which may hold
+                        // another entity since (#1370).
+                        // A spawn still publishing holds the slot's lock, and its own component publish takes chain locks: waited for before the chains
+                        // below are taken. Then the chains of the entity's indexed Versioned components that this destroy did not tombstone — created
+                        // after its snapshot, by a supply: an update of one moves its keys under that chain lock and no other (Transaction.PublishComponent).
+                        destroyClusterState.WaitSlotIndexesUnlocked(clusterChunkId, slotIndex);
+                        _dbe.DestroyAfterSpawnWaitProbe?.Invoke();
+                        var chainHolds = LockUntombstonedChains(meta, engineState, readBuf, entityId);
+                        destroyClusterState.LockSlotIndexes(clusterChunkId, slotIndex);
+                        try
                         {
-                            int entityIndex = clusterChunkId * 64 + slotIndex;
-                            // The exact complement of what the captures recorded (#1339: on an archetype with two marks, a Commit writer records the
-                            // Transient keys only).
-                            var recorded = destroyClusterState.FenceRecordedSlots(entityIndex);
-                            bool hasPendingShadow = recorded != 0;
-                            ushort removeHereMask = (ushort)~recorded;
-
-                            if (removeHereMask != 0)
+                            var liveBase = hasClusterAccessor
+                                ? clusterAccessor.GetChunkAddress(clusterChunkId)
+                                : destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId);
+                            if (destroyClusterState.HoldsLive(liveBase, slotIndex, entityId))
                             {
-                                byte* clusterBase = hasClusterAccessor
-                                    ? clusterAccessor.GetChunkAddress(clusterChunkId)
-                                    : destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId);
-                                var layout = destroyClusterState.Layout;
-
-                                RemoveClusterIndexEntries(destroyClusterState.IndexSlots, engineState, clusterBase, clusterBase, layout, clusterChunkId,
-                                    slotIndex, entityId, ref destroyClusterIdxAccessor, ref destroyClusterIdxAccessorS64,
-                                    hasDestroyClusterIdxAccessorS64 ? destroyClusterState.IndexSegmentString64 : null, removeHereMask);
-
-                                // Transient slots are the fence's under every discipline, so under a pending shadow this home is entirely its business.
-                                if (destroyClusterState.TransientIndexSlots != null && !hasPendingShadow)
+                                // Remove per-archetype B+Tree entries before releasing the slot. If the entity was written this tick (shadow bitmap set),
+                                // the tick fence's ProcessClusterShadowEntries detects occupancy=0 and removes the OLD key — which is the only correct
+                                // key, because the cluster data may already hold the post-mutation value while the B+Tree still holds the pre-mutation one
+                                // (the Move has not happened yet).
+                                //
+                                // #711: that hand-off is only valid for the slots the fence actually shadows. ShadowClusterIndexedFields captures every
+                                // indexed NON-Versioned slot and skips Versioned ones (their index is maintained on the commit path instead), while the
+                                // shadow BITMAP is per-entity — set, since #1344 / #1346, by a key-changing write to any fence-indexed component. So one
+                                // such write was enough to make this branch skip a Versioned slot's removal and hand it to a fence that never had an entry
+                                // for it — nobody removed it, and the index kept an entry for a released slot. Silent for AllowMultiple, loud on the next
+                                // rebuild for Unique. No key move is needed to reach it.
+                                //
+                                // So the skip is scoped to the shadowed slots: when a shadow is pending, Versioned slots are still removed here, and only
+                                // those. Remove from BOTH index homes (#655). The elementId tail lives on the cluster (primary) base even for a Transient
+                                // slot, whose component bytes live in the Transient segment.
                                 {
-                                    byte* transientBase = hasDestroyTransientClusterAccessor
-                                        ? destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId)
-                                        : clusterBase;
-                                    RemoveClusterIndexEntries(destroyClusterState.TransientIndexSlots, engineState, transientBase, clusterBase, layout,
-                                        clusterChunkId, slotIndex, entityId, ref destroyClusterTransientIdxAccessor,
-                                        ref destroyClusterTransientIdxAccessorS64, destroyClusterState.TransientIndexSegmentString64);
+                                    int entityIndex = clusterChunkId * 64 + slotIndex;
+                                    // The exact complement of what the captures recorded (#1339: on an archetype with two marks, a Commit writer records the
+                                    // Transient keys only).
+                                    var recorded = destroyClusterState.FenceRecordedSlots(entityIndex);
+                                    bool hasPendingShadow = recorded != 0;
+                                    ushort removeHereMask = (ushort)~recorded;
+
+                                    if (removeHereMask != 0)
+                                    {
+                                        byte* clusterBase = hasClusterAccessor
+                                            ? clusterAccessor.GetChunkAddress(clusterChunkId)
+                                            : destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId);
+                                        var layout = destroyClusterState.Layout;
+
+                                        RemoveClusterIndexEntries(destroyClusterState.IndexSlots, engineState, clusterBase, clusterBase, layout, clusterChunkId,
+                                            slotIndex, entityId, ref destroyClusterIdxAccessor, ref destroyClusterIdxAccessorS64,
+                                            hasDestroyClusterIdxAccessorS64 ? destroyClusterState.IndexSegmentString64 : null, removeHereMask);
+
+                                        // Transient slots are the fence's under every discipline, so under a pending shadow this home is entirely its business.
+                                        if (destroyClusterState.TransientIndexSlots != null && !hasPendingShadow)
+                                        {
+                                            byte* transientBase = hasDestroyTransientClusterAccessor
+                                                ? destroyTransientClusterAccessor.GetChunkAddress(clusterChunkId)
+                                                : clusterBase;
+                                            RemoveClusterIndexEntries(destroyClusterState.TransientIndexSlots, engineState, transientBase, clusterBase, layout,
+                                                clusterChunkId, slotIndex, entityId, ref destroyClusterTransientIdxAccessor,
+                                                ref destroyClusterTransientIdxAccessorS64, destroyClusterState.TransientIndexSegmentString64);
+                                        }
+                                    }
+                                }
+
+                                // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup
+                                // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
+                                // The cell bookkeeping is the cluster's realm's (Realms C1): an entity destroyed in realm 3 frees a slot in realm 3's cell.
+                                var releaseGrid = destroyClusterState.SpatialOfCluster(clusterChunkId).Grid;
+                                if (hasClusterAccessor && meta.VersionedSlotMask != 0)
+                                {
+                                    // VIS-09: an archetype that promises snapshot isolation keeps the slot, hidden from HEAD and reserved, for a snapshot
+                                    // older than the destroy to still find; the cleanup releases it once no snapshot can
+                                    // (DatabaseEngine.ProcessEcsCleanupEntry).
+                                    destroyClusterState.HideDestroyedSlot(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterChunkId, slotIndex,
+                                        releaseGrid);
+                                }
+                                else if (hasClusterAccessor)
+                                {
+                                    destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, releaseGrid);
+                                }
+                                else if (hasDestroyTransientClusterAccessor)
+                                {
+                                    destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, releaseGrid);
                                 }
                             }
                         }
-
-                        // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup
-                        // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
-                        // The cell bookkeeping is the cluster's realm's (Realms C1): an entity destroyed in realm 3 frees a slot in realm 3's cell.
-                        var releaseGrid = destroyClusterState.SpatialOfCluster(clusterChunkId).Grid;
-                        if (hasClusterAccessor && meta.VersionedSlotMask != 0)
+                        finally
                         {
-                            // VIS-09: an archetype that promises snapshot isolation keeps the slot, hidden from HEAD and reserved, for a snapshot older than
-                            // the destroy to still find; the cleanup releases it once no snapshot can (DatabaseEngine.ProcessEcsCleanupEntry).
-                            destroyClusterState.HideDestroyedSlot(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterChunkId, slotIndex, releaseGrid);
-                        }
-                        else if (hasClusterAccessor)
-                        {
-                            destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, releaseGrid);
-                        }
-                        else if (hasDestroyTransientClusterAccessor)
-                        {
-                            destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, releaseGrid);
+                            destroyClusterState.UnlockSlotIndexes(clusterChunkId, slotIndex);
+                            ReleaseChainHolds(chainHolds);
                         }
                     }
 

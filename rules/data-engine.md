@@ -150,7 +150,8 @@ below names the invariant that proves it.
             placed in PREPARE (Transaction.PlaceSpawns): its slot claimed and left unoccupied, its SoA bytes copied, its EntityMap record inserted with `BornTSN = Pending(owner)` (bit 47), and the bounds widened —
             zone maps, cluster AABB, per-cell index: conservative upward, and placement reads them. PUBLISH
             (Transaction.PublishSpawns) writes the record's stamp in place, then folds the born watermark and sets the
-            occupancy bit, the claim kept (PublishReservedSlot), then adds the B+Tree entries
+            occupancy bit, the claim kept (PublishReservedSlot), then adds the B+Tree entries and their element-id tails, then releases
+            the slot's index lock
   invariant a reader resolves a pending born through the owner's card (EntityVisibility, EntityRecordHeader.IsVisibleAt
             with the cards), re-reading the record when no card holds the owner. A snapshot scan of the cluster SoA reads the
             occupancy word, then the claim word, visits both, and decides a slot claimed and not occupied
@@ -158,6 +159,23 @@ below names the invariant that proves it.
             publish, so a scan whose occupancy read precedes the publish still finds the slot claimed. The occupancy count
             bails to the map probe while a cluster holds such a slot. A HEAD reader takes a pending born for not alive
             (EntityRecordHeader.IsAlive)
+  invariant a spawn is visible from its commit's card, before its PUBLISH writes its index entries: every commit that maintains an
+            existing entity's entries is serialized with the spawn, and with a destroy of the entity, and decides under that serialization
+            whether the slot still holds the entity alive (ArchetypeClusterState.HoldsLive: occupied, its entity id the entity's) — a slot
+            that does not moves, copies and removes nothing: its destroy removed the entries, and a released slot may hold another entity
+            since. The slot's index lock (ArchetypeClusterState.LockSlotIndexes), which the spawn takes when it is placed and releases at
+            the end of its PUBLISH, serializes a first supply's move and slot copy (Transaction.LockLiveSlotIndexes, under the chain lock),
+            a Commit-discipline staged write's (Transaction.PublishStagedEntry) and a destroy's removal and hide or release (VIS-09). An
+            update of an existing chain is serialized with a destroy by its chain lock alone (Transaction.SlotHoldsEntityAlive): the
+            destroy's tombstone publish takes it, and for a chain the destroy did not tombstone — a supply's, after its snapshot — its index
+            removal does (Transaction.LockUntombstonedChains). The slot lock on every move cost a key-moving update 3 %: a lock-prefixed CAS
+            waits for the move's stores. An in-place write whose keys the fence moves waits for
+            the lock to be free before it records them (WaitSlotIndexesUnlocked); a fence migration skips a locked slot. Order: chain lock,
+            slot lock, the trees' latches. A spawner's component publish runs before its spawns' and takes chain locks while it holds its
+            spawns' slot locks, so a commit about to take an entity's chain lock first waits, holding none, for the slot to be free
+            (Transaction.PublishComponent) — on the handler path, which takes it in PREPARE and keeps it, there, bounded by the chain
+            lock's own wait (Transaction.AwaitSpawnPublished). Once a spawn is published nothing holds its slot lock while waiting for a
+            chain lock
   invariant a slot is free when clear in both words (TakenBits): occupancy covers the slots a load or a recovery set
             without a claim. A claim only sets claim bits and only an owner clears them, so a stale claimer's CAS takes only
             a slot free again — no ABA (ArchetypeClusterState.ClaimFirstFree, ClaimExact); a cluster with a claimed slot is
@@ -178,12 +196,27 @@ below names the invariant that proves it.
         no record (CommitStampVisibilityTests.AReaderDuringASpawnsClaim_NeitherCountsNorFindsTheUnplacedSlot; the claim
         published the bit and PREPARE cleared it after, until 2026-10-12)
   scope: Transaction.PlaceSpawns, Transaction.PublishSpawns, Transaction.UnplaceSpawns, ArchetypeClusterState.PublishClaimedSlot,
+         Transaction.SlotHoldsEntityAlive, Transaction.LockUntombstonedChains,
+         ArchetypeClusterState.LockSlotIndexes, ArchetypeClusterState.UnlockSlotIndexes, ArchetypeClusterState.IsSlotIndexLocked,
+         ArchetypeClusterState.WaitSlotIndexesUnlocked, ArchetypeClusterState.HoldsLive, Transaction.LockLiveSlotIndexes,
+         Transaction.AwaitSpawnPublished, Transaction.PublishComponent, Transaction.PublishStagedEntry,
          ArchetypeClusterState.PublishReservedSlot, ArchetypeClusterState.UnreserveSlot, ArchetypeClusterState.ClaimFirstFree,
          ArchetypeClusterState.ClaimExact, ArchetypeClusterState.TakenBits, ArchetypeClusterState.PendingBits, EntityVisibility.IsVisible,
          EntityVisibility.IsVisibleInScan, EntityRecordHeader.IsAlive
   spec: tla/CommitStampFamilies.tla — SpawnRead (spawnatpublish, scanoccupancy, publishclearsclaim: the publish clearing the claim
         lets a scan that read occupancy before it and the claim after it miss the spawn)
-  on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan
+  on_violation: a reader holding the commit's revision of one entity misses the entity it spawned, by lookup or by scan; an entity
+                indexed twice, or a dead one indexed — a stale entry the slot's next occupant inherits (#1370) — and a removal from
+                another key's value buffer, its count off by one (#1369)
+  verified: LastWriterWinsIndexTests [VerifiesRule] — an update, a destroy (Versioned and SingleVersion) staged inside a spawn's PUBLISH;
+            an update, with and without a conflict handler, from inside the spawner's revision publish, on its own thread (no deadlock); a
+            first supply published after a destroy of its entity; a destroy between a first supply's move and its slot copy; a second
+            destroy, and a Commit-discipline staged write, published after the slot was reused. Mutants: no spawn lock, no update lock, no
+            liveness check on update, on a supply, on destroy or on a staged write, no destroy lock, no chain lock on a chain the destroy
+            did not tombstone (a destroy between an update's move and its copy; an update after the destroy), no wait before the chain
+            lock at publish or in a
+            handler's PREPARE (deadlock) — each red. The staged write's lock alone has no staged race. Under load: QueryStressOracleTests
+            ...UnderConcurrentChurnAndTierMoves
   requires: VIS-01, VIS-02, CM-01
 
 ### VIS-09: A destroy is pending before the stamp, and its slot outlives every snapshot that sees the entity `[fatal]` `[silent]`
@@ -196,6 +229,12 @@ below names the invariant that proves it.
             IsClusterFullyVisibleAt, and by the scans BEFORE the occupancy word): its slot is still occupied and its died
             watermark not folded. The publish folds the watermark, then hides the slot, then lifts the count — counted and
             lifted on the cluster the PREPARE found, whatever the record says by the publish
+  invariant the publish removes the entity's B+Tree entries, by the keys and tails its slot holds, and hides or releases the slot, after
+            a spawn still publishing finishes, and under the chain locks of the entity's indexed Versioned components it did not tombstone
+            (taken first, in component order) and the slot's index lock (VIS-08): a supply or an update moving the entity's entries and
+            copying its slot finishes first. A slot that no longer holds the entity alive (ArchetypeClusterState.HoldsLive) is left
+            alone — a second destroy of one entity found it hidden, or released and holding another entity, whose entries it removed and
+            whose slot it released (#1370)
   invariant in an archetype with a Versioned component — the one that promises snapshot isolation — the publish hides the slot
             rather than release it (ArchetypeClusterState.HideDestroyedSlot): out of HEAD (change signals, cell count,
             shrink flag, occupancy bit) and still claimed, its bytes and entity id kept, so an older snapshot still finds the
@@ -305,4 +344,4 @@ below names the invariant that proves it.
             ...OrdersByTheValueItSees_OnTheMerge. Mutants: no watermark fold (nine red), no stamp fold, the walk skipped (eight each), no count, the
             merge's second read removed (the merge case), either validation removed (the between-reads case), the merge dropping only matching rows,
             a migration that does not carry the watermark, a prune that ignores it — each red. Under load: QueryStressOracleTests
-            ...UnderConcurrentChurnAndTierMoves, quarantined on #1369/#1370 (pre-existing, reproduced without this rule's code)
+            ...UnderConcurrentChurnAndTierMoves, quarantined on #1381 (#1369/#1370, which it exposed, are VIS-08's slot index lock)
