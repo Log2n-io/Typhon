@@ -719,6 +719,10 @@ written for the read path; these are the write-path obligations that went unwrit
             never carried across a latch release
   invariant the key of a buffer one thread has emptied is removed from the tree only if, under the removing leaf's write latch, the buffer STILL holds
             no element (`RemoveArguments.OnlyIfBufferEmpty`); an append that got the latch in between keeps the key alive
+  invariant the buffer of a key removed from the tree is retired, never freed on the spot (`BTree.RetireBuffer`): stamped with
+            `BumpEpochForRetire` after the unlink and freed once `MinActiveEpoch` is past the stamp (`BTree.ReclaimRetiredBuffers`, outside every
+            latch) — an optimistic reader (`TryGetMultiple`, the range readers) reads the buffer id, validates the leaf, then enters the buffer holding
+            nothing in between, so only its pinned epoch keeps the root it is about to enter from being freed and re-issued (#1399)
   invariant a miss on a latched leaf means "absent" only if that leaf OWNS the key's range (`KeyOutsideLeafAuthority` false, both bounds); a miss on a
             leaf that does not is a descent that landed beside its target and is re-descended, never reported
   never `FindLeaf` + `GetItem` + `Append`/`RemoveFromBuffer` with no latch between them — that is what `MoveValuePessimistic` did
@@ -752,7 +756,8 @@ written for the read path; these are the write-path obligations that went unwrit
   enforce `CanLoseAnEntryInPlace` (root, or strictly above half full) gates the entry removal on both optimistic `MoveValue` paths when
           `BufferElementCount(oldBufferId) == 1`
   scope: BTree.Move.cs (`MoveValue`, `MoveValuePessimistic`, `MovePessimistic`, `CanLoseAnEntryInPlace`), BTree.cs (`RemoveValue`,
-         `RemoveElementLatched`, `TryLatchAuthoritativeLeaf`, `RemoveKeyIfBufferStillEmpty`, `RemoveArguments`), BTree.Remove.cs (`RemoveCorePessimistic`,
+         `RemoveElementLatched`, `TryLatchAuthoritativeLeaf`, `RemoveKeyIfBufferStillEmpty`, `RemoveArguments`, `RetireBuffer`,
+         `ReclaimRetiredBuffers`), BTree.Remove.cs (`RemoveCorePessimistic`,
          `RemoveIterative`), BTree.NodeWrapper.cs (`RemoveLeaf`),
          BTree.Insert.cs (`KeyOutsideLeafAuthority`), BTree.BaseNodeStorage.cs (`BufferElementCount`),
          DatabaseEngine.ClusterMigration.cs (`DrainClusterShadowSlots`, `ProcessShadowFieldEntries`), DatabaseEngine.TickFence.cs (`RunPrepSlice`)
@@ -784,6 +789,8 @@ written for the read path; these are the write-path obligations that went unwrit
             `..._UniqueKeysToFreshKeys_KeepsEveryElement` (shape 2), 2 x CPU threads, census — probabilistic in the way OlcBTreeStressTests is, so a single
             green run is weak and the un-quarantined nightly is the real net. Their single-threaded twins pin the oracle.
             `Mutant_AnElementRemovedBehindTheCensus_IsReported` shows the census detects the loss shape rather than passing vacuously.
+            `BTreeRetiredBufferTests` [VerifiesRule] (#1399) — a reader pinned before the key's last value is removed keeps the buffer's root live and
+            out of the buffers created meanwhile, and it is freed once the reader leaves (red with the reclaim ignoring the epoch: freed at once).
   requires IXW-04 (the leaf-authority proof both paths take, and which says nothing about the buffer behind the entry)
 
 ### IXW-07: A writer never allocates storage while it holds a node or bucket latch `[fatal]`

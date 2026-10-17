@@ -572,6 +572,11 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     // Protected by _deferredLock for thread safety under concurrent merge operations.
     private DeferredNodeList _deferredNodes;
 
+    // The value buffers of AllowMultiple keys removed from the tree, freed the same way (#1399): an optimistic reader that read a buffer id before the
+    // key left can still be entering the buffer. Under _deferredLock; the count is an unlocked hint that keeps the common path to one read.
+    private DeferredNodeList _retiredBuffers;
+    private int _retiredBufferCount;
+
     // Batching counter for DeferredReclaim: only reclaim every 64 mutations to reduce MinActiveEpoch calls.
     // Non-atomic by design — racy reads are harmless (DeferredReclaim is idempotent, serialized by _deferredLock).
     private int _deferredReclaimSkip;
@@ -754,6 +759,46 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             }
         }
 
+        /// <summary>
+        /// Removes up to <c>dest.Length</c> entries whose retire epoch is strictly less than <paramref name="safeEpoch"/> into <paramref name="dest"/>,
+        /// for a caller that frees them outside the lock; returns how many.
+        /// </summary>
+        public int Take(long safeEpoch, Span<int> dest)
+        {
+            var taken = 0;
+            int write = 0;
+            for (int read = 0; read < _inlineCount; read++)
+            {
+                if (taken < dest.Length && _entries[read].RetireEpoch < safeEpoch)
+                {
+                    dest[taken++] = _entries[read].ChunkId;
+                }
+                else
+                {
+                    if (write != read)
+                    {
+                        _entries[write] = _entries[read];
+                    }
+                    write++;
+                }
+            }
+            _inlineCount = write;
+
+            if (_overflow is { Count: > 0 })
+            {
+                for (int i = _overflow.Count - 1; i >= 0 && taken < dest.Length; i--)
+                {
+                    if (_overflow[i].RetireEpoch < safeEpoch)
+                    {
+                        dest[taken++] = _overflow[i].ChunkId;
+                        _overflow.RemoveAt(i);
+                    }
+                }
+            }
+
+            return taken;
+        }
+
         /// <summary>Number of deferred entries pending reclamation.</summary>
         public readonly int Count => _inlineCount + (_overflow?.Count ?? 0);
     }
@@ -779,6 +824,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     /// <summary>Number of deferred nodes pending reclamation (test visibility).</summary>
     internal int DeferredNodeCount => _deferredNodes.Count;
+
+    /// <summary>Value buffers of removed keys not yet freed (#1399). Diagnostic.</summary>
+    internal int RetiredBufferCount => Volatile.Read(ref _retiredBufferCount);
 
     /// <summary>Number of OLC optimistic read restarts (version validation failures). Bounded at <see cref="MaxOptimisticRestarts"/> per operation.</summary>
     /// <remarks>
@@ -2628,10 +2676,100 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         RemoveCorePessimistic(ref args);
         if (args.Removed)
         {
-            _storage.DeleteBuffer(args.Value, ref sibAccessor);
+            RetireBuffer(args.Value);
         }
 
         SyncHeader(ref opAccessor);
+        ReclaimRetiredBuffers(ref sibAccessor);
+    }
+
+    /// <summary>
+    /// Hands the value buffer of a key just removed from the tree to the epoch-deferred reclaimer (#1399), instead of freeing it. Call after the unlink.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryGetMultiple(TKey, ref ChunkAccessor{TStore})"/> and the range readers read a key's buffer id, validate the leaf, and only then
+    /// enter the buffer, holding nothing in between. A writer emptying the key in that window freed the buffer's root under them: with the free
+    /// quarantine (CK-17) the reader read the deleted values, without it (a Transient store) it could enter a root already given to another buffer, and
+    /// its release then wrote into that buffer's lock. Every such reader holds an epoch, so the buffer is freed only once no epoch that could have read
+    /// its id is still pinned — the protocol a merged node already follows, stamped the same way: <c>BumpEpochForRetire</c> after the unlink, so a
+    /// reader that pinned a later epoch is not taken for one that arrived after the key was gone (#1329). Safe under a leaf latch: it frees nothing.
+    /// </remarks>
+    private void RetireBuffer(int bufferId)
+    {
+        var stamp = _segment.Store.EpochManager.BumpEpochForRetire();
+        bool lockTaken = false;
+        _deferredLock.Enter(ref lockTaken);
+        try
+        {
+            _retiredBuffers.Add(bufferId, stamp);
+            Volatile.Write(ref _retiredBufferCount, _retiredBuffers.Count);
+        }
+        finally
+        {
+            _deferredLock.Exit(false);
+        }
+    }
+
+    /// <summary>Frees the retired buffers no pinned epoch can still reach, up to 16 a call, outside every latch and lock.</summary>
+    private void ReclaimRetiredBuffers(ref ChunkAccessor<TStore> bufferAccessor)
+    {
+        if (Volatile.Read(ref _retiredBufferCount) == 0)
+        {
+            return;
+        }
+
+        PagedMMF.DisarmIndexRestart();   // it frees chunks: as DeferredReclaim (#1382)
+        Span<int> ids = stackalloc int[16];
+        int n;
+        bool lockTaken = false;
+        _deferredLock.Enter(ref lockTaken);
+        try
+        {
+            n = _retiredBuffers.Take(_segment.Store.EpochManager.MinActiveEpoch, ids);
+            Volatile.Write(ref _retiredBufferCount, _retiredBuffers.Count);
+        }
+        finally
+        {
+            _deferredLock.Exit(false);
+        }
+
+        for (var i = 0; i < n; i++)
+        {
+            _storage.DeleteBuffer(ids[i], ref bufferAccessor);
+        }
+    }
+
+    /// <inheritdoc cref="ReclaimRetiredBuffers(ref ChunkAccessor{TStore})"/>
+    private void ReclaimRetiredBuffers(ChangeSet changeSet)
+    {
+        if (Volatile.Read(ref _retiredBufferCount) == 0)
+        {
+            return;
+        }
+
+        ref var sibAccessor = ref _segment.RentWarmSiblingAccessor(changeSet);
+        try
+        {
+            ReclaimRetiredBuffers(ref sibAccessor);
+        }
+        finally
+        {
+            _segment.ReturnWarmSiblingAccessor();
+        }
+    }
+
+    /// <summary>Frees every retired buffer no pinned epoch can still reach, whatever the 16-a-call bound. Test-only.</summary>
+    internal void FlushRetiredBuffers(ChangeSet changeSet)
+    {
+        while (RetiredBufferCount > 0)
+        {
+            var before = RetiredBufferCount;
+            ReclaimRetiredBuffers(changeSet);
+            if (RetiredBufferCount == before)
+            {
+                return;   // the rest are still reachable
+            }
+        }
     }
 
     public VariableSizedBufferAccessor<int, TStore> TryGetMultiple(TKey key, ref ChunkAccessor<TStore> accessor)

@@ -432,6 +432,7 @@ internal abstract partial class BTree<TKey, TStore>
                 // As Move: the old key may have been the tree's last, emptied and removed.
                 var elementIdAfter = MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
                 _hasCachedLastKey = false;
+                ReclaimRetiredBuffers(accessor.ChangeSet);   // a buffer its latched paths retired, freed once out of every latch (#1399)
                 return elementIdAfter;
             }
             catch (BackpressureIndexRestart restart) when (restartable)
@@ -644,7 +645,7 @@ internal abstract partial class BTree<TKey, TStore>
                             if (oi >= 0)
                             {
                                 leaf.RemoveAtInternal(oi, ref opAccessor);
-                                _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                                RetireBuffer(oldBufferId);
                                 Interlocked.Decrement(ref _count);
                             }
                             // Re-find insertion point after removal
@@ -666,7 +667,7 @@ internal abstract partial class BTree<TKey, TStore>
                         if (oi >= 0)
                         {
                             leaf.RemoveAtInternal(oi, ref opAccessor);
-                            _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                            RetireBuffer(oldBufferId);
                             Interlocked.Decrement(ref _count);
                             countChanged = true;
                         }
@@ -823,7 +824,7 @@ internal abstract partial class BTree<TKey, TStore>
                         if (oi >= 0)
                         {
                             oldLeaf.RemoveAtInternal(oi, ref opAccessor);
-                            _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                            RetireBuffer(oldBufferId);
                             Interlocked.Decrement(ref _count);
                             countChanged = true;
                         }

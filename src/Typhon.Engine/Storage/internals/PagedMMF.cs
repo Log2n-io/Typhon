@@ -120,12 +120,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     //    layout at all, so that scenario is unreachable. The bump is still correct; the reason above is the real one. A
     //    wrong reason on a format gate is worse than none, because the next person to weigh a layout change weighs it
     //    against a hazard that does not exist.
-    //
-    // 9 (#1027 step 4.0b): FieldR1 gained IndexSparse. The four bools after IndexSPI had used the last of the struct's padding (IsRealmKey took it), so
-    //    the fifth grows the row from 96 to 100 bytes, and the schema catalog's field collection is a VSBS of fixed-stride rows. A v8 catalog read at the v9
-    //    stride decodes every field after the first from the wrong offset — names, types, offsets — and schema validation then compares the build against
-    //    garbage. The bump turns that into the clean refusal.
-    internal const int DatabaseFormatRevision   = 9;
+    internal const int DatabaseFormatRevision   = 8;
     internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;                   // 8 MiB — the hard floor (see Validate)
     internal const long MaximumMemPageCount     = int.MaxValue;                                     // ≈16 TiB: slot indices are int. No other ceiling (#945)
     internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;                          // 256 MiB — the shipped production default
