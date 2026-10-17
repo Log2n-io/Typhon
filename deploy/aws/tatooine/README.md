@@ -1,10 +1,11 @@
 # `deploy/aws/tatooine` — the two-instance deployment
 
-**Status:** authored and `terraform validate`-clean. **Never applied.** No instance, bucket, distribution or budget
-exists yet; nothing here has been run against an AWS account.
+**Status:** applied. The `tatooine` stack was created in eu-west-1 on 2026-10-15, deployed to, loaded with 8 192 player
+bots, and destroyed on 2026-10-17 (29 resources, nothing left: verified by tag sweep). The apply found three things
+`terraform validate` could not — the AMI has no `awscli`, cloud-init must be LF, and the world's disk was never mounted.
 
-This is phase **I3–I7, I9, I10** of [`14-game-programme.md`](../../../claude/design/SwgTatooine/14-game-programme.md) § I,
-built to the topology in [`08-hosting.md`](../../../claude/design/SwgTatooine/08-hosting.md) § 11.
+This is phase **I3–I7, I9, I10** of [`plan.md`](../../../claude/design/SwgTatooine/plan.md) § I, built to the topology in
+[`design/hosting.md`](../../../claude/design/SwgTatooine/design/hosting.md) § 11.
 
 Two front doors, mutually exclusive. **The default is the cheap one** — the instance serves TLS itself, with no CDN, no
 load balancer and no Elastic IP, so nothing bills while the stack is stopped:
