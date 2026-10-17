@@ -3,7 +3,10 @@ using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using Serilog;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests;
@@ -91,6 +94,8 @@ class SlotReserveTests
 
         Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(target));
         Assert.That(pmmf.ReserveDraws, Is.Zero, "nothing waited: nothing was drawn");
+        Assert.That(pmmf.GetMetrics().FreeMemPageCount, Is.EqualTo(PagedMMF.MinimumMemPageCount),
+            "a reserved slot counts as free, as the gauges count it: no slot is Allocating");
         Assert.That(pmmf.DescribeEvictionBlockers(), Does.Contain($"reserved {target} of {target}"));
     }
 
@@ -134,6 +139,7 @@ class SlotReserveTests
 
             Assert.That(sw.ElapsedMilliseconds, Is.LessThan(250), "served without waiting out the back-pressure");
             Assert.That(pmmf.ReserveDraws, Is.EqualTo(1));
+            Assert.That(pmmf.GetMetrics().FreeMemPageCount, Is.EqualTo(PagedMMF.MinimumMemPageCount), "the drawn slot serves its page; none is Allocating");
             Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(target - 1));
 
             pmmf.ForceBackpressureForTest = null;
@@ -180,6 +186,197 @@ class SlotReserveTests
         {
             pmmf.ForceBackpressureForTest = null;
             TimeoutOptions.Current = saved;
+        }
+    }
+
+    /// <summary>
+    /// A younger pin leaves the reserve's last quarter to the thread whose pin is the cache's floor: that one cannot be served by eviction, since nothing
+    /// tagged after its pin is evictable, so a reserve emptied by younger waiters would leave it to a timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-24")]
+    public void AYoungerPin_LeavesTheFloorHoldersShareOfTheReserve()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        using (EpochGuard.Enter(epochManager))
+        {
+            Assert.That(pmmf.RequestPageEpoch(10, epochManager.GlobalEpoch, out _), Is.True);
+        }
+
+        var target = pmmf.ReservedSlotCount;
+        var kept = target / PagedMMF.SlotReserveFloorShareDivisor;
+        Assert.That(kept, Is.GreaterThan(0), "premise: the reserve keeps a share");
+
+        using var floorPinned = new ManualResetEventSlim();
+        using var floorAsks = new ManualResetEventSlim();
+        var floorDrew = -1L;
+        var floor = Task.Run(() =>
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                floorPinned.Set();
+                floorAsks.Wait();
+                var before = pmmf.ReserveDraws;
+                Assert.That(pmmf.RequestPageEpoch(500, epochManager.GlobalEpoch, out _), Is.True);
+                floorDrew = pmmf.ReserveDraws - before;
+            }
+        });
+        floorPinned.Wait();
+        using (EpochGuard.Enter(epochManager))
+        {
+        }
+
+        var young = Environment.CurrentManagedThreadId;
+        var rounds = 0;
+        pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId != young || ++rounds <= 2;
+        try
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                Assert.That(epochManager.MinActiveEpoch, Is.LessThan(epochManager.GlobalEpoch), "premise: the other thread's pin is the floor");
+                for (var i = 0; i < target - kept; i++)
+                {
+                    rounds = 0;
+                    Assert.That(pmmf.RequestPageEpoch(200 + i, epochManager.GlobalEpoch, out _), Is.True);
+                }
+
+                Assert.That(pmmf.ReserveDraws, Is.EqualTo(target - kept), "each younger request drew, down to the floor's share");
+                rounds = 0;
+                Assert.That(pmmf.RequestPageEpoch(300, epochManager.GlobalEpoch, out _), Is.True);
+                Assert.That(rounds, Is.GreaterThan(2), "at the share, the younger request waited its rounds out");
+                Assert.That(pmmf.ReserveDraws, Is.EqualTo(target - kept), "and drew nothing");
+                Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(kept));
+            }
+
+            floorAsks.Set();
+            floor.Wait();
+        }
+        finally
+        {
+            floorAsks.Set();
+            pmmf.ForceBackpressureForTest = null;
+        }
+
+        Assert.That(floorDrew, Is.EqualTo(1), "the floor-holder drew from its share");
+    }
+
+    /// <summary>
+    /// A slot that ends a wait serves its waiter. Given to the short reserve instead, the waiter would wait again for the next one, and a pinned
+    /// waiter would draw back the very slot it had found.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-24")]
+    public void ASlotThatEndsAWait_ServesItsWaiter_NotTheReserve()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        using (EpochGuard.Enter(epochManager))
+        {
+            Assert.That(pmmf.RequestPageEpoch(10, epochManager.GlobalEpoch, out _), Is.True);
+        }
+
+        var requester = Environment.CurrentManagedThreadId;
+        var forcedOnce = false;
+        pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == requester && !forcedOnce && (forcedOnce = true);
+        try
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                Assert.That(pmmf.RequestPageEpoch(200, epochManager.GlobalEpoch, out _), Is.True);
+            }
+
+            var target = pmmf.SlotReserveTarget;
+            Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(target - 1), "premise: a draw left the reserve short");
+
+            var rounds = 0;
+            pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == requester && ++rounds <= 2;
+            PagedMMF.RefreshableWaitDepth++;
+            try
+            {
+                using (EpochGuard.Enter(epochManager))
+                {
+                    Assert.That(pmmf.RequestPageEpoch(201, epochManager.GlobalEpoch, out _), Is.True);
+                }
+            }
+            finally
+            {
+                PagedMMF.RefreshableWaitDepth--;
+            }
+
+            Assert.That(rounds, Is.EqualTo(3), "the round after the wait found a slot and served the waiter with it");
+            Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(target - 1), "the reserve did not take it");
+        }
+        finally
+        {
+            pmmf.ForceBackpressureForTest = null;
+        }
+    }
+
+    /// <summary>
+    /// Under the eviction guard (#1382), a slot evicted for the reserve sits out its quarantine first, like one evicted to serve a page: a stale address
+    /// into it faults for the whole quarantine, whichever use it goes to.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("PS-24")]
+    public void UnderTheEvictionGuard_AReservedSlotSatOutItsQuarantine()
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetService<PagedMMF>();
+        var epochManager = scope.ServiceProvider.GetRequiredService<EpochManager>();
+        var served = new HashSet<int>();
+        var file = 0;
+        void Serve()
+        {
+            using (EpochGuard.Enter(epochManager))
+            {
+                Assert.That(pmmf.RequestPageEpoch(file++, epochManager.GlobalEpoch, out var mem), Is.True);
+                served.Add(mem);
+            }
+        }
+
+        // Every slot outside the reserve holds a page: from here a slot is found by evicting one.
+        for (var i = 0; i < PagedMMF.MinimumMemPageCount; i++)
+        {
+            Serve();
+        }
+
+        pmmf.EnableEvictionGuardForTests(8);
+        var requester = Environment.CurrentManagedThreadId;
+        var draw = false;
+        pmmf.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == requester && draw && !(draw = false);
+        // Sampled before each slot an allocation tries: a slot quarantined and handed back within one allocation is seen in between.
+        var everQuarantined = new HashSet<int>();
+        pmmf.ReclaimBeforeLockProbe = _ => everQuarantined.UnionWith(pmmf.QuarantinedSlotsForTests);
+        try
+        {
+            for (var d = 0; d < 4; d++)
+            {
+                draw = true;
+                Serve();
+            }
+
+            Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(pmmf.SlotReserveTarget - 4), "premise: four draws left the reserve short");
+            for (var i = 0; i < 64 && pmmf.ReservedSlotCount < pmmf.SlotReserveTarget; i++)
+            {
+                Serve();
+            }
+        }
+        finally
+        {
+            pmmf.ForceBackpressureForTest = null;
+            pmmf.ReclaimBeforeLockProbe = null;
+        }
+
+        Assert.That(pmmf.ReservedSlotCount, Is.EqualTo(pmmf.SlotReserveTarget), "premise: evictions refilled the reserve");
+        foreach (var slot in pmmf.ReservedSlotsForTests)
+        {
+            Assert.That(!served.Contains(slot) || everQuarantined.Contains(slot), Is.True, $"slot {slot} held a page and was reserved unquarantined");
         }
     }
 

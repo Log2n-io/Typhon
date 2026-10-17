@@ -94,6 +94,9 @@ internal class DeferredCleanupManager
     /// compaction.</summary>
     internal Action<int> EntityCleanupProbeForTest { get; set; }
 
+    /// <summary>Test seam: called with the entry's index as its pre-lock ownership check starts (EP-02).</summary>
+    internal Action<int> ChainCheckProbeForTest { get; set; }
+
     public DeferredCleanupManager(DeferredCleanupOptions options, ILogger log = null)
     {
         _options = options;
@@ -459,7 +462,7 @@ internal class DeferredCleanupManager
         {
             FreeChunkWaitingRefreshed(entry.Table.CompRevTableSegment, entry.ChunkId);
         }
-        else
+        else if (entry.ChunkId != 0)
         {
             if (entry.Table.HasCollections)
             {
@@ -635,6 +638,7 @@ internal class DeferredCleanupManager
                 // all: compacting it would rearrange someone else's revisions (REAP-02).
                 // Up to its chain lock an entry holds what it holds between two entries, its accessors' slot-reference pins: its page waits move the
                 // epoch (EP-02, #1382), as the refresh between entries does. Waiting with its pin, the drain was the oldest pin of a 32 MiB market.
+                ChainCheckProbeForTest?.Invoke(i);
                 PagedMMF.RefreshableWaitDepth++;
                 bool ours;
                 try

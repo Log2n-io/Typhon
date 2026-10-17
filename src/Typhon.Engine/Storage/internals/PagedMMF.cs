@@ -2468,10 +2468,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                             throw new BackpressureIndexRestart(this);
                         }
 
-                        // PS-24 (#1382): a thread that would wait here with its epoch pinned holds the cache's floor, and nothing tagged since its
+                        // Demand-driven flush, every round as before, a draw's included: wake the checkpoint manager so dirty pages get written to
+                        // disk → DecrementDirty → SignalPageAvailable → waiter wakes, and let go of the spatial queries' pinned pages. Not once per lap:
+                        // above 524 288 slots a lap is many rounds, and the remedies must not wait for it.
+                        OnBackpressure?.Invoke();
+
+                        // PS-24 (#1382): a thread that would wait here with its epoch pinned may hold the cache's floor, and nothing tagged since its
                         // pin can be evicted for it: it takes a reserved slot instead, finishes, and moves its epoch. A wait that moved its epoch
                         // does not hold the floor, and waits.
-                        if (!refreshed && TryDrawReserve(out var reservedSlot))
+                        if (!refreshed && TryDrawReserve(minActiveEpoch, out var reservedSlot))
                         {
                             memPageIndex = reservedSlot;
                             pi = Slot(reservedSlot);
@@ -2480,11 +2485,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         }
                         else
                         {
-                            // Demand-driven flush, every round as before: wake the checkpoint manager so dirty pages get written to disk →
-                            // DecrementDirty → SignalPageAvailable → waiter wakes, and let go of the spatial queries' pinned pages. Not once per lap:
-                            // above 524 288 slots a lap is many rounds, and the remedies must not wait for it.
-                            OnBackpressure?.Invoke();
-
                             // The timeout is honoured only at the end of a lap (#1137): a page that stays evictable is found before the allocation
                             // gives up, whatever the cache size or the configured timeout — so the timeout can be overrun by at most one lap. Until
                             // then a strategy that gives up just does not wait.
@@ -2534,21 +2534,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
             }
 
-            // PS-24 (#1382): while the reserve is short, the slot found refills it and the allocation looks for another.
-            if (!drawn && TryStockReserve(memPageIndex))
-            {
-                if (evictedFilePageIndex >= 0)
-                {
-                    TyphonEvent.EmitPageEvicted(evictedFilePageIndex, 0);
-                }
-
-                continue;
-            }
-
             // Test-only (#1382, EvictionGuardDepthForProcess): the reclaimed slot sits out a quarantine, inaccessible, and an older one serves instead.
+            // Before the reserve takes it, so a reserved slot has sat out its quarantine: a drawn one goes straight to its new page.
             var displacedSlot = memPageIndex;
             var evictionGuard = _evictionGuard;
-            if (evictionGuard != null)
+            if (!drawn && evictionGuard != null)
             {
                 if (!evictionGuard.Exchange(ref memPageIndex))
                 {
@@ -2556,6 +2546,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
 
                 pi = Slot(memPageIndex);
+            }
+
+            // PS-24 (#1382): while the reserve is short, the slot found refills it and the allocation looks for another. Not a slot that ends a wait:
+            // its waiter would wait again for the next one, and a pinned waiter would draw back the slot it had found.
+            if (!drawn && backpressureSince == 0 && TryStockReserve(memPageIndex))
+            {
+                if (evictedFilePageIndex >= 0)
+                {
+                    TyphonEvent.EmitPageEvicted(evictedFilePageIndex, 0);
+                }
+
+                continue;
             }
 
             ++_metrics.TotalMemPageAllocatedCount;

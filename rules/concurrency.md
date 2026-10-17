@@ -453,7 +453,8 @@ lock ordering and deadlock prevention are still to come.
             thread stays pinned with the finally removed); TheTailsDrain_GivesBackItsMarksAsItGoes [VerifiesRule] — refreshed between entries the
             drain holds 1 marked page at most, 10 without the release; TheDrainsChunkFrees_WaitWithTheirEpochMoved [VerifiesRule] — three
             back-pressure rounds forced on a drain's frees each move its epoch and draw nothing from the slot reserve (none move it with the scope
-            removed)
+            removed); ARevisionCleanupsChainCheck_WaitsWithItsEpochMoved [VerifiesRule] — three rounds forced on a revision cleanup's ownership check
+            before its chain lock each move the drain's epoch and draw nothing (the scope removed, none moves it and the check draws)
   verified: LockReleaseOnThrowTests.AnOpenWaitingOnAHeldChain_MovesItsEpochWhileItWaits_AndGoesOnOnceItIsReleased [VerifiesRule] — another thread
             holds the chain: the open restarts, its pin moves, and the write commits once the chain is released (no restart and no epoch move with the
             lock restart removed)

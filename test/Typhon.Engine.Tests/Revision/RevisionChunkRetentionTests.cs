@@ -272,6 +272,7 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
         var forced = 0;
         var refreshed = Interlocked.Read(ref PagedMMF.RefreshedWaits);
         var draws = dbe.MMF.ReserveDraws;
+        Assert.That(dbe.MMF.ReservedSlotCount, Is.GreaterThan(0), "premise: a pinned wait would draw from the reserve");
 
         // The next transfer's dispose drains the queue: its allocations miss once the drain has taken the frees, and its first three rounds find nothing.
         dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == drainer
@@ -287,6 +288,60 @@ class RevisionChunkRetentionTests : TestBase<RevisionChunkRetentionTests>
 
         Assert.That(forced, Is.GreaterThan(3), "premise: the drain met three back-pressure rounds");
         Assert.That(dbe.DeferredCleanupManager.ChunkFreeQueueSize, Is.LessThan(queued), "premise: the drain freed queued chunks");
+        Assert.That(Interlocked.Read(ref PagedMMF.RefreshedWaits) - refreshed, Is.EqualTo(3), "each round moved the drain's epoch");
+        Assert.That(dbe.MMF.ReserveDraws - draws, Is.Zero, "none waited with its pin");
+    }
+
+    /// <summary>
+    /// #1382: a revision cleanup's ownership check, before it takes the chain lock, waits with its epoch moved (EP-02). Up to that lock the entry holds
+    /// only its accessors' slot-reference pins; waiting with its pin, the drain was the oldest pin of a 32 MiB market.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    [CancelAfter(10_000)]
+    [NonParallelizable] // PagedMMF.RefreshedWaits is process-wide
+    public void ARevisionCleanupsChainCheck_WaitsWithItsEpochMoved()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        var (tail, _) = TailWithABacklog(dbe);
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "premise: the pages are clean");
+
+        var drainer = Environment.CurrentManagedThreadId;
+        var inCheck = false;
+        var checks = 0;
+        var evicted = 0;
+        var forced = 0;
+        var refreshed = Interlocked.Read(ref PagedMMF.RefreshedWaits);
+        var draws = dbe.MMF.ReserveDraws;
+        Assert.That(dbe.MMF.ReservedSlotCount, Is.GreaterThan(0), "premise: a pinned wait would draw from the reserve");
+        // The tail's pin protects every page until its drain starts: the first check evicts what the drain's own pin leaves evictable, so it misses.
+        dbe.DeferredCleanupManager.ChainCheckProbeForTest = _ =>
+        {
+            if (checks++ == 0)
+            {
+                ChunkBasedSegment<PersistentStore>.ReleaseWarmAccessorsForTests();
+                evicted = dbe.MMF.EvictEvictablePagesForTest();
+            }
+
+            inCheck = true;
+        };
+        dbe.DeferredCleanupManager.EntityCleanupProbeForTest = _ => inCheck = false;
+        // The tail's dispose drains the backlog: its first check that misses meets three rounds that find nothing.
+        dbe.MMF.ForceBackpressureForTest = () => Environment.CurrentManagedThreadId == drainer && inCheck && ++forced <= 3;
+        try
+        {
+            tail.Dispose();
+        }
+        finally
+        {
+            dbe.MMF.ForceBackpressureForTest = null;
+            dbe.DeferredCleanupManager.ChainCheckProbeForTest = null;
+            dbe.DeferredCleanupManager.EntityCleanupProbeForTest = null;
+        }
+
+        Assert.That(checks, Is.GreaterThan(0), "premise: the drain checked chains");
+        Assert.That(evicted, Is.GreaterThan(0), "premise: the first check found its pages evicted");
+        Assert.That(forced, Is.GreaterThan(3), "premise: a check met three back-pressure rounds");
         Assert.That(Interlocked.Read(ref PagedMMF.RefreshedWaits) - refreshed, Is.EqualTo(3), "each round moved the drain's epoch");
         Assert.That(dbe.MMF.ReserveDraws - draws, Is.Zero, "none waited with its pin");
     }

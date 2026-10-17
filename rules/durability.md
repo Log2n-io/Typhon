@@ -2418,27 +2418,6 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 
 ---
 
-### PS-24: A wait that holds the cache's floor is served from a reserve `[correctness]`
-  invariant a page cache of SlotReserveMinPages (1,024) pages or more keeps one slot in SlotReserveDivisor (32), at most SlotReserveMaxSlots (256),
-            out of every sweep (PageState.Reserved). An allocation that would wait on back-pressure with its thread's epoch pinned, its wait not
-            moving the epoch (EP-02), takes a reserved slot instead and is served at once; a wait that moves its epoch never takes one. While the
-            reserve is short, an allocation that finds a slot gives it to the reserve and looks for another
-  invariant that waiter holds the cache's floor: no page tagged after its pin can be evicted, and every thread then touching pages tags them after
-            it, so on an epoch-held cache nothing a sweep can find frees it; served, it finishes and its epoch moves. Waits that hold their pin
-            are the publish's B+Tree writes past their first latch (EP-02), the checkpoint's meta persist, a transaction's own reads, a compaction
-            under its chain lock; served first, they cannot hold every other wait behind them for a timeout. The reserve emptied, they wait as
-            before
-  scope: PagedMMF.TryDrawReserve, PagedMMF.TryStockReserve, PagedMMF.SlotReserveTarget, PagedMMF.ReservedSlotCount, PagedMMF.ReserveDraws,
-         PagedMMF.AllocateMemoryPageCore
-  verified: SlotReserveTests [VerifiesRule] — a cache under 1,024 pages reserves nothing; the first allocation fills the reserve and 4,096 more
-            never take a reserved slot; with every round finding nothing, a pinned request is served at once from the reserve, which the next
-            allocation refills, and with no reserve the same request times out; a wait that moves its epoch draws nothing. Mutants killed: no draw
-            (the pinned request times out), a draw for a wait that moved its epoch; [RuleMutant] Mutant_WithNoReserve_APinnedWaiterTimesOut
-  on_violation: the 32 MiB market (16 threads) failed every run of nine: after the storm, the checkpoint's CheckpointLSN flip (PersistMetaNow)
-                waited for the meta page with its pin, 4,399 epochs behind, and every reader timed out behind it; during the storm, publishes waiting
-                past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
-                longest back-pressure wait is 68-352 ms
-
 ### PS-23: Work is paced at its start, holding nothing, and never refused for being slow `[correctness]`
   invariant while the storage gate is on (AdmissionLimit > 0), DatabaseEngine.CreateUnitOfWork admits a unit of work only once fewer than the limit
             run, waiting before it creates its ChangeSet or claims a registry slot: no pin, latch or lock is held, and no append has happened (#1382, S4)
@@ -2458,6 +2437,35 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             Mutants killed: no epoch-scope bypass, no held-unit bypass, no deadline admit, no release at dispose
   on_violation: a unit made to wait while it holds a pin keeps the cache epoch-held for the work already running — the stall the gate exists to
                 prevent; a unit refused for slowness fails work the engine would have completed
+
+### PS-24: A wait that holds the cache's floor is served from a reserve `[correctness]`
+  invariant a page cache of SlotReserveMinPages (1,024) pages or more keeps one slot in SlotReserveDivisor (32), at most SlotReserveMaxSlots (256),
+            out of every sweep (PageState.Reserved). An allocation that would wait on back-pressure with its thread's epoch pinned, its wait not
+            moving the epoch (EP-02), takes a reserved slot instead and is served at once; a wait that moves its epoch never takes one
+  invariant the last 1 / SlotReserveFloorShareDivisor (a quarter) of the reserve is drawn only by the thread whose pin is the cache's floor
+            (MinActiveEpoch): a younger pin can be served once the floor moves, the floor-holder by nothing a sweep finds, so younger waiters never
+            empty the reserve before it
+  invariant while the reserve is short, an allocation that finds a slot on its first try gives it to the reserve and looks for another; a slot that
+            ends a back-pressure wait serves its waiter. A reserved slot counts as free (the gauges and FreeMemPageCount agree), holds no page, no
+            epoch tag and no debt, and under the eviction guard it has sat out its quarantine before the reserve takes it
+  invariant that waiter holds the cache's floor: no page tagged after its pin can be evicted, and every thread then touching pages tags them after
+            it, so on an epoch-held cache nothing a sweep can find frees it; served, it finishes and its epoch moves. Waits that hold their pin
+            are the publish's B+Tree writes past their first latch (EP-02), the checkpoint's meta persist, a transaction's own reads, a compaction
+            under its chain lock; served first, they cannot hold every other wait behind them for a timeout. The reserve emptied, they wait as
+            before
+  scope: PagedMMF.TryDrawReserve, PagedMMF.TryStockReserve, PagedMMF.SlotReserveTarget, PagedMMF.ReservedSlotCount, PagedMMF.ReserveDraws,
+         PagedMMF.AllocateMemoryPageCore
+  verified: SlotReserveTests [VerifiesRule] — a cache under 1,024 pages reserves nothing; the first allocation fills the reserve and 4,096 more
+            never take a reserved slot, every slot counted free or serving; with every round finding nothing, a pinned request is served at once
+            from the reserve, which the next allocation refills, and with no reserve the same request times out; a wait that moves its epoch draws
+            nothing; a younger pin draws down to the floor's share and then waits, and the floor-holder draws from it; a slot that ends a wait
+            serves its waiter, not the reserve; under the eviction guard every reserved slot that held a page was quarantined first. Mutants
+            killed: no draw (the pinned request times out), a draw for a wait that moved its epoch, no floor share, a waiter's slot stocked, a slot
+            stocked unquarantined, a stock or a draw left out of the free count; [RuleMutant] Mutant_WithNoReserve_APinnedWaiterTimesOut
+  on_violation: the 32 MiB market (16 threads) failed every run of nine: after the storm, the checkpoint's CheckpointLSN flip (PersistMetaNow)
+                waited for the meta page with its pin, 4,399 epochs behind, and every reader timed out behind it; during the storm, publishes waiting
+                past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
+                longest back-pressure wait is 68-352 ms
 
 ## Module: WAL Recovery
 
