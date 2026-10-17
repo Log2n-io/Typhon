@@ -56,8 +56,9 @@ public struct FieldR1
     /// the realm is what places every entity, and losing it silently would merge every realm's clusters into realm 0. Occupies what was padding.</summary>
     public bool IsRealmKey;
 
-    /// <summary><c>true</c> when the field's index skips key 0, "no data" (<c>[Index(Sparse = true)]</c>, IX-09). Persisted so turning it on or off rebuilds the
-    /// index: a tree built dense holds key-0 entries a sparse one never removes, and one built sparse is missing the entities a dense one must find.</summary>
+    /// <summary><c>true</c> when the field's index skips key 0, "no data" (<c>[Index(Sparse = true)]</c>, IX-09). Persisted so turning it on or off
+    /// rebuilds the index: a tree built dense holds key-0 entries a sparse one never removes, and one built sparse is missing the entities a dense one
+    /// must find.</summary>
     public bool IndexSparse;
 
     /// <summary>Element count when the field is a fixed-length array; 0 for scalar fields (see <see cref="IsArray"/>).</summary>
@@ -4248,8 +4249,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 _migratedComponents[schemaName] = migrationResult.Value;
             }
 
-            // Persist schema changes if the resolver detected changes or migration ran
-            if ((resolver != null && resolver.HasChanges) || migrationResult.HasValue)
+            // Persist schema changes if the resolver detected changes, migration ran, or an index was added or changed kind. The last is what an index-only
+            // change is: no field moved, so neither of the first two fires, and the catalog kept the old flags — every later open saw the change again and
+            // rebuilt the trees again, and the integrity check read the kind the trees no longer had (IX-09).
+            if ((resolver != null && resolver.HasChanges) || migrationResult.HasValue || newIndexFieldIds != null)
             {
                 PersistSchemaChanges(persisted.ChunkId, definition, migrationResult);
                 IncrementUserSchemaVersion();

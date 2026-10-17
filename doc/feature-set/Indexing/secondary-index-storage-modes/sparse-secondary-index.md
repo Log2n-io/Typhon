@@ -20,10 +20,11 @@ only the entities that set the field.
 ## ⚙️ How it works (in brief)
 
 The tree itself treats key 0 as the state each write asks for: an insert of 0 adds nothing, a removal of 0 succeeds,
-a change from 0 to a value inserts, a change from a value to 0 removes, and a lookup of 0 finds nothing. Every write
-path — commit, tick fence (including the batched moves), migration, destroy — goes through those entry points, so
-none of them tests for 0. On a unique sparse index any number of entities may hold 0, and two entities still cannot
-hold one real key.
+a change from 0 to a value inserts, a change from a value to 0 removes, and a lookup of 0 finds nothing. The commit,
+tick fence (including the batched moves), destroy and rebuild paths go through those entry points, so none of them tests
+for 0; a migration stages no index update for an entity holding 0. On a unique sparse index any number of entities may
+hold 0, and two entities still cannot hold one real key: a change from 0 onto a key another entity holds is refused like
+any duplicate.
 
 Queries stay correct without the 0s in the tree: a predicate whose range admits 0 over a sparse index is answered
 from component data (the zone-map scan, or the sort fallback for an ordered query), and a range that excludes 0 uses

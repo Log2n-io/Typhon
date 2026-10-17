@@ -198,10 +198,15 @@ internal abstract partial class BTree<TKey, TStore>
 
         var events = 2L * moves.Length;
         desiredParts = (int)Math.Max(1, Math.Min(Math.Min(desiredParts, ranges.Length), events / Math.Max(1, IndexMoveBatch.MinEventsPerRange)));
-        var sampled = desiredParts > 1 ? SampleMoveKeys(moves, desiredParts) : 0;
-        if (sampled == 0)
+        var sampled = 0;
+        if (desiredParts > 1)
         {
-            desiredParts = 1;   // every sampled key was a sparse tree's 0: no quantile to cut on
+            sampled = SampleMoveKeys(moves, desiredParts, out var picks);
+
+            // A sparse tree's 0s are no events (IX-09): the sample's share of non-zero keys scales the batch's, so a mostly-unset batch is neither cut into
+            // nor sized for twice its moves. Every sampled key a 0 leaves no quantile to cut on.
+            events = Math.Max(1, events * sampled / (2L * picks));
+            desiredParts = sampled == 0 ? 1 : (int)Math.Max(1, Math.Min(desiredParts, events / Math.Max(1, IndexMoveBatch.MinEventsPerRange)));
         }
 
         var parts = 0;
@@ -233,9 +238,9 @@ internal abstract partial class BTree<TKey, TStore>
     }
 
     /// <summary>Sorted keys of up to 64 moves per part, evenly strided over the batch, both keys of each: the cut's quantiles.</summary>
-    private int SampleMoveKeys(Span<IndexMove> moves, int parts)
+    private int SampleMoveKeys(Span<IndexMove> moves, int parts, out int picks)
     {
-        var picks = Math.Min(moves.Length, 64 * parts);
+        picks = Math.Min(moves.Length, 64 * parts);
         var n = 2 * picks;
         if (_moveSample.Length < n)
         {

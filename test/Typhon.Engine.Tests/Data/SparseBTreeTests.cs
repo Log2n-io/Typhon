@@ -171,6 +171,56 @@ public class SparseBTreeTests
     }
 
     /// <summary>
+    /// The lookups answer from the guard, not from the tree's contents: a key-0 entry planted under the flag (as a tree built dense would hold) is not
+    /// returned once the tree is sparse.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IX-09")]
+    public void Multi_TheLookupNeverAnswersKeyZero_EvenWhenTheTreeHoldsOne()
+    {
+        With(s => new IntMultipleBTree<PersistentStore>(s), static (tree, _, _, ref accessor) =>
+        {
+            tree.Sparse = false;
+            tree.Add(0, 100, ref accessor);
+            Assert.That(tree.TryGetMultiple(0, ref accessor).IsValid, Is.True, "premise: the planted key 0 is there");
+            tree.Sparse = true;
+            Assert.That(tree.TryGetMultiple(0, ref accessor).IsValid, Is.False, "a planted key 0 is not answered");
+        });
+    }
+
+    /// <inheritdoc cref="Multi_TheLookupNeverAnswersKeyZero_EvenWhenTheTreeHoldsOne"/>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IX-09")]
+    public void Unique_TheLookupNeverAnswersKeyZero_EvenWhenTheTreeHoldsOne()
+    {
+        With(s => new IntSingleBTree<PersistentStore>(s), static (tree, _, _, ref accessor) =>
+        {
+            tree.Sparse = false;
+            tree.Add(0, 100, ref accessor);
+            Assert.That(tree.TryGet(0, ref accessor).IsSuccess, Is.True, "premise: the planted key 0 is there");
+            tree.Sparse = true;
+            Assert.That(tree.TryGet(0, ref accessor).IsSuccess, Is.False, "a planted key 0 is not answered");
+        });
+    }
+
+    /// <summary>On a unique sparse tree a move off 0 onto a key another entity holds changes nothing and answers false, as a move between two keys does.</summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("IX-09")]
+    public void Unique_AMoveOffZeroOntoAHeldKey_ChangesNothing()
+    {
+        With(s => new IntSingleBTree<PersistentStore>(s), static (tree, _, _, ref accessor) =>
+        {
+            tree.Add(3, 30, ref accessor);
+            Assert.That(tree.Move(0, 3, 31, ref accessor), Is.False, "key 3 is held");
+            Assert.That(tree.TryGet(3, ref accessor).Value, Is.EqualTo(30), "and still by its holder");
+            Assert.That(tree.EntryCount, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
     /// A batch of moves on and off 0, whole: the gather keeps only the non-zero sides, so a move onto 0 is a departure alone and one off 0 an arrival alone,
     /// and the element ids written back are 0 for an entity left in no group and a real element for one that joined.
     /// </summary>

@@ -2842,7 +2842,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         };
     }
 
-    /// <summary>Whether the plan's primary range admits key 0 and the archetype's tree for that field is sparse: a scan of it would miss the 0s (IX-09).</summary>
+    /// <summary>
+    /// Whether the plan's primary range admits key 0 and the archetype's tree for that field is sparse: a scan of it would miss the 0s (IX-09).
+    /// </summary>
     private static bool ScanMissesSparseZero(ExecutionPlan plan, ArchetypeClusterState clusterState, int ixSlotIdx)
     {
         var ixSlots = clusterState.IndexSlots;

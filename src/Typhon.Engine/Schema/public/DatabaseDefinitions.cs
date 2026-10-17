@@ -431,10 +431,13 @@ public class DatabaseDefinitions
                 field.IsIndexAuto = false;
                 if (f.IndexSparse)
                 {
-                    // Key 0 is "no data" only where 0 is one value: a float's -0 compares equal to it, and a String64 key has no zero the tree compares by.
-                    if (fieldType is FieldType.Float or FieldType.Double or FieldType.String64 || field.IsArray)
+                    // An allow-list: key 0 is "no data" only for an integer key, where 0 is one value — a float's -0 compares equal to it, a String64 key has
+                    // no zero the tree compares by, and any other type has no tree at all to be sparse.
+                    if (field.IsArray || fieldType is not (FieldType.Byte or FieldType.Short or FieldType.Int or FieldType.Long or FieldType.UByte
+                            or FieldType.UShort or FieldType.UInt or FieldType.ULong or FieldType.Char))
                     {
-                        throw new InvalidOperationException($"[Index(Sparse = true)] on field '{f.Name}' requires an integer key type, but found {fieldType}.");
+                        var found = field.IsArray ? $"an array of {fieldType}" : fieldType.ToString();
+                        throw new InvalidOperationException($"[Index(Sparse = true)] on field '{f.Name}' requires an integer key type, but found {found}.");
                     }
                     field.IndexSparse = true;
                 }

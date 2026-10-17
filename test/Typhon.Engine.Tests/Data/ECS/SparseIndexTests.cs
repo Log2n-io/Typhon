@@ -62,6 +62,20 @@ struct SpFloat
     public int Padding;
 }
 
+[Component("Typhon.Test.Sparse.Double", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct SpDouble
+{
+    [Index(Sparse = true)] public double Weight;
+}
+
+[Component("Typhon.Test.Sparse.Name", 1)]
+[StructLayout(LayoutKind.Sequential)]
+struct SpName
+{
+    [Index(Sparse = true)] public String64 Name;
+}
+
 #endregion
 
 /// <summary>
@@ -338,12 +352,54 @@ class SparseIndexTests : TestBase<SparseIndexTests>
         Assert.That(positive.Count, Is.EqualTo(expected.Count(g => g >= 2)));
     }
 
+    /// <summary>Only an integer key has one 0 to skip: float, double and String64 are refused at registration.</summary>
     [Test]
-    public void ASparseIndex_OnAFloatField_IsRefused()
+    public void ASparseIndex_OnANonIntegerField_IsRefused()
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
-        var e = Assert.Throws<InvalidOperationException>(() => dbe.RegisterComponentFromAccessor<SpFloat>());
-        Assert.That(e.Message, Does.Contain("Sparse").And.Contain("integer"));
+        foreach (var register in new Action[]
+                 {
+                     () => dbe.RegisterComponentFromAccessor<SpFloat>(), () => dbe.RegisterComponentFromAccessor<SpDouble>(),
+                     () => dbe.RegisterComponentFromAccessor<SpName>()
+                 })
+        {
+            var e = Assert.Throws<InvalidOperationException>(() => register());
+            Assert.That(e.Message, Does.Contain("Sparse").And.Contain("integer"));
+        }
+    }
+
+    /// <summary>A range that excludes 0 still reads the tree: the refusal is for ranges that admit 0, not for sparse fields.</summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("IX-09")]
+    public void ARangeExcludingZero_StillTakesTheSelectivePath(bool versioned)
+    {
+        using var dbe = SetupEngine();
+        var ids = Spawn(dbe, versioned);
+        var groups = Enumerable.Range(0, Rows).Select(GroupOf).ToArray();
+
+        foreach (var (group, toTree) in new[] { (2, true), (0, false) })
+        {
+            QueryPathProbe.Reset();
+            QueryPathProbe.Forced = ClusterScanPath.Selective;
+            HashSet<EntityId> got;
+            long selective;
+            try
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                got = versioned
+                    ? [.. tx.Query<SpVUnit>().WhereField<SpVMember>(m => m.Group == group).Execute()]
+                    : [.. tx.Query<SpUnit>().WhereField<SpMember>(m => m.Group == group).Execute()];
+                selective = QueryPathProbe.SelectiveScans;
+            }
+            finally
+            {
+                QueryPathProbe.Reset();
+            }
+
+            Assert.That(got, Is.EquivalentTo(Expected(ids, groups, group)), $"Group == {group}");
+            Assert.That(selective > 0, Is.EqualTo(toTree), toTree ? "Group == 2 went to the tree" : "Group == 0 did not");
+        }
     }
 
     /// <summary>
