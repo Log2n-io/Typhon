@@ -22,24 +22,25 @@ namespace Typhon.Engine;
 public sealed class SubscriptionsOptions
 {
     /// <summary>
-    /// Ceiling on native memory held by per-cluster replication state blocks. Default: 256 MiB.
+    /// Ceiling on native memory held by one observed archetype's per-cluster replication state blocks. Default: 256 MiB per archetype.
     /// </summary>
     /// <remarks>
     /// <para>
+    /// <b>Per archetype.</b> Each observed archetype has its own pool, and each pool honours this ceiling on its own; the total is this times the number of
+    /// observed archetypes.
+    /// </para>
+    /// <para>
     /// <b>Size it from a formula, not from this default.</b> A block covers a whole cluster, and every live cluster of an archetype some profile observes
-    /// holds one (SUB-13), so the requirement is <c>96 B × N × (live clusters of the observed archetypes)</c>, where <c>N</c> is the archetype's cluster
-    /// slot count. An operator sizes this from their replicated population, exactly as they size the page cache. The engine ships a
+    /// holds one (SUB-13), so an archetype needs about <c>96 B × N × (its live clusters)</c>, where <c>N</c> is its cluster slot count; the exhaustion
+    /// warning prints the exact block size. An operator sizes this from their replicated population, exactly as they size the page cache. The engine ships a
     /// rail, not an estimate of anyone's working set; the default matches the page cache's own default as the engine's scale for a significant pool, and is
     /// not derived from any application's workload.
     /// </para>
     /// <para>
-    /// It is a ceiling, never a reservation. On exhaustion a cluster is given no block, and its entities are not replicated until one is free; the pool
-    /// never allocates beyond the budget on the tick path and never throws there.
-    /// </para>
-    /// <para>
-    /// <b>Not yet implemented:</b> the design also calls for a warning when utilization crosses 80 % — the resource graph's default health threshold — so an
-    /// operator learns the budget binds before sessions degrade. The pool exposes the ratio, but emitting the warning needs a logger it does not yet have,
-    /// and lands with the DI wiring that reads this option. Until then the budget binds silently.
+    /// <b>A ceiling, never a reservation.</b> On exhaustion a pushed cluster is given no block and is DEFERRED (SUB-32): its entities are not replicated
+    /// until a block frees, and then are, with nothing lost in between. The pool never allocates beyond the budget on the tick path and never throws there.
+    /// Every refusal is counted: the pool's <c>RentRefusals</c> in the resource graph's metrics, and a warning is logged when an archetype's pool starts
+    /// refusing and an information line when it stops, never once per tick.
     /// </para>
     /// </remarks>
     public long StatePoolBudgetBytes { get; init; } = 256L * 1024 * 1024;

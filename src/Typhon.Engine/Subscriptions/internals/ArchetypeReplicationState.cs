@@ -1331,6 +1331,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return false;
         }
 
+        // Whether or not the cluster had a block: one deferred for want of one (SUB-32) has pushes pending and nothing else to say it ever existed.
+        Push?.Hub?.ForgetRepush(PushArchetypeIndex, chunkId);
+
         try
         {
             // A block released with live entries takes identities clients may hold; each becomes a leave.

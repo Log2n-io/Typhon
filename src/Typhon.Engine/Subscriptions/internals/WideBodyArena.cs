@@ -77,8 +77,10 @@ internal sealed unsafe class WideBodyArena : ResourceNode, IMemoryResource
     /// <param name="parent">Resource-graph parent; the slabs register under the arena.</param>
     /// <param name="allocator">Engine allocator.</param>
     /// <param name="budgetBytes">The ceiling on committed slab bytes.</param>
+    // Degrade, not Evict: a live body is a described entity's state, so there is nothing to evict. An exhausted arena defers the entity to the next tick
+    // (WideDeferrals), the state pool's answer too (SUB-32).
     public WideBodyArena(string id, IResource parent, IMemoryAllocator allocator, long budgetBytes)
-        : base(id, ResourceType.Allocator, parent, ExhaustionPolicy.Evict)
+        : base(id, ResourceType.Allocator, parent, ExhaustionPolicy.Degrade)
     {
         ArgumentNullException.ThrowIfNull(allocator);
         ArgumentOutOfRangeException.ThrowIfNegative(budgetBytes);

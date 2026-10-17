@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 
 namespace Typhon.Engine.Internals;
 
@@ -108,6 +109,33 @@ internal sealed unsafe class PushHub
     /// </remarks>
     public long RealmPassSteps;
 
+    /// <summary>
+    /// Pushed clusters denied a block because their archetype's pool was at its budget, summed over ticks: one per cluster per tick it waited (SUB-32).
+    /// </summary>
+    public long BlockDeferrals;
+
+    /// <summary>Pushed clusters left without a block on the last blocks step, every archetype together. Zero is the healthy reading.</summary>
+    public int BlocklessClusters;
+
+    /// <summary>Where the start and the end of an exhaustion are reported; <see langword="null"/> logs nothing, the counters above still count.</summary>
+    internal ILogger Logger;
+
+    /// <summary>The plans' names by plan index, for the exhaustion log; <see langword="null"/> logs the index.</summary>
+    internal string[] ArchetypeNames;
+
+    /// <summary>
+    /// <b>Test seams, and deliberate ones.</b> The two moves SUB-32 forbids, applied to the production path so the rule's verifier can be shown to reject
+    /// them: dropping a denied cluster's push instead of deferring it, and keeping a drained cluster's pending pushes. Nothing in production sets them.
+    /// </summary>
+    internal bool DropDeniedPushesForTest;
+
+    /// <inheritdoc cref="DropDeniedPushesForTest"/>
+    internal bool KeepDrainedRepushesForTest;
+
+    // Per plan index: the tick its pool began refusing pushed clusters (0 while it is not), and BlockDeferrals then, for the recovery line.
+    private readonly long[] _exhaustedSince;
+    private readonly long[] _deferralsAtExhaustion;
+
     /// <summary>Builds the hub over one served realm's replication.</summary>
     /// <param name="states">Every plan's replication state, by plan index.</param>
     /// <param name="isPush">Per plan index: some profile observes the archetype.</param>
@@ -146,6 +174,8 @@ internal sealed unsafe class PushHub
         _validateCursor = new int[n];
         _validating = new Dictionary<int, ulong>[n];
         _forgottenGroups = new long[n][];
+        _exhaustedSince = new long[n];
+        _deferralsAtExhaustion = new long[n];
         for (var a = 0; a < n; a++)
         {
             _validating[a] = [];
@@ -636,6 +666,7 @@ internal sealed unsafe class PushHub
     public void PrepareBlocks(uint tick)
     {
         var from = Stopwatch.GetTimestamp();
+        var blockless = 0;
         var active = Active;
         RealmPassSteps += _activeCount;
         for (var r = 0; r < active.Length; r++)
@@ -761,6 +792,7 @@ internal sealed unsafe class PushHub
                 Array.Resize(ref _pushBlocks[a], _pushChunks[a].Length);
             }
 
+            var denied = 0;
             for (var i = 0; i < _pushCount[a]; i++)
             {
                 var chunk = _pushChunks[a][i];
@@ -768,15 +800,58 @@ internal sealed unsafe class PushHub
                 var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
                 if (block == null && !state.TryAttachBlock(chunk, out block))
                 {
+                    // DEFERRED, never dropped (SUB-32). A cluster with no block has nothing of it described, so the slots pushed into it now are the only
+                    // record that its entities exist and what changed; discarding them left a static entity invisible until some unrelated write pushed
+                    // it again, which for scenery is never. Kept in the repush list, they are offered again next tick and attach the first tick a block
+                    // frees: the wide-body arena's deferral, for the same reason (06 § 8).
                     block = null;
+                    if (!DropDeniedPushesForTest)
+                    {
+                        RepushFromBlocksStep(a, chunk, _pushMasks[a][i]);
+                    }
+
+                    denied++;
                 }
 
                 _pushBlocks[a][i] = (nint)block;
             }
+
+            blockless += denied;
+            NoteExhaustion(a, state, denied, tick);
         }
 
+        BlockDeferrals += blockless;
+        BlocklessClusters = blockless;
         PrepareTicks += Stopwatch.GetTimestamp() - from;
     }
+
+    /// <summary>
+    /// Logs the edges of an archetype's pool exhaustion: once when it starts refusing clusters, once when every pushed cluster has a block again. Never
+    /// per tick: a server short of budget for an hour would otherwise log 180 000 lines saying the same thing.
+    /// </summary>
+    private void NoteExhaustion(int a, ArchetypeReplicationState state, int denied, uint tick)
+    {
+        if (denied > 0 && _exhaustedSince[a] == 0)
+        {
+            _exhaustedSince[a] = tick;
+            _deferralsAtExhaustion[a] = BlockDeferrals;
+            if (Logger != null)
+            {
+                SubscriptionsLog.StatePoolExhausted(Logger, NameOf(a), denied, state.Pool.BudgetBytes, state.Pool.BlockCount, state.Pool.BlockStride);
+            }
+        }
+        else if (denied == 0 && _exhaustedSince[a] != 0)
+        {
+            if (Logger != null)
+            {
+                SubscriptionsLog.StatePoolRecovered(Logger, NameOf(a), tick - _exhaustedSince[a], BlockDeferrals - _deferralsAtExhaustion[a]);
+            }
+
+            _exhaustedSince[a] = 0;
+        }
+    }
+
+    private string NameOf(int a) => ArchetypeNames != null && (uint)a < (uint)ArchetypeNames.Length ? ArchetypeNames[a] : $"#{a}";
 
     /// <summary>Adds the validator's clusters for this tick to the push set, remembering which of their slots were not pushed otherwise.</summary>
     private void Validate(int a, ArchetypeClusterState cs, uint tick, ulong slotMask)
@@ -935,6 +1010,28 @@ internal sealed unsafe class PushHub
         }
 
         r[chunkId] |= (long)slots;
+    }
+
+    /// <summary>
+    /// Forgets every pending repush of a cluster that has just drained, so its id is never pushed, and never given a block, after it stops being a cluster.
+    /// </summary>
+    /// <remarks>
+    /// Called from the fence's cluster retirement, which runs before the blocks step and single-threaded per archetype, so it never races the step that
+    /// reads the list. Needed by SUB-32's deferral above all: a cluster drained while it waited would otherwise be offered again every tick, counted as
+    /// waiting forever, and handed a block the first tick one freed, a block no drain would ever take back. The projection's own repushes (a mover still
+    /// extrapolating) can name a cluster that drains the same way.
+    /// </remarks>
+    public void ForgetRepush(int archetype, int chunkId)
+    {
+        if (KeepDrainedRepushesForTest)
+        {
+            return;
+        }
+
+        if ((uint)archetype < (uint)_repush.Length && _repush[archetype] is { } r && (uint)chunkId < (uint)r.Length)
+        {
+            r[chunkId] = 0;
+        }
     }
 
     /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>

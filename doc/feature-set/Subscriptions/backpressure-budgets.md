@@ -28,24 +28,29 @@ stalls everybody; one that accepts whatever a client sends can be driven off its
 - **Overload.** When the runtime is overloaded, every Sphere session is served a level lower and every profile half as often.
 - **Inbound.** Each session's inbound byte budget (`IngressBytesPerSecond`, required with commands) refuses over-budget `COMMANDS` whole;
   refused commands past `AbuseRefusalsPerWindow` for `AbuseWindows` adjacent windows close the session with **1008**.
-- **Pools.** Frames and per-entity state live in native pools under `FramePoolBudgetBytes` and `StatePoolBudgetBytes`; an exhausted frame
-  pool skips sessions (and they catch up), never allocates.
+- **Pools.** Frames and per-entity state live in native pools under `FramePoolBudgetBytes` and `StatePoolBudgetBytes` (the latter per observed
+  archetype); an exhausted frame pool skips sessions (and they catch up), an exhausted state pool defers clusters (and they arrive once a block
+  frees). Neither allocates past its budget.
 
 | Option | Default | Effect |
 |---|---|---|
 | `CloseStalledAfter` | 3 s | Skip run after which a session is closed with 1013 (degraded first) |
 | `LagSkipRttAllowanceMs` | 250 | RTT allowance of the acknowledgement-based lag skip |
 | `FrameBytes` | 256 KiB | Largest frame a session may be sent |
-| `FramePoolBudgetBytes` / `StatePoolBudgetBytes` | 256 MiB / 256 MiB | Native pool ceilings |
+| `FramePoolBudgetBytes` / `StatePoolBudgetBytes` | 256 MiB / 256 MiB per archetype | Native pool ceilings |
 | `IngressPoolBudgetBytes` | 64 MiB | Inbound rings, all sessions |
 
 ## ⚠️ Guarantees & limits
 
 - **A slower session loses rate, never state**; records are absolute and skips are unions (SUB-03).
 - **An idle tick is not a skip** (SUB-15).
-- **An exhausted state pool** leaves a pushed cluster unprojected for that tick — a policy for it is not built yet.
-- **Connection churn is not rate-limited by the engine.** Measured on the SWG demo, ~1 700 connect/close cycles a second from one host raise
-  the tick's p99 severalfold; put connection-rate limiting in front of a public endpoint.
+- **An exhausted state pool defers, never drops** (SUB-32): a pushed cluster with no block is offered again every tick and replicated the
+  first tick a block frees. Its entities are invisible meanwhile, so the budget is still a sizing decision. Refusals are counted
+  (`RentRefusals` in the resource metrics) and the start and end of an exhaustion are logged.
+- **Connection churn is not rate-limited by the engine.** Measured on the SWG demo (1 000 player sessions, 50 Hz), ~2 000 connect/close
+  cycles a second from one host add about 5 ms to the tick's p99, all of it GC from ASP.NET Core's per-connection objects; on one Windows box
+  that rate also fills the TCP TIME_WAIT table in about 30 s and stalls the whole machine for seconds. Put connection-rate limiting in front of a
+  public endpoint.
 
 ## 🧪 Tests
 

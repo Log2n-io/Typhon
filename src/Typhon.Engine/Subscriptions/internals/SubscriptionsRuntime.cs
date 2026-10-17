@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -83,10 +84,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// private instance, which is right for a harness that drives the stages by hand — nothing writes to it, so the track metric honestly reads zero rather
     /// than reporting another runtime's numbers.
     /// </param>
+    /// <param name="logger">Where the track reports the edges of a state-pool exhaustion (SUB-32); <see langword="null"/> logs nothing.</param>
     /// <exception cref="InvalidOperationException">A declaration cannot be compiled, or names something the engine does not hold.</exception>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public SubscriptionsRuntime(DatabaseEngine engine, SubscriptionsRegistry registry, RuntimeOptions options, IResource parent, NetIdAllocator netIds,
-        IReadOnlyList<string> systemNames, SubscriptionsTelemetry telemetry = null)
+        IReadOnlyList<string> systemNames, SubscriptionsTelemetry telemetry = null, ILogger logger = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(registry);
@@ -214,7 +216,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     Options.ForceDeepReplicationForTest);
 
                 // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
-                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions);
+                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions) { Logger = logger, ArchetypeNames = PlanNames(Plans) };
 
                 // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
                 // from the same grid; they must agree to the bit.
@@ -1281,4 +1283,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// be sent, and the clients holding their baselines have to be told so.
     /// </remarks>
     internal int DiscardFrames() => _sendPump?.DiscardProduced() ?? 0;
+
+    private static string[] PlanNames(CompiledProjectionPlan[] plans)
+    {
+        var names = new string[plans.Length];
+        for (var a = 0; a < plans.Length; a++)
+        {
+            names[a] = plans[a].Name;
+        }
+
+        return names;
+    }
 }

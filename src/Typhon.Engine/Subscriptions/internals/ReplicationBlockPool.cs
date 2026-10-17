@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -19,10 +20,12 @@ namespace Typhon.Engine.Internals;
 /// than broken, which is the right outcome for an operator who sized it to zero.
 /// </para>
 /// <para>
-/// <b>Exhaustion never throws and never overshoots.</b> <see cref="TryRent"/> returns <see langword="false"/> when the budget binds; it is the caller's job
-/// to evict idle blocks and then degrade sessions, in that order. Allocating past the budget on the tick path, or throwing there, are both forbidden —
-/// hence the <see cref="ExhaustionPolicy.Evict"/> classification on this node. A <i>programming</i> error is different: returning a block twice, or using a
-/// disposed pool, throws, because those cannot be recovered from and silently tolerating them corrupts the free list.
+/// <b>Exhaustion never throws and never overshoots.</b> <see cref="TryRent"/> returns <see langword="false"/> when the budget binds, and counts it
+/// (<see cref="RentRefusals"/>). Under push there is no idle block to evict, since every block holds a live cluster's described entities, so the caller
+/// DEFERS: the cluster's pushed slots stay in the repush list and it attaches the first tick a block frees (SUB-32). Hence
+/// <see cref="ExhaustionPolicy.Degrade"/>: the fallback is correct, only late. Allocating past the budget on the tick path, or throwing there, are both
+/// forbidden. A <i>programming</i> error is different: returning a block twice, or using a disposed pool, throws, because those cannot be recovered from
+/// and silently tolerating them corrupts the free list.
 /// </para>
 /// <para>
 /// <b>Thread safety: none, by contract.</b> The pool is mutated only at the replication track's prologue and its single-threaded "blocks" step, each
@@ -30,7 +33,7 @@ namespace Typhon.Engine.Internals;
 /// change, not a tuning change.
 /// </para>
 /// </remarks>
-internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResource
+internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResource, IMetricSource
 {
     /// <summary>Smallest slab taken from the allocator. A block larger than this gets a slab of its own.</summary>
     private const int MinSlabBytes = 64 * 1024;
@@ -64,6 +67,7 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
     private long _committedBytes;
     private int _blockCount;
     private int _freeBlockCount;
+    private long _rentRefusals;
     private bool _disposed;
     private ReplicationThreadAffinity _affinity;
 
@@ -74,7 +78,7 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
     /// <param name="layout">The archetype's block layout; fixes the stride for the pool's lifetime.</param>
     /// <param name="options">Operator configuration; <see cref="SubscriptionsOptions.StatePoolBudgetBytes"/> is the ceiling this pool honours.</param>
     public ReplicationBlockPool(string id, IResource parent, IMemoryAllocator allocator, ReplicationBlockLayout layout, SubscriptionsOptions options)
-        : base(id, ResourceType.Allocator, parent, ExhaustionPolicy.Evict)
+        : base(id, ResourceType.Allocator, parent, ExhaustionPolicy.Degrade)
     {
         ArgumentNullException.ThrowIfNull(allocator);
         ArgumentNullException.ThrowIfNull(options);
@@ -122,6 +126,9 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
     /// </summary>
     public double Utilization => _budgetBytes <= 0 ? 0d : (double)_committedBytes / _budgetBytes;
 
+    /// <summary>Rents refused because the budget bound, cumulative: one per pushed cluster per tick it waited for a block (SUB-32).</summary>
+    public long RentRefusals => Volatile.Read(ref _rentRefusals);
+
     /// <summary>Live block count, surfaced to the Workbench resource tree.</summary>
     public override int? Count => _blockCount;
 
@@ -140,8 +147,16 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
         _affinity.Enter(nameof(ReplicationBlockPool), nameof(TryRent));
         try
         {
-            if (_disposed || (_freeHead == FreeListEnd && !TryGrow()))
+            if (_disposed)
             {
+                block = null;
+                return false;
+            }
+
+            if (_freeHead == FreeListEnd && !TryGrow())
+            {
+                // Single writer (the blocks step); the volatile store is for the resource snapshot thread that reads it.
+                Volatile.Write(ref _rentRefusals, _rentRefusals + 1);
                 block = null;
                 return false;
             }
@@ -202,6 +217,25 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
         {
             _affinity.Exit();
         }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Read without synchronisation from the snapshot thread, per the interface contract. Peak equals committed: slabs are only released by
+    /// <see cref="Dispose"/>, so the pool never shrinks below its high-water mark.
+    /// </remarks>
+    public void ReadMetrics(IMetricWriter writer)
+    {
+        var committed = Volatile.Read(ref _committedBytes);
+        var blocks = Volatile.Read(ref _blockCount);
+        writer.WriteMemory(committed, committed);
+        writer.WriteCapacity(blocks - Volatile.Read(ref _freeBlockCount), blocks);
+        writer.WriteThroughput("RentRefusals", Volatile.Read(ref _rentRefusals));
+    }
+
+    /// <inheritdoc />
+    public void ResetPeaks()
+    {
     }
 
     /// <summary>

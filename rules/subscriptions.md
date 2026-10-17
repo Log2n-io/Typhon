@@ -210,6 +210,27 @@
     `verified:` field rather than a verifier that cannot fail. A verifier needs an allocation probe around a
     steady-state tick, which is only meaningful once the track actually dispatches one.
 
+### SUB-32: A pushed cluster the state pool cannot give a block is deferred and counted, never dropped `[fatal][silent]`
+  invariant ∀ pushed cluster C of an observed archetype A, tick T: [A's pool refuses C a block at T] → every slot pushed into C at T is pushed again at
+    T + 1, and on every tick after until C has a block or C drains; C's entities are projected, identified and sent the first tick a block is free
+  invariant every refusal is counted where an operator reads it: ReplicationBlockPool.RentRefusals (the resource graph's RentRefusals throughput), and
+    PushHub.BlockDeferrals (cumulative) and PushHub.BlocklessClusters (the last blocks step); the first refused tick and the first tick with none left are
+    logged once each, never per tick
+  invariant a cluster that drains drops its pending pushes with it (PushHub.ForgetRepush, from the fence's retirement): a drained id is never offered
+    again, never counted as waiting, and never given a block that no drain would take back
+  never grow a pool past StatePoolBudgetBytes, and never throw, to serve a cluster: the budget is a ceiling (06 § 3), and a refused cluster is late, not wrong
+  scope: PushHub.PrepareBlocks, PushHub.ForgetRepush, PushHub.BlockDeferrals, PushHub.BlocklessClusters, ReplicationBlockPool.TryRent,
+    ReplicationBlockPool.RentRefusals, ArchetypeReplicationState.ReleaseBlockForDrain, SubscriptionsOptions.StatePoolBudgetBytes
+  on_violation: silent. A cluster denied a block was left out of its tick and nothing pushed it again, so a static entity in it stayed invisible to every
+    client until an unrelated write happened to push it, which for scenery is never, and nothing counted it (#1041).
+  rationale: under push a block holds a live cluster's described entities, so there is nothing idle to evict and closing sessions frees nothing (blocks are
+    per cluster); deferral is the only answer that is correct, and the wide-body arena already gives it (WideDeferrals).
+  verified: StatePoolExhaustionTests.AClusterDeniedABlockIsReplicatedOnceOneFrees. A one-slab budget under 96 one-entity clusters; it keeps only entities
+    the client never received, destroys the rest to free blocks, and requires every survivor to arrive, nothing to be left waiting, and one block per
+    live cluster. Mutants, on the production path: StatePoolExhaustionTests.ADroppedPushIsDetected (PushHub.DropDeniedPushesForTest: every survivor is
+    never replicated) and StatePoolExhaustionTests.ADrainedClustersPushOutlivingItIsDetected (PushHub.KeepDrainedRepushesForTest: drained clusters
+    offered forever).
+
 ---
 
 ## Module: Per-Entity State Lifetime

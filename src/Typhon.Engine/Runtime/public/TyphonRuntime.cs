@@ -494,7 +494,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             // The context's telemetry, not a fresh one: the stages write to the instance the context owns, and STATS has to read the same object or the
             // track metric would report zeros from a ring nothing fills.
-            var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames(), _subscriptionsContext.Telemetry);
+            var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames(), _subscriptionsContext.Telemetry, _logger);
             _subscriptionsRuntime = built;
             if (built.Grid is { } grid)
             {
