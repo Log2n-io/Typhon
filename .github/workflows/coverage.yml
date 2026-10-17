@@ -18,9 +18,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.label.name == 'run-coverage'
-    # Pinned, not ubuntu-latest: -latest moves to 26.04 (Python 3.14) from 2026-10-19 (actions/runner-images#14748), and
-    # SkyPilot lists 3.9-3.13. Move to ubuntu-26.04 explicitly once `pip install skypilot[aws]` is proven there.
-    runs-on: ubuntu-24.04
+    # Pinned, not ubuntu-latest (actions/runner-images#14748): a new image's Python decides whether `pip install skypilot`
+    # resolves, so moving it is a change we make, not one we receive. 26.04 (Python 3.14, SkyPilot 0.14.0) proven 2026-10-17.
+    runs-on: ubuntu-26.04
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
     # `sky launch` holds a billed VM for exactly as long as this job runs, and an uncapped job inherits GitHub's
     # 360-minute default — so a hang here strands a c6id.8xlarge for six hours. Opt-in-only triggers make that unlikely,
