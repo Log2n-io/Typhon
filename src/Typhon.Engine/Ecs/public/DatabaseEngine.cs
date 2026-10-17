@@ -727,6 +727,29 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>Test seam: runs in PREPARE right after a spawn's slot is claimed, before its data is copied (VIS-08). Null in production.</summary>
     internal Action SpawnClaimedProbe { get; set; }
 
+    /// <summary>
+    /// Test seam: runs in PUBLISH once a spawn's record is stamped and its slot published, before its B+Tree entries and element-id tails are written
+    /// (VIS-08). Null in production.
+    /// </summary>
+    internal Action<EntityId> SpawnBeforeIndexesProbe { get; set; }
+
+    /// <summary>
+    /// Test seam: runs in PUBLISH once every revision of the commit is published, before its destroys remove their entities' B+Tree entries (VIS-09).
+    /// Null in production.
+    /// </summary>
+    internal Action DestroysBeforeIndexRemovalProbe { get; set; }
+
+    /// <summary>
+    /// Test seam: runs when a destroy's index removal is about to take the lock of a chain it did not tombstone (VIS-09), before it waits. Null in production.
+    /// </summary>
+    internal Action DestroyChainLockProbe { get; set; }
+
+    /// <summary>
+    /// Test seam: runs in a destroy's index removal once no spawn holds the slot's index lock, before it takes its chain and slot locks (VIS-09). Null in
+    /// production.
+    /// </summary>
+    internal Action DestroyAfterSpawnWaitProbe { get; set; }
+
     /// <summary>Test seam: keep the crash open's identity → commit stamp map in <see cref="LastWalV2RecoveryResult"/> (dropped otherwise: one entry per
     /// committed transaction of the window, for the engine's lifetime). Set before <see cref="InitializeArchetypes"/>.</summary>
     internal bool RetainRecoveryCommitStampsForTest { get; set; }

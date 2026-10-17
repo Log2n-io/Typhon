@@ -460,6 +460,9 @@ public unsafe ref struct EntityRefMut
     /// </remarks>
     private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
     {
+        // An entity another commit spawned is visible from its card, before that commit's PUBLISH indexes it from the slot's bytes (VIS-08). Written now,
+        // the spawn indexed the new value and the fence then moved it from the old one, which the tree never held: two entries (#1370).
+        clusterState.WaitSlotIndexesUnlocked(_ref._clusterChunkId, _ref._clusterSlotIndex);
         // Records the fence-maintained indexed slots — never a Versioned one, whose index moves at commit (a second Move from the fence corrupts the entry,
         // #711), nor a SingleVersion one under the Commit discipline (#1339). The destroy path defers exactly what was recorded (IX-06).
         // Through ClusterBase(): a Transient write lands here without having refreshed the primary base, which may be stale (#1199).
