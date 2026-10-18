@@ -1330,11 +1330,7 @@ internal abstract unsafe partial class PushReplication
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId)
-    {
-        var table = _states[archetype].BlockByChunk;
-        return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
-    }
+    private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId) => _states[archetype].BlockAt(chunkId);
 
     // ══ Blocks step (serial): this realm's half; the collector is the hub's ═══════════════════════════════════════════════════════════════════════
 

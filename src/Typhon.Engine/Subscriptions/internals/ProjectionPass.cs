@@ -281,7 +281,7 @@ internal static unsafe class ProjectionPass
         // A reference to an entity that has no identity yet sends 0 this tick; its referrer is pushed again, and resolves once the target has one.
         if (unresolved != 0)
         {
-            hub?.Repush(pushIndex, block->ChunkId, unresolved);
+            hub?.Repush(worker, pushIndex, block->ChunkId, unresolved);
         }
 
         var referenceIndex = plan.ReferenceCount > 0 ? state.References : null;
@@ -713,7 +713,7 @@ internal static unsafe class ProjectionPass
 
         if (repush != 0)
         {
-            hub?.Repush(pushIndex, block->ChunkId, repush);
+            hub?.Repush(worker, pushIndex, block->ChunkId, repush);
         }
         // ── Arrivals, consumed ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         //

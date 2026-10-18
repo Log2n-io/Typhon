@@ -235,8 +235,7 @@ internal sealed unsafe partial class PushHub
                         foreach (var location in buffer.ReadOnlyElements)
                         {
                             var chunk = location >> 6;
-                            var table = state.BlockByChunk;
-                            if (((uint)chunk >= (uint)table.Length || table[chunk] == 0) && _lazyChunks.Add(chunk))
+                            if (state.BlockAt(chunk) == null && _lazyChunks.Add(chunk))
                             {
                                 AddPush(a, chunk, slotMask, anyPass: true);
                             }
@@ -301,8 +300,7 @@ internal sealed unsafe partial class PushHub
             for (var i = 0; i < _pushCount[a]; i++)
             {
                 var chunk = _pushChunks[a][i];
-                var table = state.BlockByChunk;
-                var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+                var block = state.BlockAt(chunk);
                 if (block == null)
                 {
                     if (!LazyNeeded(a, chunk, _pushMasks[a][i], ref accessor))
@@ -372,13 +370,12 @@ internal sealed unsafe partial class PushHub
         var state = _states[a];
         var layout = state.Layout;
         var keys = _plans[a].GroupKeys;
-        var table = state.BlockByChunk;
         var seen = _lazySeen[a];
         _lazyIdle.Clear();
         foreach (var (chunk, last) in seen)
         {
             // A cluster the fence drained took its block with it: its entry goes too.
-            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+            var block = state.BlockAt(chunk);
             if (block == null || Needed(block, layout, keys) || _tick - last >= LazyIdleTicks)
             {
                 _lazyIdle.Add(chunk);
@@ -387,7 +384,7 @@ internal sealed unsafe partial class PushHub
 
         foreach (var chunk in _lazyIdle)
         {
-            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+            var block = state.BlockAt(chunk);
             if (block == null)
             {
                 seen.Remove(chunk);
@@ -476,9 +473,8 @@ internal sealed unsafe partial class PushHub
                 return true;
             }
 
-            var table = _state.BlockByChunk;
             var chunk = move.Location >> 6;
-            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+            var block = _state.BlockAt(chunk);
             if (block == null)
             {
                 return false;   // no state, so no projected key: nothing a fill could pass unsent

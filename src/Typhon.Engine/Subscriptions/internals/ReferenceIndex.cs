@@ -186,8 +186,7 @@ internal sealed unsafe class ReferenceResolver
         // Every pushed cluster has a block by now (the blocks step attached them). One without was never pushed — a realm nobody serves, or a pool that ran
         // dry — and waiting would re-push the referrer every tick for nothing. The realm case costs no client anything: a session holds its own realm only
         // (SUB-28), so a target in a realm nobody serves is one no referrer's client could hold. The pool case is 06 § 8's open item.
-        var table = state.BlockByChunk;
-        var block = (uint)chunk < (uint)table.Length ? (byte*)table[chunk] : null;
+        var block = (byte*)state.BlockAt(chunk);
         if (block == null || (uint)slot >= (uint)state.Layout.SlotCount)
         {
             // A positionless member has a block only while a held key needs it (14 § 5): 0 now, and the referrer is pushed again when the block attaches.
@@ -530,8 +529,7 @@ internal sealed unsafe class ReferenceIndex : IDisposable
     // dormant cluster's skip does not pass it by. A parked entry is not reachable here; its −1 is then dropped (DroppedDecrements).
     private static void Forget(ArchetypeReplicationState state, int chunk, int slot, EntityId referrer, uint netId)
     {
-        var table = state.BlockByChunk;
-        var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+        var block = state.BlockAt(chunk);
         var layout = state.Layout;
         if (block == null || (uint)slot >= (uint)layout.SlotCount)
         {

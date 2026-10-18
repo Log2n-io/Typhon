@@ -46,6 +46,13 @@ internal sealed unsafe partial class PushHub
     // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
     private readonly long[][] _repush;
 
+    // Per archetype, the chunks given a repush since the blocks step last consumed them: a list per projection worker (the worker owning the block is the
+    // chunk's one writer) and one for the blocks step itself. The step reads these, not every chunk id, so its work follows what is pushed again (SUB-13).
+    private readonly int[][][] _repushTouched;
+    private readonly int[][] _repushTouchedCount;
+    private readonly int[][] _repushSerial;
+    private readonly int[] _repushSerialCount;
+
     // The realm map the collector routes the archetype it is collecting by, or null when the engine has one realm.
     private ushort[] _realmMap;
 
@@ -74,6 +81,11 @@ internal sealed unsafe partial class PushHub
 
     /// <summary>Slots marked pushed, cumulative.</summary>
     public long SlotsPushed;
+
+    /// <summary>
+    /// Touched-list entries the blocks steps read, cumulative: what the repush costs per tick, which follows the chunks pushed again (SUB-13).
+    /// </summary>
+    public long RepushVisited;
 
     /// <summary>The blocks step's collector, cumulative, in Stopwatch ticks.</summary>
     public long PrepareTicks;
@@ -171,6 +183,10 @@ internal sealed unsafe partial class PushHub
         _pushCount = new int[n];
         _pushBlocks = new nint[n][];
         _repush = new long[n][];
+        _repushTouched = new int[n][][];
+        _repushTouchedCount = new int[n][];
+        _repushSerial = new int[n][];
+        _repushSerialCount = new int[n];
         _validateCursor = new int[n];
         _validating = new Dictionary<int, ulong>[n];
         _forgottenGroups = new long[n][];
@@ -188,6 +204,9 @@ internal sealed unsafe partial class PushHub
             _pushBlocks[a] = new nint[64];
             _pushMasks[a] = new ulong[64];
             _repush[a] = [];
+            _repushTouched[a] = [];
+            _repushTouchedCount[a] = [];
+            _repushSerial[a] = new int[16];
         }
 
         _byRealm = new PushReplication[1];
@@ -803,15 +822,13 @@ internal sealed unsafe partial class PushHub
 
             // Slots still extrapolating or denied an identity last tick: the engine's own pushes. A client dead-reckons a mover until told it stopped, so a
             // mover that stops without a write must still be visited, and an entity with no identity is invisible until it gets one.
+            // Only the chunks touched since the last step: a chunk listed twice, or forgotten by a drain since, reads 0 the second time and is passed.
             var repush = _repush[a];
-            for (var c = 0; c < repush.Length; c++)
+            ConsumeRepush(a, repush, _repushSerial[a], ref _repushSerialCount[a], slotMask);
+            var touched = _repushTouched[a];
+            for (var w = 0; w < touched.Length; w++)
             {
-                var w = (ulong)repush[c];
-                if (w != 0UL)
-                {
-                    AddPush(a, c, w & slotMask, anyPass: true);
-                    repush[c] = 0;
-                }
+                ConsumeRepush(a, repush, touched[w], ref _repushTouchedCount[a][w], slotMask);
             }
 
             // A positionless member's state follows the held keys (P5′): the clusters of a key newly held are pushed, and a block no held key needs any more is
@@ -840,8 +857,7 @@ internal sealed unsafe partial class PushHub
             for (var i = 0; i < _pushCount[a]; i++)
             {
                 var chunk = _pushChunks[a][i];
-                var table = state.BlockByChunk;
-                var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+                var block = state.BlockAt(chunk);
                 if (block == null && !state.TryAttachBlock(chunk, out block))
                 {
                     // DEFERRED, never dropped (SUB-32). A cluster with no block has nothing of it described, so the slots pushed into it now are the only
@@ -1005,6 +1021,8 @@ internal sealed unsafe partial class PushHub
     public void MarkPushed(int workers, bool countInProject = false)
     {
         Workers = workers;
+        SizeRepushLists(workers);
+
         BeginUnplaced(workers);
         foreach (var a in _pushIndices)
         {
@@ -1054,6 +1072,11 @@ internal sealed unsafe partial class PushHub
             Array.Resize(ref r, Math.Max(chunkId + 1, r.Length * 2));
         }
 
+        if (r[chunkId] == 0)
+        {
+            Touch(ref _repushSerial[archetype], ref _repushSerialCount[archetype], chunkId);
+        }
+
         r[chunkId] |= (long)slots;
     }
 
@@ -1073,19 +1096,88 @@ internal sealed unsafe partial class PushHub
             return;
         }
 
+        // The chunk stays in its touched list, and reads 0 there.
         if ((uint)archetype < (uint)_repush.Length && _repush[archetype] is { } r && (uint)chunkId < (uint)r.Length)
         {
             r[chunkId] = 0;
         }
     }
 
-    /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
-    public void Repush(int archetype, int chunkId, ulong slots)
+    /// <summary>
+    /// Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — the chunk's one writer this tick — which lists the
+    /// chunk the first time its word goes from 0.
+    /// </summary>
+    public void Repush(int worker, int archetype, int chunkId, ulong slots)
     {
         var r = _repush[archetype];
-        if ((uint)chunkId < (uint)r.Length)
+        if ((uint)chunkId >= (uint)r.Length)
         {
-            r[chunkId] |= (long)slots;
+            return;
         }
+
+        if (r[chunkId] == 0)
+        {
+            var touched = _repushTouched[archetype];
+            Debug.Assert((uint)worker < (uint)touched.Length, "a projection worker past the lists MarkPushed sized");
+            if ((uint)worker < (uint)touched.Length)
+            {
+                Touch(ref touched[worker], ref _repushTouchedCount[archetype][worker], chunkId);
+            }
+        }
+
+        r[chunkId] |= (long)slots;
+    }
+
+    // One touched list per projection worker, sized at the mark, before the projection appends to them. Serial. Grown, never cut: a list a larger worker
+    // count left holds chunks still to be consumed.
+    private void SizeRepushLists(int workers)
+    {
+        foreach (var a in _pushIndices)
+        {
+            if (_repushTouched[a].Length >= workers)
+            {
+                continue;
+            }
+
+            var lists = new int[workers][];
+            var counts = new int[workers];
+            Array.Copy(_repushTouched[a], lists, _repushTouched[a].Length);
+            Array.Copy(_repushTouchedCount[a], counts, _repushTouchedCount[a].Length);
+            for (var w = _repushTouched[a].Length; w < workers; w++)
+            {
+                lists[w] = new int[16];
+            }
+
+            _repushTouched[a] = lists;
+            _repushTouchedCount[a] = counts;
+        }
+    }
+
+    private static void Touch(ref int[] list, ref int count, int chunk)
+    {
+        if (count == list.Length)
+        {
+            Array.Resize(ref list, count * 2);
+        }
+
+        list[count++] = chunk;
+    }
+
+    // The repushes of one touched list into the push set, each word read and cleared once; the list is emptied.
+    private void ConsumeRepush(int a, long[] repush, int[] list, ref int count, ulong slotMask)
+    {
+        RepushVisited += count;
+        for (var i = 0; i < count; i++)
+        {
+            var chunk = list[i];
+            var w = (uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL;
+            if (w != 0UL)
+            {
+                AddPush(a, chunk, w & slotMask, anyPass: true);
+                repush[chunk] = 0;
+            }
+        }
+
+        count = 0;
     }
 }

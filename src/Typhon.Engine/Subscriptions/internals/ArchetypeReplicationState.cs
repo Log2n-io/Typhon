@@ -235,10 +235,19 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     internal NetIdEntityIndex EntityIndex;
 
     /// <summary>
-    /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
-    /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.
+    /// Every block by chunk id. A push archetype looks a block up per pushed cluster per tick and per cluster a session's delivery, sweep or fill reaches, so
+    /// the directory's hash probe is replaced by an index. Written only by attach and release, which are serial. Sized by the archetype's chunk ids, not by
+    /// what is pushed: memory, 8 B a chunk id, and no work — the probe in its place cost the track 14 % (#1042, SUB-13's note).
     /// </summary>
     internal nint[] BlockByChunk = [];
+
+    /// <summary>The block of cluster <paramref name="chunkId"/>, or null when it has none.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ReplicationBlockHeader* BlockAt(int chunkId)
+    {
+        var table = BlockByChunk;
+        return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
+    }
 
     /// <summary>This archetype's plan index, for the push path's events.</summary>
     internal int PushArchetypeIndex;

@@ -196,6 +196,7 @@
     sweep that decides it visits the attached blocks alone, through a map keyed by their chunks
   never any per-cluster replication structure sized by A's chunk-id space, entity count, or segment capacity
   scope: ReplicationDirectory, ReplicationBlockPool, NetIdAllocator, ArchetypeReplicationState, ArchetypeReplicationState.BlockByChunk,
+    ArchetypeReplicationState.BlockAt, PushHub.Repush, PushHub.RepushFromBlocksStep, PushHub.ForgetRepush,
     SubscriptionsOptions.StatePoolBudgetBytes, PushHub.AttachLazy, PushHub.SweepLazy, PushHub.PushNewlyWanted, PushHub.CollectWanted
   on_violation: a database holding a billion entities of a replicated type pays replication work for all of them every tick while a handful change,
     and, where a structure is keyed by chunk id, memory for every id the segment ever handed out.
@@ -207,11 +208,16 @@
     THIS RULE REFUSES — see Typhon issue #960, which tracks that cost on the engine side.
   note the memory half was weakened by ADR-067, deliberately: under the watched set memory followed what was WATCHED; under push it follows the
     observed archetype's population, which is accepted for archetypes clients can see and not for unbounded ones.
-  note a DEVIATION, recorded rather than hidden: `ArchetypeReplicationState.BlockByChunk` is a flat array indexed by chunk id, added by the push
-    prototype to replace a hash probe per pushed cluster. It is the shape the `never` clause refuses, and it is kept only because an observed archetype
-    has a block for every live cluster, so its fill is high; replacing it with the directory's probe is the open item.
+  note a DEVIATION of MEMORY only, recorded rather than hidden (#1042): `ArchetypeReplicationState.BlockByChunk` and `PushHub`'s repush words are
+    flat arrays indexed by chunk id — 8 B a chunk id each, the shape the `never` clause refuses. Neither costs per-tick work: a block is found by one
+    load, and the repush is read through per-worker lists of the chunks pushed again, never by scanning the chunk-id space. The directory's probe in
+    BlockByChunk's place was measured (2026-10-19, SWG d06 / 1 000 bots / 50 Hz, six interleaved pairs on one binary): subscriptions track +14 % (5/6
+    up), Frames +16 % (6/6), tick P50 +16 % (6/6) — the lookup sits on every session's delivery, sweep and fill — so the array is kept. The box was
+    loaded by another process during the run and two control runs were unhealthy, so the size is approximate; its sign is what decided.
   note a flat array remains legitimate for a specific archetype behind a self-justifying size test — take it
     when that archetype's peak cluster count makes the array smaller than the map. It is never the default.
+  verified: RepushSizingTests.TheRepushVisitsTheChunksPushedAgainNotTheArchetype — the repush's per-tick work is the chunks pushed again (three of 40+),
+    each read once, a drained one's entry read as 0 (red when a touched list is not kept, by the blocks step or by a projection worker).
   verified: PushGroupShardTests.AShardHasStateOnlyWhileATownOfItIsHeld — the group-only half: no block before a session holds the town, blocks and
     identities while it does, none again once it has been unneeded for LazyIdleTicks.
   verified: ReplicationDirectoryTests.SparseChunkIdsCostOnlyWhatIsWatched — the directory's MEMORY shape, and
