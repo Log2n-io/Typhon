@@ -44,7 +44,8 @@ catch (PageCacheBackpressureTimeoutException ex)
 | Option | Default | Effect |
 |---|---|---|
 | `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB and at least 8 MiB; no ceiling beyond 2³¹ − 1 pages (about 16 TiB): past what the host grants, the allocation is refused at startup with a `StorageException` (`PageCacheAllocationFailed`). Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
-| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | How long to wait for a page to free up before `PageCacheBackpressureTimeoutException`. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, the wait can exceed it by up to one lap |
+| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | Per-round budget for a back-pressure wait. If at least one page was served since the previous round, a fresh round starts instead of throwing — up to `PageCacheOverloadWaitCeiling` in total. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, one round can exceed it by up to one lap |
+| `TimeoutOptions.PageCacheOverloadWaitCeiling` | 60 s | Overall ceiling for all back-pressure rounds combined. Once reached, `PageCacheBackpressureTimeoutException` propagates even if the cache is still serving pages |
 | `TimeoutOptions.PageCacheLockTimeout` | 5 s | Max wait on a page state-transition lock |
 
 ## ⚠️ Guarantees & limits
