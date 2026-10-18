@@ -18,7 +18,9 @@ It is one engine feature with four moving parts:
 - **What is visible** — a [projection](xref:concept-projection) per archetype: which fields travel, quantized how, grouped how, and which
   are private to the entity's owner. Declared once, by attributes on the data or by a builder call.
 - **Who sees what** — a [profile](xref:concept-replication-profile) per kind of viewer: the whole world, a sphere around a point or an
-  entity, a footprint the client sends, plus optional per-tile counts. A [session](xref:concept-replication-session) is bound to one.
+  entity, a footprint the client sends, plus optional per-tile counts. Beyond geometry, a profile may hold whole **groups** — entities
+  sharing a key, such as a town's buildings or a player's listings — and a session never receives an entity its **visibility mask**
+  excludes. A [session](xref:concept-replication-session) is bound to one profile.
 - **What changed** — **push replication**: after a system writes a replicated field it calls `Replicate(cluster, slot)`. The engine
   pushes spawns, destroys, moves and migrations on its own, compares each pushed entity's quantized values with what it last sent, and
   encodes a change **once**, whatever the number of sessions.
