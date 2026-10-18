@@ -286,7 +286,18 @@ public sealed partial class TatooineSim : IDisposable
         // The replication cell follows the spatial one, 1:1 (TatooineReplication.ReplicationCellM): delivering a replication cell queries the spatial index
         // over that cell's box, so a finer replication grid opens the same spatial cell once per replication cell inside it. Measured at 2.4x on this demo's
         // geometry. Set here rather than in StartReplication because the realms registered below carry it, and they are registered first.
-        TatooineReplication.ReplicationCellM = cell;
+        //
+        // <b>Floored at a third of the player's view radius, because 1:1 is not servable at every world size.</b> ResolveCellSize scales the spatial cell
+        // with --world (256 m x ContentScale), while PlayerRadiusM does not scale, and a sphere session's window is 2(ceil(R / c) + 2) + 1 cells per axis
+        // against ReplicationGrid.MaxWindow of 16 — so ceil(R / c) <= 5, and a 192 m sphere needs a replication cell of at least 38.4 m. At --world 2 the
+        // scaled cell is 31.25 m and StartReplication refuses PlayerProfile outright, which is how this was found.
+        //
+        // <b>The radius is deliberately not scaled with the world instead.</b> The small worlds are bench configurations, and a sweep over world size is
+        // only interpretable if the per-session workload is held constant: scaling the sphere would confound the two axes and make a 2 km run incomparable
+        // with a 16 km one. A third rather than a fifth leaves a cell of headroom under the engine's bound, and is the value this was before #1372 coupled
+        // the two cells. The floor only ever makes the replication cell COARSER than the spatial one, which is the cheap direction — the 2.4x above is the
+        // penalty for a FINER replication grid, so flooring it does not spend what that coupling bought.
+        TatooineReplication.ReplicationCellM = Math.Max(cell, TatooineReplication.PlayerRadiusM / 3d);
         var planetGrid = SpatialGridConfig.Flat(
             worldMin: new Vector2(-half, -half),
             worldMax: new Vector2(half, half),
