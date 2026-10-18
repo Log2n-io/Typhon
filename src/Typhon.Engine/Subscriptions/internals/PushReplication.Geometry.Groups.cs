@@ -204,6 +204,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         for (var s = 0; s < GroupSets.Length; s++)
         {
+            if (GroupSets[s].Region == null)
+            {
+                _regionCount[s] = 0;
+                continue;
+            }
+
             var count = ReadRegions(GroupSets[s].Region, ref _regionScratch);
             var table = _regionTable[s];
             var same = count == _regionCount[s];
@@ -429,6 +435,25 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
     private protected override GroupSessionState GroupStateAtOrNull(int local) => (uint)local < (uint)_groupSessions.Length ? _groupSessions[local] : null;
 
+    internal override GroupKeyState GroupKeyStateOf(SessionId session, int set, long key)
+    {
+        var gs = GroupStateAtOrNull(L(session));
+        if (gs == null || gs.Generation != session.Generation || (uint)set >= (uint)gs.PCount.Length)
+        {
+            return GroupKeyState.NotHeld;
+        }
+
+        var max = gs.Max;
+        if (!IsHeldKey(gs.PKeys, set * max, gs.PCount[set], key))
+        {
+            return GroupKeyState.NotHeld;
+        }
+
+        return GroupSessionState.CursorOf(gs.PKeys, gs.PCursor, set * max, gs.PCount[set], key) == GroupSessionState.Complete
+            ? GroupKeyState.Complete
+            : GroupKeyState.Filling;
+    }
+
     private GroupSessionState GroupStateOf(int local, ushort generation)
     {
         Debug.Assert((uint)local < (uint)_groupSessions.Length, "the group sessions are sized with the session slots");
@@ -506,13 +531,33 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         gs.Reset = reset;
 
-        // ── 1. The keys this frame moves to: the regions the anchor meets, the held ones under hysteresis ─────────────────────────────────────────
+        // ── 1. The keys this frame moves to: the regions the anchor meets, the held ones under hysteresis; an explicit set's requested keys, a shared
+        //       set's one ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         Array.Clear(gs.PCount);
+        Span<long> sharedKey = stackalloc long[1];
         foreach (var group in groups)
         {
             var set = group.Set;
             var compiled = GroupSets[set];
             var met = 0;
+            if (compiled.Selector != GroupSelector.Region)
+            {
+                // Not met by geometry (14 § 4): every key is at distance 0, so the fill takes them in key order; the bound was the request's.
+                sharedKey[0] = compiled.SharedKey;
+                var keys = compiled.Selector == GroupSelector.Shared ? sharedKey : Requests != null ? Requests.KeysOf(session, set) : default;
+                for (var k = 0; k < keys.Length && met < max; k++)
+                {
+                    var cursor = GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, gs.CCount[set], keys[k]);
+                    var kept = cursor != 0 || IsHeldKey(gs.CKeys, set * max, gs.CCount[set], keys[k]);
+                    gs.PKeys[(set * max) + met] = keys[k];
+                    gs.PCursor[(set * max) + met] = kept ? cursor : 0u;
+                    gs.PDistance[(set * max) + met] = 0d;
+                    met++;
+                }
+
+                gs.PCount[set] = met;
+                continue;
+            }
 
             // A 2D extent lies on the plane z = 0, where it was filed: its sessions look it up there, whatever their altitude.
             var cz = Is2D(compiled.Region.ExtentType) ? CellZ(0d) : CellZ(n.Z);

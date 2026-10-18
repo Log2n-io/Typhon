@@ -765,6 +765,32 @@ bool HasClientRegionShape(const CatalogCommand& cmd)
            && budget->t == "u16" && plain;
 }
 
+// SubscribeRequest is recognised by shape, not by name (14 § 4, P13): {u16 requestId, varu set, vari64 key, u8 op}, queued, 5 a second.
+bool HasSubscribeRequestShape(const CatalogCommand& cmd)
+{
+    const auto kind = [&](const char* name) -> std::string
+    {
+        for (const CatalogField& f : cmd.fields)
+        {
+            if (f.name == name)
+            {
+                return f.codec.t;
+            }
+        }
+
+        return {};
+    };
+
+    bool plain = true;
+    for (const CatalogField& f : cmd.fields)
+    {
+        plain = plain && !f.group.has_value() && !f.IsOnEnter() && !f.enumName.has_value();
+    }
+
+    return cmd.fields.size() == 4 && cmd.delivery == "queued" && cmd.rate.has_value() && cmd.rate->perSec == 5 && cmd.rate->burst == 5
+           && kind("requestId") == "u16" && kind("set") == "varu" && kind("key") == "vari64" && kind("op") == "u8" && plain;
+}
+
 void CheckCommand(const CatalogCommand& cmd, const Catalog& c, long long maxBytes, Problems& p)
 {
     if (cmd.delivery != "queued" && cmd.delivery != "latest")
@@ -781,9 +807,9 @@ void CheckCommand(const CatalogCommand& cmd, const Catalog& c, long long maxByte
     {
         p.push_back("command '" + cmd.name + "' is a built-in whose shape does not match its definition");
     }
-    else if (cmd.name == BuiltIn::SubscribeRequest)
+    else if (cmd.name == BuiltIn::SubscribeRequest && !HasSubscribeRequestShape(cmd))
     {
-        p.push_back("command '" + cmd.name + "' is reserved; its shape is decided when source subscriptions are built");
+        p.push_back("command '" + cmd.name + "' is a built-in whose shape does not match its definition");
     }
 
     CheckMessageFields("command '" + cmd.name + "'", cmd.fields, c, maxBytes, p);
@@ -916,7 +942,7 @@ void CheckGroupSets(const std::vector<CatalogGroupSet>& sets, std::size_t archet
             p.push_back(where + ": the name is empty or listed twice");
         }
 
-        if (s.selector != "region")
+        if (s.selector != "region" && s.selector != "explicit" && s.selector != "shared")
         {
             p.push_back(where + ": selector '" + s.selector + "' is unknown");
         }

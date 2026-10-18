@@ -147,15 +147,20 @@ public class CatalogValidatorTests
             Metrics = [new CatalogMetric { Name = "typhon.tick.p99", Unit = "ms", Codec = new CatalogCodec { Kind = CodecKind.U32 } }],
         }, "is a built-in");
 
+    /// <summary>SubscribeRequest (14 § 4, P13) is recognised by shape: a command taking its name with another shape is refused.</summary>
     [Test]
-    public void SubscribeRequestIsReservedUntilSourcesExist() =>
+    public void SubscribeRequestIsABuiltInRecognisedByShape() =>
         AssertBreaks(c => new Catalog
         {
             Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, Archetypes = c.Archetypes, Enums = c.Enums, Events = c.Events,
             Grids = c.Grids,
             Metrics = c.Metrics,
             Commands = [new CatalogCommand { Name = BuiltInCommands.SubscribeRequest, Delivery = CatalogCommand.QueuedDelivery, Fields = [] }],
-        }, "is reserved");
+        }, "is a built-in");
+
+    [Test]
+    public void TheBuiltSubscribeRequestIsAccepted() =>
+        Assert.That(BuiltInCommands.HasSubscribeRequestShape(BuiltInCommands.CreateSubscribeRequest()), Is.True);
 
     /// <summary>A parameter the kind does not read would be honoured by some other decoder: refused, so every decoder reads the same width.</summary>
     [Test]

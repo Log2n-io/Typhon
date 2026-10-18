@@ -138,6 +138,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             GroupSets = GroupSetCompiler.Compile(registry, engine, Plans);
             foreach (var set in GroupSets)
             {
+                if (set.Region == null)
+                {
+                    continue;
+                }
+
                 set.Region.ClusterState = engine._archetypeStates[set.Region.Archetype.ArchetypeId]?.ClusterState
                     ?? throw new InvalidOperationException(
                         $"Group set '{set.Name}' reads its regions from archetype '{set.Region.Archetype.Name}', which this engine holds no cluster state for. "
@@ -164,6 +169,18 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 engine.RealmTable?.TryGet(RealmId.Default.Value)?.Config?.Replication?.Kind ?? "")));
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
+
+            // The explicit sets' per-session keys and answers (14 § 4): engine-wide, so a session keeps them across a realm switch and a RESET.
+            foreach (var set in GroupSets)
+            {
+                if (set.Selector == GroupSelector.Explicit)
+                {
+                    GroupRequests = new GroupRequests(GroupSets, Options.MaxGroupsPerSession, Options.MaxSessions, registry);
+                    break;
+                }
+            }
+
+            _sessions.GroupRequests = GroupRequests;
 
             _replicationStates = AttachReplicationStates(engine, parent, netIds);
 
@@ -345,6 +362,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingress.Realm = Realm0Frame;
             _ingress.Realms = engine.RealmTable;
             _ingress.Profiles = Profiles;
+            _ingress.GroupRequests = GroupRequests;
+            _ingress.Requests.ExplicitSets = GroupRequests?.ExplicitNames();
+            _frames.Requests = GroupRequests;
             _ingress.MultiRealm = engine.ConfiguredMaxRealms > 1;
             _frames.MultiRealm = _ingress.MultiRealm;
             _ingress.ReplicationStates = _replicationStates;
@@ -525,6 +545,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The compiled group sets (14 § 3.8), by set index; empty when none is declared.</summary>
     internal CompiledGroupSet[] GroupSets { get; private set; } = [];
+
+    /// <summary>The explicit group sets' per-session keys and answers (14 § 4); null when no set is explicit.</summary>
+    internal GroupRequests GroupRequests { get; private set; }
     private bool[] _automatic;
     private ArchetypeEncodePlan[] _encodePlans;
     private ArchetypeSet[] _nearSets;
@@ -540,6 +563,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         push.ConfigureFar(farPhase, farWindow);
         push.GroupSets = GroupSets;
         push.MaxGroupsPerSession = Options.MaxGroupsPerSession;
+        push.Requests = GroupRequests;
         push.AttachEncodePlans(_encodePlans);
         ConfigureAggregates(push, frame, first);
         ConfigureRegions(push, grid, kind);

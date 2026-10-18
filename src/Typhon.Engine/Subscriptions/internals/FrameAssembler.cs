@@ -136,6 +136,9 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Group sets: one fill's members, gathered and sorted by netId.</summary>
     internal GroupFillMember[] FillMembers = new GroupFillMember[64];
 
+    /// <summary>Explicit sets (14 § 4): the answers the current session's frame says, by their numbers, retired once it is published.</summary>
+    internal readonly List<ulong> Answered = [];
+
     private struct RecordList
     {
         public FrameRecord* Items;
@@ -186,6 +189,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
 
         GroupFolds.Clear();
         GroupRecords.Clear();
+        Answered.Clear();
     }
 
     /// <summary>One archetype's sub-list, writable in place: what the group post-pass compacts (14 § 3.8).</summary>

@@ -94,6 +94,12 @@ public sealed class CatalogGroupSet
     /// <summary>The <see cref="Selector"/> of a set whose groups a session holds while its observer meets a region's extent.</summary>
     public const string RegionSelector = "region";
 
+    /// <summary>The <see cref="Selector"/> of a set whose groups a session holds when it asked for them (<c>SubscribeRequest</c>) or the server chose them.</summary>
+    public const string ExplicitSelector = "explicit";
+
+    /// <summary>The <see cref="Selector"/> of a set with one group, held by every session whose profile names the set.</summary>
+    public const string SharedSelector = "shared";
+
     /// <summary>The codecs a key may be declared with: the integer the key field holds. On the wire every key is a <c>vari</c>.</summary>
     public static System.Collections.ObjectModel.ReadOnlyCollection<string> KeyCodecs { get; } = Array.AsReadOnly<string>(["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"]);
 
@@ -103,7 +109,7 @@ public sealed class CatalogGroupSet
     /// <summary>The set's declared name, unique among sets.</summary>
     public string Name { get; init; }
 
-    /// <summary>What decides which groups a session holds; <see cref="RegionSelector"/> is the only one.</summary>
+    /// <summary>What decides which groups a session holds: <see cref="RegionSelector"/>, <see cref="ExplicitSelector"/> or <see cref="SharedSelector"/>.</summary>
     public string Selector { get; init; }
 
     /// <summary>The key's integer type, one of <see cref="KeyCodecs"/>.</summary>

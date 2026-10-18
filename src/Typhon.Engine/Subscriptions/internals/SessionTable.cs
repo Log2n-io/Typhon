@@ -1424,6 +1424,31 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <returns>The budget in bytes per second.</returns>
     public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row->BytesPerSecond : 0;
 
+    /// <summary>The explicit group sets' per-session keys (14 § 4); null when no set is explicit.</summary>
+    internal GroupRequests GroupRequests;
+
+    /// <summary>Replaces the keys the server chose for a session in explicit set <paramref name="set"/> (P14). Tick side, from the request log.</summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="set">The set's name.</param>
+    /// <param name="keys">The full list.</param>
+    /// <returns><see langword="false"/> when the session is no longer open, or the set is not explicit.</returns>
+    public bool SetGroupKeys(SessionId session, string set, long[] keys)
+    {
+        if (GroupRequests == null || !TryEnter())
+        {
+            return false;
+        }
+
+        try
+        {
+            return TryGetOpenRow(session, out _) && GroupRequests.SetServerKeys(session, GroupRequests.IndexOf(set), keys);
+        }
+        finally
+        {
+            Exit();
+        }
+    }
+
     /// <summary>Sets a session's outbound byte budget. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>
     /// <param name="bytesPerSecond">The budget; zero removes it.</param>

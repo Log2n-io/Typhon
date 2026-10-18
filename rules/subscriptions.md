@@ -520,20 +520,30 @@
     move log), so the cursor never passes a member it did not send
   invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
     emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
-  never accept at Start what is not built: a set with no Region, groups on a World or ClientRegion observer, a key that is not an integer, not
+  invariant ∀ explicit set S (14 § 4): s holds the keys its client asked for with SubscribeRequest and the application allowed, and the keys a system
+    chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; ∀ shared set S, s
+    holds S's one key from its first frame. Both are filled, completed and released like a region's keys
+  invariant every SubscribeRequest a session's ingress takes is answered exactly once, in SOURCES: SOURCE_APPLIED{requestId} in the frame whose state
+    holds its key complete (after the GROUP_COMPLETE that completes it) — or, for an unsubscribe, no longer holds it (with its GROUP_RELEASED) — and
+    SOURCE_ERROR{requestId, code} for a refusal: the engine's codes below 100 (an unknown or non-explicit set, a set the profile does not name, key 0,
+    an unknown op, the limit), the application's from 100. An answer is retired only by the frame that publishes it; one past the command's rate is an
+    ACK (SUB-27), never an answer
+  never accept at Start what is not built: a set with no selector, or with two; groups on a World or ClientRegion observer; a region set named with no
+    reach, or an explicit or shared one named with one; a key that is not an integer, not
     [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), or of another signedness than its region key; an observer naming
     an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
     GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
     TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups, PushReplication.AddMember, PushReplication.AddMoves,
-    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced
+    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request,
+    GroupRequests.SetServerKeys, GroupRequests.Emit, GroupRequests.Retire, SessionRequest.SetSources, BuiltInCommands.CreateSubscribeRequest
   on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
     walks to a terminal that is not there; a duplicate or a missing release leaves a client holding a town it left; a key change the projection never
     reads leaves a member in its old town on every client.
   rationale: a set anchored on something other than the observer cannot be expressed by any radius (14 § 3.6), and its completion edge is only
     meaningful because the set has a definition; the engine already maintains the relation on every path, so replication reads it and keeps nothing.
-  verified: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (towns, buildings, citizens and positionless shards — about half the members — under seeded churn — key changes through the tap alone,
+  verified: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (towns, buildings, citizens and positionless shards — about half the members — and an explicit set of the shards' lists the sessions subscribe to and give back, under seeded churn — key changes through the tap alone,
     spawns, destroys, teleports, towns appearing, vanishing and moving — walking sessions skipping 0–90 %, gathered on four workers: at every quiet
     point, once no key is filling, each session holds exactly the members of the towns it holds complete and of its disc, and holds complete every town
     its observer meets and none beyond reach and margin; on the session that skips nothing, every GROUP_COMPLETE is checked against the world in the
@@ -550,11 +560,17 @@
     tap), PushGroupShardTests.AShardHasStateOnlyWhileATownOfItIsHeld, PushGroupShardTests.AShardJoiningAHeldTownEntersAndOneLeavingItLeaves,
     PushGroupShardTests.ShardsFillUnderTheEnterBudget, PushGroupShardTests.JointedStructuresAndTheirShardsFollowTheirGroupThroughASplitAndAMerge
     (#1389's scenario: a group met by its box, delivered under the budget, a RESET mid-fill, a split and a merge),
-    PushGroupShardTests.AnOffDagMoveOutOfAFillingTownIsSentThenLeaves (a commit on another thread between the projection and the gather), and a
+    PushGroupShardTests.AnOffDagMoveOutOfAFillingTownIsSentThenLeaves (a commit on another thread between the projection and the gather),
+    PushGroupRequestTests.AnAllowedRequestIsAnsweredAppliedInTheFrameThatCompletesIt, PushGroupRequestTests.ADeniedRequestIsAnsweredWithTheApplicationsCode,
+    PushGroupRequestTests.TheEnginesRefusalsCarryTheirCodes, PushGroupRequestTests.AnUnsubscribeIsAnsweredWithTheRelease,
+    PushGroupRequestTests.TheServersKeysAreHeldBesideTheClientsAndReplacedWhole, PushGroupRequestTests.ASharedSetsKeyIsEverySessionsFromItsFirstFrame,
+    PushGroupRequestTests.SubscriptionsSurviveAReset, PushGroupRequestTests.ASetWithNoSelectorIsRefused,
+    PushGroupRequestTests.AReachOnAnExplicitSetAndNoneOnARegionSetAreRefused, and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
     requires the oracle to reject the run; PushGroupShardTests.WithoutTheMoveLogAnOffDagMoveIsCaught takes the move log away and requires the leave of
     the shard the fill passed unsent to be caught. The oracle is also red when completion ignores pending members, when the positionless log is not
-    folded, when a fence with no work publishes no structure words, and when a lazy cluster is attached only for a newly held key.
+    folded, when a fence with no work publishes no structure words, when a lazy cluster is attached only for a newly held key, when an APPLIED is sent
+    before its key completes, and when the gather ignores the requested keys — every answer is checked against the client's store in the frame it arrives.
 
 ### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
   invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push

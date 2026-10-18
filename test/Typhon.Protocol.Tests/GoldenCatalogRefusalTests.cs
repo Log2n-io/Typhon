@@ -154,7 +154,7 @@ public class GoldenCatalogRefusalTests
             new CatalogGroupSet { Name = "crew", Selector = CatalogGroupSet.RegionSelector, Key = "u16", Members = [1] },
         ]));
         Accept(cases, "group-sets", withGroups);
-        Refuse(cases, "group-set-unknown-selector", "selector", Mutate(withGroups, c => c["groupSets"]![0]!["selector"] = "explicit"));
+        Refuse(cases, "group-set-unknown-selector", "selector", Mutate(withGroups, c => c["groupSets"]![0]!["selector"] = "nearest"));
         Refuse(cases, "group-set-float-key", "not an integer codec", Mutate(withGroups, c => c["groupSets"]![0]!["key"] = "f32"));
         Refuse(cases, "group-set-member-out-of-range", "does not exist or is listed twice",
             Mutate(withGroups, c => c["groupSets"]![0]!["members"]![0] = 2));

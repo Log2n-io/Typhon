@@ -126,7 +126,7 @@ class PushGroupShardTests : TestBase<PushGroupShardTests>
         {
             Assert.That(completed, Is.EqualTo(1));
             Assert.That(entered, Is.EqualTo(10));
-            Assert.That(store.IsGroupComplete(0, 7), Is.True);
+            Assert.That(store.IsGroupComplete((uint)harness.CatalogPlan.GroupSetIndex(GroupTestSchema.Set), 7), Is.True);
             Assert.That(shards.All(s => harness.NetIdOf(s) != 0), Is.True, "every shard has an identity");
             Assert.That(ShardBlocks(harness), Is.GreaterThan(0));
         });
@@ -140,7 +140,7 @@ class PushGroupShardTests : TestBase<PushGroupShardTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Replica(session).Store.IsGroupComplete(0, 7), Is.False);
+            Assert.That(harness.Replica(session).Store.IsGroupComplete((uint)harness.CatalogPlan.GroupSetIndex(GroupTestSchema.Set), 7), Is.False);
             Assert.That(harness.Replica(session).NetIds(ShardPlan(harness)), Is.Empty);
         });
 

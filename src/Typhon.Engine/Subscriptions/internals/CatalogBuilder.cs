@@ -248,14 +248,22 @@ internal static class CatalogBuilder
 
             result[s] = new CatalogGroupSet
             {
-                Name = set.Name, Selector = CatalogGroupSet.RegionSelector, Key = KeyCodecOf(set.Region.Key.Type), Members = members,
+                Name = set.Name, Selector = SelectorOf(set.Selector), Key = KeyCodecOf(set.KeyType), Members = members,
             };
         }
 
         return result;
     }
 
-    // The region key is the set's: a member key of another integer type is compared with it as a 64-bit value.
+    private static string SelectorOf(GroupSelector selector) => selector switch
+    {
+        GroupSelector.Region => CatalogGroupSet.RegionSelector,
+        GroupSelector.Explicit => CatalogGroupSet.ExplicitSelector,
+        GroupSelector.Shared => CatalogGroupSet.SharedSelector,
+        _ => throw new InvalidOperationException($"A group set with selector {selector} reached the catalog; Start refuses one with none."),
+    };
+
+    // The set's key: a member key of another integer type is compared with it as a 64-bit value.
     private static string KeyCodecOf(FieldType type) => type switch
     {
         FieldType.Byte => "i8",
@@ -364,6 +372,16 @@ internal static class CatalogBuilder
         if (TryBuildClientRegion(registry, out var region))
         {
             commands.Add(region);
+        }
+
+        // SubscribeRequest, by an explicit group set a client may ask keys of (14 § 4, P13).
+        foreach (var set in registry.GroupSets)
+        {
+            if (set.Selector == GroupSelector.Explicit && set.Admit != null)
+            {
+                commands.Add(BuiltInCommands.CreateSubscribeRequest());
+                break;
+            }
         }
 
         foreach (var declaration in registry.Commands)

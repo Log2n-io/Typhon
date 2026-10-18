@@ -7,7 +7,7 @@ description: 'A session holds a whole set of entities that share a key — a tow
 # Groups
 > A session holds a whole set of entities that share a key — a town and its buildings — while its observer meets the town, and is told when it holds all of it.
 
-**Status:** 🚧 Partial — region sets on Sphere observers, positioned and positionless members · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Subscriptions](./README.md)
+**Status:** 🚧 Partial — region, explicit and shared sets on Sphere observers, positioned and positionless members · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Subscriptions](./README.md)
 
 ## 🎯 What it solves
 
@@ -29,6 +29,9 @@ town while it is in or near it, with a completion signal a client can act on: on
 - **Union with geometry.** A member the Sphere also holds is one entity in the store; a member moving between two held towns is an update.
 - **Key changes need no push.** Writing a member's key component marks it like a position write, so the projection sees the new key the
   same tick.
+- **A client can ask.** An explicit set's keys are the ones a session's client requested (`SubscribeRequest`, built-in command 1) and the
+  application allowed, plus the ones a system chose (`SetSources`). Each request is answered in `SOURCES`: `SOURCE_APPLIED` once its key is complete,
+  or `SOURCE_ERROR` with a code — the engine's below 100, the application's from 100. A shared set has one key every session naming it holds.
 - **Members need no position.** An archetype with none (a structure's shards, a joint record) is a member like any other, reached through its
   keys alone. It is in no realm and in no cell, and it has replication state only while some session holds a key it carries: a cluster of it gets
   a block when a held key needs one, and gives it back once unneeded for 64 ticks. A key completes only once every member has that state and has
@@ -60,6 +63,17 @@ subs.Groups("structure", g => g
     .Member<Shard>(m => m.Key(Shard.Group, s => s.Id)));
 ```
 
+```csharp
+// An explicit set: keys a client asks for, allowed or not by the application; a shared one: one key for every session.
+subs.Groups("myLists", g => g
+    .Explicit((in GroupRequest r) => Owns(r.Session, r.Key) ? GroupDecision.Allow : GroupDecision.Deny(403))
+    .Member<Listing>(m => m.Key(Listing.Owner, o => o.Account)));
+subs.Groups("bazaar", g => g.Shared(1).Member<Listing>(m => m.Key(Listing.Listed, l => l.Board)));
+subs.Profile("trader", p => p.Sphere(64).Groups("myLists").Groups("bazaar"));
+
+ctx.Subscriptions.Session(session).SetSources("myLists", accountId);   // the server's keys, beside the client's
+```
+
 On the client: `store.IsGroupComplete(set, key)`, `store.CompleteGroups` and the frame's `store.Groups` (.NET);
 `applier.groups.isComplete(set, key)` (TypeScript); `typhon_group_is_complete` and `typhon_groups_get` (C). The set's index is its position
 in the catalog's `groupSets`, in name order.
@@ -73,7 +87,9 @@ in the catalog's `groupSets`, in name order.
 - A region in a realm other than 0 needs a positioned region archetype: one with no spatial field has no realm, and its regions are realm 0's.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
 - Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
-- Not built yet: explicit and shared sets (a session asking for a key), visibility tags.
+- Explicit and shared sets: a profile names them with `Groups(set)`, no reach; at most `MaxGroupsPerSession` keys per set, a client's and the server's
+  together; `SubscribeRequest` is rate-limited to 5 a second, and a request past it is an `ACK`, not an answer.
+- Not built yet: visibility tags.
 - Measured (`GroupRegionBench`, 14 § 3.6): a 456 m town on a 192 m Sphere costs no measurable gather time (within 1 µs over 128 sessions) and no steady-state bytes; widening
   the Sphere to 456 m instead sends 2.8× the bytes.
 
@@ -81,6 +97,7 @@ in the catalog's `groupSets`, in name order.
 
 - [PushGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupTests.cs) — the oracle (towns, members and walking sessions under churn and skips), hysteresis and re-entry, budgeted fill, moves between towns, a destroyed town, the refusals, the tap's mutant
 - [PushGroupShardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupShardTests.cs) — positionless members: state only while held, the budget, a reference resolved once its target has state, #1389's split and merge, an off-DAG key move between the projection and the gather
+- [PushGroupRequestTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupRequestTests.cs) — explicit and shared sets: answers, codes, the server's keys, a RESET
 - [RealmGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Realms/RealmGroupTests.cs) — a positionless member held by the sessions of the realm its region is in
 - [FrameApplierTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/FrameApplierTests.cs) — the client's complete set, release and `RESET`, a duplicate completion counted
 - The `stream-kitchen-sink`, `tick-blocks` and `catalog-refusals` vectors, replayed by the .NET, C and TypeScript SDKs

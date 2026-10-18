@@ -22,6 +22,15 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The most keys a session holds per set (<see cref="SubscriptionsOptions.MaxGroupsPerSession"/>).</summary>
     internal int MaxGroupsPerSession;
 
+    /// <summary>The explicit sets' per-session keys and answers (14 § 4), engine-wide; null when no set is explicit.</summary>
+    internal GroupRequests Requests;
+
+    /// <summary>
+    /// Where <paramref name="session"/> stands with <paramref name="key"/> of <paramref name="set"/> after this frame's gather — the state its frame
+    /// commits: what a <c>SubscribeRequest</c>'s answer waits for.
+    /// </summary>
+    internal virtual GroupKeyState GroupKeyStateOf(SessionId session, int set, long key) => GroupKeyState.NotHeld;
+
     /// <summary>Whether any group set is declared: the one test every group step starts with.</summary>
     internal bool HasGroups => GroupSets.Length > 0;
 

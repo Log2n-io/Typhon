@@ -76,6 +76,33 @@ public static class SourceStatus
     public const byte GroupReleased = 3;
 }
 
+/// <summary>
+/// The codes a <c>SOURCE_ERROR</c> carries (14 § 4): the engine's below <see cref="FirstApplicationCode"/>, the application's from it. 0 is no code.
+/// </summary>
+public static class SourceErrorCodes
+{
+    /// <summary>The set is not declared, or is not one a client asks keys of.</summary>
+    public const ushort UnknownSet = 1;
+
+    /// <summary>The session's profile does not name the set.</summary>
+    public const ushort NotInProfile = 2;
+
+    /// <summary>The key is 0, which names no group.</summary>
+    public const ushort InvalidKey = 3;
+
+    /// <summary>The session already holds as many keys of the set as <c>MaxGroupsPerSession</c> allows.</summary>
+    public const ushort Limit = 4;
+
+    /// <summary>The operation is neither subscribe nor unsubscribe.</summary>
+    public const ushort InvalidOp = 5;
+
+    /// <summary>The application refused the request without a code of its own.</summary>
+    public const ushort Denied = 6;
+
+    /// <summary>The first code an application may answer with; the ones below are the engine's.</summary>
+    public const ushort FirstApplicationCode = 100;
+}
+
 /// <summary>Which blocks of a <c>TICK</c> a <see cref="TickReader"/> hands to its sink.</summary>
 [Flags]
 public enum TickBlocks

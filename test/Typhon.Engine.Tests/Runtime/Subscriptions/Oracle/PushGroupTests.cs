@@ -153,6 +153,8 @@ class PushGroupTests : TestBase<PushGroupTests>
             Assert.That(oracle.Releases, Is.GreaterThan(0), "towns were released");
             Assert.That(oracle.KeyChanges, Is.GreaterThan(10), "members changed town through the tap alone");
             Assert.That(oracle.ResetsDroppingGroups, Is.GreaterThan(0), "a RESET dropped held towns, which were filled and completed again");
+            Assert.That(oracle.AnswersChecked, Is.GreaterThan(3), "SubscribeRequests were answered, and each answer checked");
+            Assert.That(oracle.RequiredLists, Is.GreaterThan(0), "sessions held lists they asked for");
         });
     }
 
@@ -616,7 +618,7 @@ class PushGroupTests : TestBase<PushGroupTests>
     {
         Members(s);
         s.Groups("town", g => g.Member<GroupBuilding>(m => m.Key(GroupBuilding.Key, k => k.Town)));
-    }, "declares no Region");
+    }, "declares no selector");
 
     [Test]
     [VerifiesRule("SUB-33")]

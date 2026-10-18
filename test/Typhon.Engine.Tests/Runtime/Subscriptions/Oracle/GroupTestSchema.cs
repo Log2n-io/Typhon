@@ -148,12 +148,26 @@ partial class GroupUnsignedMember : Archetype<GroupUnsignedMember>
     public static readonly Comp<GroupUnsignedKey> Key = Register<GroupUnsignedKey>();
 }
 
-/// <summary>A shard: a member with no position (14 § 5), reached through its town alone, with replication state only while a town of it is held.</summary>
+/// <summary>A shard's list: the key of an explicit set (14 § 4) a session's client asks for, 0 for none.</summary>
+[Component("Typhon.Test.Group.List", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct GroupListKey
+{
+    [Field]
+    [Index(AllowMultiple = true, Sparse = true)]
+    public int List;
+}
+
+/// <summary>
+/// A shard: a member with no position (14 § 5), reached through its town or through a list a session subscribed to, with replication state only while
+/// one of them is held.
+/// </summary>
 [Archetype]
 partial class GroupPositionless : Archetype<GroupPositionless>
 {
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<GroupKey> Key = Register<GroupKey>();
+    public static readonly Comp<GroupListKey> List = Register<GroupListKey>();
 }
 
 /// <summary>A shard whose town is Versioned: the one key an off-DAG commit may move between the projection and the gather (EW-02).</summary>
@@ -190,6 +204,15 @@ static class GroupTestSchema
     /// <summary>The Sphere profile every group session is bound to.</summary>
     public const string Profile = "group-sphere";
 
+    /// <summary>The explicit set of the shards' lists, declared with the shards (14 § 4).</summary>
+    public const string ListSet = "lists";
+
+    /// <summary>The one list key a client is refused, with the application's code <see cref="DeniedListCode"/>.</summary>
+    public const int DeniedList = 6;
+
+    /// <summary>The application's SOURCE_ERROR code for <see cref="DeniedList"/>.</summary>
+    public const ushort DeniedListCode = 150;
+
     /// <summary>The engine, with the projection test components and the group ones registered.</summary>
     /// <param name="services">The fixture's service provider.</param>
     /// <param name="deep">A volumetric grid (±1 024 m, 128 m cells) instead of the flat ±8 192 m one.</param>
@@ -209,6 +232,7 @@ static class GroupTestSchema
         dbe.RegisterComponentFromAccessor<GroupVersionedKey>();
         dbe.RegisterComponentFromAccessor<GroupUnsignedKey>();
         dbe.RegisterComponentFromAccessor<GroupShardLink>();
+        dbe.RegisterComponentFromAccessor<GroupListKey>();
         dbe.ConfigureSpatialGrid(deep
             ? new SpatialGridConfig(worldMin: new Vector3D(-1024d, -1024d, -1024d), worldMax: new Vector3D(1024d, 1024d, 1024d), cellSize: 128d)
             : SpatialGridConfig.Flat(
@@ -251,7 +275,21 @@ static class GroupTestSchema
                 g.Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town));
             }
         });
-        subs.Profile(Profile, p => p.Detection(PushDetection.Explicit).Sphere(radiusM).Of<GroupCitizen>().Groups(Set, reachM));
+        if (shards)
+        {
+            subs.Groups(ListSet, g => g
+                .Explicit(static (in GroupRequest r) => r.Key == DeniedList ? GroupDecision.Deny(DeniedListCode) : GroupDecision.Allow)
+                .Member<GroupPositionless>(m => m.Key(GroupPositionless.List, k => k.List)));
+        }
+
+        subs.Profile(Profile, p =>
+        {
+            var observer = p.Detection(PushDetection.Explicit).Sphere(radiusM).Of<GroupCitizen>().Groups(Set, reachM);
+            if (shards)
+            {
+                observer.Groups(ListSet);
+            }
+        });
     }
 
     /// <summary>A square extent centred on (x, y).</summary>

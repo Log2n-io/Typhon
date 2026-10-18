@@ -20,8 +20,8 @@ namespace Typhon.Engine;
 /// on a field, captured or passed to another thread, which is the compiler enforcing the per-worker discipline instead of documentation asking for it.
 /// </para>
 /// <para>
-/// <b>What applies.</b> <see cref="Profile"/>, <see cref="Control"/>, <see cref="Follow"/>, <see cref="SetBudget"/> and <see cref="Kick"/> take effect.
-/// <see cref="Observe"/>, <see cref="Unobserve"/> and <see cref="SetSources"/> throw here, at the call site, naming the phase that builds them — the shape is
+/// <b>What applies.</b> <see cref="Profile"/>, <see cref="Control"/>, <see cref="Follow"/>, <see cref="SetBudget"/>, <see cref="SetSources"/> and
+/// <see cref="Kick"/> take effect. <see cref="Observe"/> and <see cref="Unobserve"/> throw here, at the call site, naming the phase that builds them — the shape is
 /// complete now so that an application written against it never has to be revisited when the verb it wanted starts working.
 /// </para>
 /// <para>
@@ -139,19 +139,40 @@ public readonly ref struct SessionRequest
     }
 
     /// <summary>
-    /// Replaces the session's whole source subscription list: diffed against the current one, idempotent, atomic within a frame.
+    /// Replaces the keys the server chooses for the session in an explicit group set (14 § 4, P14): diffed against what it chose before, idempotent, applied
+    /// at the next session pass. The keys the session's client asked for itself are untouched; a key either chose is held, filled and completed.
     /// </summary>
-    /// <param name="sources">The full list. An empty list unsubscribes from everything.</param>
+    /// <param name="set">An explicit group set's name, as <c>subs.Groups(name, g =&gt; g.Explicit(...))</c> declared it.</param>
+    /// <param name="keys">The full list; empty gives back every key the server chose. Never 0, which names no group.</param>
     /// <returns>This request, so several may be chained.</returns>
-    /// <remarks><b>The shape is final; the verb arrives in Phase 4</b>, with shared sources themselves.</remarks>
-    /// <exception cref="NotSupportedException">Always, until Phase 4 builds shared sources.</exception>
-    public SessionRequest SetSources(params SourceDeclaration[] sources)
+    /// <remarks>
+    /// A session holds at most <see cref="SubscriptionsOptions.MaxGroupsPerSession"/> keys of a set, its client's and the server's together: keys past it are
+    /// not added, and counted.
+    /// </remarks>
+    public SessionRequest SetSources(string set, params long[] keys)
     {
-        ArgumentNullException.ThrowIfNull(sources);
+        if (string.IsNullOrWhiteSpace(set))
+        {
+            throw new ArgumentException("SetSources names an explicit group set.", nameof(set));
+        }
 
-        throw new NotSupportedException(
-            $"{_session} asked for SetSources, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach travels as " +
-            "owner fields on the entity that owns it.");
+        ArgumentNullException.ThrowIfNull(keys);
+        if (_segment.ExplicitSets is not { } explicitSets || !explicitSets.Contains(set))
+        {
+            throw new ArgumentException(
+                $"{_session}: '{set}' is not an explicit group set. Declare it with subs.Groups(\"{set}\", g => g.Explicit(...).Member<T>(...)).", nameof(set));
+        }
+
+        foreach (var key in keys)
+        {
+            if (key == 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(keys), key, "A group key is never 0: 0 means no group, and is never indexed.");
+            }
+        }
+
+        _segment.Add(_session, SessionRequestKind.SetSources, keys.Length, new GroupKeysRequest(set, (long[])keys.Clone()));
+        return this;
     }
 
     /// <summary>

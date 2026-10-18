@@ -187,7 +187,7 @@ public static class CatalogValidator
                 problems.Add($"group set '{s.Name}': the name is empty or listed twice");
             }
 
-            if (s.Selector != CatalogGroupSet.RegionSelector)
+            if (s.Selector is not (CatalogGroupSet.RegionSelector or CatalogGroupSet.ExplicitSelector or CatalogGroupSet.SharedSelector))
             {
                 problems.Add($"group set '{s.Name}': selector '{s.Selector}' is unknown");
             }
@@ -230,8 +230,8 @@ public static class CatalogValidator
             case BuiltInCommands.ClientRegion when !BuiltInCommands.HasClientRegionShape(cmd):
                 problems.Add($"command '{BuiltInCommands.ClientRegion}' is a built-in; declare it with BuiltInCommands.CreateClientRegion, not by name");
                 break;
-            case BuiltInCommands.SubscribeRequest:
-                problems.Add($"command '{BuiltInCommands.SubscribeRequest}' is reserved; its shape is decided when source subscriptions are built");
+            case BuiltInCommands.SubscribeRequest when !BuiltInCommands.HasSubscribeRequestShape(cmd):
+                problems.Add($"command '{BuiltInCommands.SubscribeRequest}' is a built-in; declare it with BuiltInCommands.CreateSubscribeRequest, not by name");
                 break;
         }
 

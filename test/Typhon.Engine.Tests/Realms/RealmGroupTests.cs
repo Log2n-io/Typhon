@@ -36,6 +36,7 @@ class RealmGroupTests : TestBase<RealmGroupTests>
         dbe.RegisterComponentFromAccessor<RealmPos>();
         dbe.RegisterComponentFromAccessor<GroupZone>();
         dbe.RegisterComponentFromAccessor<GroupKey>();
+        dbe.RegisterComponentFromAccessor<GroupListKey>();
         dbe.RegisterComponentFromAccessor<ProjAi>();
         dbe.ConfigureRealms(4);
         dbe.ConfigureSpatialGrid(Realm0Grid());

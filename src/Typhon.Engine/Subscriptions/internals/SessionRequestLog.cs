@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Typhon.Engine.Internals;
 
@@ -32,6 +33,9 @@ internal enum SessionRequestKind : byte
     /// <summary>Point the session's viewpoint at an entity it does not control.</summary>
     Follow = 8,
 }
+
+/// <summary>A <see cref="SessionRequest.SetSources"/> request's payload: the explicit set and the full list of keys the server chooses in it.</summary>
+internal sealed record GroupKeysRequest(string Set, long[] Keys);
 
 /// <summary>
 /// One recorded request. Sixteen bytes and no reference, so a worker's segment is a flat array the apply pass walks forward.
@@ -76,6 +80,9 @@ internal sealed class SessionRequestSegment
 
     /// <summary>Requests recorded this tick.</summary>
     public int Count => _count;
+
+    /// <summary>The explicit group sets' names, which <see cref="SessionRequest.SetSources"/> checks at the call site; null when none is declared.</summary>
+    internal IReadOnlySet<string> ExplicitSets;
 
     /// <summary>Records the segment can hold before it grows. Steady state never grows.</summary>
     public int RecordCapacity => _records.Length;
@@ -203,10 +210,26 @@ internal sealed class SessionRequestLog
         Array.Copy(_segments, grown, _segments.Length);
         for (var i = _segments.Length; i < workerCount; i++)
         {
-            grown[i] = new SessionRequestSegment();
+            grown[i] = new SessionRequestSegment { ExplicitSets = _explicitSets };
         }
 
         _segments = grown;
+    }
+
+    private IReadOnlySet<string> _explicitSets;
+
+    /// <summary>The explicit group sets' names, handed to every segment: what <see cref="SessionRequest.SetSources"/> validates against. Set at Start.</summary>
+    internal IReadOnlySet<string> ExplicitSets
+    {
+        get => _explicitSets;
+        set
+        {
+            _explicitSets = value;
+            foreach (var segment in _segments)
+            {
+                segment.ExplicitSets = value;
+            }
+        }
     }
 
     /// <summary>Requests recorded this tick, across every segment.</summary>
@@ -321,9 +344,10 @@ internal sealed class SessionRequestLog
                     $"{nameof(SessionRequest)} refuses this at the call site, so a record reaching here was built past that surface.");
 
             case SessionRequestKind.SetSources:
-                throw new NotSupportedException(
-                    $"{session} asked for SetSources, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
-                    $"travels as owner fields on the entity that owns it. {nameof(SessionRequest)} refuses this at the call site.");
+            {
+                var request = (GroupKeysRequest)segment.ObjectAt(record.ObjectIndex);
+                return table.SetGroupKeys(session, request.Set, request.Keys);
+            }
 
             default:
                 return false;

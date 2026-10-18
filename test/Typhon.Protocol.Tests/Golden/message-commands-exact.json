@@ -1,5 +1,5 @@
 {
-  "description": "COMMANDS against catalog-exact: two Transfers \u2014 a u64 at 2\u2075\u00B3 \u002B 1 and 2\u2076\u2074 \u2212 1, a varu64 \u00D7 2 at its edges, an f64 (0.1, \u2212\u221E), a vari64 at its minimum and \u22121, an f32 \u00D7 2 point with a negative zero.",
+  "description": "COMMANDS against catalog-exact: two Transfers \u2014 a u64 at 2\u2075\u00B3 \u002B 1 and 2\u2076\u2074 \u2212 1, a varu64 \u00D7 2 at its edges, an f64 (0.1, \u2212\u221E), a vari64 at its minimum and \u22121, an f32 \u00D7 2 point with a negative zero \u2014 and two SubscribeRequests on set 1 (lists): a subscribe with request id 65 535 and the minimum key, an unsubscribe of 2\u2075\u00B3 \u002B 1.",
   "catalog": "catalog-exact",
   "inputs": [
     {
@@ -45,6 +45,42 @@
         "where": [
           "0000000000000000",
           "8000000000000000"
+        ]
+      }
+    },
+    {
+      "type": "SubscribeRequest",
+      "seq": 3,
+      "values": {
+        "requestId": [
+          "40efffe000000000"
+        ],
+        "set": [
+          "3ff0000000000000"
+        ],
+        "key": [
+          "8000000000000000"
+        ],
+        "op": [
+          "3ff0000000000000"
+        ]
+      }
+    },
+    {
+      "type": "SubscribeRequest",
+      "seq": 4,
+      "values": {
+        "requestId": [
+          "401c000000000000"
+        ],
+        "set": [
+          "3ff0000000000000"
+        ],
+        "key": [
+          "0020000000000001"
+        ],
+        "op": [
+          "4000000000000000"
         ]
       }
     }
@@ -137,6 +173,76 @@
       "values": [
         "0000000000000000",
         "8000000000000000"
+      ]
+    },
+    {
+      "call": "command",
+      "type": "SubscribeRequest",
+      "idx": 1,
+      "seq": 3,
+      "clientTick": 12345
+    },
+    {
+      "call": "integer64",
+      "field": "key",
+      "values": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "op",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "requestId",
+      "values": [
+        "40efffe000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "set",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "command",
+      "type": "SubscribeRequest",
+      "idx": 1,
+      "seq": 4,
+      "clientTick": 12345
+    },
+    {
+      "call": "integer64",
+      "field": "key",
+      "values": [
+        "0020000000000001"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "op",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "requestId",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "set",
+      "values": [
+        "3ff0000000000000"
       ]
     }
   ]

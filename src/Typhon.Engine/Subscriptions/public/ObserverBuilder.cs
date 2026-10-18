@@ -64,14 +64,27 @@ public sealed class ObserverBuilder
     /// <returns>This builder.</returns>
     public ObserverBuilder Groups(string set, double reachM)
     {
-        if (string.IsNullOrWhiteSpace(set))
-        {
-            throw new ArgumentException("Groups names a declared group set.", nameof(set));
-        }
-
         if (!double.IsFinite(reachM) || reachM < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(reachM), reachM, "A group reach is a finite distance of at least 0.");
+        }
+
+        return AddGroups(set, reachM);
+    }
+
+    /// <summary>
+    /// Holds the keys of an explicit or a shared group set (14 § 4): the ones the session's client asked for and the application allowed, or the server
+    /// chose — or the set's one key, from the session's first frame. No reach: these keys are not met by geometry.
+    /// </summary>
+    /// <param name="set">The group set's name.</param>
+    /// <returns>This builder.</returns>
+    public ObserverBuilder Groups(string set) => AddGroups(set, double.NaN);
+
+    private ObserverBuilder AddGroups(string set, double reachM)
+    {
+        if (string.IsNullOrWhiteSpace(set))
+        {
+            throw new ArgumentException("Groups names a declared group set.", nameof(set));
         }
 
         foreach (var existing in _observer.GroupInterests)
@@ -195,7 +208,7 @@ public sealed class ObserverDeclaration
 
     private readonly List<GroupInterest> _groupInterests = [];
 
-    /// <summary>The group sets this observer holds the groups of (<see cref="ObserverBuilder.Groups"/>).</summary>
+    /// <summary>The group sets this observer holds the groups of (<see cref="ObserverBuilder.Groups(string, double)"/>).</summary>
     public IReadOnlyList<GroupInterest> GroupInterests => _groupInterests;
 
     internal void AddGroupInterest(GroupInterest interest) => _groupInterests.Add(interest);

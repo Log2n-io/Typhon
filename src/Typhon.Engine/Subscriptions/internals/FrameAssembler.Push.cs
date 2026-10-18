@@ -35,6 +35,9 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
 
+    /// <summary>The explicit group sets' requests and answers (14 § 4); null when no set is explicit.</summary>
+    internal GroupRequests Requests;
+
     /// <summary>The engine, whose EntityMap and clusters a followed entity's position is read from (09 § 6).</summary>
     internal DatabaseEngine Engine;
 
@@ -1359,6 +1362,9 @@ internal sealed unsafe partial class FrameAssembler
         // The first-frame RESET (below) decided before SELF, which sends every owner group on a RESET.
         var first = !reset && Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
+
+        // The SubscribeRequest answers due in this frame (14 § 4), after the gather's own records: an APPLIED follows the GROUP_COMPLETE it reports.
+        Requests?.Emit(session, push, scratch);
         var groupRecords = scratch.GroupRecords.Count;
         if (records == 0 && groupRecords == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write
             && self.Acks == 0)
@@ -1414,7 +1420,22 @@ internal sealed unsafe partial class FrameAssembler
             writer.WriteVaru((uint)groupRecords);
             foreach (var g in scratch.GroupRecords)
             {
-                TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
+                if (g.Kind == SourceStatus.Applied)
+                {
+                    writer.WriteU8(g.Kind);
+                    writer.WriteU16((ushort)g.Key);
+                }
+                else if (g.Kind == SourceStatus.Error)
+                {
+                    // An answer's request id in the key's low 16 bits, its code in the next 16.
+                    writer.WriteU8(g.Kind);
+                    writer.WriteU16((ushort)g.Key);
+                    writer.WriteU16((ushort)(g.Key >> 16));
+                }
+                else
+                {
+                    TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
+                }
             }
 
             TickWriter.EndBlock(ref writer, sourcesMark);
@@ -1481,6 +1502,7 @@ internal sealed unsafe partial class FrameAssembler
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
         push.Commit(session);
+        Requests?.Retire(session, scratch.Answered);
         state.EventsCursor = (uint)_tick;
         CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
         if (aggDue)

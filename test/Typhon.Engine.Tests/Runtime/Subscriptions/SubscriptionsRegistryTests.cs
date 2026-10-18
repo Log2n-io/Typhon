@@ -643,21 +643,6 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         Assert.DoesNotThrow(runtime.Start);
     }
 
-    /// <summary>A shared source is declarable today and refused at <c>Start</c> as Phase 4 work.</summary>
-    [Test]
-    public void ASource_IsRefusedAtStartAsPhase4()
-    {
-        using var runtime = CreateRuntime();
-        using var tx = runtime.Engine.CreateQuickTransaction();
-        using var view = tx.Query<SwgWorldObject>().ToView();
-        runtime.Subscriptions.Source("bazaar", view, _ => { });
-
-        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-
-        Assert.That(ex.Message, Does.Contain("Phase 4"));
-        Assert.That(ex.Message, Does.Contain("bazaar"));
-    }
-
     // 16 markers × 16 markers = 256 archetypes, declared in two levels so the limit can be pushed past without 256 class declarations. Any 16 distinct types
     // will do: a filler archetype has no components and never reaches the schema — it exists only to occupy a replication slot.
     private static void DeclareFillerArchetypes(SubscriptionsRegistry subs)

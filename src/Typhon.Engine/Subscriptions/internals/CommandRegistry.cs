@@ -230,6 +230,38 @@ internal readonly struct CommandFieldBinding
     }
 }
 
+/// <summary>A decoded <c>SubscribeRequest</c> as the ring carries it: <c>u16 requestId | u32 set | i64 key | u8 op</c>, little-endian.</summary>
+internal static class SubscribeRequestRecord
+{
+    public const int Bytes = 15;
+
+    public static void Write(Span<byte> into, ushort requestId, uint set, long key, byte op)
+    {
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(into, requestId);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(into[2..], set);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(into[6..], key);
+        into[14] = op;
+    }
+
+    public static bool TryRead(ReadOnlySpan<byte> from, out ushort requestId, out uint set, out long key, out byte op)
+    {
+        if (from.Length < Bytes)
+        {
+            requestId = 0;
+            set = 0;
+            key = 0;
+            op = 0;
+            return false;
+        }
+
+        requestId = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(from);
+        set = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(from[2..]);
+        key = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(from[6..]);
+        op = from[14];
+        return true;
+    }
+}
+
 /// <summary>
 /// One command type as the ingress path needs it: its wire index and plan, its delivery policy, its rate bucket parameters, and where each wire field lands
 /// in the application's struct.
@@ -307,6 +339,12 @@ internal sealed class CommandTypeInfo
 
     /// <summary>Whether this is the built-in <c>ClientRegion</c>, which the engine decodes into its own region rather than into an application struct.</summary>
     public bool IsClientRegion { get; }
+
+    /// <summary>Whether this is the built-in <c>SubscribeRequest</c>, which the engine decodes into a <see cref="SubscribeRequestRecord"/> and takes itself.</summary>
+    public bool IsSubscribeRequest { get; init; }
+
+    /// <summary>Whether the engine, not an application struct, is this command's destination.</summary>
+    public bool IsBuiltIn => IsClientRegion || IsSubscribeRequest;
 
     /// <summary>Whether <paramref name="role"/> may send this command.</summary>
     /// <param name="role">The session's role.</param>
@@ -413,8 +451,8 @@ internal sealed class CommandRegistry
         foreach (var command in commands)
         {
             var messagePlan = plan.Command(command.Idx);
-            var info = command.Name == BuiltInCommands.ClientRegion
-                ? BuildClientRegion(messagePlan, command)
+            var info = command.Name == BuiltInCommands.ClientRegion ? BuildClientRegion(messagePlan, command)
+                : command.Name == BuiltInCommands.SubscribeRequest ? BuildSubscribeRequest(messagePlan, command)
                 : BuildApplicationCommand(registry, messagePlan);
 
             table[command.Idx] = info;
@@ -440,6 +478,14 @@ internal sealed class CommandRegistry
         return new CommandTypeInfo(plan.Idx, plan, null, ClientRegionCommand.MaxRecordBytes, CommandCoalesce.LatestPerSession, rolesMask: 0,
             ratePerSecond: rate, rateBurst: burst, bindings: [], precheck: null, precheckAdapter: null, unboundStructFields: [], isClientRegion: true);
     }
+
+    // A client's request for a key of an explicit group set (14 § 4, P13): the engine decodes it into its own record, every one kept, in order.
+    private static CommandTypeInfo BuildSubscribeRequest(MessagePlan plan, CatalogCommand command) =>
+        new(plan.Idx, plan, null, SubscribeRequestRecord.Bytes, CommandCoalesce.Queued, rolesMask: 0, ratePerSecond: command.Rate?.PerSec ?? 0,
+            rateBurst: command.Rate?.Burst ?? 0, bindings: [], precheck: null, precheckAdapter: null, unboundStructFields: [], isClientRegion: false)
+        {
+            IsSubscribeRequest = true,
+        };
 
     private static CommandTypeInfo BuildApplicationCommand(SubscriptionsRegistry registry, MessagePlan plan)
     {

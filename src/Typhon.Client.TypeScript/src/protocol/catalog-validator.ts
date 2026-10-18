@@ -317,11 +317,27 @@ function checkCommand(cmd: CatalogCommand, enums: Catalog['enums'], maxBytes: nu
 
   if (cmd.name === BuiltInCommand.ClientRegion && !hasClientRegionShape(cmd)) {
     problems.push(`command '${cmd.name}' is a built-in whose shape does not match its definition`);
-  } else if (cmd.name === BuiltInCommand.SubscribeRequest) {
-    problems.push(`command '${cmd.name}' is reserved; its shape is decided when source subscriptions are built`);
+  } else if (cmd.name === BuiltInCommand.SubscribeRequest && !hasSubscribeRequestShape(cmd)) {
+    problems.push(`command '${cmd.name}' is a built-in whose shape does not match its definition`);
   }
 
   checkMessageFields(`command '${cmd.name}'`, cmd.fields, enums, maxBytes, problems);
+}
+
+/** `SubscribeRequest` is recognised by shape, not by name (14 § 4, P13): `{u16 requestId, varu set, vari64 key, u8 op}`, queued, 5 a second. */
+function hasSubscribeRequestShape(cmd: CatalogCommand): boolean {
+  const kind = (name: string) => cmd.fields.find((f) => f.name === name)?.codec.t;
+  return (
+    cmd.fields.length === 4 &&
+    cmd.delivery === 'queued' &&
+    cmd.rate?.perSec === 5 &&
+    cmd.rate.burst === 5 &&
+    kind('requestId') === 'u16' &&
+    kind('set') === 'varu' &&
+    kind('key') === 'vari64' &&
+    kind('op') === 'u8' &&
+    cmd.fields.every((f) => f.group === undefined && f.onEnter !== true && f.enum === undefined)
+  );
 }
 
 /** `ClientRegion` is recognised by shape, not by name (W28). */
@@ -608,7 +624,7 @@ function checkGroupSets(sets: readonly CatalogGroupSet[], archetypeCount: number
     }
 
     names.add(s.name);
-    if (s.selector !== 'region') {
+    if (s.selector !== 'region' && s.selector !== 'explicit' && s.selector !== 'shared') {
       problems.push(`${where}: selector '${s.selector}' is unknown`);
     }
 

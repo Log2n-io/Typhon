@@ -317,6 +317,20 @@ internal sealed class CompiledGroupSet
 {
     public int Index;
     public string Name;
+
+    /// <summary>What decides which keys a session holds: a region (<see cref="Region"/>), the session's requests, or <see cref="SharedKey"/>.</summary>
+    public GroupSelector Selector;
+
+    /// <summary>A shared set's one key; 0 otherwise.</summary>
+    public long SharedKey;
+
+    /// <summary>An explicit set's verdict on a client's request; null when clients may not ask.</summary>
+    public GroupRequestHandler Admit;
+
+    /// <summary>The key's integer type: the region key's, or an explicit or shared set's first member's.</summary>
+    public FieldType KeyType;
+
+    /// <summary>The region selector; null for an explicit or a shared set.</summary>
     public CompiledRegion Region;
     public CompiledGroupMember[] Members;
     public double LeaveMarginM;
@@ -363,9 +377,13 @@ internal static class GroupSetCompiler
                 Index = s,
                 Name = d.Name,
                 LeaveMarginM = d.LeaveMarginM,
-                Region = CompileRegion(d, engine),
-                MaxReachM = MaxReachOf(registry, d.Name),
+                Selector = d.Selector,
+                SharedKey = d.SharedKey,
+                Admit = d.Admit,
+                Region = d.Selector == GroupSelector.Region ? CompileRegion(d, engine) : null,
+                MaxReachM = d.Selector == GroupSelector.Region ? MaxReachOf(registry, d.Name) : 0d,
             };
+            set.KeyType = set.Region?.Key.Type ?? FieldType.None;
 
             var members = new CompiledGroupMember[d.Members.Count];
             for (var m = 0; m < members.Length; m++)
@@ -387,12 +405,18 @@ internal static class GroupSetCompiler
                         $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is a {field.Type}. A group key is an integer field (I8 … U64), 0 for no group.");
                 }
 
-                if (ClusterFieldReader.IsSignedKey(field.Type) != ClusterFieldReader.IsSignedKey(set.Region.Key.Type))
+                // The set's key type: its region's, or for an explicit or shared set its first member's.
+                if (set.KeyType == FieldType.None)
+                {
+                    set.KeyType = field.Type;
+                }
+
+                if (ClusterFieldReader.IsSignedKey(field.Type) != ClusterFieldReader.IsSignedKey(set.KeyType))
                 {
                     // Keys compare as 64-bit values, so an i32 -1 and a u32 0xFFFFFFFF would name two groups for one bit pattern.
                     throw new InvalidOperationException(
-                        $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is a {field.Type} and the region key a {set.Region.Key.Type}. A member key and its "
-                        + "region key are both signed or both unsigned.");
+                        $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is a {field.Type} and the set's key a {set.KeyType}. A member key and its "
+                        + "set's key are both signed or both unsigned.");
                 }
 
                 var table = engine.GetComponentTable(meta._slotToComponentType[slot]);

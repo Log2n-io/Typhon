@@ -53,6 +53,18 @@ internal sealed unsafe class GroupOracle : IDisposable
     private readonly int _buildingPlan;
     private readonly int _citizenPlan;
     private readonly int _shardPlan;
+    private readonly uint _townSet;
+    private readonly uint _listSet;
+
+    // Per session, the client side of the explicit set (14 § 4): its next seq and request id, the requests it awaits an answer to, and the lists it holds.
+    private readonly ushort[] _seq;
+    private readonly ushort[] _requestIds;
+    private readonly Dictionary<ushort, (byte Op, int List, ushort Seq)>[] _pending;
+    private readonly HashSet<int>[] _subscribed;
+    private readonly Random _requests;
+    private readonly double[] _tokens;
+    private readonly long[] _tokensAt;
+    private const int Lists = 6;
 
     private readonly List<EntityId> _towns = [];
     private readonly List<EntityId> _buildings = [];
@@ -74,6 +86,20 @@ internal sealed unsafe class GroupOracle : IDisposable
         _buildingPlan = harness.PlanIndex(nameof(GroupBuilding));
         _citizenPlan = harness.PlanIndex(nameof(GroupCitizen));
         _shardPlan = harness.PlanIndex(nameof(GroupPositionless));
+        _townSet = (uint)harness.CatalogPlan.GroupSetIndex(GroupTestSchema.Set);
+        _listSet = (uint)harness.CatalogPlan.GroupSetIndex(GroupTestSchema.ListSet);
+        _seq = new ushort[_sessions.Length];
+        _requestIds = new ushort[_sessions.Length];
+        _pending = new Dictionary<ushort, (byte, int, ushort)>[_sessions.Length];
+        _subscribed = new HashSet<int>[_sessions.Length];
+        _requests = new Random(seed * 31 + 7);
+        _tokens = new double[_sessions.Length];
+        _tokensAt = new long[_sessions.Length];
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            _pending[i] = [];
+            _subscribed[i] = [];
+        }
         for (var i = 0; i < _sessions.Length; i++)
         {
             _delivery[i] = new Random(seed + (7919 * (i + 1)));
@@ -103,6 +129,15 @@ internal sealed unsafe class GroupOracle : IDisposable
 
     /// <summary>Viewpoint teleports, each a reset of its session.</summary>
     public int Teleports { get; private set; }
+
+    /// <summary>SubscribeRequests sent, and answers checked: each APPLIED against the client's store in the frame it arrives, each ERROR against its key.</summary>
+    public int RequestsSent { get; private set; }
+
+    /// <inheritdoc cref="RequestsSent"/>
+    public int AnswersChecked { get; private set; }
+
+    /// <summary>Lists a session was required to hold complete at a quiet point, summed.</summary>
+    public long RequiredLists { get; private set; }
 
     /// <summary>The push path.</summary>
     public PushReplication Push => _harness.Subscriptions.Push;
@@ -139,6 +174,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         {
             harness.RunFence = true;
             harness.DrainNetIds = true;
+            harness.RunIngress = true;
             var oracle = new GroupOracle(harness, seed, skipPercent);
             oracle.Seed();
             for (var i = 0; i < oracle._sessions.Length; i++)
@@ -218,7 +254,9 @@ internal sealed unsafe class GroupOracle : IDisposable
     private void SpawnShard(Transaction tx, int key)
     {
         var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
-        _shards.Add(tx.Spawn<GroupPositionless>(GroupPositionless.Ai.Set(in ai), GroupPositionless.Key.Set(new GroupKey { Town = key })));
+        var list = _random.Next(Lists + 2);   // 0 and Lists + 1: no list, or one nobody may ask for twice as often as any other
+        _shards.Add(tx.Spawn<GroupPositionless>(GroupPositionless.Ai.Set(in ai), GroupPositionless.Key.Set(new GroupKey { Town = key }),
+            GroupPositionless.List.Set(new GroupListKey { List = list > Lists ? 0 : list })));
     }
 
     private void SpawnCitizen(Transaction tx, int key, (float X, float Y) at)
@@ -268,6 +306,7 @@ internal sealed unsafe class GroupOracle : IDisposable
     {
         Churn();
         Walk();
+        Ask();
         _tick++;
         _harness.RunTick(_tick, Workers);
         for (var i = 0; i < _sessions.Length; i++)
@@ -320,6 +359,11 @@ internal sealed unsafe class GroupOracle : IDisposable
         else if (shardRoll < 34)
         {
             Destroy(tx, _shards);
+        }
+        else if (shardRoll < 44 && _shards.Count > 0)
+        {
+            tx.OpenMut(_shards[_random.Next(_shards.Count)]).Set(GroupPositionless.List, new GroupListKey { List = _random.Next(Lists + 1) });
+            KeyChanges++;
         }
 
         var roll = _random.Next(100);
@@ -379,6 +423,91 @@ internal sealed unsafe class GroupOracle : IDisposable
         }
 
         tx.Commit();
+    }
+
+    // Now and then a session asks for a list or gives one back, within SubscribeRequest's rate (5 a second, a burst of 5) as a client keeps it: a bucket of
+    // its own, refilled a little slower than the server's, so no request is refused. One that were would be answered by an ACK — which a session further
+    // behind than the ACK history never receives, a refusal then settling through lastSeq alone — and the oracle could not tell it from a lost answer.
+    private void Ask()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            _tokens[i] = _tokensAt[i] == 0 ? 5d : Math.Min(5d, _tokens[i] + (4d * (now - _tokensAt[i]) / System.Diagnostics.Stopwatch.Frequency));
+            _tokensAt[i] = now;
+            if (_requests.Next(100) >= 3 || _tokens[i] < 1d)
+            {
+                continue;
+            }
+
+            _tokens[i] -= 1d;
+
+            var list = 1 + _requests.Next(Lists);
+            var op = _subscribed[i].Contains(list) ? BuiltInCommands.UnsubscribeOp : BuiltInCommands.SubscribeOp;
+            var id = ++_requestIds[i];
+            var seq = ++_seq[i];
+            var values = new RecordValues
+            {
+                [BuiltInCommands.SubscribeRequestIdField] = FieldValue.Of(id),
+                [BuiltInCommands.SubscribeSetField] = FieldValue.Of(_listSet),
+                [BuiltInCommands.SubscribeKeyField] = new FieldValue { Integers = [(ulong)list] },
+                [BuiltInCommands.SubscribeOpField] = FieldValue.Of(op),
+            };
+
+            var buffer = new byte[256];
+            var writer = new WireWriter(buffer);
+            CommandsMessage.Write(ref writer, (uint)_tick, [(_harness.CatalogPlan.CommandByName(BuiltInCommands.SubscribeRequest), seq, values)],
+                _harness.Subscriptions.Realm0Frame);
+            _harness.Subscriptions.Ingress.OnCommands(_sessions[i], writer.Written);
+            _pending[i][id] = (op, list, seq);
+            RequestsSent++;
+        }
+    }
+
+    // A frame's answers to this session's requests: an APPLIED subscription's list is complete in the store the frame left, an unsubscription's is not; an
+    // ERROR is the application's refusal of the denied list; a refusal ACK (the rate) forgets the request.
+    private void CheckAnswers(int session, SessionReplica replica)
+    {
+        foreach (var (seq, _) in replica.Store.Acks)
+        {
+            foreach (var (id, request) in _pending[session])
+            {
+                if (request.Seq == seq)
+                {
+                    _pending[session].Remove(id);
+                    break;
+                }
+            }
+        }
+
+        foreach (var (requestId, status, code) in replica.Store.Sources)
+        {
+            if (!_pending[session].Remove(requestId, out var request))
+            {
+                Assert.Fail($"{FailureMarker} tick {_tick}, session {session}: an answer to request {requestId}, which is not awaiting one (twice, or never asked)");
+                continue;
+            }
+
+            AnswersChecked++;
+            var complete = replica.Store.IsGroupComplete(_listSet, request.List);
+            if (status == SourceStatus.Error)
+            {
+                Assert.That(request.List == GroupTestSchema.DeniedList && code == GroupTestSchema.DeniedListCode, Is.True,
+                    $"{FailureMarker} tick {_tick}, session {session}: request {requestId} for list {request.List} refused with code {code}");
+            }
+            else if (request.Op == BuiltInCommands.SubscribeOp)
+            {
+                Assert.That(complete, Is.True,
+                    $"{FailureMarker} tick {_tick}, session {session}: request {requestId} for list {request.List} APPLIED and the list is not complete");
+                _subscribed[session].Add(request.List);
+            }
+            else
+            {
+                Assert.That(complete, Is.False,
+                    $"{FailureMarker} tick {_tick}, session {session}: request {requestId} giving list {request.List} back APPLIED and it is still complete");
+                _subscribed[session].Remove(request.List);
+            }
+        }
     }
 
     private void ChangeKeys(Transaction tx, List<EntityId> from, Comp<GroupKey> key, int count)
@@ -477,7 +606,7 @@ internal sealed unsafe class GroupOracle : IDisposable
                 ResetsDroppingGroups++;
             }
 
-            foreach (var (kind, _, key) in replica.Store.Groups)
+            foreach (var (kind, set, key) in replica.Store.Groups)
             {
                 if (kind == SourceStatus.GroupReleased)
                 {
@@ -485,14 +614,16 @@ internal sealed unsafe class GroupOracle : IDisposable
                 }
                 else if (_skipPercent[session] == 0)
                 {
-                    AssertCompleteNow(session, key, replica);
+                    AssertCompleteNow(session, set, key, replica);
                 }
 
-                if (_skipPercent[session] == 0)
+                if (_skipPercent[session] == 0 && set == _townSet)
                 {
                     AssertRecordIsLegal(session, kind, key);
                 }
             }
+
+            CheckAnswers(session, replica);
         }
     }
 
@@ -535,20 +666,24 @@ internal sealed unsafe class GroupOracle : IDisposable
     }
 
     /// <summary>A <c>GROUP_COMPLETE</c> arrived in a frame of this tick: every current member of the key is in the store.</summary>
-    private void AssertCompleteNow(int session, long key, SessionReplica replica)
+    private void AssertCompleteNow(int session, uint set, long key, SessionReplica replica)
     {
         CompletionsChecked++;
         var missing = new List<string>();
         using var tx = _harness.Engine.CreateQuickTransaction();
-        foreach (var (list, comp, name) in new[]
-                 {
-                     (_buildings, GroupBuilding.Key, nameof(GroupBuilding)), (_citizens, GroupCitizen.Key, nameof(GroupCitizen)),
-                     (_shards, GroupPositionless.Key, nameof(GroupPositionless)),
-                 })
+        var lists = set == _listSet;
+        foreach (var (list, comp, name) in lists
+                     ? new[] { (_shards, GroupPositionless.Key, nameof(GroupPositionless)) }
+                     : new[]
+                     {
+                         (_buildings, GroupBuilding.Key, nameof(GroupBuilding)), (_citizens, GroupCitizen.Key, nameof(GroupCitizen)),
+                         (_shards, GroupPositionless.Key, nameof(GroupPositionless)),
+                     })
         {
             foreach (var entity in list)
             {
-                if (tx.Open(entity).Read(comp).Town != key)
+                var member = lists ? tx.Open(entity).Read(GroupPositionless.List).List : tx.Open(entity).Read(comp).Town;
+                if (member != key)
                 {
                     continue;
                 }
@@ -562,7 +697,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         }
 
         Assert.That(missing, Is.Empty,
-            $"{FailureMarker} tick {_tick}, session {session}: GROUP_COMPLETE for town {key} arrived and these members are not in the store");
+            $"{FailureMarker} tick {_tick}, session {session}: GROUP_COMPLETE for {(lists ? "list" : "town")} {key} arrived and these members are not in the store");
     }
 
     // ══ The comparison ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -636,7 +771,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         foreach (var key in required)
         {
             RequiredKeys++;
-            if (!replica.Store.IsGroupComplete(0, key))
+            if (!replica.Store.IsGroupComplete(_townSet, key))
             {
                 divergences.Add($"session {session}: the observer meets town {key} and the client does not hold it complete");
             }
@@ -644,10 +779,29 @@ internal sealed unsafe class GroupOracle : IDisposable
 
         foreach (var (set, key) in replica.Store.CompleteGroups)
         {
-            if (set != 0 || !possible.Contains((int)key))
+            if (set == _townSet && !possible.Contains((int)key))
             {
                 divergences.Add($"session {session}: the client holds town {key} complete and the observer is beyond its reach and margin (or it is gone)");
             }
+            else if (set == _listSet && !_subscribed[session].Contains((int)key))
+            {
+                divergences.Add($"session {session}: the client holds list {key} complete and no APPLIED subscription of its asked for it");
+            }
+        }
+
+        // Every list a subscription was applied for is held complete; every request has its answer by now.
+        foreach (var list in _subscribed[session])
+        {
+            RequiredLists++;
+            if (!replica.Store.IsGroupComplete(_listSet, list))
+            {
+                divergences.Add($"session {session}: its subscription to list {list} was APPLIED and the client does not hold it complete");
+            }
+        }
+
+        if (_pending[session].Count > 0)
+        {
+            divergences.Add($"session {session}: {_pending[session].Count} request(s) still unanswered at a quiet point");
         }
 
         if (replica.Store.Anomalies != 0)
@@ -658,11 +812,16 @@ internal sealed unsafe class GroupOracle : IDisposable
         // At a quiet point no key is filling, so every key the session holds is complete on the client: the members it must hold through a key are exactly
         // those of the keys it holds complete — required ⊆ complete ⊆ possible was checked above — and the hysteresis band no longer licenses anything.
         var complete = new HashSet<int>();
+        var completeLists = new HashSet<int>();
         foreach (var (set, key) in replica.Store.CompleteGroups)
         {
-            if (set == 0)
+            if (set == _townSet)
             {
                 complete.Add((int)key);
+            }
+            else if (set == _listSet)
+            {
+                completeLists.Add((int)key);
             }
         }
 
@@ -670,7 +829,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         var margin = _anchorSlack + visibility + OracleHarness.MotionToleranceM + 0.01;
         CompareMembers(tx, session, replica, _buildingPlan, nameof(GroupBuilding), truth[_buildingPlan], complete, double.NaN, divergences);
         CompareMembers(tx, session, replica, _citizenPlan, nameof(GroupCitizen), truth[_citizenPlan], complete, margin, divergences);
-        CompareShards(tx, session, replica, truth[_shardPlan], complete, divergences);
+        CompareShards(tx, session, replica, truth[_shardPlan], complete, completeLists, divergences);
     }
 
     /// <summary>
@@ -678,7 +837,7 @@ internal sealed unsafe class GroupOracle : IDisposable
     /// not every shard. Every shard of a complete town is held, with its own state; no other is.
     /// </summary>
     private void CompareShards(Transaction tx, int session, SessionReplica replica, Dictionary<uint, EntityId> identified, HashSet<int> complete,
-        List<string> divergences)
+        HashSet<int> completeLists, List<string> divergences)
     {
         var held = new HashSet<uint>(replica.NetIds(_shardPlan));
         foreach (var netId in held)
@@ -693,14 +852,15 @@ internal sealed unsafe class GroupOracle : IDisposable
         {
             var reference = tx.Open(entity);
             var key = reference.Read(GroupPositionless.Key).Town;
+            var list = reference.Read(GroupPositionless.List).List;
             var netId = _harness.NetIdOf(entity);
             var holds = netId != 0 && held.Contains(netId);
-            if (complete.Contains(key))
+            if (complete.Contains(key) || completeLists.Contains(list))
             {
                 RequiredMembers++;
                 if (!holds)
                 {
-                    divergences.Add($"session {session}: shard entity {entity.RawValue} (netId {netId}, town {key}) must be held, its town is complete, and is not");
+                    divergences.Add($"session {session}: shard entity {entity.RawValue} (netId {netId}, town {key}, list {list}) must be held, its town or list is complete, and is not");
                     continue;
                 }
 
@@ -714,7 +874,7 @@ internal sealed unsafe class GroupOracle : IDisposable
             }
             else if (holds)
             {
-                divergences.Add($"session {session}: shard netId {netId} (entity {entity.RawValue}, town {key}) is held and no town of the client's holds it");
+                divergences.Add($"session {session}: shard netId {netId} (entity {entity.RawValue}, town {key}, list {list}) is held and no town or list of the client's holds it");
             }
         }
     }

@@ -55,7 +55,6 @@ public sealed class SubscriptionsRegistry
     private readonly List<CommandDeclaration> _commands = [];
     private readonly List<EventDeclaration> _events = [];
     private readonly List<MetricDeclaration> _metrics = [];
-    private readonly List<SourceDeclaration> _sources = [];
     private readonly List<GroupSetDeclaration> _groupSets = [];
 
     /// <summary>
@@ -91,9 +90,6 @@ public sealed class SubscriptionsRegistry
 
     /// <summary>The application's metrics, in declaration order. The built-ins are not listed here: the engine owns them.</summary>
     public IReadOnlyList<MetricDeclaration> Metrics => _metrics;
-
-    /// <summary>The shared sources, in declaration order.</summary>
-    public IReadOnlyList<SourceDeclaration> Sources => _sources;
 
     /// <summary>The group sets declared with <see cref="Groups"/>, in ordinal name order — the catalog's: a set's index is its number on the wire.</summary>
     public IReadOnlyList<GroupSetDeclaration> GroupSets => _groupSets;
@@ -222,7 +218,7 @@ public sealed class SubscriptionsRegistry
 
     /// <summary>
     /// Declares a group set (14 § 3): a family of groups, each a key its members carry in an indexed field, held by a session while its selector names the
-    /// key — for a region set, while the session's observer meets the region's extent (<see cref="ObserverBuilder.Groups"/>).
+    /// key — for a region set, while the session's observer meets the region's extent (<see cref="ObserverBuilder.Groups(string, double)"/>).
     /// </summary>
     /// <param name="name">The set's name, as profiles and the catalog name it.</param>
     /// <param name="configure">Declares the selector and the members.</param>
@@ -260,42 +256,6 @@ public sealed class SubscriptionsRegistry
         }
 
         _groupSets.Insert(at, set);
-        return this;
-    }
-
-    /// <summary>
-    /// Declares a shared non-spatial source: a View whose members are replicated to the sessions subscribed to it — a bazaar, a leaderboard, a roster.
-    /// </summary>
-    /// <param name="name">The source's name, as a session subscribes to it.</param>
-    /// <param name="view">The View whose membership drives enters and leaves.</param>
-    /// <param name="projection">Declares what of each member travels.</param>
-    /// <returns>This registry.</returns>
-    /// <remarks>
-    /// <b>Declared now, built in Phase 4</b> — a runtime that starts with one refuses to start and says so. Data with no position cannot be reached through
-    /// an observer, so an application that needs it should be able to say so against the shape it will eventually get, rather than inventing a spatial home
-    /// for a leaderboard in the meantime.
-    /// </remarks>
-    public SubscriptionsRegistry Source(string name, ViewBase view, Action<ArchetypeProjectionBuilder> projection)
-    {
-        ThrowIfFrozen();
-        ArgumentNullException.ThrowIfNull(view);
-        ArgumentNullException.ThrowIfNull(projection);
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new ArgumentException("A source needs a name.", nameof(name));
-        }
-
-        foreach (var existing in _sources)
-        {
-            if (string.Equals(existing.Name, name, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException($"Source '{name}' is already declared.");
-            }
-        }
-
-        var declaration = new SourceDeclaration(name, view, _sources.Count);
-        projection(new ArchetypeProjectionBuilder(declaration.Projection));
-        _sources.Add(declaration);
         return this;
     }
 
@@ -679,13 +639,6 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        if (_sources.Count > 0)
-        {
-            throw new NotSupportedException(
-                $"Source '{_sources[0].Name}' is declared, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
-                "travels as owner fields on the entity that owns it.");
-        }
-
         RefuseUnbuiltGroups();
     }
 
@@ -703,10 +656,10 @@ public sealed class SubscriptionsRegistry
     {
         foreach (var set in _groupSets)
         {
-            if (set.Region == null)
+            if (set.Selector == GroupSelector.None)
             {
-                throw new NotSupportedException(
-                    $"Group set '{set.Name}' declares no Region. Region sets are built; explicit and shared sets (SubscribeRequest, SetSources) are not yet.");
+                throw new InvalidOperationException(
+                    $"Group set '{set.Name}' declares no selector: Region<T>(...) for keys met by geometry, Explicit(...) for keys asked for, or Shared(key).");
             }
 
             if (set.Members.Count == 0)
@@ -755,19 +708,31 @@ public sealed class SubscriptionsRegistry
                 if (observer.Kind != ObserverKind.Sphere)
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile}' names group set '{interest.Set}' on a {observer.Kind} observer. Groups are built for Sphere observers; a World "
-                        + "session already holds everything, and the ClientRegion's hull test is not built yet.");
+                        $"Profile '{profile}' names group set '{interest.Set}' on a {observer.Kind} observer. Groups are built for Sphere observers: the group "
+                        + "gather is the Sphere's, and neither the World's nor the ClientRegion's has one yet.");
                 }
 
-                var found = false;
+                GroupSetDeclaration found = null;
                 foreach (var set in _groupSets)
                 {
-                    found |= string.Equals(set.Name, interest.Set, StringComparison.Ordinal);
+                    found = string.Equals(set.Name, interest.Set, StringComparison.Ordinal) ? set : found;
                 }
 
-                if (!found)
+                if (found == null)
                 {
                     throw new InvalidOperationException($"Profile '{profile}' names group set '{interest.Set}', which is not declared.");
+                }
+
+                if (found.Selector == GroupSelector.Region && !interest.HasReach)
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile}' names region set '{interest.Set}' with no reach: Groups(set, reachM) says how far from its extent a region is met.");
+                }
+
+                if (found.Selector != GroupSelector.Region && interest.HasReach)
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile}' names {found.Selector} set '{interest.Set}' with a reach. Its keys are not met by geometry: name it with Groups(set).");
                 }
 
                 count++;
@@ -897,36 +862,6 @@ public sealed class MetricDeclaration
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name} ({Unit}, {Kind})";
-}
-
-/// <summary>
-/// A shared non-spatial source and the projection its members travel under.
-/// </summary>
-[PublicAPI]
-public sealed class SourceDeclaration
-{
-    internal SourceDeclaration(string name, ViewBase view, int index)
-    {
-        Name = name;
-        View = view;
-        Index = index;
-        Projection = new ArchetypeProjection(name, null, index, isStatic: false);
-    }
-
-    /// <summary>The source's name.</summary>
-    public string Name { get; }
-
-    /// <summary>The View whose membership drives enters and leaves.</summary>
-    public ViewBase View { get; }
-
-    /// <summary>The order this source was declared in.</summary>
-    public int Index { get; }
-
-    /// <summary>What of each member travels.</summary>
-    public ArchetypeProjection Projection { get; }
-
-    /// <inheritdoc/>
-    public override string ToString() => $"{Name}: {Projection.Fields.Count} field(s)";
 }
 
 /// <summary>
