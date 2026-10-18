@@ -55,6 +55,50 @@ public sealed class ObserverBuilder
         return this;
     }
 
+    /// <summary>
+    /// Holds the groups of <paramref name="set"/> whose region this observer meets: within <paramref name="reachM"/> of the region's extent — its nearest
+    /// point, zero inside it (14 § 3.3, P6). A region set only, on a Sphere.
+    /// </summary>
+    /// <param name="set">A group set declared with <see cref="SubscriptionsRegistry.Groups"/>.</param>
+    /// <param name="reachM">The reach, metres, at least 0: "which sets I belong to", declared apart from what the sphere sees.</param>
+    /// <returns>This builder.</returns>
+    public ObserverBuilder Groups(string set, double reachM)
+    {
+        if (!double.IsFinite(reachM) || reachM < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reachM), reachM, "A group reach is a finite distance of at least 0.");
+        }
+
+        return AddGroups(set, reachM);
+    }
+
+    /// <summary>
+    /// Holds the keys of an explicit or a shared group set (14 § 4): the ones the session's client asked for and the application allowed, or the server
+    /// chose — or the set's one key, from the session's first frame. No reach: these keys are not met by geometry.
+    /// </summary>
+    /// <param name="set">The group set's name.</param>
+    /// <returns>This builder.</returns>
+    public ObserverBuilder Groups(string set) => AddGroups(set, double.NaN);
+
+    private ObserverBuilder AddGroups(string set, double reachM)
+    {
+        if (string.IsNullOrWhiteSpace(set))
+        {
+            throw new ArgumentException("Groups names a declared group set.", nameof(set));
+        }
+
+        foreach (var existing in _observer.GroupInterests)
+        {
+            if (string.Equals(existing.Set, set, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"This observer already names group set '{set}'.");
+            }
+        }
+
+        _observer.AddGroupInterest(new GroupInterest(set, reachM));
+        return this;
+    }
+
     /// <summary>Binds a sphere to an entity, so the region follows it.</summary>
     /// <param name="entity">The entity to follow.</param>
     /// <returns>This builder.</returns>
@@ -161,6 +205,13 @@ public sealed class ObserverBuilder
 public sealed class ObserverDeclaration
 {
     private readonly List<Type> _archetypes = [];
+
+    private readonly List<GroupInterest> _groupInterests = [];
+
+    /// <summary>The group sets this observer holds the groups of (<see cref="ObserverBuilder.Groups(string, double)"/>).</summary>
+    public IReadOnlyList<GroupInterest> GroupInterests => _groupInterests;
+
+    internal void AddGroupInterest(GroupInterest interest) => _groupInterests.Add(interest);
 
     internal ObserverDeclaration(ObserverKind kind) => Kind = kind;
 

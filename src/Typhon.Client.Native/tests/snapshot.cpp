@@ -273,6 +273,19 @@ Value Render(const FrameApplier& applier, std::vector<Value> events)
         sources.push_back(Value::MakeObject({{"requestId", Num(s.requestId)}, {"status", Num(s.status)}, {"code", Num(s.code)}}));
     }
 
+    std::vector<Value> groups;
+    for (const GroupEntry& g : applier.Groups())
+    {
+        groups.push_back(Value::MakeObject({{"kind", Num(g.kind)}, {"set", Num(g.set)}, {"key", Str(std::to_string(g.key))}}));
+    }
+
+    // Ascending (set, key): the applier keeps them sorted, the other SDKs sort into the same order.
+    std::vector<Value> completeGroups;
+    for (const auto& [set, key] : applier.CompleteGroups())
+    {
+        completeGroups.push_back(Value::MakeObject({{"set", Num(set)}, {"key", Str(std::to_string(key))}}));
+    }
+
     std::vector<Value> aggregates;
     for (const auto& g : applier.Grids())
     {
@@ -313,6 +326,8 @@ Value Render(const FrameApplier& applier, std::vector<Value> events)
                               {"self", std::move(selfJson)},
                               {"acks", Value::MakeArray(std::move(acks))},
                               {"sources", Value::MakeArray(std::move(sources))},
+                              {"groups", Value::MakeArray(std::move(groups))},
+                              {"completeGroups", Value::MakeArray(std::move(completeGroups))},
                               {"aggregates", Value::MakeArray(std::move(aggregates))},
                               {"metrics", std::move(metrics)},
                               {"anomalies", Num(static_cast<double>(applier.World().anomalies))}});

@@ -5,6 +5,7 @@ import type {
   CatalogCommand,
   CatalogField,
   CatalogGrid,
+  CatalogGroupSet,
   CatalogMetric,
   CatalogPosition,
 } from './catalog.js';
@@ -141,6 +142,7 @@ export function validateCatalog(c: Catalog, problems: string[]): void {
   }
 
   checkGrids(c.grids, c.archetypes.length, problems);
+  checkGroupSets(c.groupSets ?? [], c.archetypes.length, problems);
 }
 
 /**
@@ -210,6 +212,18 @@ export function checkCanonical(c: Catalog, problems: string[]): void {
     // Canonical order is total, so comparing neighbours finds a duplicate too: it compares equal to the grid before it.
     if (g.idx !== i || (i > 0 && compareGrids(c.grids[i - 1]!, g) >= 0)) {
       fail(`grid ${g.idx} is not at its sorted position, or duplicates the grid before it`);
+    }
+  });
+
+  const sets = c.groupSets ?? [];
+  if (c.groupSets !== undefined && sets.length === 0) {
+    fail('groupSets is listed and empty: a catalog with no group set omits it');
+  }
+
+  sets.forEach((s, i) => {
+    const sorted = s.members.every((m, j) => j === 0 || s.members[j - 1]! <= m);
+    if (s.idx !== i || (i > 0 && !(sets[i - 1]!.name < s.name)) || !sorted) {
+      fail(`group set '${s.name}' is not at its ordinal position, or its members are not ascending`);
     }
   });
 }
@@ -303,11 +317,31 @@ function checkCommand(cmd: CatalogCommand, enums: Catalog['enums'], maxBytes: nu
 
   if (cmd.name === BuiltInCommand.ClientRegion && !hasClientRegionShape(cmd)) {
     problems.push(`command '${cmd.name}' is a built-in whose shape does not match its definition`);
-  } else if (cmd.name === BuiltInCommand.SubscribeRequest) {
-    problems.push(`command '${cmd.name}' is reserved; its shape is decided when source subscriptions are built`);
+  } else if (cmd.name === BuiltInCommand.SubscribeRequest && !hasSubscribeRequestShape(cmd)) {
+    problems.push(`command '${cmd.name}' is a built-in whose shape does not match its definition`);
   }
 
   checkMessageFields(`command '${cmd.name}'`, cmd.fields, enums, maxBytes, problems);
+}
+
+/**
+ * `SubscribeRequest` is recognised by shape, not by name (14 § 4, P13): `{u16 requestId, varu set, vari64 key, u8 op}`, queued, 5 a second past a
+ * burst of 5 to 1024 (the server's `MaxGroupsPerSession`).
+ */
+function hasSubscribeRequestShape(cmd: CatalogCommand): boolean {
+  const kind = (name: string) => cmd.fields.find((f) => f.name === name)?.codec.t;
+  return (
+    cmd.fields.length === 4 &&
+    cmd.delivery === 'queued' &&
+    cmd.rate?.perSec === 5 &&
+    cmd.rate.burst >= 5 &&
+    cmd.rate.burst <= 1024 &&
+    kind('requestId') === 'u16' &&
+    kind('set') === 'varu' &&
+    kind('key') === 'vari64' &&
+    kind('op') === 'u8' &&
+    cmd.fields.every((f) => f.group === undefined && f.onEnter !== true && f.enum === undefined)
+  );
 }
 
 /** `ClientRegion` is recognised by shape, not by name (W28). */
@@ -581,6 +615,40 @@ function checkGrids(grids: readonly CatalogGrid[], archetypeCount: number, probl
       shapes.set(key, i);
     }
   });
+}
+
+const GROUP_KEY_CODECS: readonly string[] = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'u64', 'i64'];
+
+function checkGroupSets(sets: readonly CatalogGroupSet[], archetypeCount: number, problems: string[]): void {
+  const names = new Set<string>();
+  for (const s of sets) {
+    const where = `group set '${s.name}'`;
+    if (s.name === '' || names.has(s.name)) {
+      problems.push(`${where}: the name is empty or listed twice`);
+    }
+
+    names.add(s.name);
+    if (s.selector !== 'region' && s.selector !== 'explicit' && s.selector !== 'shared') {
+      problems.push(`${where}: selector '${s.selector}' is unknown`);
+    }
+
+    if (!GROUP_KEY_CODECS.includes(s.key)) {
+      problems.push(`${where}: key '${s.key}' is not an integer codec`);
+    }
+
+    if (s.members.length === 0) {
+      problems.push(`${where} has no member`);
+    }
+
+    const seen = new Set<number>();
+    for (const idx of s.members) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= archetypeCount || seen.has(idx)) {
+        problems.push(`${where}: member archetype index ${idx} does not exist or is listed twice`);
+      }
+
+      seen.add(idx);
+    }
+  }
 }
 
 /** Each realm kind once (typhon.3): a `REALM` block names its kind by index. Absent means the default `""` alone. */

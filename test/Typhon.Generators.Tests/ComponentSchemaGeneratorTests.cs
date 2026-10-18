@@ -27,7 +27,7 @@ namespace Typhon.Schema.Definition
         public CommitDiscipline DefaultDiscipline { get; set; }
     }
     public sealed class FieldAttribute : System.Attribute { public int? FieldId { get; set; } public string Name { get; set; } public string PreviousName { get; set; } }
-    public sealed class IndexAttribute : System.Attribute { public bool AllowMultiple { get; set; } public CascadeAction OnParentDelete { get; set; } }
+    public sealed class IndexAttribute : System.Attribute { public bool AllowMultiple { get; set; } public bool Sparse { get; set; } public CascadeAction OnParentDelete { get; set; } }
     public sealed class ForeignKeyAttribute : System.Attribute { public ForeignKeyAttribute(System.Type t) { } }
     public sealed class SpatialIndexAttribute : System.Attribute { public SpatialIndexAttribute(float cellSize = 0f) { } public SpatialMode Mode { get; set; } public uint Category { get; set; } }
     public enum StorageMode { Versioned = 0, SingleVersion = 1, Transient = 2 }
@@ -112,7 +112,7 @@ namespace Game
         public float X;
 
         [Field(PreviousName = ""Hitpoints"")]
-        [Index(AllowMultiple = true)]
+        [Index(AllowMultiple = true, Sparse = true)]
         public int Health;
 
         [ForeignKey(typeof(Fk))]
@@ -153,7 +153,7 @@ namespace Game
             Assert.That(reg, Does.Contain("managedOffsets: true"));
             // Field metadata carried faithfully.
             Assert.That(reg, Does.Contain("previousName: \"Hitpoints\""));
-            Assert.That(reg, Does.Contain("hasIndex: true, indexAllowMultiple: true"));
+            Assert.That(reg, Does.Contain("hasIndex: true, indexAllowMultiple: true, indexSparse: true"));
             Assert.That(reg, Does.Contain("isForeignKey: true, foreignKeyTargetType: typeof(global::Game.Fk)"));
             Assert.That(reg, Does.Contain("hasSpatialIndex: true"));
             Assert.That(reg, Does.Contain("spatialCellSize: 4f"));

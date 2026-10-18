@@ -175,6 +175,19 @@ public class TyphonClientTests
         });
     }
 
+    /// <summary>A second dispose returns at once: the session's owner and a <c>finally</c> may both dispose it.</summary>
+    [Test]
+    public async Task DisposeTwiceIsHarmless()
+    {
+        var transport = new FakeTransport(Welcome(), Frame(1, TickFlags.Reset, enters: [9], realm: true));
+        var client = new TyphonClient(new ClientOptions { Endpoint = new Uri("tcp://127.0.0.1:1/"), Reconnect = false, PingHz = 0 }, () => transport);
+        await client.ConnectAsync();
+        var pending = client.SubscribeAsync("nowhere", 1);
+        await client.DisposeAsync();
+        Assert.DoesNotThrowAsync(async () => await client.DisposeAsync());
+        Assert.ThrowsAsync<ArgumentException>(() => pending, "no such group set");
+    }
+
     private static async Task<Outcome> RunUntilDisconnected(FakeTransport transport, IEventHandler handler)
     {
         var transports = 0;

@@ -56,11 +56,92 @@ public static class BuiltInCommands
     /// <summary>The reserved index of <see cref="ClientRegion"/>.</summary>
     public const int ClientRegionIdx = 0;
 
-    /// <summary>The name of the source-subscription request (#204). Reserved; its shape is decided when Phase 4 opens.</summary>
+    /// <summary>
+    /// The name of a client's request for one key of an explicit group set (14 § 4, P13): <c>{u16 requestId, varu set, vari key, u8 op}</c>, answered in
+    /// <c>SOURCES</c> by <c>SOURCE_APPLIED{requestId}</c> once the key is complete — or released — or by <c>SOURCE_ERROR{requestId, code}</c>.
+    /// </summary>
     public const string SubscribeRequest = "SubscribeRequest";
 
     /// <summary>The reserved index of <see cref="SubscribeRequest"/>.</summary>
     public const int SubscribeRequestIdx = 1;
+
+    /// <summary>The <c>SubscribeRequest</c> field the client chose to recognise the answer by.</summary>
+    public const string SubscribeRequestIdField = "requestId";
+
+    /// <summary>The <c>SubscribeRequest</c> field naming the group set, by its index in the catalog's <c>groupSets</c>.</summary>
+    public const string SubscribeSetField = "set";
+
+    /// <summary>The <c>SubscribeRequest</c> field carrying the key, as a 64-bit integer.</summary>
+    public const string SubscribeKeyField = "key";
+
+    /// <summary>The <c>SubscribeRequest</c> field saying what to do with the key: <see cref="SubscribeOp"/> or <see cref="UnsubscribeOp"/>.</summary>
+    public const string SubscribeOpField = "op";
+
+    /// <summary>The <c>op</c> that asks for the key. 0 is no operation and refused.</summary>
+    public const byte SubscribeOp = 1;
+
+    /// <summary><c>SubscribeRequest</c>'s sustained rate, per second.</summary>
+    public const int SubscribeRatePerSec = 5;
+
+    /// <summary>
+    /// The fewest and the most requests a <c>SubscribeRequest</c> burst admits. A server sets it to the keys a session may hold of a set, so a client that
+    /// subscribes all of them at once — at login — is admitted in one tick; the sustained rate is fixed.
+    /// </summary>
+    public const int MinSubscribeBurst = 5;
+
+    /// <inheritdoc cref="MinSubscribeBurst"/>
+    public const int MaxSubscribeBurst = 1024;
+
+    /// <summary>The <c>op</c> that gives the key back.</summary>
+    public const byte UnsubscribeOp = 2;
+
+    /// <summary>Whether <paramref name="command"/> is shaped as <see cref="CreateSubscribeRequest"/> builds it, for any burst it admits.</summary>
+    /// <param name="command">A command named <see cref="SubscribeRequest"/>.</param>
+    /// <returns><see langword="true"/> when the shape matches.</returns>
+    public static bool HasSubscribeRequestShape(CatalogCommand command)
+    {
+        var fields = command.Fields ?? [];
+        var requestId = Array.Find(fields, f => f?.Name == SubscribeRequestIdField)?.Codec;
+        var set = Array.Find(fields, f => f?.Name == SubscribeSetField)?.Codec;
+        var key = Array.Find(fields, f => f?.Name == SubscribeKeyField)?.Codec;
+        var op = Array.Find(fields, f => f?.Name == SubscribeOpField)?.Codec;
+        return fields.Length == 4
+            && command.Delivery == CatalogCommand.QueuedDelivery
+            && command.Rate is { PerSec: SubscribeRatePerSec, Burst: >= MinSubscribeBurst and <= MaxSubscribeBurst }
+            && requestId?.Kind == CodecKind.U16
+            && set?.Kind == CodecKind.Varu
+            && key?.Kind == CodecKind.Vari64
+            && op?.Kind == CodecKind.U8
+            && Array.TrueForAll(fields, f => f is { Group: null, OnEnter: false, Enum: null });
+    }
+
+    /// <summary>Builds the <c>SubscribeRequest</c> command: every request kept, in order, 5 a second past a burst of <paramref name="burst"/>.</summary>
+    /// <param name="burst">The burst, <see cref="MinSubscribeBurst"/> to <see cref="MaxSubscribeBurst"/>; the engine's is the keys a session may hold of a set.</param>
+    /// <returns>The command definition.</returns>
+    public static CatalogCommand CreateSubscribeRequest(int burst = MinSubscribeBurst)
+    {
+        if (burst is < MinSubscribeBurst or > MaxSubscribeBurst)
+        {
+            throw new ArgumentOutOfRangeException(nameof(burst), burst, $"A SubscribeRequest burst is {MinSubscribeBurst} to {MaxSubscribeBurst}.");
+        }
+
+        return CreateSubscribeRequestOf(burst);
+    }
+
+    private static CatalogCommand CreateSubscribeRequestOf(int burst) => new()
+    {
+        Idx = SubscribeRequestIdx,
+        Name = SubscribeRequest,
+        Delivery = CatalogCommand.QueuedDelivery,
+        Rate = new CatalogCommandRate { PerSec = SubscribeRatePerSec, Burst = burst },
+        Fields =
+        [
+            new CatalogField { Name = SubscribeRequestIdField, Codec = new CatalogCodec { Kind = CodecKind.U16 } },
+            new CatalogField { Name = SubscribeSetField, Codec = new CatalogCodec { Kind = CodecKind.Varu } },
+            new CatalogField { Name = SubscribeKeyField, Codec = new CatalogCodec { Kind = CodecKind.Vari64 } },
+            new CatalogField { Name = SubscribeOpField, Codec = new CatalogCodec { Kind = CodecKind.U8 } },
+        ],
+    };
 
     /// <summary>The fewest vertices a flat world's region may carry: a triangle.</summary>
     public const int MinRegionVertices = 3;

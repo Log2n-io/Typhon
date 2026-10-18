@@ -105,6 +105,15 @@ struct CatalogGrid {
     std::vector<int> archetypes;
 };
 
+// A group set (14 § 3.5): entities sharing a key, held whole.
+struct CatalogGroupSet {
+    int idx = 0;
+    std::string name;
+    std::string selector;
+    std::string key;
+    std::vector<int> members;
+};
+
 struct CatalogMetric {
     int idx = 0;
     std::string name;
@@ -133,6 +142,9 @@ struct Catalog {
     std::vector<CatalogEvent> events;
     std::vector<CatalogCommand> commands;
     std::vector<CatalogGrid> grids;
+    // Absent in a catalog that declares none. Listed: the member was present and not null — an empty list is not canonical.
+    std::vector<CatalogGroupSet> groupSets;
+    bool groupSetsListed = false;
     std::vector<CatalogMetric> metrics;
 
     // The names of enum `name`, or nullptr.

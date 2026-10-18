@@ -814,14 +814,18 @@ internal static class SchemaEvolutionEngine
     }
 
     /// <summary>
-    /// Collects FieldIds of newly added indexes from the diff.
+    /// Collects FieldIds of the indexes that must be built from data rather than loaded: newly added ones, and ones whose kind changed.
     /// </summary>
+    /// <remarks>
+    /// A changed kind cannot load: a tree built sparse is missing every key-0 entity a dense one must find, and one built dense holds key-0 entries a sparse
+    /// one never removes (IX-09). The diff reported the change and nothing acted on it, so the old tree was loaded under the new flag.
+    /// </remarks>
     internal static HashSet<int> GetNewIndexFieldIds(SchemaDiff diff)
     {
         HashSet<int> result = null;
         foreach (var ic in diff.IndexChanges)
         {
-            if (ic.Kind == FieldChangeKind.IndexAdded)
+            if (ic.Kind is FieldChangeKind.IndexAdded or FieldChangeKind.IndexTypeChanged)
             {
                 result ??= new HashSet<int>();
                 result.Add(ic.FieldId);

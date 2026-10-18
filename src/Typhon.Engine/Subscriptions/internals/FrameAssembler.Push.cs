@@ -29,8 +29,14 @@ internal sealed unsafe partial class FrameAssembler
     // u8 bits, f64 cell, six f64 bounds.
     private const int RealmBlockBound = 1 + 5 + 2 + 2 + 1 + 5 + 4 + 1 + 8 + (6 * 8);
 
+    /// <summary>One <c>GROUP_COMPLETE</c> / <c>GROUP_RELEASED</c> record at its widest: kind, varu set, vari64 key.</summary>
+    private const int GroupRecordBound = 1 + 5 + 10;
+
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
+
+    /// <summary>The explicit group sets' requests and answers (14 § 4); null when no set is explicit.</summary>
+    internal GroupRequests Requests;
 
     /// <summary>The engine, whose EntityMap and clusters a followed entity's position is read from (09 § 6).</summary>
     internal DatabaseEngine Engine;
@@ -894,6 +900,16 @@ internal sealed unsafe partial class FrameAssembler
 
     // published: the bytes the session's frame published, or zero when it had nothing to say; left as it was when no frame was made — not its tick, or a
     // frame refused (degraded, lagging, no slot, oversize, no pool): the budget loop reads the link's rate, and a refusal is congestion, not quiet.
+    // A cursor older than the reliable ring: what the session is owed is gone, so it cannot be kept reliable (SUB-35). The skip sweep closes such a session
+    // first; this is the backstop, reached only by a bound the sweep does not see.
+    private void CloseIfUnreliable(SessionId session, bool lagging)
+    {
+        if (lagging && _sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater))
+        {
+            Interlocked.Increment(ref _sessionsClosedReliable);
+        }
+    }
+
     /// <summary>
     /// A session bound to no profile: a frame of the events routed to it — broadcasts and its own <c>EmitTo</c> — since its last one, and nothing else
     /// (09 § 11). No frame when none is owed; a frame not sent leaves the events owed, caught up from the log.
@@ -917,10 +933,16 @@ internal sealed unsafe partial class FrameAssembler
             var nowhere = new NoEventGeometry(state.PendingRealm is >= 0 and < RealmId.NoneValue ? (ushort)state.PendingRealm : RealmId.NoneValue,
                 Engine?.RealmTable);
             events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
-            if (bytes > _maxFrameBytes / 2)
+            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, EntityId.Null, session, ref nowhere, _maxFrameBytes / 2, out var reliable,
+                out var reliableBytes, out var lagging);
+            CloseIfUnreliable(session, lagging);
+            if (bytes + reliableBytes > _maxFrameBytes / 2)
             {
-                EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
+                events.ShedTo(scratch.EventPicks, (_maxFrameBytes / 2) - reliableBytes, ref count, ref bytes, ref lost);
             }
+
+            count += reliable;
+            bytes += reliableBytes;
         }
 
         var reset = state.PendingReset;
@@ -929,9 +951,14 @@ internal sealed unsafe partial class FrameAssembler
         // SELF, which sends every owner group on a RESET.
         var first = Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref locator, out var self);
-        if (count == 0 && !reset && !self.Write && self.Acks == 0)
+
+        // The SubscribeRequest answers it is owed (14 § 4): no profile names a set, so each is an error, a pending subscription's NotInProfile.
+        scratch.GroupRecords.Clear();
+        Requests?.Emit(session, null, scratch, _sessions.ProfileName(session));
+        if (count == 0 && !reset && !self.Write && self.Acks == 0 && scratch.GroupRecords.Count == 0)
         {
             state.EventsCursor = (uint)_tick;
+            events?.CommitReliable(state, scratch.EventPicks);
             CommitSelf(session, state, in self, -1, ref counters);
             return;
         }
@@ -948,9 +975,10 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self));
+        var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self) + SourcesBound(scratch));
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None, Realm != null, state.PendingFrame);
+        WriteSources(ref writer, scratch);
         WriteSelf(ref writer, in self, scratch);
         if (count > 0)
         {
@@ -972,8 +1000,10 @@ internal sealed unsafe partial class FrameAssembler
         PublishRealmView(session, state, reset);
         send.PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
+        Requests?.Retire(session, scratch.Answered);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
+        events?.CommitReliable(state, scratch.EventPicks);
         state.PendingReset = false;
         if (reset)
         {
@@ -986,6 +1016,43 @@ internal sealed unsafe partial class FrameAssembler
         scratch.AddReady(session);
         counters.FramesProduced++;
         counters.BytesEncoded += length;
+    }
+
+    // Upper bound of the SOURCES block for the worker's group records; 0 when it has none.
+    private static int SourcesBound(FrameWorkerScratch scratch) =>
+        scratch.GroupRecords.Count > 0 ? 1 + 5 + 5 + (scratch.GroupRecords.Count * GroupRecordBound) : 0;
+
+    // The SOURCES block of the worker's group records (14 § 3.5): the gather's, then the SubscribeRequest answers. Nothing when there are none.
+    private static void WriteSources(ref WireWriter writer, FrameWorkerScratch scratch)
+    {
+        if (scratch.GroupRecords.Count == 0)
+        {
+            return;
+        }
+
+        var sourcesMark = TickWriter.BeginBlock(ref writer, BlockTypes.Sources);
+        writer.WriteVaru((uint)scratch.GroupRecords.Count);
+        foreach (var g in scratch.GroupRecords)
+        {
+            if (g.Kind == SourceStatus.Applied)
+            {
+                writer.WriteU8(g.Kind);
+                writer.WriteU16((ushort)g.Key);
+            }
+            else if (g.Kind == SourceStatus.Error)
+            {
+                // An answer's request id in the key's low 16 bits, its code in the next 16.
+                writer.WriteU8(g.Kind);
+                writer.WriteU16((ushort)g.Key);
+                writer.WriteU16((ushort)(g.Key >> 16));
+            }
+            else
+            {
+                TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
+            }
+        }
+
+        TickWriter.EndBlock(ref writer, sourcesMark);
     }
 
     /// <summary>
@@ -1196,8 +1263,11 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // A rate-classed session's degrade class runs on the same staggered tick as its rate class: on the bare tick, a divisor-2 session of odd slot at
+        // degrade level 1 would pass one gate only on the ticks the other refuses, and never produce a frame — never closed either, since neither gate is a
+        // skip of its run. An undivided session keeps the bare tick, so every session at one level lands on the same ticks.
         ref var send = ref SendStateOf(session.Slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, divisor > 1 ? _tick + session.Slot : _tick))
         {
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1228,6 +1298,9 @@ internal sealed unsafe partial class FrameAssembler
             ResolveFollowed(index, session, ref follow, ref lost);
         }
 
+        // The session's visibility mask for this frame (14 § 6): a change of it makes this frame a RESET.
+        push.NoteVisibility(session, _sessions.VisibilityOf(session));
+
         bool reset, complete;
         if (_pushRegion[index])
         {
@@ -1248,7 +1321,7 @@ internal sealed unsafe partial class FrameAssembler
                     ref updates, out complete)
                 : push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
                     state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(push.TargetLevelOf(session)), ref enters,
-                    ref leaves, ref updates, out complete);
+                    ref leaves, ref updates, out complete, Profiles.GroupsOf(_pushProfiles[index]));
         }
 
         if (timing)
@@ -1293,11 +1366,20 @@ internal sealed unsafe partial class FrameAssembler
             events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
                 out eventBytes, out eventsLost);
 
-            // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
-            if (eventBytes > _maxFrameBytes / 2)
+            // Reliable events first (14 § 7): up to half a frame but at least one, the rest carried to the next frames — never shed.
+            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, _maxFrameBytes / 2,
+                out var reliable, out var reliableBytes, out var lagging);
+            CloseIfUnreliable(session, lagging);
+
+            // Events take at most half a frame: past it the best-effort ones are counted, not sent, so a burst cannot make every frame oversize and starve
+            // the session.
+            if (eventBytes + reliableBytes > _maxFrameBytes / 2)
             {
-                EventHub.Shed(scratch.EventPicks, ref eventCount, ref eventBytes, ref eventsLost);
+                events.ShedTo(scratch.EventPicks, (_maxFrameBytes / 2) - reliableBytes, ref eventCount, ref eventBytes, ref eventsLost);
             }
+
+            eventCount += reliable;
+            eventBytes += reliableBytes;
         }
 
         // The aggregate tier (09 § 8): on the session's aggregate tick — at most its rate, staggered by slot — the tiles of its region that changed since its
@@ -1356,7 +1438,12 @@ internal sealed unsafe partial class FrameAssembler
         // The first-frame RESET (below) decided before SELF, which sends every owner group on a RESET.
         var first = !reset && Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
-        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write && self.Acks == 0)
+
+        // The SubscribeRequest answers due in this frame (14 § 4), after the gather's own records: an APPLIED follows the GROUP_COMPLETE it reports.
+        Requests?.Emit(session, push, scratch, _sessions.ProfileName(session));
+        var groupRecords = scratch.GroupRecords.Count;
+        if (records == 0 && groupRecords == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write
+            && self.Acks == 0)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -1365,6 +1452,7 @@ internal sealed unsafe partial class FrameAssembler
             NoteSkip(state, counted: false);
             push.Commit(session);
             state.EventsCursor = (uint)_tick;
+            events?.CommitReliable(state, scratch.EventPicks);
             CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
             if (aggDue)
             {
@@ -1386,7 +1474,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
             + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
-            + SelfBound(in self) + RealmBlockBound;
+            + SelfBound(in self) + RealmBlockBound + SourcesBound(scratch);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm != null, state.PendingFrame);
@@ -1401,6 +1489,9 @@ internal sealed unsafe partial class FrameAssembler
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
         }
+
+        // SOURCES (14 § 3.5): applied after ENTITIES, so a GROUP_COMPLETE lands once the enters it completes are in the store.
+        WriteSources(ref writer, scratch);
 
         WriteSelf(ref writer, in self, scratch);
         if (eventCount > 0)
@@ -1463,7 +1554,9 @@ internal sealed unsafe partial class FrameAssembler
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
         push.Commit(session);
+        Requests?.Retire(session, scratch.Answered);
         state.EventsCursor = (uint)_tick;
+        events?.CommitReliable(state, scratch.EventPicks);
         CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
         if (aggDue)
         {
@@ -1574,6 +1667,10 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
 
     public bool Sees(float x, float y, float z, float viewRadius) =>
         World ? _push.WorldSeesPoint(_session, x, y, z) : _push.SeesPoint(_session, x, y, z, viewRadius);
+
+    public bool SeesTags(uint mask) => _push.SessionSees(_session, mask);
+
+    public GroupSessionState Groups => _push.GroupsOf(_session);
 }
 
 /// <summary>No geometry: a session with no profile sees no point, so the geometric routes never match it (09 § 11).</summary>
@@ -1603,6 +1700,10 @@ internal readonly ref struct NoEventGeometry : IEventGeometry
     }
 
     public bool Sees(float x, float y, float z, float viewRadius) => false;
+
+    public bool SeesTags(uint mask) => mask == 0;
+
+    public GroupSessionState Groups => null;
 }
 
 /// <summary>The realm parent tree, for <see cref="EventRouting.ToRealm"/> (12-realms § 3): routing only, never visibility.</summary>

@@ -68,6 +68,9 @@ internal sealed class ExclusiveWindow
     /// <summary>True while a fence is running on this engine.</summary>
     internal bool IsOpen => Volatile.Read(ref _depth) != 0;
 
+    /// <summary>True when the calling thread is part of a fence that is running on this engine: the fence's own thread or one of its workers.</summary>
+    internal bool OnFenceThread => FenceThreadDepth > 0 && IsOpen;
+
     /// <summary>Foreign mutations seen since the last <see cref="ResetCounters"/>. <c>AC-6.1</c> asserts this is zero.</summary>
     internal int Violations => Volatile.Read(ref _violations);
 

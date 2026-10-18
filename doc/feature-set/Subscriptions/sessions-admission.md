@@ -23,7 +23,9 @@ entity it controls — and all of that has to happen without the network thread 
 - **Session events** — `Opened`, `Closed` (with a `SessionCloseReason` and close code) — are delivered in the next tick's Engine-Pre, so a
   system reacts with an ordinary transaction. A session that opens and closes in one tick produces both, in order.
 - **Requests** through `ctx.Subscriptions.Session(id)`: `.Profile(name)` (a session with none receives nothing), `.Control(entity)`,
-  `.SetBudget(bytesPerSecond)`, `.Kick(code, reason)`. They are staged per worker and applied by the next tick's prologue, so any system
+  `.SetBudget(bytesPerSecond)`, `.Kick(code, reason)`, `.SetSources(set, keys)` (the server's keys of an explicit
+  [group set](./groups.md), beside the client's own), `.SetVisibility(mask)` (what tagged entities the session may see, 0 at admission; a change
+  re-sends its view — [Profiles & observers](./profiles-observers.md)). They are staged per worker and applied by the next tick's prologue, so any system
   may make them. `Place(session, point)` and `SetRadius(session, r)` apply now.
 - **Closing** is announced with a `KICK` carrying the code and reason, sent by the session's send pump after whatever it was writing.
 

@@ -104,6 +104,15 @@ struct ProjWallet
     public int ItemCount;
 }
 
+/// <summary>A visibility tag mask (14 § 6): 0 public. Read only where a test declares it.</summary>
+[Component("Typhon.Test.Proj.Visibility", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct ProjVisibility
+{
+    [Field]
+    public uint Mask;
+}
+
 // ProjCreature and ProjPlayer are also declared by their attributes (design/Subscriptions/11 § 5): subs.Archetype<T>() must compile to exactly what
 // DeclareCreature and DeclarePlayer write by hand (ReplicationAttributeTests). ProjRock shares ProjAi but names its Template "kind" — per-archetype variation
 // is what the builder is for, so it stays on the builder.
@@ -115,6 +124,7 @@ partial class ProjCreature : Archetype<ProjCreature>
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<ProjVitals> Vitals = Register<ProjVitals>();
+    public static readonly Comp<ProjVisibility> Visibility = Register<ProjVisibility>();
 }
 
 [Archetype]
@@ -132,6 +142,7 @@ partial class ProjRock : Archetype<ProjRock>
 {
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
+    public static readonly Comp<ProjVisibility> Visibility = Register<ProjVisibility>();
 }
 
 /// <summary>A 3D mover: three position axes, and enough <c>varu</c> state to push the hot entry past one cache line.</summary>
@@ -200,6 +211,7 @@ static class ProjectionTestSchema
         dbe.RegisterComponentFromAccessor<ProjAi>();
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.RegisterComponentFromAccessor<ProjVisibility>();
         dbe.ConfigureSpatialGrid(spatial);
         dbe.InitializeArchetypes();
         return dbe;
@@ -229,6 +241,7 @@ static class ProjectionTestSchema
         dbe.RegisterComponentFromAccessor<ProjAi>();
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.RegisterComponentFromAccessor<ProjVisibility>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
             worldMax: new Vector2(WorldExtentM, WorldExtentM),
@@ -242,15 +255,26 @@ static class ProjectionTestSchema
     }
 
     /// <summary>The creature projection, declared in the order a reader would write it.</summary>
-    public static void DeclareCreature(SubscriptionsRegistry subs)
+    /// <param name="subs">The registry.</param>
+    /// <param name="tags">The creature declares its visibility mask (14 § 6).</param>
+    public static void DeclareCreature(SubscriptionsRegistry subs) => DeclareCreature(subs, tags: false);
+
+    /// <inheritdoc cref="DeclareCreature(SubscriptionsRegistry)"/>
+    public static void DeclareCreature(SubscriptionsRegistry subs, bool tags)
     {
-        subs.Archetype<ProjCreature>(a => a
-            .Motion(ProjCreature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
-            .OnEnter(ProjCreature.Ai, x => x.Template, Codec.U8, name: "template")
-            .Field(ProjCreature.Ai, x => x.Mode, Codec.Enum<ProjAiMode>(bits: 3), name: "mode")
-            .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
-            .Field(ProjCreature.Ai, x => x.Level, Codec.U16, name: "level", group: "vitals")
-            .Fraction(ProjCreature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
+        subs.Archetype<ProjCreature>(a =>
+        {
+            a.Motion(ProjCreature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
+                .OnEnter(ProjCreature.Ai, x => x.Template, Codec.U8, name: "template")
+                .Field(ProjCreature.Ai, x => x.Mode, Codec.Enum<ProjAiMode>(bits: 3), name: "mode")
+                .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
+                .Field(ProjCreature.Ai, x => x.Level, Codec.U16, name: "level", group: "vitals")
+                .Fraction(ProjCreature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals");
+            if (tags)
+            {
+                a.Visibility(ProjCreature.Visibility, t => t.Mask);
+            }
+        });
     }
 
     /// <summary>The same creature projection with every call reversed, which W11 says must compile to the identical plan.</summary>
@@ -277,11 +301,21 @@ static class ProjectionTestSchema
     }
 
     /// <summary>A static archetype: sent once on enter, never updated, so it has no change groups at all.</summary>
-    public static void DeclareRock(SubscriptionsRegistry subs)
+    /// <param name="subs">The registry.</param>
+    /// <param name="tags">The rock declares its visibility mask (14 § 6).</param>
+    public static void DeclareRock(SubscriptionsRegistry subs) => DeclareRock(subs, tags: false);
+
+    /// <inheritdoc cref="DeclareRock(SubscriptionsRegistry)"/>
+    public static void DeclareRock(SubscriptionsRegistry subs, bool tags)
     {
-        subs.Static<ProjRock>(a => a
-            .Position(ProjRock.Bounds)
-            .Field(ProjRock.Ai, x => x.Template, Codec.U8, name: "kind"));
+        subs.Static<ProjRock>(a =>
+        {
+            a.Position(ProjRock.Bounds).Field(ProjRock.Ai, x => x.Template, Codec.U8, name: "kind");
+            if (tags)
+            {
+                a.Visibility(ProjRock.Visibility, t => t.Mask);
+            }
+        });
     }
 
     /// <summary>

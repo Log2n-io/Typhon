@@ -453,6 +453,28 @@ CatalogPlan::CatalogPlan(std::shared_ptr<const Catalog> catalog) : catalog_(std:
 
         grids_.push_back(std::make_unique<GridPlan>(c.grids[i], c.archetypes.size()));
     }
+
+    for (std::size_t i = 0; i < c.groupSets.size(); i++)
+    {
+        if (c.groupSets[i].idx != static_cast<int>(i))
+        {
+            throw Refuse("group set at position " + std::to_string(i) + " has index " + std::to_string(c.groupSets[i].idx));
+        }
+    }
+}
+
+int CatalogPlan::GroupSetIndex(std::string_view name) const
+{
+    const auto& sets = catalog_->groupSets;
+    for (std::size_t i = 0; i < sets.size(); i++)
+    {
+        if (sets[i].name == name)
+        {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
 }
 
 const ArchetypePlan& CatalogPlan::Archetype(std::uint32_t idx) const

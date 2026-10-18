@@ -269,6 +269,13 @@ internal static class CatalogSamples
             },
         ],
         Grids = [new CatalogGrid { TileCells = 4, Archetypes = [0, 2] }],
+
+        // Declared out of name order, members out of index order: canonicalization sorts both (crew is set 0, zone set 1).
+        GroupSets =
+        [
+            new CatalogGroupSet { Name = "zone", Selector = CatalogGroupSet.RegionSelector, Key = "i32", Members = [2, 0] },
+            new CatalogGroupSet { Name = "crew", Selector = CatalogGroupSet.RegionSelector, Key = "u16", Members = [1] },
+        ],
         Metrics =
         [
             BuiltInMetrics.Create(BuiltInMetrics.ReservedIdx("typhon.tick.p50")),
@@ -284,7 +291,8 @@ internal static class CatalogSamples
 
     /// <summary>
     /// catalog-exact (W32, W33, 13 § 3): the exact codecs on every record kind — the 64-bit integers and <c>f64</c> on archetype fields (onEnter, two
-    /// groups, an owner group), <c>count</c> shapes with their hints, and the same on an event and a command. Nobody's application, like
+    /// groups, an owner group), <c>count</c> shapes with their hints, and the same on an event and a command; and an explicit and a shared group set with the
+    /// <c>SubscribeRequest</c> built-in (14 § 4). Nobody's application, like
     /// <see cref="KitchenSink"/>; kept apart from it so the codecs it adds move no byte of that catalog's vectors.
     /// </summary>
     internal static Catalog Exact() => new()
@@ -357,6 +365,14 @@ internal static class CatalogSamples
                     new CatalogField { Name = "where", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 2 }, Shape = "point2" },
                 ],
             },
+            BuiltInCommands.CreateSubscribeRequest(),
+        ],
+
+        // 14 § 4: an explicit set a client asks keys of with SubscribeRequest, and a shared one every session holds.
+        GroupSets =
+        [
+            new CatalogGroupSet { Name = "lists", Selector = CatalogGroupSet.ExplicitSelector, Key = "i64", Members = [0] },
+            new CatalogGroupSet { Name = "board", Selector = CatalogGroupSet.SharedSelector, Key = "u64", Members = [0] },
         ],
     };
 

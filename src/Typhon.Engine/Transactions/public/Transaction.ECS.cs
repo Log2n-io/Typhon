@@ -2175,6 +2175,9 @@ public unsafe partial class Transaction
         // increment is a store other cores may be watching.
         var mutations = 0;
 
+        // A destroyed member leaves its group keys (14 § 5): logged before its entries go, for a replication gather that misses them in the tree.
+        var keyMoves = engineState.ClusterState?.GroupKeyMoves;
+
         for (int s = 0; s < ixSlots.Length; s++)
         {
             ref var ixSlot = ref ixSlots[s];
@@ -2199,6 +2202,7 @@ public unsafe partial class Transaction
                 // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
                 var useS64 = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment);
                 mutations++;   // (#665)
+                keyMoves?.Note(ixSlot.Slot, field.FieldOffset, destroyClusterLocation, fieldPtr);
                 if (field.AllowMultiple)
                 {
                     int elementId = *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));
@@ -2828,6 +2832,11 @@ public unsafe partial class Transaction
     /// <summary>Records a key this transaction puts in a unique index; a second put of one key — by the index's own comparison — is a violation.</summary>
     private static void ClaimOwnKey(IBTreeIndex index, byte* key)
     {
+        if (index.SkipsKey(key))
+        {
+            return;   // key 0 of a sparse index is no entry, so any number of entities hold it (IX-09)
+        }
+
         t_validationOwnKeys ??= new HashSet<UniqueKeyRef>();
         if (!t_validationOwnKeys.Add(new UniqueKeyRef(index, key)))
         {

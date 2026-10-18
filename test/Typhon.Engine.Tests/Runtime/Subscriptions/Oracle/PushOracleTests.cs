@@ -375,8 +375,10 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         oracle.AssertConverged("far flushes on cell crossings, with most frames skipped");
 
         // Whether a seed's sessions ever catch up depends on how the workload's churn renumbers clusters, not on the property: #582's fence-deferred
-        // reclamation left seed 7501 with none, at 150 ticks and at 300, while the other seeds catch up two to six times. It still checks convergence.
-        if (seed != 7501)
+        // reclamation left seed 7501 with none, at 150 ticks and at 300, while the other seeds catch up two to six times; #1030's tag component, which
+        // moved the creatures' and rocks' cluster layout, did the same to 7503 (with the component taken out it catches up again). It still checks
+        // convergence.
+        if (seed is not (7501 or 7503))
         {
             Assert.That(oracle.Push.LogCatchUps, Is.GreaterThan(0), "no session ever caught up, so no flush travelled through the log");
         }
@@ -828,6 +830,80 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         oracle.AssertConverged($"after {skippedTicks + 1} ticks the track did not run");
         Assert.That(oracle.Push.GapRepushes, Is.EqualTo(1), "the tick after the gap should re-push every live entity once");
         AssertLookedAtSomething(oracle);
+    }
+
+    /// <summary>The shapes the tagged oracle runs over.</summary>
+    public enum TaggedShape
+    {
+        World,
+        BandedSphere,
+        Region,
+
+        // Detection is the engine's own: a mask written and nothing told (14 § 6 — a write to the tag component alone is pushed).
+        AutomaticSphere,
+    }
+
+    /// <summary>
+    /// Visibility tags (14 § 6) on every shape the house oracle has: creatures and rocks under masks the churn flips, sessions that see public only, one tag
+    /// or both — now and then switching, a reset each — over a World, walking Spheres with three distance bands, and ClientRegions, with skipped frames.
+    /// At every quiet point a session holds exactly what its shape names AND it sees, every held value is the engine's, and no record was ever illegal.
+    /// </summary>
+    /// <param name="shape">The observer.</param>
+    /// <param name="skipPercent">The percentage of ticks on which the skipping sessions' frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-34")]
+    [VerifiesRule("SUB-03")]
+    public void TaggedSessionsHoldOnlyWhatTheySee([Values] TaggedShape shape, [Values(0, 60)] int skipPercent)
+    {
+        int[] skips = [0, 0, 0, skipPercent, skipPercent, skipPercent];
+        using var oracle = shape switch
+        {
+            TaggedShape.World => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8800 + skipPercent, skips,
+                nameof(PushOracleTests),
+                worldObserver: true, bigWorld: true, tags: true),
+            TaggedShape.BandedSphere => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8810 + skipPercent, skips,
+                nameof(PushOracleTests), walkRadius: 3000, bands: b => b.Every(2, beyond: 0.4).Every(4, beyond: 0.6).Every(8, beyond: 0.8), tags: true),
+            TaggedShape.AutomaticSphere => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8830 + skipPercent, skips,
+                nameof(PushOracleTests), PushDetection.Automatic, walkRadius: 3000, tags: true),
+            _ => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8820 + skipPercent, skips, nameof(PushOracleTests),
+                replicationCellM: 250, regionEdgeM: 6000, tags: true),
+        };
+        if (shape != TaggedShape.World)
+        {
+            oracle.Workload.WalkStrideM = 1.5f;
+        }
+
+        var hidden = 0L;
+        var required = 0L;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"tags over {shape}, after {i + 1} ticks at a {skipPercent}% skip rate");
+                hidden += oracle.HiddenAtLastPoint;
+                required += oracle.RequiredAtLastPoint;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hidden, Is.GreaterThan(100), "entities were hidden from sessions, and each checked not held");
+            Assert.That(oracle.Workload.MaskFlips, Is.GreaterThan(30), "masks changed under the churn");
+            Assert.That(oracle.SessionMaskChanges, Is.GreaterThan(0), "a session's own mask changed, which resets it");
+            Assert.That(oracle.EntersChecked, Is.GreaterThan(100), "enters were checked frame by frame against the receiving session's mask");
+            Assert.That(oracle.Compared, Is.GreaterThan(200), "the comparison looked at entities the sessions see");
+            if (shape != TaggedShape.World)
+            {
+                Assert.That(required, Is.GreaterThan(100), "the shapes held enough to mean something");
+            }
+
+            if (shape == TaggedShape.BandedSphere)
+            {
+                Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "the bands deferred updates, so the far paths ran under masks");
+            }
+        });
     }
 
     private static void AssertLookedAtSomething(OracleHarness oracle)

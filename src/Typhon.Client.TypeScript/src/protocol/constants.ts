@@ -105,11 +105,19 @@ export const Capabilities = {
   Debug: 2,
 } as const;
 
-/** A `SOURCES` entry's status. */
+/**
+ * A `SOURCES` record's kind (14 § 3.5): every record leads with it. The first two are a request's outcome, the last two a
+ * group's lifecycle.
+ */
 export const SourceStatus = {
+  /** `SOURCE_APPLIED { u16 requestId }`. */
   Applied: 0,
-  /** The request failed; the previous source set is kept, and a `u16` code follows. */
+  /** `SOURCE_ERROR { u16 requestId | u16 code }`: the request failed; the previous source set is kept. */
   Error: 1,
+  /** `GROUP_COMPLETE { varu set | vari key }`: every current member has entered, with the enters it completes. */
+  GroupComplete: 2,
+  /** `GROUP_RELEASED { varu set | vari key }`: no longer held; its members' leaves are in the same frame. */
+  GroupReleased: 3,
 } as const;
 
 /** Reason codes of an `ACKS` rejection record. Codes 128–255 belong to the application. */

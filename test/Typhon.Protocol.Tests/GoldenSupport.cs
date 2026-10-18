@@ -162,6 +162,10 @@ internal sealed class RecordingSink : ITickSink, ICommandSink
     public void Source(ushort requestId, byte status, ushort code) =>
         Log.Add(new JsonObject { ["call"] = "source", ["requestId"] = requestId, ["status"] = status, ["code"] = code });
 
+    // The key as decimal text: a 64-bit key read through a double in another SDK would compare equal to its neighbour.
+    public void Group(byte kind, uint set, long key) =>
+        Log.Add(new JsonObject { ["call"] = "group", ["kind"] = kind, ["set"] = set, ["key"] = key.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+
     public void BeginAggregate(CatalogGrid grid, bool reset) => Log.Add(new JsonObject { ["call"] = "beginAggregate", ["grid"] = grid.Idx, ["reset"] = reset });
 
     public void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts)

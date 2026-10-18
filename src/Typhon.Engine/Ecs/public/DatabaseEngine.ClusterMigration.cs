@@ -1218,8 +1218,9 @@ public partial class DatabaseEngine
                             // FieldSize bytes into an 8-byte struct (64 for a String64 field), smashing the stack and crashing the host. Same defect and
                             // same fix as the destroy twin (Transaction.ECS.cs:1393).
                             var fieldPtr = dstCompBase + field.FieldOffset;
+                            // A sparse tree holds no key 0 (IX-09): nothing to re-value, so nothing staged — for a group field most of the batch.
+                            var staged = !field.Index.SkipsKey(fieldPtr);
                             var stride = field.Index.BulkEntryStride(field.AllowMultiple);
-                            var dest = staging.Reserve(chunkIndex, fieldId, stride);
 
                             if (field.AllowMultiple)
                             {
@@ -1228,14 +1229,19 @@ public partial class DatabaseEngine
                                 // exactly where it is, so the destination inherits the source's id and one VSBS allocation per migrant per field disappears.
                                 // srcBase still holds the source cluster's bytes — step 4's copy is src -> dst and does not touch the elementId tail.
                                 var elementId = *(int*)(srcBase + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
-                                field.Index.WriteBulkMultiEntry(dest, fieldPtr, elementId, oldClusterLocation, newClusterLocation);
+                                if (staged)
+                                {
+                                    field.Index.WriteBulkMultiEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, elementId, oldClusterLocation,
+                                        newClusterLocation);
+                                }
+
                                 *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = elementId;
                             }
-                            else
+                            else if (staged)
                             {
                                 // Only where the tree names this migrant (#1348): the key its data holds may be another entity's in the tree, a unique
                                 // collision's holder when this migrant is the loser.
-                                field.Index.WriteBulkEntry(dest, fieldPtr, newClusterLocation, oldClusterLocation);
+                                field.Index.WriteBulkEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, newClusterLocation, oldClusterLocation);
                             }
 
                             // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.

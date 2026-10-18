@@ -1,7 +1,7 @@
 ---
 uid: concept-replication-event
 title: 'Replication event'
-description: 'A one-off fact the server tells clients — an attack, an explosion, a chat line — routed to the sessions it concerns, encoded once, best effort.'
+description: 'A one-off fact the server tells clients — an attack, an explosion, a chat line — routed to the sessions it concerns, encoded once, best effort or reliable.'
 ---
 
 # Replication event
@@ -24,9 +24,13 @@ An event is encoded once, after the tick's projection, and the same bytes reach 
 the netId the client knows (0 when it has none). A session that misses frames receives the events of the ticks it missed with its next
 one, from an event log eight ticks deep.
 
-**Events are best effort, by design.** A session more than eight ticks behind loses the events of the ticks past the log, and its next
-frame starts with the built-in `EventsLost` event counting them. Anything that must never be lost is **state**: a death is a mode change the
+**Events are best effort by default.** A session more than eight ticks behind loses the events of the ticks past the log, and its next
+frame starts with the built-in `EventsLost` event counting them. Most of what must never be lost is **state**: a death is a mode change the
 client learns from its next record, not only a message.
+
+**A reliable event** (`.Reliable()`) is for a fact the client cannot learn again from state — a trade's outcome, a loot drop. While a session
+lives, it receives every reliable event routed to it, once and in emission order; a session that cannot keep up is closed (1013) and
+reconnects. Reliable events are budgeted (`SubscriptionsOptions.ReliableEventBytes`): an emit past the budget is refused, never dropped later.
 
 ## How it relates
 

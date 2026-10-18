@@ -62,6 +62,7 @@ public:
     void Self(const client::ArchetypePlan* archetype, std::uint32_t netId, std::uint32_t lastSeq, std::uint8_t ownerMask) override;
     void Ack(std::uint32_t seq, std::uint8_t reason) override;
     void Source(std::uint32_t requestId, std::uint8_t status, std::uint32_t code) override;
+    void Group(std::uint8_t kind, std::uint32_t set, std::int64_t key) override;
     void BeginAggregate(const client::GridPlan& grid, bool reset) override;
     void AggregateCell(std::uint32_t cell, std::span<const std::uint32_t> counts) override;
     void Metric(const client::MetricPlan& metric, int valueIndex, double value) override;

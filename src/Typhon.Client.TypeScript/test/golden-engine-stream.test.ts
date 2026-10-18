@@ -90,6 +90,10 @@ class RecordingSink implements TickSink {
     this.calls.push(`source ${requestId}`);
   }
 
+  group(kind: number, set: number, key: bigint): void {
+    this.calls.push(`group ${kind} ${set} ${key}`);
+  }
+
   beginAggregate(grid: GridPlan): void {
     this.calls.push(`beginAggregate ${grid.idx}`);
   }

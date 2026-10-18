@@ -60,6 +60,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -150,6 +152,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -240,6 +244,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -330,6 +336,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -420,6 +428,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -510,6 +520,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -600,6 +612,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -690,6 +704,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -780,6 +796,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -870,6 +888,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -960,6 +980,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1050,6 +1072,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1223,6 +1247,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1403,6 +1429,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1583,6 +1611,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1763,6 +1793,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -1932,6 +1964,8 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,

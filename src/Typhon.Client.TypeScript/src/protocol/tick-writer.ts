@@ -2,6 +2,7 @@ import type { ArchetypePlan, CatalogPlan, GridPlan, MessagePlan, PositionPlan } 
 import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, SourceStatus, TickFlags } from './constants.js';
 import { writeNumber, writeSection, type FieldValues } from './field-codec.js';
+import { HIGH_WORD, LOW_WORD, wordsOf } from './int64.js';
 import { uintInRange } from './range.js';
 import { RealmFrame } from './realm-frame.js';
 import type { WireWriter } from './writer.js';
@@ -54,6 +55,13 @@ export interface SourceInput {
   readonly requestId: number;
   readonly status: number;
   readonly code?: number;
+}
+
+/** A group lifecycle record: {@link SourceStatus.GroupComplete} or {@link SourceStatus.GroupReleased}. */
+export interface GroupInput {
+  readonly kind: number;
+  readonly set: number;
+  readonly key: bigint | number;
 }
 
 const NO_VALUES: ArrayLike<number> = [];
@@ -253,16 +261,28 @@ export function writeAcksBlock(
   endBlock(w, mark);
 }
 
-/** A `SOURCES` block. */
-export function writeSourcesBlock(w: WireWriter, entries: readonly SourceInput[]): void {
+/** A `SOURCES` block: the requests' outcomes, then the groups' lifecycle records, each led by its kind. */
+export function writeSourcesBlock(
+  w: WireWriter,
+  entries: readonly SourceInput[],
+  groups: readonly GroupInput[] = [],
+): void {
   const mark = beginBlock(w, BlockType.Sources);
-  w.varu(entries.length);
+  w.varu(entries.length + groups.length);
   for (const e of entries) {
-    w.u16(uintInRange(e.requestId, 0xffff, 'requestId'));
     w.u8(uintInRange(e.status, 0xff, 'status'));
+    w.u16(uintInRange(e.requestId, 0xffff, 'requestId'));
     if (e.status === SourceStatus.Error) {
       w.u16(uintInRange(e.code ?? 0, 0xffff, 'code'));
     }
+  }
+
+  const words = new Uint32Array(2);
+  for (const g of groups) {
+    w.u8(uintInRange(g.kind, 0xff, 'kind'));
+    w.varu(uintInRange(g.set, 0xffffffff, 'set'));
+    wordsOf(g.key, true, words, 0, 'key');
+    w.vari64Words(words[LOW_WORD]!, words[HIGH_WORD]!);
   }
 
   endBlock(w, mark);

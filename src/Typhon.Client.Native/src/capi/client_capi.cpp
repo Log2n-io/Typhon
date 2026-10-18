@@ -1,6 +1,7 @@
 // The C ABI over Client: every entry point catches, so no exception crosses into C, and maps the exception to a status and a message.
 
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <new>
 #include <stdexcept>
@@ -19,6 +20,8 @@ struct typhon_client {
     std::string lastError;
     // A destroy asked for from one of this client's callbacks: carried out once the poll that runs them has returned.
     bool destroyPending = false;
+    // typhon_subscribe_results_get's view of the client's results, rebuilt by each call.
+    std::vector<typhon_subscribe_result> subscribeResults;
 };
 
 namespace typhon::client::capi {
@@ -611,6 +614,62 @@ uint32_t typhon_locate(const typhon_client* client, uint32_t net_id)
     return client == nullptr || client->client->Applier() == nullptr ? TYPHON_NOT_FOUND : client->client->Applier()->World().Locate(net_id);
 }
 
+static_assert(sizeof(GroupEntry) == sizeof(typhon_group_record) && offsetof(GroupEntry, kind) == offsetof(typhon_group_record, kind)
+              && offsetof(GroupEntry, set) == offsetof(typhon_group_record, set) && offsetof(GroupEntry, key) == offsetof(typhon_group_record, key));
+
+typhon_status typhon_groups_get(const typhon_client* client, const typhon_group_record** records, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(records);
+                     capi::RequireOut(count);
+                     const auto groups = capi::ApplierOf(client)->Groups();
+                     *records = reinterpret_cast<const typhon_group_record*>(groups.data());
+                     *count = groups.size();
+                     return TYPHON_OK;
+                 });
+}
+
+static_assert(sizeof(std::pair<std::uint32_t, std::int64_t>) == sizeof(typhon_complete_group)
+              && offsetof(typhon_complete_group, key) == sizeof(std::int64_t));
+
+typhon_status typhon_complete_groups_get(const typhon_client* client, const typhon_complete_group** groups, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(groups);
+                     capi::RequireOut(count);
+                     const auto complete = capi::ApplierOf(client)->CompleteGroups();
+                     *groups = reinterpret_cast<const typhon_complete_group*>(complete.data());
+                     *count = complete.size();
+                     return TYPHON_OK;
+                 });
+}
+
+int32_t typhon_group_is_complete(const typhon_client* client, uint32_t set, int64_t key)
+{
+    return client != nullptr && client->client->Applier() != nullptr && client->client->Applier()->IsGroupComplete(set, key) ? 1 : 0;
+}
+
+typhon_status typhon_group_set_index(const typhon_client* client, const char* name, uint32_t* out)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(out);
+                     const int idx = capi::ApplierOf(client)->Plan().GroupSetIndex(name != nullptr ? name : "");
+                     if (idx < 0)
+                     {
+                         throw std::invalid_argument(std::string("no group set '") + (name != nullptr ? name : "") + "'");
+                     }
+
+                     *out = static_cast<uint32_t>(idx);
+                     return TYPHON_OK;
+                 });
+}
+
 double typhon_client_now_ms(const typhon_client* client) { return client == nullptr ? 0 : client->client->NowMs(); }
 
 typhon_status typhon_clock_update(typhon_client* client, double now_ms)
@@ -670,6 +729,61 @@ typhon_status typhon_motion_evaluate_live(const typhon_client* client, uint32_t 
 
                      const Clock& clock = *const_cast<typhon_client*>(client)->client->RenderClock();
                      EvaluateLive(s, clock.RenderTick(), clock.RenderFrac(), {out, out_len});
+                     return TYPHON_OK;
+                 });
+}
+
+namespace {
+
+typhon_status Subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* requestId, std::uint8_t op)
+{
+    return Guard(client,
+                 [&]
+                 {
+                     capi::RequireOut(requestId);
+                     capi::ApplierOf(client);
+                     *requestId = client->client->Subscribe(set, key, op);
+                     return TYPHON_OK;
+                 });
+}
+
+}  // namespace
+
+typhon_status typhon_group_subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id)
+{
+    return Subscribe(client, set, key, request_id, typhon::client::SubscribeOp::Subscribe);
+}
+
+typhon_status typhon_group_unsubscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id)
+{
+    return Subscribe(client, set, key, request_id, typhon::client::SubscribeOp::Unsubscribe);
+}
+
+typhon_status typhon_subscribe_results_get(const typhon_client* client, const typhon_subscribe_result** results, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(results);
+                     capi::RequireOut(count);
+                     capi::ApplierOf(client);
+                     auto& out = const_cast<typhon_client*>(client)->subscribeResults;
+                     out.clear();
+                     for (const auto& r : client->client->SubscribeResults())
+                     {
+                         typhon_subscribe_result c{};
+                         c.request_id = r.requestId;
+                         c.op = r.op;
+                         c.outcome = static_cast<uint8_t>(r.outcome);
+                         c.code = r.code;
+                         c.ack_reason = r.ackReason;
+                         c.set = r.set;
+                         c.key = r.key;
+                         out.push_back(c);
+                     }
+
+                     *results = out.data();
+                     *count = out.size();
                      return TYPHON_OK;
                  });
 }

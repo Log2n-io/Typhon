@@ -11,6 +11,7 @@
 #include "apply/frame_applier.hpp"
 #include "clock/clock.hpp"
 #include "commands/command_queue.hpp"
+#include "commands/group_subscriptions.hpp"
 #include "net/connection.hpp"
 #include "net/reconnect.hpp"
 
@@ -108,8 +109,19 @@ public:
     double NowMs() const { return now_(); }
 
     // Sends the queued commands for the newest applied tick over the session's realm; dropped when the session is not open (counted by
-    // CommandQueue::DiscardedCount). Returns the messages sent.
+    // CommandQueue::DiscardedCount). Pumps the SubscribeRequests first. Returns the messages sent.
     int FlushCommands();
+
+    // Asks for (SubscribeOp::Subscribe) or gives back (Unsubscribe) one key of an explicit group set (14 § 4, P13) and returns the request's
+    // id; it goes with the next FlushCommands the command's rate allows, and its answer is among SubscribeResults after the Poll that
+    // brought it. Throws std::logic_error before the first WELCOME or when the catalog lists no SubscribeRequest, std::invalid_argument for
+    // a set that is not explicit, key 0 or another op.
+    std::uint16_t Subscribe(std::uint32_t set, std::int64_t key, std::uint8_t op);
+
+    // The requests that ended during the last Poll — answered, rejected, or dropped by a close — and any a Stop ended since. Valid until the
+    // next Poll.
+    std::span<const SubscribeResult> SubscribeResults() const { return {subscribeResults_.data(), subscribeResults_.size()}; }
+    const GroupSubscriptions* Subscriptions() const { return subscriptions_.get(); }
 
 private:
     void Open();
@@ -140,6 +152,10 @@ private:
     std::unique_ptr<Clock> clock_;
     std::unique_ptr<FrameApplier> applier_;
     std::unique_ptr<CommandQueue> commands_;
+    std::unique_ptr<GroupSubscriptions> subscriptions_;
+    std::vector<SubscribeResult> subscribeResults_;
+    // How many of subscribeResults_ the last Poll handed out: the next Poll drops those and keeps what a Stop added since.
+    std::size_t subscribeResultsShown_ = 0;
     std::unique_ptr<PingScheduler> ping_;
     CatalogHash planHash_{};
 };

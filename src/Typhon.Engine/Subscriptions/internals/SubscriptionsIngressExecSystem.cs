@@ -211,6 +211,9 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <summary>The frame assembler, for diagnostics only. Set by the runtime once both exist; nothing on the tick path reads it.</summary>
     internal FrameAssembler Frames;
 
+    /// <summary>The explicit group sets' requests (14 § 4), which a drained <c>SubscribeRequest</c> goes to; null when no set is explicit.</summary>
+    internal GroupRequests GroupRequests;
+
     /// <summary>The engine's realms, which <see cref="SubscriptionsCommands.Place(SessionId, RealmId, Vector3D)"/> checks a realm against; set at Start.</summary>
     internal RealmTable Realms;
 
@@ -657,6 +660,9 @@ internal sealed class SubscriptionsIngress : IDisposable
 
     private void DrainSession(SessionIngress row, int segment)
     {
+        // Last tick's SubscribeRequests, now that last tick's session requests — a profile bound on Opened among them — are in force (14 § 4).
+        GroupRequests?.DecideParked(row.Session, _sessions.ProfileName(row.Session));
+
         var scratch = _scratch[segment];
         for (var pass = 0; pass < MaxDrainPassesPerTick; pass++)
         {
@@ -729,6 +735,20 @@ internal sealed class SubscriptionsIngress : IDisposable
 
         // The realm the client held when it built the batch (12-realms § 2.5), from the frame stage's own record: tick side, like this drain.
         var built = RealmAt(row.Session, clientTick);
+        if (info.IsSubscribeRequest)
+        {
+            // An explicit group set's request (14 § 4): parked for the next tick's drain, then validated, decided by the application and answered in
+            // SOURCES — never a buffer, and an ACK only when it cannot be taken.
+            if (GroupRequests != null && SubscribeRequestRecord.TryRead(body, out var requestId, out var set, out var key, out var op)
+                && !GroupRequests.Park(row.Session, requestId, set, key, op))
+            {
+                // Its session is owed as many answers as it may be: refused like a request past the command's rate.
+                Buffers.Acks.Add(row.Session, seq, AckReasons.RateLimited);
+            }
+
+            return;
+        }
+
         if (info.IsClientRegion)
         {
             // A region framed in a realm the session has since left names places that are no longer its own: dropped, as the transport would have.
@@ -967,6 +987,10 @@ internal ref struct IngressCommandSink : ICommandSink
     private float _altitudeM;
     private ushort _budgetKiBps;
     private bool _open;
+    private ushort _requestId;
+    private uint _requestSet;
+    private long _requestKey;
+    private byte _requestOp;
 
     /// <summary>Creates a sink for one message.</summary>
     /// <param name="ingress">The ingress path.</param>
@@ -1001,6 +1025,10 @@ internal ref struct IngressCommandSink : ICommandSink
         _framed = false;
         _altitudeM = 0;
         _budgetKiBps = 0;
+        _requestId = 0;
+        _requestSet = 0;
+        _requestKey = 0;
+        _requestOp = 0;
         _open = _current != null;
 
         if (_current == null)
@@ -1046,6 +1074,24 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
+        if (_current.IsSubscribeRequest)
+        {
+            if (field.Name == BuiltInCommands.SubscribeRequestIdField)
+            {
+                _requestId = (ushort)Math.Clamp(components[0], 0, ushort.MaxValue);
+            }
+            else if (field.Name == BuiltInCommands.SubscribeSetField)
+            {
+                _requestSet = (uint)Math.Clamp(components[0], 0, uint.MaxValue);
+            }
+            else if (field.Name == BuiltInCommands.SubscribeOpField)
+            {
+                _requestOp = (byte)Math.Clamp(components[0], 0, byte.MaxValue);
+            }
+
+            return;
+        }
+
         if (_current.IsClientRegion)
         {
             if (field.Name == BuiltInCommands.RegionAltitudeField)
@@ -1076,6 +1122,16 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
+        if (_current.IsSubscribeRequest)
+        {
+            if (field.Name == BuiltInCommands.SubscribeKeyField)
+            {
+                _requestKey = unchecked((long)components[0]);
+            }
+
+            return;
+        }
+
         var bindings = _current.Bindings;
         if ((uint)field.Ordinal < (uint)bindings.Length)
         {
@@ -1086,7 +1142,7 @@ internal ref struct IngressCommandSink : ICommandSink
     /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
-        if (!_open || _current.IsClientRegion)
+        if (!_open || _current.IsBuiltIn)
         {
             return;
         }
@@ -1163,6 +1219,14 @@ internal ref struct IngressCommandSink : ICommandSink
         if (_current.IsClientRegion)
         {
             FlushRegion();
+            return;
+        }
+
+        if (_current.IsSubscribeRequest)
+        {
+            Span<byte> request = stackalloc byte[SubscribeRequestRecord.Bytes];
+            SubscribeRequestRecord.Write(request, _requestId, _requestSet, _requestKey, _requestOp);
+            SubscriptionsIngress.Publish(_row, (ushort)_current.WireIdx, _seq, _clientTick, request);
             return;
         }
 

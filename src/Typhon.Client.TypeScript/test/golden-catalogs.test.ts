@@ -212,7 +212,7 @@ describe('golden catalogs', () => {
     expect(problems).toMatch(/field 'text': codec 'str' carries a parameter its kind does not read/);
   });
 
-  it('recognises built-ins by shape, and refuses SubscribeRequest until its shape is decided', () => {
+  it('recognises built-ins by shape, SubscribeRequest among them', () => {
     const catalog = kitchenSink();
     catalog.commands[0]!.rate = { perSec: 50, burst: 50 };
     catalog.metrics[0]!.unit = 's';
@@ -223,7 +223,7 @@ describe('golden catalogs', () => {
 
     const subscribe = kitchenSink();
     subscribe.commands.splice(1, 0, { idx: 1, name: 'SubscribeRequest', delivery: 'latest', fields: [] });
-    expect(problemsOf(subscribe)).toMatch(/'SubscribeRequest' is reserved/);
+    expect(problemsOf(subscribe)).toMatch(/'SubscribeRequest' is a built-in whose shape/);
   });
 
   it('refuses grids without a tile, duplicated, or counting an archetype twice', () => {

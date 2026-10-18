@@ -34,6 +34,11 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 /// describes, from the reclamation's timing instead of the allocator's choice. Every run still converges and flat still equals deep.
 /// </para>
 /// <para>
+/// <b>Re-pinned by #1030</b> (every run, none of the flat/deep relationships): the fixture's <c>ProjCreature</c> and <c>ProjRock</c> gained a visibility tag
+/// component for the tagged oracle — undeclared here, so no mask is read — which moves their cluster layout and so the order entities are numbered in.
+/// The engine change alone keeps every constant: with the component taken out of the two archetypes, all fourteen runs gave the values they had before.
+/// </para>
+/// <para>
 /// <b>Both implementations</b> (10 § 3.5, L6): every run is also served by the deep implementation on the same flat world, and must give the flat one's
 /// digest — the deep geometry with z = 0 everywhere is the flat geometry, bit for bit (10 § 3.4). The one exception is a <c>World</c> fill the enter
 /// budget splits, whose frames follow key order, tile-major in the deep implementation.
@@ -68,7 +73,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1501, [0, 30, 60], nameof(PushFrameDigestTests),
             deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(7817184632393362037UL));
+        Assert.That(Run(oracle), Is.EqualTo(9376404375929097638UL));
     }
 
     [Test]
@@ -77,7 +82,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1502, [0, 60], nameof(PushFrameDigestTests),
             worldObserver: true, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(4190370453878381558UL));
+        Assert.That(Run(oracle), Is.EqualTo(3819234560863104122UL));
     }
 
     /// <summary>
@@ -100,7 +105,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
             }
 
             // The deep implementation walks its keys in tile order, so where the enter budget splits a fill its frames differ from the flat row order's.
-            Assert.That(digest, Is.EqualTo(deep ? 6838433372632719504UL : 9662215220212417540UL));
+            Assert.That(digest, Is.EqualTo(deep ? 651481155831991946UL : 12267079432801803586UL));
         });
     }
 
@@ -112,7 +117,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
 
         // The prototype's value. 2.4a re-pinned it to 18235304897354314830, blaming the declared band applying from tick 1: it was a flush window whose floor
         // wrapped in the first ticks and stripped their changes (AChangeInTheFirstTicksReachesAFarSession). With the floor wrap-safe, the value came back.
-        Assert.That(Run(oracle), Is.EqualTo(7873776348527644988UL));
+        Assert.That(Run(oracle), Is.EqualTo(8419250041192655937UL));
     }
 
     [Test]
@@ -121,6 +126,6 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1504, [0, 30], nameof(PushFrameDigestTests),
             worldObserver: world, every: 4, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(10946941685168650680UL));
+        Assert.That(Run(oracle), Is.EqualTo(5726398522903001248UL));
     }
 }

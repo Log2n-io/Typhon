@@ -28,6 +28,35 @@ internal abstract partial class BTree<TKey, TStore>
     /// <returns>True if the old key was found and moved; false if old key not found.</returns>
     public bool Move(TKey oldKey, TKey newKey, int value, ref ChunkAccessor<TStore> accessor)
     {
+        // A sparse tree holds no key 0 (IX-09): a move off it is an insert, a move onto it a removal. Off 0 onto a key another entity holds changes
+        // nothing and answers false, as the move between two real keys does — never the insert's throw.
+        if (Sparse)
+        {
+            var fromNone = SkipsKey(oldKey);
+            var toNone = SkipsKey(newKey);
+            if (fromNone || toNone)
+            {
+                ThrowIfFaulted();
+                if (!fromNone)
+                {
+                    return Remove(oldKey, out _, ref accessor);
+                }
+
+                if (toNone)
+                {
+                    return true;
+                }
+
+                if (TryGet(newKey, ref accessor).IsSuccess)
+                {
+                    return false;
+                }
+
+                Add(newKey, value, ref accessor, out _);
+                return true;
+            }
+        }
+
         while (true)
         {
             ThrowIfFaulted();
@@ -383,6 +412,25 @@ internal abstract partial class BTree<TKey, TStore>
     public int MoveValue(TKey oldKey, TKey newKey, int elementId, int value,
         ref ChunkAccessor<TStore> accessor, out int oldHeadBufferId, out int newHeadBufferId)
     {
+        // As Move. Onto key 0 the entity keeps no element, so its id is 0; a removal that misses still reports -1, which MoveValueOrReindex counts.
+        if (Sparse)
+        {
+            var fromNone = SkipsKey(oldKey);
+            var toNone = SkipsKey(newKey);
+            if (fromNone || toNone)
+            {
+                ThrowIfFaulted();
+                oldHeadBufferId = 0;
+                newHeadBufferId = 0;
+                if (!fromNone)
+                {
+                    return RemoveValue(oldKey, elementId, value, ref accessor) ? 0 : -1;
+                }
+
+                return toNone ? 0 : Add(newKey, value, ref accessor, out newHeadBufferId);
+            }
+        }
+
         while (true)
         {
             ThrowIfFaulted();
@@ -393,6 +441,7 @@ internal abstract partial class BTree<TKey, TStore>
                 // As Move: the old key may have been the tree's last, emptied and removed.
                 var elementIdAfter = MoveValueUnguarded(oldKey, newKey, elementId, value, ref accessor, out oldHeadBufferId, out newHeadBufferId);
                 _hasCachedLastKey = false;
+                ReclaimRetiredBuffers(accessor.ChangeSet, throttled: true);   // out of every latch (#1399)
                 return elementIdAfter;
             }
             catch (BackpressureIndexRestart restart) when (restartable)
@@ -528,6 +577,7 @@ internal abstract partial class BTree<TKey, TStore>
 
                     // Remove element from old buffer (VSBS via sibAccessor to avoid CA slot eviction)
                     var oldBufferId = leaf.GetItem(oi, ref opAccessor).Value;
+                    var released = 0;   // the buffer this move emptied, released once its latch is gone (#1399)
 
                     // Asked BEFORE the buffer mutation, like the authority check above. When this move empties the old buffer AND the new key already exists
                     // in this leaf, the leaf loses an entry with nothing coming in; if that would take it under half full, only the SMO path can borrow or
@@ -605,7 +655,7 @@ internal abstract partial class BTree<TKey, TStore>
                             if (oi >= 0)
                             {
                                 leaf.RemoveAtInternal(oi, ref opAccessor);
-                                _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                                released = oldBufferId;
                                 Interlocked.Decrement(ref _count);
                             }
                             // Re-find insertion point after removal
@@ -627,13 +677,14 @@ internal abstract partial class BTree<TKey, TStore>
                         if (oi >= 0)
                         {
                             leaf.RemoveAtInternal(oi, ref opAccessor);
-                            _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                            released = oldBufferId;
                             Interlocked.Decrement(ref _count);
                             countChanged = true;
                         }
                     }
 
                     latch.WriteUnlock();
+                    ReleaseBuffer(released, ref sibAccessor);
                     // The directory entry holds the key count and the root: neither moves unless a key came or went, and rewriting it dirtied the directory
                     // page on every move (#1346).
                     if (countChanged)
@@ -717,6 +768,7 @@ internal abstract partial class BTree<TKey, TStore>
                     }
 
                     var oldBufferId = oldLeaf.GetItem(oi, ref opAccessor).Value;
+                    var released = 0;   // the buffer this move emptied, released once its latch is gone (#1399)
 
                     // The old leaf loses its entry when this move empties the buffer, and nothing comes in to replace it. Move's twin bails whenever the old
                     // leaf is not half full; this asks the sharper question — will THIS move take an entry out, and would that underflow — and bails only
@@ -784,7 +836,7 @@ internal abstract partial class BTree<TKey, TStore>
                         if (oi >= 0)
                         {
                             oldLeaf.RemoveAtInternal(oi, ref opAccessor);
-                            _storage.DeleteBuffer(oldBufferId, ref sibAccessor);
+                            released = oldBufferId;
                             Interlocked.Decrement(ref _count);
                             countChanged = true;
                         }
@@ -792,6 +844,7 @@ internal abstract partial class BTree<TKey, TStore>
 
                     secondLatch.WriteUnlock();
                     firstLatch.WriteUnlock();
+                    ReleaseBuffer(released, ref sibAccessor);
                     if (countChanged)
                     {
                         SyncHeader(ref opAccessor);   // as the same-leaf path: only when a key came or went

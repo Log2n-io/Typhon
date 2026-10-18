@@ -39,9 +39,10 @@ public enum EventRouting
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Events are best effort, and that is a design statement rather than a limitation.</b> They accumulate per skipped session up to a cap and then the
-/// oldest are dropped with a loss count. Anything that must never be lost is state: a death is a mode change, not a message, and a client that missed the
-/// message still learns the creature is dead from its next record.
+/// <b>Events are best effort unless declared <see cref="Reliable"/>, and that is a design statement rather than a limitation.</b> A session that misses
+/// more than the log holds is told how many it lost. Anything a client can learn again is state: a death is a mode change, not a message, and a client
+/// that missed the message still learns the creature is dead from its next record. What it can never learn again — a trade's outcome, the loot it was
+/// given — is a reliable event: delivered once and in order to every live session it is routed to, or the session is closed.
 /// </para>
 /// <para>
 /// <b>Routing costs are per event, not per session.</b> <see cref="RouteNear(Func{T, Vector3D}, double)"/> buckets events by grid cell and each session collects the cells it overlaps,
@@ -167,6 +168,22 @@ public sealed partial class EventBuilder<T> where T : unmanaged
     }
 
     /// <summary>
+    /// Makes the event reliable (14 § 7, SUB-35): while a session lives it receives every one routed to it, once, in emission order — across skipped frames,
+    /// a <c>RESET</c>, and a burst larger than a frame, which goes over the next frames — and a session that cannot be kept so is closed with 1013. An emit
+    /// past <see cref="SubscriptionsOptions.ReliableEventBytes"/> is refused: <see cref="SubscriptionsCommands.Emit{T}"/> returns <see langword="false"/>.
+    /// </summary>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// The route is the event's own, judged against the session's geometry when the event is delivered. Not carried across a resume: a resumed session is
+    /// a new session, and the application re-sends what its client must learn.
+    /// </remarks>
+    public EventBuilder<T> Reliable()
+    {
+        _event.Reliable = true;
+        return this;
+    }
+
+    /// <summary>
     /// An entity reference the event carries. It travels as a netId, so a client receives the identity it already knows rather than a server-side id it
     /// could not use.
     /// </summary>
@@ -266,6 +283,9 @@ public sealed class EventDeclaration
 
     /// <summary>How the event finds its sessions.</summary>
     public EventRouting Routing { get; private set; }
+
+    /// <summary>Whether the event is reliable (<see cref="EventBuilder{T}.Reliable"/>).</summary>
+    public bool Reliable { get; internal set; }
 
     /// <summary>The routing radius in metres; 0 when the routing declared none.</summary>
     public double RoutingRadiusM { get; internal set; }

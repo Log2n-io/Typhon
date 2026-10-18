@@ -15,12 +15,12 @@
         "enter 53",
         "enter 54",
         "beginEntities ProjCreature",
-        "enter 106",
-        "enter 107",
-        "enter 108",
+        "enter 84",
+        "enter 85",
+        "enter 86",
         "beginEntities ProjRock",
-        "enter 156",
-        "enter 157",
+        "enter 129",
+        "enter 130",
         "endTick"
       ]
     },
@@ -74,12 +74,12 @@
         "enter 51",
         "enter 52",
         "beginEntities ProjCreature",
-        "enter 106",
-        "enter 107",
-        "enter 108",
+        "enter 84",
+        "enter 85",
+        "enter 86",
         "beginEntities ProjRock",
-        "enter 156",
-        "enter 157",
+        "enter 129",
+        "enter 130",
         "endTick"
       ]
     }

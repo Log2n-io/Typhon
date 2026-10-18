@@ -315,7 +315,7 @@ internal sealed class App : IDisposable
                 ? _cfg.CensusFile
                 : System.IO.Path.Combine(AppContext.BaseDirectory, _cfg.CensusFile);
             _census = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
-            _census.WriteLine("tick,ships,dirtyPages,acwPages,slotRefPages,epochHeldPages,unevictablePages,totalPages," +
+            _census.WriteLine("tick,ships,debtPages,acwPages,slotRefPages,epochHeldPages,unevictablePages,totalPages," +
                               "scoreB,scoreO,stationsB,stationsO,shipsB,shipsO,peakBpDebt,peakBpEpochHeld," +
                               "checkpoints,gatedCycles,segmentsRecycled,walBytes,walFiles,simMs,frameMs,worstFenceMs," +
                               "shipsMoved,shotsMoved,shotsFired,spawned,destroyed,acquireQ,hitQ,oreQ," +
@@ -328,7 +328,7 @@ internal sealed class App : IDisposable
         var peak = _host.PeakBackpressure();
         var (walBytes, walFiles) = _host.WalFootprint();
         _census.WriteLine($"{_host.Tick},{_sim.ShipsAlive[0] + _sim.ShipsAlive[1]}," +
-                          $"{pin.Dirty},{pin.Acw},{pin.SlotRef},{pin.EpochHeld},{pin.Unevictable},{pin.Total}," +
+                          $"{pin.Debt},{pin.Acw},{pin.SlotRef},{pin.EpochHeld},{pin.Unevictable},{pin.Total}," +
                           $"{_sim.Score(0)},{_sim.Score(1)},{_sim.StationsAlive[0]},{_sim.StationsAlive[1]},{_sim.ShipsAlive[0]},{_sim.ShipsAlive[1]}," +
                           $"{peak.Debt},{peak.EpochHeld}," +
                           $"{cp.Checkpoints},{cp.GatedCycles},{cp.SegmentsRecycled}," +
@@ -1506,7 +1506,8 @@ internal sealed class App : IDisposable
         Console.WriteLine($"PAGECACHE dirty {dirty.Dirty} of {dirty.Total} pages after a forced checkpoint, quiescent   " +
                           $"({100.0 * dirty.Dirty / Math.Max(1, dirty.Total):F1}% dirty)   first dirty page {dirty.FirstDirtyPage}");
         var pinNow = _host.CountPinnedPages();
-        Console.WriteLine($"PINS     dirty {pinNow.Dirty}  acw {pinNow.Acw}  slotRef {pinNow.SlotRef}  epochHeld {pinNow.EpochHeld}   " +
+        Console.WriteLine($"PINS     debt {pinNow.Debt}  acw {pinNow.Acw}  slotRef {pinNow.SlotRef}  epochHeld {pinNow.EpochHeld}  " +
+                          $"marked {pinNow.Marked}  epochOnly {pinNow.EpochOnly}   " +
                           $"unevictable {pinNow.Unevictable} of {pinNow.Total} ({100.0 * pinNow.Unevictable / Math.Max(1, pinNow.Total):F1}%)");
         if (_cfg.DirtyTracePage >= 0)
         {

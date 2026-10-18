@@ -27,7 +27,7 @@ public class GoldenMessageTests
                 "Every construct the wire has: every codec, all position kinds, an owner section, an unknown codec, labelled and session metrics."),
             ("catalog-exact", CatalogSamples.Exact(),
                 "The exact wire (W32, W33): u64, i64, f64, varu64 and vari64 on onEnter, group and owner fields, count shapes with their hints, and the "
-                + "same codecs on an event and a command."),
+                + "same codecs on an event and a command; an explicit and a shared group set, and the SubscribeRequest built-in (14 § 4)."),
             ("catalog-coll", CatalogSamples.Collections(),
                 "Collections (W34) on a public group, an onEnter field and an owner group; elements with a pack (bool, bits), a str, an entityRef, a u64 "
                 + "and an f32 × 2 point, declared out of wire order."),
@@ -165,10 +165,13 @@ public class GoldenMessageTests
     {
         var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Exact()));
         var transfer = plan.CommandByName("Transfer");
+        var subscribe = plan.CommandByName(BuiltInCommands.SubscribeRequest);
         var commands = new List<(MessagePlan, ushort, RecordValues)>
         {
             (transfer, 1, TransferValues((1UL << 53) + 1, [0, ulong.MaxValue], 0.1, long.MinValue, [1.5, -2.25])),
             (transfer, 2, TransferValues(ulong.MaxValue, [127, 128], double.NegativeInfinity, -1, [0, -0.0])),
+            (subscribe, 3, SubscribeValues(65_535, 1, long.MinValue, BuiltInCommands.SubscribeOp)),
+            (subscribe, 4, SubscribeValues(7, 1, (1L << 53) + 1, BuiltInCommands.UnsubscribeOp)),
         };
 
         var buffer = new byte[1024];
@@ -182,15 +185,31 @@ public class GoldenMessageTests
         Golden.Assert("message-commands-exact", bytes, new JsonObject
         {
             ["description"] = "COMMANDS against catalog-exact: two Transfers — a u64 at 2⁵³ + 1 and 2⁶⁴ − 1, a varu64 × 2 at its edges, an f64 (0.1, −∞), a "
-                + "vari64 at its minimum and −1, an f32 × 2 point with a negative zero.",
+                + "vari64 at its minimum and −1, an f32 × 2 point with a negative zero — and two SubscribeRequests on set 1 (lists): a subscribe with "
+                + "request id 65 535 and the minimum key, an unsubscribe of 2⁵³ + 1.",
             ["catalog"] = "catalog-exact",
             ["inputs"] = new JsonArray(
                 CommandInput("Transfer", 1, TransferJson((1UL << 53) + 1, [0, ulong.MaxValue], 0.1, long.MinValue, [1.5, -2.25])),
-                CommandInput("Transfer", 2, TransferJson(ulong.MaxValue, [127, 128], double.NegativeInfinity, -1, [0, -0.0]))),
+                CommandInput("Transfer", 2, TransferJson(ulong.MaxValue, [127, 128], double.NegativeInfinity, -1, [0, -0.0])),
+                CommandInput(BuiltInCommands.SubscribeRequest, 3, SubscribeJson(65_535, 1, long.MinValue, BuiltInCommands.SubscribeOp)),
+                CommandInput(BuiltInCommands.SubscribeRequest, 4, SubscribeJson(7, 1, (1L << 53) + 1, BuiltInCommands.UnsubscribeOp))),
             ["clientTick"] = 12_345,
             ["log"] = sink.Log.DeepClone(),
         });
     }
+
+    private static RecordValues SubscribeValues(ushort requestId, uint set, long key, byte op) => new()
+    {
+        [BuiltInCommands.SubscribeRequestIdField] = FieldValue.Of(requestId), [BuiltInCommands.SubscribeSetField] = FieldValue.Of(set),
+        [BuiltInCommands.SubscribeKeyField] = FieldValue.OfInt64(key), [BuiltInCommands.SubscribeOpField] = FieldValue.Of(op),
+    };
+
+    // As TransferJson: numbers by their bits, the 64-bit key as its bit pattern, so no SDK reads it through a double.
+    private static JsonObject SubscribeJson(ushort requestId, uint set, long key, byte op) => new()
+    {
+        [BuiltInCommands.SubscribeRequestIdField] = Golden.Bits([requestId]), [BuiltInCommands.SubscribeSetField] = Golden.Bits([set]),
+        [BuiltInCommands.SubscribeKeyField] = Golden.Bits64([unchecked((ulong)key)]), [BuiltInCommands.SubscribeOpField] = Golden.Bits([op]),
+    };
 
     private static RecordValues TransferValues(ulong amount, ulong[] memo, double ratio, long target, double[] where) => new()
     {

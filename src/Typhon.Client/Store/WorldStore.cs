@@ -124,6 +124,44 @@ public sealed class WorldStore
     /// <summary>This frame's source lifecycle entries.</summary>
     public List<(ushort RequestId, byte Status, ushort Code)> Sources { get; } = [];
 
+    /// <summary>
+    /// This frame's group lifecycle records (14 § 3.5), in stream order: <see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>,
+    /// the set's catalog index and the key.
+    /// </summary>
+    public List<(byte Kind, uint Set, long Key)> Groups { get; } = [];
+
+    /// <summary>The groups held complete: every current member is in the store, and stays there until the group's <c>GROUP_RELEASED</c>.</summary>
+    public int CompleteGroupCount => _completeGroups.Count;
+
+    /// <summary>The groups held complete, in no particular order.</summary>
+    public IReadOnlyCollection<(uint Set, long Key)> CompleteGroups => _completeGroups;
+
+    private readonly HashSet<(uint Set, long Key)> _completeGroups = [];
+
+    /// <summary>Whether a group is held complete: its <c>GROUP_COMPLETE</c> arrived, and neither its <c>GROUP_RELEASED</c> nor a <c>RESET</c> since.</summary>
+    /// <param name="set">The set's catalog index.</param>
+    /// <param name="key">The group's key.</param>
+    /// <returns><see langword="true"/> when every current member is in the store.</returns>
+    public bool IsGroupComplete(uint set, long key) => _completeGroups.Contains((set, key));
+
+    internal void Group(byte kind, uint set, long key)
+    {
+        Groups.Add((kind, set, key));
+        if (kind == SourceStatus.GroupComplete)
+        {
+            // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
+            if (!_completeGroups.Add((set, key)))
+            {
+                Anomalies++;
+            }
+        }
+        else
+        {
+            // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
+            _completeGroups.Remove((set, key));
+        }
+    }
+
     /// <summary>The tick of the frame most recently begun, or −1.</summary>
     public long Tick { get; internal set; } = -1;
 
@@ -227,6 +265,7 @@ public sealed class WorldStore
         Self.BeginFrame();
         Acks.Clear();
         Sources.Clear();
+        Groups.Clear();
     }
 
     /// <summary>Adopts a <c>REALM</c> block's frame: every aggregate grid is re-laid over it, and <see cref="RealmChanged"/> fires when it changed.</summary>
@@ -259,6 +298,7 @@ public sealed class WorldStore
         }
 
         Self.Clear();
+        _completeGroups.Clear();
     }
 }
 

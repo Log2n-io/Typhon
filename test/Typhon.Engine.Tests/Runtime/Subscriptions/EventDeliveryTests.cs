@@ -1,5 +1,6 @@
 ﻿using NUnit.Framework;
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Collections.Generic;
@@ -700,8 +701,8 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
 
     /// <summary>
     /// The tick path does not fail on events: a routing point that throws drops its event, counted, and the next tick's events travel; a burst larger than
-    /// half a frame is counted into EventsLost rather than making the frame oversize; emissions of a tick no frame stage encoded are discarded, not
-    /// delivered later.
+    /// half a frame sends its oldest events that fit the half and counts the rest into EventsLost, rather than making the frame oversize; emissions of a
+    /// tick no frame stage encoded are discarded, not delivered later.
     /// </summary>
     [Test]
     [VerifiesRule("SUB-21")]
@@ -747,7 +748,8 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
             Assert.That(recorder.Received.ConvertAll(e => e.Name), Is.EqualTo(new[] { nameof(ProjNotice) }));
         });
 
-        // A burst: 1 000 notices, several kilobytes against a 4 KiB frame — counted, and the frame still goes.
+        // A burst: 1 000 notices, several kilobytes against a 4 KiB frame — what fits half of it goes, oldest first, the rest is counted, and the frame
+        // still goes.
         for (var i = 0; i < 1000; i++)
         {
             commands.Emit(new ProjNotice { Seq = 100 + i, Kind = 1 });
@@ -755,11 +757,14 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
 
         harness.RunTick(++tick);
         Assert.That(harness.Deliver(session), Is.EqualTo(1), "the frame was published, not refused as oversize");
+        var sent = recorder.Received.Skip(1).Select(e => (int)e.Fields["Seq"]).ToList();
         Assert.Multiple(() =>
         {
-            Assert.That(recorder.Received, Has.Count.EqualTo(1), "none of the burst is sent");
-            Assert.That(recorder.Lost, Is.EqualTo(1000), "all of it is counted");
+            Assert.That(sent, Is.Not.Empty.And.Count.LessThan(1000), "part of the burst is sent");
+            Assert.That(sent, Is.EqualTo(Enumerable.Range(100, sent.Count)), "the oldest, in order");
+            Assert.That(sent.Count + recorder.Lost, Is.EqualTo(1000), "and the rest is counted");
         });
+        var heard = recorder.Received.Count;
 
         // A tick no frame stage encoded: its emissions are discarded when the next tick starts, not delivered then.
         commands.Emit(new ProjNotice { Seq = 5000, Kind = 1 });
@@ -769,7 +774,7 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
         Assert.Multiple(() =>
         {
             Assert.That(hub.DiscardedBytes, Is.GreaterThan(0));
-            Assert.That(recorder.Received, Has.Count.EqualTo(1), "the discarded notice never arrives");
+            Assert.That(recorder.Received, Has.Count.EqualTo(heard), "the discarded notice never arrives");
         });
     }
 

@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <algorithm>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "aggregates/aggregate_grid.hpp"
@@ -62,6 +64,14 @@ public:
     const SelfState& Self() const { return self_; }
     std::span<const AckEntry> Acks() const { return {acks_.data(), acks_.size()}; }
     std::span<const SourceEntry> Sources() const { return {sources_.data(), sources_.size()}; }
+    std::span<const GroupEntry> Groups() const { return {groups_.data(), groups_.size()}; }
+    // Whether a group is held complete: its GROUP_COMPLETE arrived, and neither its GROUP_RELEASED nor a RESET since.
+    bool IsGroupComplete(std::uint32_t set, std::int64_t key) const
+    {
+        return std::binary_search(completeGroups_.begin(), completeGroups_.end(), std::pair{set, key});
+    }
+    // The groups held complete, ascending by (set, key).
+    std::span<const std::pair<std::uint32_t, std::int64_t>> CompleteGroups() const { return {completeGroups_.data(), completeGroups_.size()}; }
     const StatsState& Stats() const { return stats_; }
 
     // The current frame's tick; -1 before the first.
@@ -90,6 +100,7 @@ public:
     void Self(const ArchetypePlan* archetype, std::uint32_t netId, std::uint32_t lastSeq, std::uint8_t ownerMask) override;
     void Ack(std::uint32_t seq, std::uint8_t reason) override;
     void Source(std::uint32_t requestId, std::uint8_t status, std::uint32_t code) override;
+    void Group(std::uint8_t kind, std::uint32_t set, std::int64_t key) override;
     void BeginAggregate(const GridPlan& grid, bool reset) override;
     void AggregateCell(std::uint32_t cell, std::span<const std::uint32_t> counts) override;
     void Metric(const MetricPlan& metric, int valueIndex, double value) override;
@@ -125,6 +136,9 @@ private:
     SelfState self_;
     Vec<AckEntry> acks_;
     Vec<SourceEntry> sources_;
+    Vec<GroupEntry> groups_;
+    // Sorted, so a steady frame reuses its capacity: a node-based set would allocate on every completion.
+    Vec<std::pair<std::uint32_t, std::int64_t>> completeGroups_;
     StatsState stats_;
     TickReader reader_;
     std::unique_ptr<EventPass> eventPass_;

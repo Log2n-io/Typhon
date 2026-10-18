@@ -83,6 +83,23 @@ public:
                  grid.archetypes = IntArray(g.Find("archetypes"), where + ".archetypes");
                  c.grids.push_back(std::move(grid));
              });
+        // Absent in a catalog that declares none; null reads as absent, as the C# model deserializes it.
+        if (Present(o.Find("groupSets")))
+        {
+            c.groupSetsListed = true;
+            List(o.Find("groupSets"), "groupSets",
+                 [&](const Value& g, const std::string& where)
+                 {
+                     CatalogGroupSet set;
+                     set.idx = Int(g, "idx", where);
+                     set.name = Str(g, "name", where);
+                     set.selector = Str(g, "selector", where);
+                     set.key = Str(g, "key", where);
+                     set.members = IntArray(g.Find("members"), where + ".members");
+                     c.groupSets.push_back(std::move(set));
+                 });
+        }
+
         List(o.Find("metrics"), "metrics", [&](const Value& m, const std::string& where) { c.metrics.push_back(ReadMetric(m, where)); });
         return c;
     }

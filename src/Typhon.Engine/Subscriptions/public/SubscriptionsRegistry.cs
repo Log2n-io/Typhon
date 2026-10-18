@@ -55,7 +55,7 @@ public sealed class SubscriptionsRegistry
     private readonly List<CommandDeclaration> _commands = [];
     private readonly List<EventDeclaration> _events = [];
     private readonly List<MetricDeclaration> _metrics = [];
-    private readonly List<SourceDeclaration> _sources = [];
+    private readonly List<GroupSetDeclaration> _groupSets = [];
 
     /// <summary>
     /// Creates a registry over the given options.
@@ -91,8 +91,8 @@ public sealed class SubscriptionsRegistry
     /// <summary>The application's metrics, in declaration order. The built-ins are not listed here: the engine owns them.</summary>
     public IReadOnlyList<MetricDeclaration> Metrics => _metrics;
 
-    /// <summary>The shared sources, in declaration order.</summary>
-    public IReadOnlyList<SourceDeclaration> Sources => _sources;
+    /// <summary>The group sets declared with <see cref="Groups"/>, in ordinal name order — the catalog's: a set's index is its number on the wire.</summary>
+    public IReadOnlyList<GroupSetDeclaration> GroupSets => _groupSets;
 
     /// <summary>
     /// Declares what clients may see of an archetype.
@@ -217,38 +217,45 @@ public sealed class SubscriptionsRegistry
     }
 
     /// <summary>
-    /// Declares a shared non-spatial source: a View whose members are replicated to the sessions subscribed to it — a bazaar, a leaderboard, a roster.
+    /// Declares a group set (14 § 3): a family of groups, each a key its members carry in an indexed field, held by a session while its selector names the
+    /// key — for a region set, while the session's observer meets the region's extent (<see cref="ObserverBuilder.Groups(string, double)"/>).
     /// </summary>
-    /// <param name="name">The source's name, as a session subscribes to it.</param>
-    /// <param name="view">The View whose membership drives enters and leaves.</param>
-    /// <param name="projection">Declares what of each member travels.</param>
+    /// <param name="name">The set's name, as profiles and the catalog name it.</param>
+    /// <param name="configure">Declares the selector and the members.</param>
     /// <returns>This registry.</returns>
-    /// <remarks>
-    /// <b>Declared now, built in Phase 4</b> — a runtime that starts with one refuses to start and says so. Data with no position cannot be reached through
-    /// an observer, so an application that needs it should be able to say so against the shape it will eventually get, rather than inventing a spatial home
-    /// for a leaderboard in the meantime.
-    /// </remarks>
-    public SubscriptionsRegistry Source(string name, ViewBase view, Action<ArchetypeProjectionBuilder> projection)
+    public SubscriptionsRegistry Groups(string name, Action<GroupSetBuilder> configure)
     {
         ThrowIfFrozen();
-        ArgumentNullException.ThrowIfNull(view);
-        ArgumentNullException.ThrowIfNull(projection);
+        ArgumentNullException.ThrowIfNull(configure);
         if (string.IsNullOrWhiteSpace(name))
         {
-            throw new ArgumentException("A source needs a name.", nameof(name));
+            throw new ArgumentException("A group set needs a name.", nameof(name));
         }
 
-        foreach (var existing in _sources)
+        foreach (var existing in _groupSets)
         {
             if (string.Equals(existing.Name, name, StringComparison.Ordinal))
             {
-                throw new InvalidOperationException($"Source '{name}' is already declared.");
+                throw new InvalidOperationException($"Group set '{name}' is already declared.");
             }
         }
 
-        var declaration = new SourceDeclaration(name, view, _sources.Count);
-        projection(new ArchetypeProjectionBuilder(declaration.Projection));
-        _sources.Add(declaration);
+        if (_groupSets.Count == MaxGroupSets)
+        {
+            throw new NotSupportedException($"Group set '{name}' would be the {MaxGroupSets + 1}th: a runtime declares at most {MaxGroupSets}.");
+        }
+
+        var set = new GroupSetDeclaration(name);
+        configure(new GroupSetBuilder(set));
+
+        // Ordinal name order, the catalog's: a set's index here is the one its SOURCES records carry.
+        var at = 0;
+        while (at < _groupSets.Count && string.CompareOrdinal(_groupSets[at].Name, name) < 0)
+        {
+            at++;
+        }
+
+        _groupSets.Insert(at, set);
         return this;
     }
 
@@ -632,12 +639,139 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        if (_sources.Count > 0)
+        RefuseUnbuiltGroups();
+    }
+
+    /// <summary>The most group sets a runtime declares: a key change is identified by (netId, set) in 40 bits.</summary>
+    internal const int MaxGroupSets = 256;
+
+    /// <summary>The most keys a session holds per set.</summary>
+    internal const int MaxGroupsPerSessionLimit = 1024;
+
+    /// <summary>
+    /// The group refusals that need no schema (14 § 3.8): a set with no selector, an explicit or shared one (step 4.3), a set no member joins, an interest
+    /// in a set nobody declared, groups on an observer that is not a Sphere, and a declaration without its per-session bound.
+    /// </summary>
+    private void RefuseUnbuiltGroups()
+    {
+        foreach (var set in _groupSets)
         {
-            throw new NotSupportedException(
-                $"Source '{_sources[0].Name}' is declared, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
-                "travels as owner fields on the entity that owns it.");
+            if (set.Selector == GroupSelector.None)
+            {
+                throw new InvalidOperationException(
+                    $"Group set '{set.Name}' declares no selector: Region<T>(...) for keys met by geometry, Explicit(...) for keys asked for, or Shared(key).");
+            }
+
+            if (set.Members.Count == 0)
+            {
+                throw new InvalidOperationException($"Group set '{set.Name}' names no member archetype: declare one with .Member<T>(m => m.Key(...)).");
+            }
         }
+
+        var interests = 0;
+        foreach (var profile in _profiles)
+        {
+            interests += CountGroupInterests(profile.Name, profile.Observers);
+            foreach (var (kind, variant) in profile.Variants)
+            {
+                interests += CountGroupInterests(profile.Name, variant.Observers);
+
+                // A session's explicit keys outlive a realm switch (14 § 4); the variant it switches into must name the same explicit sets, or a key it
+                // holds would stop filling, and its answer stop being owed, on a switch the client never asked for.
+                var based = RequestedSetsOf(profile.Observers);
+                var varied = RequestedSetsOf(variant.Observers);
+                if (!based.SetEquals(varied))
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile.Name}': its '{kind}' variant names the explicit sets [{string.Join(", ", varied)}], the base "
+                        + $"[{string.Join(", ", based)}]. A variant names the same ones: the keys a session holds in them outlive a realm switch.");
+                }
+            }
+        }
+
+        if (_groupSets.Count > 0 && Options.MaxGroupsPerSession > MaxGroupsPerSessionLimit)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.MaxGroupsPerSession = {Options.MaxGroupsPerSession}: at most {MaxGroupsPerSessionLimit}. Each session holds "
+                + "sets × MaxGroupsPerSession keys and cursors, committed and pending, whether it uses them or not.");
+        }
+
+        if (_groupSets.Count > 0 && Options.MaxGroupsPerSession <= 0)
+        {
+            throw new InvalidOperationException(
+                $"Group set '{_groupSets[0].Name}' is declared and SubscriptionsOptions.MaxGroupsPerSession is not set. It bounds the one per-session cost a "
+                + "group set has — the keys a session holds and their fill cursors — and there is no default that suits every application.");
+        }
+
+        if (interests > 0 && _groupSets.Count == 0)
+        {
+            throw new InvalidOperationException("A profile names a group set, and none is declared: declare it with subs.Groups(name, ...).");
+        }
+    }
+
+    // The explicit sets the observers name, ordered for the message.
+    private SortedSet<string> RequestedSetsOf(IReadOnlyList<ObserverDeclaration> observers)
+    {
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var observer in observers)
+        {
+            foreach (var interest in observer.GroupInterests)
+            {
+                foreach (var set in _groupSets)
+                {
+                    if (set.Selector == GroupSelector.Explicit && string.Equals(set.Name, interest.Set, StringComparison.Ordinal))
+                    {
+                        names.Add(set.Name);
+                    }
+                }
+            }
+        }
+
+        return names;
+    }
+
+    private int CountGroupInterests(string profile, IReadOnlyList<ObserverDeclaration> observers)
+    {
+        var count = 0;
+        foreach (var observer in observers)
+        {
+            foreach (var interest in observer.GroupInterests)
+            {
+                if (observer.Kind != ObserverKind.Sphere)
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile}' names group set '{interest.Set}' on a {observer.Kind} observer. Groups are built for Sphere observers: the group "
+                        + "gather is the Sphere's, and neither the World's nor the ClientRegion's has one yet.");
+                }
+
+                GroupSetDeclaration found = null;
+                foreach (var set in _groupSets)
+                {
+                    found = string.Equals(set.Name, interest.Set, StringComparison.Ordinal) ? set : found;
+                }
+
+                if (found == null)
+                {
+                    throw new InvalidOperationException($"Profile '{profile}' names group set '{interest.Set}', which is not declared.");
+                }
+
+                if (found.Selector == GroupSelector.Region && !interest.HasReach)
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile}' names region set '{interest.Set}' with no reach: Groups(set, reachM) says how far from its extent a region is met.");
+                }
+
+                if (found.Selector != GroupSelector.Region && interest.HasReach)
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile}' names {found.Selector} set '{interest.Set}' with a reach. Its keys are not met by geometry: name it with Groups(set).");
+                }
+
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private void ThrowIfFrozen()
@@ -760,36 +894,6 @@ public sealed class MetricDeclaration
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name} ({Unit}, {Kind})";
-}
-
-/// <summary>
-/// A shared non-spatial source and the projection its members travel under.
-/// </summary>
-[PublicAPI]
-public sealed class SourceDeclaration
-{
-    internal SourceDeclaration(string name, ViewBase view, int index)
-    {
-        Name = name;
-        View = view;
-        Index = index;
-        Projection = new ArchetypeProjection(name, null, index, isStatic: false);
-    }
-
-    /// <summary>The source's name.</summary>
-    public string Name { get; }
-
-    /// <summary>The View whose membership drives enters and leaves.</summary>
-    public ViewBase View { get; }
-
-    /// <summary>The order this source was declared in.</summary>
-    public int Index { get; }
-
-    /// <summary>What of each member travels.</summary>
-    public ArchetypeProjection Projection { get; }
-
-    /// <inheritdoc/>
-    public override string ToString() => $"{Name}: {Projection.Fields.Count} field(s)";
 }
 
 /// <summary>

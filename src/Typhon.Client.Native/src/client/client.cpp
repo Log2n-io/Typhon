@@ -34,6 +34,19 @@ private:
     int& depth_;
 };
 
+// At the end of a Poll, whichever way it returns: the subscribe results it handed out, which the next Poll drops.
+class PollEnd {
+public:
+    PollEnd(std::size_t& shown, const std::vector<SubscribeResult>& results) : shown_(shown), results_(results) {}
+    ~PollEnd() { shown_ = results_.size(); }
+    PollEnd(const PollEnd&) = delete;
+    PollEnd& operator=(const PollEnd&) = delete;
+
+private:
+    std::size_t& shown_;
+    const std::vector<SubscribeResult>& results_;
+};
+
 }  // namespace
 
 Client::Client(ClientOptions options)
@@ -88,6 +101,9 @@ bool Client::Poll(int timeoutMs)
     }
 
     retired_.clear();
+    subscribeResults_.erase(subscribeResults_.begin(), subscribeResults_.begin() + static_cast<std::ptrdiff_t>(subscribeResultsShown_));
+    subscribeResultsShown_ = 0;
+    const PollEnd end(subscribeResultsShown_, subscribeResults_);
     const Depth depth(depth_);
     const double now = now_();
     if (status_ == ClientStatus::WaitingToReconnect)
@@ -146,6 +162,16 @@ bool Client::Poll(int timeoutMs)
     return handled;
 }
 
+std::uint16_t Client::Subscribe(std::uint32_t set, std::int64_t key, std::uint8_t op)
+{
+    if (subscriptions_ == nullptr)
+    {
+        throw std::logic_error("no session has opened yet: the catalog is unknown");
+    }
+
+    return subscriptions_->Request(set, key, op);
+}
+
 const SessionInfo* Client::Session() const { return connection_ != nullptr ? connection_->Session() : nullptr; }
 
 int Client::FlushCommands()
@@ -159,6 +185,11 @@ int Client::FlushCommands()
     {
         commands_->Clear();
         return 0;
+    }
+
+    if (subscriptions_ != nullptr)
+    {
+        subscriptions_->Pump([this](const MessagePlan& command, std::span<const NamedValue> values) { return commands_->Enqueue(command, values); });
     }
 
     const auto tick = applier_->Tick() >= 0 ? static_cast<std::uint32_t>(applier_->Tick()) : 0u;
@@ -209,6 +240,13 @@ void Client::OnWelcome(const SessionInfo& session)
         applier.onReset = options_.onReset;
         applier_ = std::make_unique<FrameApplier>(session.plan, std::move(applier));
         commands_ = std::make_unique<CommandQueue>(session.plan, now_);
+        if (subscriptions_ != nullptr)
+        {
+            subscriptions_->Reset();
+        }
+
+        subscriptions_ = std::make_unique<GroupSubscriptions>(session.plan);
+        subscriptions_->onAnswer = [this](const SubscribeResult& result) { subscribeResults_.push_back(result); };
         ping_ = std::make_unique<PingScheduler>(catalog.pingHz > 0 ? catalog.pingHz : 4);
         planHash_ = session.catalogHash;
     }
@@ -223,6 +261,11 @@ void Client::OnWelcome(const SessionInfo& session)
 void Client::OnTick(std::span<const std::uint8_t> message, double recvMs)
 {
     applier_->Apply(message, recvMs);
+    if (subscriptions_ != nullptr)
+    {
+        subscriptions_->Observe(applier_->Acks(), applier_->Sources());
+    }
+
     if (options_.onFrame)
     {
         options_.onFrame();
@@ -256,6 +299,12 @@ void Client::OnClose(const ConnectionClose& close)
     if (commands_ != nullptr)
     {
         commands_->Clear();
+    }
+
+    // The session is over: what it was asked is unanswered, and a new one holds none of it.
+    if (subscriptions_ != nullptr)
+    {
+        subscriptions_->Reset();
     }
 
     // Only a close that carries a token replaces it: an attempt that failed before WELCOME had no session, and the token of the one that

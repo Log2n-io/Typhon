@@ -1,5 +1,6 @@
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions;
@@ -194,19 +195,25 @@ class SessionRequestLogTests
         Assert.That(log.Apply(_table), Is.Zero);
     }
 
+    /// <summary>SetSources (14 § 4, P14) names an explicit set and keys that are never 0, refused at the call site; a valid one is recorded.</summary>
     [Test]
-    public void SetSourcesThrowsAtTheCallSiteNamingPhase4()
+    public void SetSourcesRefusesWhatItCannotApplyAtTheCallSite()
     {
         var session = OpenSession();
         var log = new SessionRequestLog(1);
 
-        Assert.That(() => log.Request(0, session).SetSources(), Throws.InstanceOf<NotSupportedException>().With.Message.Contains("Phase 4"));
-
+        Assert.That(() => log.Request(0, session).SetSources("lists", 7), Throws.ArgumentException.With.Message.Contains("not an explicit group set"),
+            "no explicit set is declared");
+        log.ExplicitSets = new HashSet<string>(StringComparer.Ordinal) { "lists" };
         Assert.Multiple(() =>
         {
-            Assert.That(log.Count, Is.Zero);
-            Assert.That(log.Apply(_table), Is.Zero);
+            Assert.That(() => log.Request(0, session).SetSources("towns", 7), Throws.ArgumentException);
+            Assert.That(() => log.Request(0, session).SetSources("lists", 7, 0), Throws.InstanceOf<ArgumentOutOfRangeException>());
+            Assert.That(log.Count, Is.Zero, "nothing refused is recorded");
         });
+
+        log.Request(0, session).SetSources("lists", 7, 9);
+        Assert.That(log.Count, Is.EqualTo(1));
     }
 
     /// <summary>
@@ -222,7 +229,7 @@ class SessionRequestLogTests
         log.Request(0, session).SetBudget(1234);
 
         // Past SessionRequest, which refuses this at the call site: the backstop inside Apply is what this is about, and it must not keep the records.
-        log.Segment(1).Add(session, SessionRequestKind.SetSources, 0, Array.Empty<SourceDeclaration>());
+        log.Segment(1).Add(session, SessionRequestKind.Observe, 0, "observer");
 
         Assert.That(() => log.Apply(_table), Throws.InstanceOf<NotSupportedException>());
 

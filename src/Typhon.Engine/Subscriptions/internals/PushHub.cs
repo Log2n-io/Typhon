@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 
 namespace Typhon.Engine.Internals;
 
@@ -22,7 +23,7 @@ namespace Typhon.Engine.Internals;
 /// its own gap detection and bootstrap (<see cref="PushReplication.BeginRealmTick"/>), so a realm activated late re-pushes its own entities only.
 /// </para>
 /// </remarks>
-internal sealed unsafe class PushHub
+internal sealed unsafe partial class PushHub
 {
     private readonly ArchetypeReplicationState[] _states;
     private readonly int[] _pushIndices;
@@ -44,6 +45,13 @@ internal sealed unsafe class PushHub
 
     // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
     private readonly long[][] _repush;
+
+    // Per archetype, the chunks given a repush since the blocks step last consumed them: a list per projection worker (the worker owning the block is the
+    // chunk's one writer) and one for the blocks step itself. The step reads these, not every chunk id, so its work follows what is pushed again (SUB-13).
+    private readonly int[][][] _repushTouched;
+    private readonly int[][] _repushTouchedCount;
+    private readonly int[][] _repushSerial;
+    private readonly int[] _repushSerialCount;
 
     // The realm map the collector routes the archetype it is collecting by, or null when the engine has one realm.
     private ushort[] _realmMap;
@@ -73,6 +81,11 @@ internal sealed unsafe class PushHub
 
     /// <summary>Slots marked pushed, cumulative.</summary>
     public long SlotsPushed;
+
+    /// <summary>
+    /// Touched-list entries the blocks steps read, cumulative: what the repush costs per tick, which follows the chunks pushed again (SUB-13).
+    /// </summary>
+    public long RepushVisited;
 
     /// <summary>The blocks step's collector, cumulative, in Stopwatch ticks.</summary>
     public long PrepareTicks;
@@ -107,6 +120,33 @@ internal sealed unsafe class PushHub
     /// </para>
     /// </remarks>
     public long RealmPassSteps;
+
+    /// <summary>
+    /// Pushed clusters denied a block because their archetype's pool was at its budget, summed over ticks: one per cluster per tick it waited (SUB-32).
+    /// </summary>
+    public long BlockDeferrals;
+
+    /// <summary>Pushed clusters left without a block on the last blocks step, every archetype together. Zero is the healthy reading.</summary>
+    public int BlocklessClusters;
+
+    /// <summary>Where the start and the end of an exhaustion are reported; <see langword="null"/> logs nothing, the counters above still count.</summary>
+    internal ILogger Logger;
+
+    /// <summary>The plans' names by plan index, for the exhaustion log; <see langword="null"/> logs the index.</summary>
+    internal string[] ArchetypeNames;
+
+    /// <summary>
+    /// <b>Test seams, and deliberate ones.</b> The two moves SUB-32 forbids, applied to the production path so the rule's verifier can be shown to reject
+    /// them: dropping a denied cluster's push instead of deferring it, and keeping a drained cluster's pending pushes. Nothing in production sets them.
+    /// </summary>
+    internal bool DropDeniedPushesForTest;
+
+    /// <inheritdoc cref="DropDeniedPushesForTest"/>
+    internal bool KeepDrainedRepushesForTest;
+
+    // Per plan index: the tick its pool began refusing pushed clusters (0 while it is not), and BlockDeferrals then, for the recovery line.
+    private readonly long[] _exhaustedSince;
+    private readonly long[] _deferralsAtExhaustion;
 
     /// <summary>Builds the hub over one served realm's replication.</summary>
     /// <param name="states">Every plan's replication state, by plan index.</param>
@@ -143,9 +183,15 @@ internal sealed unsafe class PushHub
         _pushCount = new int[n];
         _pushBlocks = new nint[n][];
         _repush = new long[n][];
+        _repushTouched = new int[n][][];
+        _repushTouchedCount = new int[n][];
+        _repushSerial = new int[n][];
+        _repushSerialCount = new int[n];
         _validateCursor = new int[n];
         _validating = new Dictionary<int, ulong>[n];
         _forgottenGroups = new long[n][];
+        _exhaustedSince = new long[n];
+        _deferralsAtExhaustion = new long[n];
         for (var a = 0; a < n; a++)
         {
             _validating[a] = [];
@@ -158,6 +204,9 @@ internal sealed unsafe class PushHub
             _pushBlocks[a] = new nint[64];
             _pushMasks[a] = new ulong[64];
             _repush[a] = [];
+            _repushTouched[a] = [];
+            _repushTouchedCount[a] = [];
+            _repushSerial[a] = new int[16];
         }
 
         _byRealm = new PushReplication[1];
@@ -226,6 +275,19 @@ internal sealed unsafe class PushHub
 
     // Realm-local slots nobody was placed in are given back every this many ticks: a session that closed or lost its profile leaves its slot until then.
     private const uint SweepEvery = 64;
+
+    /// <summary>The replication of the realm <paramref name="session"/> was last placed in, or <see langword="null"/> when it holds no realm's slot.</summary>
+    internal PushReplication PlacedFor(SessionId session)
+    {
+        var slot = (uint)session.Slot;
+        if (slot >= (uint)_placement.Length)
+        {
+            return null;
+        }
+
+        var p = _placement[slot];
+        return p != 0 && (ushort)p == session.Generation ? For((ushort)(p >> 16)) : null;
+    }
 
     /// <summary>The realm-local slot <paramref name="session"/> holds in <paramref name="realm"/>'s replication, or 0 when it holds none there.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -508,6 +570,7 @@ internal sealed unsafe class PushHub
             _active[r].FinishIndex();
         }
 
+        FinishUnplaced();
         if (!sessions)
         {
             return 0;
@@ -577,6 +640,8 @@ internal sealed unsafe class PushHub
 
             _active[r].PrepareWorldOrder();
         }
+
+        FinishUnplaced();
     }
 
     /// <summary>Every served realm's far flushes into the tick's log slot.</summary>
@@ -636,11 +701,23 @@ internal sealed unsafe class PushHub
     public void PrepareBlocks(uint tick)
     {
         var from = Stopwatch.GetTimestamp();
+        var blockless = 0;
         var active = Active;
         RealmPassSteps += _activeCount;
         for (var r = 0; r < active.Length; r++)
         {
             active[r].BeginRealmTick(tick);
+        }
+
+        // Positionless members (14 § 5): the keys every session holds decide which of them have state, and the referrers the last projection left waiting
+        // on one with no block are recorded for when it gets one. The key moves the projection has caught up on are pruned.
+        _tick = tick;
+        if (_anyLazy)
+        {
+            CollectWanted();
+            References?.DrainLazyMisses(this);
+            PurgeWaitingReferrers();
+            PruneKeyMoves();
         }
 
         foreach (var a in _pushIndices)
@@ -735,24 +812,31 @@ internal sealed unsafe class PushHub
                 }
             }
 
-            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads.
+            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads. Not a
+            // positionless member's: most of its clusters have no block by design.
             _validating[a].Clear();
-            if (anyPartial && ValidateClustersPerTick > 0)
+            if (anyPartial && ValidateClustersPerTick > 0 && !_lazy[a])
             {
                 Validate(a, cs, tick, slotMask);
             }
 
             // Slots still extrapolating or denied an identity last tick: the engine's own pushes. A client dead-reckons a mover until told it stopped, so a
             // mover that stops without a write must still be visited, and an entity with no identity is invisible until it gets one.
+            // Only the chunks touched since the last step: a chunk listed twice, or forgotten by a drain since, reads 0 the second time and is passed.
             var repush = _repush[a];
-            for (var c = 0; c < repush.Length; c++)
+            ConsumeRepush(a, repush, _repushSerial[a], ref _repushSerialCount[a], slotMask);
+            var touched = _repushTouched[a];
+            for (var w = 0; w < touched.Length; w++)
             {
-                var w = (ulong)repush[c];
-                if (w != 0UL)
-                {
-                    AddPush(a, c, w & slotMask, anyPass: true);
-                    repush[c] = 0;
-                }
+                ConsumeRepush(a, repush, touched[w], ref _repushTouchedCount[a][w], slotMask);
+            }
+
+            // A positionless member's state follows the held keys (P5′): the clusters of a key newly held are pushed, and a block no held key needs any more is
+            // released — before the blocks below are attached, so a released block is never listed for this tick's projection.
+            if (_lazy[a])
+            {
+                PushNewlyWanted(a, slotMask);
+                SweepLazy(a);
             }
 
             // Blocks for every cluster pushed into. Serial by contract (pool and directory are single-threaded here).
@@ -761,22 +845,73 @@ internal sealed unsafe class PushHub
                 Array.Resize(ref _pushBlocks[a], _pushChunks[a].Length);
             }
 
+            var denied = 0;
+            if (_lazy[a])
+            {
+                denied = AttachLazy(a, state, slotMask);
+                blockless += denied;
+                NoteExhaustion(a, state, denied, tick);
+                continue;
+            }
+
             for (var i = 0; i < _pushCount[a]; i++)
             {
                 var chunk = _pushChunks[a][i];
-                var table = state.BlockByChunk;
-                var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+                var block = state.BlockAt(chunk);
                 if (block == null && !state.TryAttachBlock(chunk, out block))
                 {
+                    // DEFERRED, never dropped (SUB-32). A cluster with no block has nothing of it described, so the slots pushed into it now are the only
+                    // record that its entities exist and what changed; discarding them left a static entity invisible until some unrelated write pushed
+                    // it again, which for scenery is never. Kept in the repush list, they are offered again next tick and attach the first tick a block
+                    // frees: the wide-body arena's deferral, for the same reason (06 § 8).
                     block = null;
+                    if (!DropDeniedPushesForTest)
+                    {
+                        RepushFromBlocksStep(a, chunk, _pushMasks[a][i]);
+                    }
+
+                    denied++;
                 }
 
                 _pushBlocks[a][i] = (nint)block;
             }
+
+            blockless += denied;
+            NoteExhaustion(a, state, denied, tick);
         }
 
+        BlockDeferrals += blockless;
+        BlocklessClusters = blockless;
         PrepareTicks += Stopwatch.GetTimestamp() - from;
     }
+
+    /// <summary>
+    /// Logs the edges of an archetype's pool exhaustion: once when it starts refusing clusters, once when every pushed cluster has a block again. Never
+    /// per tick: a server short of budget for an hour would otherwise log 180 000 lines saying the same thing.
+    /// </summary>
+    private void NoteExhaustion(int a, ArchetypeReplicationState state, int denied, uint tick)
+    {
+        if (denied > 0 && _exhaustedSince[a] == 0)
+        {
+            _exhaustedSince[a] = tick;
+            _deferralsAtExhaustion[a] = BlockDeferrals;
+            if (Logger != null)
+            {
+                SubscriptionsLog.StatePoolExhausted(Logger, NameOf(a), denied, state.Pool.BudgetBytes, state.Pool.BlockCount, state.Pool.BlockStride);
+            }
+        }
+        else if (denied == 0 && _exhaustedSince[a] != 0)
+        {
+            if (Logger != null)
+            {
+                SubscriptionsLog.StatePoolRecovered(Logger, NameOf(a), tick - _exhaustedSince[a], BlockDeferrals - _deferralsAtExhaustion[a]);
+            }
+
+            _exhaustedSince[a] = 0;
+        }
+    }
+
+    private string NameOf(int a) => ArchetypeNames != null && (uint)a < (uint)ArchetypeNames.Length ? ArchetypeNames[a] : $"#{a}";
 
     /// <summary>Adds the validator's clusters for this tick to the push set, remembering which of their slots were not pushed otherwise.</summary>
     private void Validate(int a, ArchetypeClusterState cs, uint tick, ulong slotMask)
@@ -886,6 +1021,9 @@ internal sealed unsafe class PushHub
     public void MarkPushed(int workers, bool countInProject = false)
     {
         Workers = workers;
+        SizeRepushLists(workers);
+
+        BeginUnplaced(workers);
         foreach (var a in _pushIndices)
         {
             var state = _states[a];
@@ -934,16 +1072,112 @@ internal sealed unsafe class PushHub
             Array.Resize(ref r, Math.Max(chunkId + 1, r.Length * 2));
         }
 
+        if (r[chunkId] == 0)
+        {
+            Touch(ref _repushSerial[archetype], ref _repushSerialCount[archetype], chunkId);
+        }
+
         r[chunkId] |= (long)slots;
     }
 
-    /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
-    public void Repush(int archetype, int chunkId, ulong slots)
+    /// <summary>
+    /// Forgets every pending repush of a cluster that has just drained, so its id is never pushed, and never given a block, after it stops being a cluster.
+    /// </summary>
+    /// <remarks>
+    /// Called from the fence's cluster retirement, which runs before the blocks step and single-threaded per archetype, so it never races the step that
+    /// reads the list. Needed by SUB-32's deferral above all: a cluster drained while it waited would otherwise be offered again every tick, counted as
+    /// waiting forever, and handed a block the first tick one freed, a block no drain would ever take back. The projection's own repushes (a mover still
+    /// extrapolating) can name a cluster that drains the same way.
+    /// </remarks>
+    public void ForgetRepush(int archetype, int chunkId)
+    {
+        if (KeepDrainedRepushesForTest)
+        {
+            return;
+        }
+
+        // The chunk stays in its touched list, and reads 0 there.
+        if ((uint)archetype < (uint)_repush.Length && _repush[archetype] is { } r && (uint)chunkId < (uint)r.Length)
+        {
+            r[chunkId] = 0;
+        }
+    }
+
+    /// <summary>
+    /// Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — the chunk's one writer this tick — which lists the
+    /// chunk the first time its word goes from 0.
+    /// </summary>
+    public void Repush(int worker, int archetype, int chunkId, ulong slots)
     {
         var r = _repush[archetype];
-        if ((uint)chunkId < (uint)r.Length)
+        if ((uint)chunkId >= (uint)r.Length)
         {
-            r[chunkId] |= (long)slots;
+            return;
         }
+
+        if (r[chunkId] == 0)
+        {
+            var touched = _repushTouched[archetype];
+            Debug.Assert((uint)worker < (uint)touched.Length, "a projection worker past the lists MarkPushed sized");
+            if ((uint)worker < (uint)touched.Length)
+            {
+                Touch(ref touched[worker], ref _repushTouchedCount[archetype][worker], chunkId);
+            }
+        }
+
+        r[chunkId] |= (long)slots;
+    }
+
+    // One touched list per projection worker, sized at the mark, before the projection appends to them. Serial. Grown, never cut: a list a larger worker
+    // count left holds chunks still to be consumed.
+    private void SizeRepushLists(int workers)
+    {
+        foreach (var a in _pushIndices)
+        {
+            if (_repushTouched[a].Length >= workers)
+            {
+                continue;
+            }
+
+            var lists = new int[workers][];
+            var counts = new int[workers];
+            Array.Copy(_repushTouched[a], lists, _repushTouched[a].Length);
+            Array.Copy(_repushTouchedCount[a], counts, _repushTouchedCount[a].Length);
+            for (var w = _repushTouched[a].Length; w < workers; w++)
+            {
+                lists[w] = new int[16];
+            }
+
+            _repushTouched[a] = lists;
+            _repushTouchedCount[a] = counts;
+        }
+    }
+
+    private static void Touch(ref int[] list, ref int count, int chunk)
+    {
+        if (count == list.Length)
+        {
+            Array.Resize(ref list, count * 2);
+        }
+
+        list[count++] = chunk;
+    }
+
+    // The repushes of one touched list into the push set, each word read and cleared once; the list is emptied.
+    private void ConsumeRepush(int a, long[] repush, int[] list, ref int count, ulong slotMask)
+    {
+        RepushVisited += count;
+        for (var i = 0; i < count; i++)
+        {
+            var chunk = list[i];
+            var w = (uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL;
+            if (w != 0UL)
+            {
+                AddPush(a, chunk, w & slotMask, anyPass: true);
+                repush[chunk] = 0;
+            }
+        }
+
+        count = 0;
     }
 }

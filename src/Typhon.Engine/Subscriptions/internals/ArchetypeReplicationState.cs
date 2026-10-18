@@ -235,10 +235,19 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     internal NetIdEntityIndex EntityIndex;
 
     /// <summary>
-    /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
-    /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.
+    /// Every block by chunk id. A push archetype looks a block up per pushed cluster per tick and per cluster a session's delivery, sweep or fill reaches, so
+    /// the directory's hash probe is replaced by an index. Written only by attach and release, which are serial. Sized by the archetype's chunk ids, not by
+    /// what is pushed: memory, 8 B a chunk id, and no work — the probe in its place cost the track 14 % (#1042, SUB-13's note).
     /// </summary>
     internal nint[] BlockByChunk = [];
+
+    /// <summary>The block of cluster <paramref name="chunkId"/>, or null when it has none.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ReplicationBlockHeader* BlockAt(int chunkId)
+    {
+        var table = BlockByChunk;
+        return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
+    }
 
     /// <summary>This archetype's plan index, for the push path's events.</summary>
     internal int PushArchetypeIndex;
@@ -379,6 +388,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// here logs.
     /// </summary>
     internal ReferenceIndex References;
+
+    /// <summary>A positionless group member (14 § 5): its clusters have a block only while a held key needs one.</summary>
+    internal bool Lazy;
 
     // ── Collections (W34, 13 § 6.5) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1314,8 +1326,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </summary>
     /// <remarks>
     /// <para>
-    /// It is called from the fence's cluster reclamation (<c>DrainPendingClusterFinalizations</c>, the only site since #582): an exception raised here skips
-    /// the <c>FreeChunk</c> that follows — orphaning a chunk id permanently, since the cluster is already off the active list and detached from its cell.
+    /// It is called from the fence's cluster reclamation (<c>DrainPendingClusterFinalizations</c>, the drain's only site since #582): an exception raised here
+    /// skips the <c>FreeChunk</c> that follows — orphaning a chunk id permanently, since the cluster is already off the active list and detached from its cell.
+    /// The blocks step's lazy sweep (14 § 5.1) is the second caller, for a positionless member's live cluster no held key needs any more: the same orphan
+    /// path, so its entities leave and their identities go back through the quarantine.
     /// </para>
     /// <para>
     /// Swallowing is therefore the lesser failure, but it must not be silent: a refusal is counted in <see cref="DrainFaults"/> and the exception kept in
@@ -1330,6 +1344,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         {
             return false;
         }
+
+        // Whether or not the cluster had a block: one deferred for want of one (SUB-32) has pushes pending and nothing else to say it ever existed.
+        Push?.Hub?.ForgetRepush(PushArchetypeIndex, chunkId);
 
         try
         {

@@ -209,6 +209,8 @@ public sealed class FrameApplier
 
     private void Source(ushort requestId, byte status, ushort code) => _store.Sources.Add((requestId, status, code));
 
+    private void Group(byte kind, uint set, long key) => _store.Group(kind, set, key);
+
     private void BeginAggregate(CatalogGrid grid, bool reset)
     {
         _target = Target.None;
@@ -478,6 +480,8 @@ public sealed class FrameApplier
         public void Ack(ushort seq, byte reason) => _applier.Ack(seq, reason);
 
         public void Source(ushort requestId, byte status, ushort code) => _applier.Source(requestId, status, code);
+
+        public void Group(byte kind, uint set, long key) => _applier.Group(kind, set, key);
 
         public void BeginAggregate(CatalogGrid grid, bool reset) => _applier.BeginAggregate(grid, reset);
 

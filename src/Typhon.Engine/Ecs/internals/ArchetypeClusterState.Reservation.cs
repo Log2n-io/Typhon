@@ -465,7 +465,6 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;   // not occupied: nothing of this entity to hide
         }
 
-        NoteSlotsChanged(clusterChunkId, (ulong)bit);
         NoteStructureSlots(clusterChunkId, (ulong)bit);
         Interlocked.Or(ref ClaimWord(clusterChunkId), bit);
         Interlocked.And(ref *(long*)clusterBase, ~bit);

@@ -106,7 +106,15 @@ internal abstract unsafe partial class PushReplication
 {
     private protected readonly CompiledProjectionPlan[] _plans;
     private protected readonly ArchetypeReplicationState[] _states;
+
+    // The observed archetypes with a position: every geometric structure — the index, the occupancy, the sweeps, the shadow — is over these alone.
     private protected readonly int[] _pushIndices;
+
+    // Per plan index: an observed archetype with no position (14 § 5), a group member only. Its events go to the hub's log, never to a cell.
+    private protected readonly bool[] _unplaced;
+
+    /// <summary>Whether plan <paramref name="archetype"/> is observed with no position (14 § 5): held through its keys alone, in no realm of its own.</summary>
+    internal bool IsUnplaced(int archetype) => (uint)archetype < (uint)_unplaced.Length && _unplaced[archetype];
 
     /// <summary>The hub that collects this realm's blocks and routes them here (R4.1); set when the hub starts serving the realm.</summary>
     internal PushHub Hub;
@@ -542,11 +550,11 @@ internal abstract unsafe partial class PushReplication
     // By realm-local slot (R4.3): slot 0 is a sentinel no session ever holds — never bound, never written — so a session not placed in this realm reads an
     // unbound state wherever it is looked up. The others are handed out by Join and given back by Release; the arrays grow ×2 from a few.
     private protected PushSessionState[] _sessions;
-    private SessionId[] _slotOwners;
+    private protected SessionId[] _slotOwners;
     private uint[] _slotSeen;
     private int[] _freeSlots;
     private int _freeCount;
-    private int _slotHigh = 1;
+    private protected int _slotHigh = 1;
 
     /// <summary>The realm-local slots a new replication starts with, the sentinel included; ×2 on demand.</summary>
     internal const int InitialSessionSlots = 8;
@@ -618,6 +626,10 @@ internal abstract unsafe partial class PushReplication
     private protected virtual void ResetSlot(int local)
     {
         _sessions[local] = default;
+        _sessionTagsGeneration[local] = 0;
+        _sessionTags[local] = 0;
+        _committedTagsGeneration[local] = 0;
+        _committedTags[local] = 0;
         if (local < _regions.Length && _regions[local] != null)
         {
             _regions[local].Generation = 0;
@@ -633,6 +645,10 @@ internal abstract unsafe partial class PushReplication
     private protected virtual void GrowSessions(int length)
     {
         Array.Resize(ref _sessions, length);
+        Array.Resize(ref _sessionTags, length);
+        Array.Resize(ref _sessionTagsGeneration, length);
+        Array.Resize(ref _committedTags, length);
+        Array.Resize(ref _committedTagsGeneration, length);
         Array.Resize(ref _slotOwners, length);
         Array.Resize(ref _slotSeen, length);
         Array.Resize(ref _freeSlots, length);
@@ -803,23 +819,27 @@ internal abstract unsafe partial class PushReplication
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
+        // A positionless observed archetype is a group member reached through its keys alone (the runtime refused it in any observer): no cell holds it.
+        _unplaced = new bool[isPush.Length];
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
-            count += isPush[a] ? 1 : 0;
+            _unplaced[a] = isPush[a] && plans[a].Position == null;
+            count += isPush[a] && !_unplaced[a] ? 1 : 0;
         }
 
         _pushIndices = new int[count];
         count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
-            if (isPush[a])
+            if (isPush[a] && !_unplaced[a])
             {
                 _pushIndices[count++] = a;
             }
         }
 
         ServedRealm = realm;
+        InitTags(plans, states);
         Codecs = codecs ?? RealmCodecs.FromPlans(plans);
         Bootstrapped = new bool[plans.Length];
         EverythingThisTick = new bool[plans.Length];
@@ -1105,6 +1125,23 @@ internal abstract unsafe partial class PushReplication
     public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z) =>
         TryVisibilityAt(clusters, chunk, slot, entity, out _, out netId, out x, out y, out z);
 
+    /// <summary>The entity's netId and v̂ as <c>TryEntityAt</c> reads them, with its visibility tag mask (14 § 6) — 0 for a public one.</summary>
+    public bool TryEntityTagsAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z,
+        out uint mask)
+    {
+        mask = 0;
+        if (!TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out netId))
+        {
+            x = y = z = 0f;
+            return false;
+        }
+
+        var layout = _states[archetype].Layout;
+        Decode(archetype, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(archetype), out x, out y, out z);
+        mask = MaskAt(archetype, block, slot);
+        return true;
+    }
+
     /// <summary><see cref="TryEntityAt"/>, with the entity's plan index — what an archetype-set test needs (SUB-26).</summary>
     public bool TryVisibilityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out int archetype, out uint netId, out float x,
         out float y, out float z)
@@ -1293,11 +1330,7 @@ internal abstract unsafe partial class PushReplication
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId)
-    {
-        var table = _states[archetype].BlockByChunk;
-        return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
-    }
+    private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId) => _states[archetype].BlockAt(chunkId);
 
     // ══ Blocks step (serial): this realm's half; the collector is the hub's ═══════════════════════════════════════════════════════════════════════
 
@@ -1326,6 +1359,8 @@ internal abstract unsafe partial class PushReplication
             // The orphans queued across the gap are leaves nobody needs: a session connected before it misses a tick the log never held, so it resets, and
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
+            _orphanKeyChangeCount = 0;
+            _orphanTagChangeCount = 0;
         }
     }
 
@@ -1370,6 +1405,8 @@ internal abstract unsafe partial class PushReplication
         _validating = Hub.ValidateClustersPerTick > 0;
         _indexedTick = uint.MaxValue;
         ResetWorkers(workers);
+        ResetKeyChanges(workers);
+        ResetTagChanges(workers);
     }
 
     /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>
@@ -1419,9 +1456,12 @@ internal abstract unsafe partial class PushReplication
         y = (float)WireMath.DecodeQuantWithStep(qy, _minY[archetype], _stepY[archetype]);
     }
 
-    /// <summary>Records one projected slot. Called by the worker that owns the block, while its hot entry is still in cache.</summary>
-    public abstract void AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
-        float ox, float oy, float oz, float nx, float ny, float nz);
+    /// <summary>
+    /// Records one projected slot. Called by the worker that owns the block, while its hot entry is still in cache. Returns whether an event was recorded: a
+    /// push that changed nothing — <paramref name="maskChanged"/> false, whatever its <see cref="PushEvent.TagsChanged"/> says — is dropped.
+    /// </summary>
+    public abstract bool AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
+        float ox, float oy, float oz, float nx, float ny, float nz, bool maskChanged = false);
 
     /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
     public abstract void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause);
@@ -1508,7 +1548,7 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, in LodBands bands, bool forceReset,
         in ArchetypeSet archetypes, FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves,
-        ref long updates, out bool complete);
+        ref long updates, out bool complete, ProfileGroup[] groups = null);
 
     /// <summary>
     /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one

@@ -468,6 +468,15 @@ public sealed class CatalogPlan
         SessionMetrics = session.ToArray();
 
         Grids = catalog.Grids ?? [];
+        GroupSets = catalog.GroupSets ?? [];
+        for (var i = 0; i < GroupSets.Length; i++)
+        {
+            if (GroupSets[i].Idx != i)
+            {
+                throw new CatalogException([$"group set at position {i} has index {GroupSets[i].Idx}"]);
+            }
+        }
+
         RealmKinds = catalog.RealmKinds is { Length: > 0 } kinds ? kinds : DefaultRealmKinds;
         for (var i = 0; i < Grids.Length; i++)
         {
@@ -492,6 +501,25 @@ public sealed class CatalogPlan
 
     /// <summary>The grids, by index.</summary>
     public CatalogGrid[] Grids { get; }
+
+    /// <summary>The group sets, by index: what a <c>SOURCES</c> group record's set names.</summary>
+    public CatalogGroupSet[] GroupSets { get; }
+
+    /// <summary>The index of the group set named <paramref name="name"/>, or -1.</summary>
+    /// <param name="name">The set's declared name.</param>
+    /// <returns>Its index in <see cref="GroupSets"/>.</returns>
+    public int GroupSetIndex(string name)
+    {
+        for (var i = 0; i < GroupSets.Length; i++)
+        {
+            if (string.Equals(GroupSets[i].Name, name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 
     /// <summary>The realm kinds a catalog that declares none has: the default kind alone.</summary>
     public static readonly string[] DefaultRealmKinds = [""];

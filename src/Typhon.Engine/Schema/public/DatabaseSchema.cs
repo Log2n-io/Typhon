@@ -93,6 +93,7 @@ public static class DatabaseSchema
                                 Size = f.SizeInComponentStorage,
                                 HasIndex = f.HasIndex,
                                 IndexAllowMultiple = f.IndexAllowMultiple,
+                                IndexSparse = f.IndexSparse,
                             });
 
                             if (f.HasIndex)

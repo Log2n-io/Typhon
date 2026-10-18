@@ -29,7 +29,8 @@ internal sealed unsafe partial class FrameAssembler
         => TryHeldNetId(session, entity, out var carried) && carried == netId;
 
     /// <summary>
-    /// The identity <paramref name="session"/> knows <paramref name="entity"/> by, when it holds it at all.
+    /// The identity <paramref name="session"/> knows <paramref name="entity"/> by, when it holds it at all: its controlled entity, one its committed
+    /// geometry names, or a member of a group its committed frame holds (14 § 3) — positionless ones included (14 § 5) — and, of those, one it sees (14 § 6).
     /// </summary>
     /// <param name="session">The session asking.</param>
     /// <param name="entity">The entity to name.</param>
@@ -57,11 +58,12 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         using var epoch = EpochGuard.Enter(Engine.EpochManager);
-        var locator = new BoundViewpoint(Engine);
+        var locator = new EntityLocator(Engine);
         try
         {
-            if (!locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
-                || !Push.TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out var carried)
+            if (!locator.TryLocate(entity, out var chunk, out var slot)
+                || !Push.TryReplicaAt(Engine._stateByRouting[entity.ArchetypeId].ClusterState, chunk, slot, entity, out var archetype, out var block,
+                    out var carried)
                 || carried == NetIdAllocator.NoNetId)
             {
                 return false;
@@ -75,22 +77,38 @@ internal sealed unsafe partial class FrameAssembler
 
             var state = StateOf(session);
             var profile = state != null && state.Generation == session.Generation ? state.CommittedProfile : -1;
-            if (profile < 0 || Profiles == null || !Profiles.SetOf(profile).Contains(archetype))
+            if (profile < 0 || Profiles == null)
             {
                 return false;
             }
 
-            // The entity's realm's replication (SUB-28): its frame decodes the entity's v̂, and its geometry is the session's only if the session is placed in
-            // that realm — a session of another realm reads an unbound slot there and holds nothing, whatever the local coordinates.
-            var owner = Push.Hub == null ? Push : Push.Hub.For(((ReplicationBlockHeader*)block)->Realm);
+            // The entity's realm's replication (SUB-28): its frame decodes the entity's v̂, and its geometry and groups are the session's only if the session
+            // is placed in that realm — a session of another realm reads an unbound slot there and holds nothing, whatever the local coordinates. A
+            // positionless member has no realm of its own (14 § 5): it is held through the keys of whichever realm the session is in.
+            var positionless = Push.IsUnplaced(archetype);
+            var owner = Push.Hub == null ? Push
+                : positionless ? Push.Hub.PlacedFor(session)
+                : Push.Hub.For(((ReplicationBlockHeader*)block)->Realm);
             if (owner == null)
             {
                 return false;
             }
 
-            owner.DecodeVisibility(archetype, block, slot, out var x, out var y, out var z);
-            var shape = Profiles.IsWorld(profile) ? PushShape.World : Profiles.RegionOf(profile) ? PushShape.Region : PushShape.Sphere;
-            if (!owner.HoldsCommitted(session, shape, x, y, z))
+            var held = false;
+            if (!positionless && Profiles.SetOf(profile).Contains(archetype))
+            {
+                owner.DecodeVisibility(archetype, block, slot, out var x, out var y, out var z);
+                var shape = Profiles.IsWorld(profile) ? PushShape.World : Profiles.RegionOf(profile) ? PushShape.Region : PushShape.Sphere;
+                held = owner.HoldsCommitted(session, shape, x, y, z);
+            }
+
+            if (!held && !owner.GroupHoldsCommitted(session, archetype, block, slot, carried))
+            {
+                return false;
+            }
+
+            // Visibility (14 § 6): a session that does not see the entity was never sent it, whatever its geometry.
+            if (!owner.CommittedSees(session, owner.MaskOf(archetype, block, slot)))
             {
                 return false;
             }
@@ -113,11 +131,12 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         using var epoch = EpochGuard.Enter(Engine.EpochManager);
-        var locator = new BoundViewpoint(Engine);
+        var locator = new EntityLocator(Engine);
         try
         {
-            return locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
-                   && Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var carried) && carried == netId;
+            return locator.TryLocate(entity, out var chunk, out var slot)
+                   && Push.TryReplicaAt(Engine._stateByRouting[entity.ArchetypeId].ClusterState, chunk, slot, entity, out _, out _, out var carried)
+                   && carried == netId;
         }
         finally
         {

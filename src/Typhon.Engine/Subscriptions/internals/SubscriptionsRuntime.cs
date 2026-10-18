@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -83,10 +84,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// private instance, which is right for a harness that drives the stages by hand — nothing writes to it, so the track metric honestly reads zero rather
     /// than reporting another runtime's numbers.
     /// </param>
+    /// <param name="logger">Where the track reports the edges of a state-pool exhaustion (SUB-32); <see langword="null"/> logs nothing.</param>
     /// <exception cref="InvalidOperationException">A declaration cannot be compiled, or names something the engine does not hold.</exception>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public SubscriptionsRuntime(DatabaseEngine engine, SubscriptionsRegistry registry, RuntimeOptions options, IResource parent, NetIdAllocator netIds,
-        IReadOnlyList<string> systemNames, SubscriptionsTelemetry telemetry = null)
+        IReadOnlyList<string> systemNames, SubscriptionsTelemetry telemetry = null, ILogger logger = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(registry);
@@ -131,7 +133,26 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
                 Options.VisibilitySlackMForTest);
 
-            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+            // Group sets (14 § 3.8): resolved against the schema, and each member plan's cold entry widened by its keys — before the replication state is
+            // carved to that layout below.
+            GroupSets = GroupSetCompiler.Compile(registry, engine, Plans);
+
+            // Visibility tags (14 § 6): the mask's field, and four bytes of cold entry for the mask each push read.
+            GroupSetCompiler.CompileTagMasks(registry, engine, Plans);
+            foreach (var set in GroupSets)
+            {
+                if (set.Region == null)
+                {
+                    continue;
+                }
+
+                set.Region.ClusterState = engine._archetypeStates[set.Region.Archetype.ArchetypeId]?.ClusterState
+                    ?? throw new InvalidOperationException(
+                        $"Group set '{set.Name}' reads its regions from archetype '{set.Region.Archetype.Name}', which this engine holds no cluster state for. "
+                        + "Call DatabaseEngine.InitializeArchetypes before TyphonRuntime.Start().");
+            }
+
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames, GroupSets);
 
             // The served realm's frame (typhon.3): what every position a session of it receives, and every position it sends, is quantized over.
             // Every registered realm's kind must be declared (12-realms § 2.7): a kind nobody declared picks no variant.
@@ -151,6 +172,18 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 engine.RealmTable?.TryGet(RealmId.Default.Value)?.Config?.Replication?.Kind ?? "")));
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
+
+            // The explicit sets' per-session keys and answers (14 § 4): engine-wide, so a session keeps them across a realm switch and a RESET.
+            foreach (var set in GroupSets)
+            {
+                if (set.Selector == GroupSelector.Explicit)
+                {
+                    GroupRequests = new GroupRequests(GroupSets, Options.MaxGroupsPerSession, Options.MaxSessions, registry);
+                    break;
+                }
+            }
+
+            _sessions.GroupRequests = GroupRequests;
 
             _replicationStates = AttachReplicationStates(engine, parent, netIds);
 
@@ -176,6 +209,17 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
 
+            // An observer reaches what is somewhere (14 § 5, P17): an archetype with no position is a group set's member, reached through its keys alone.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                if (observed[a] && Plans[a].Position == null)
+                {
+                    throw new NotSupportedException(
+                        $"Archetype '{Plans[a].Name}' has no position and a profile's observer names it. An observer reaches entities by where they are; one "
+                        + "with no position is reached through a group set it is a member of (subs.Groups(...).Member<T>()), or declare a Position or Motion.");
+                }
+            }
+
             // An archetype with owner fields has replication state whether or not a profile observes it (11 § 2.4, Q5): owner data follows Control, not
             // geometry, and a controlled entity with no state would have nowhere to be compared. No session's archetype set names it, so it sends no record.
             for (var a = 0; a < Plans.Length; a++)
@@ -197,6 +241,31 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
 
             _frames.Self = Self;
+
+            // A group member has replication state whether or not a profile's geometry observes it: a session reaches it through its key (14 § 3.8). A
+            // write to its key component is marked as a structure change (the tap), so the projection reads the new key the tick it is written.
+            foreach (var set in GroupSets)
+            {
+                foreach (var member in set.Members)
+                {
+                    observed[member.Plan] = true;
+                    var clusters = ClusterStateOf(engine, Plans[member.Plan]);
+                    clusters.AddGroupKeySlot(member.ComponentSlot);
+
+                    // A positionless member's Versioned key is the one an off-DAG commit may move between the projection and the gather (EW-02): its
+                    // archetype logs the moves for the fill (14 § 5). A positioned member's archetype is spatial, which no off-DAG thread may write.
+                    if (member.Positionless && member.Versioned)
+                    {
+                        clusters.GroupKeyMoves ??= new GroupKeyMoveLog();
+                        member.Moves = clusters.GroupKeyMoves;
+                        member.MoveWatch = member.Moves.Watch(member.ComponentSlot, member.FieldOffsetInComponent, member.FieldSize);
+                    }
+
+                    _replicationStates[member.Plan].Lazy = member.Positionless;
+                }
+            }
+
+            _frames.HasGroups = GroupSets.Length > 0;
             if (Array.IndexOf(automatic, true) >= 0 && !Options.AllowAutomaticPushDetection)
             {
                 throw new NotSupportedException(
@@ -214,7 +283,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     Options.ForceDeepReplicationForTest);
 
                 // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
-                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions);
+                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions) { Logger = logger, ArchetypeNames = PlanNames(Plans) };
+                Hub.ConfigureGroups(Plans, GroupSets);
 
                 // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
                 // from the same grid; they must agree to the bit.
@@ -252,6 +322,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     {
                         state.References = References;
                     }
+
+                    Hub.References = References;
                 }
 
                 _frames.Push = Push;
@@ -284,7 +356,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // bound between a single client and the transport threads' decode work, and only the application knows what its commands cost.
             ValidateIngressRails(Options, CommandTypes.Count);
             _ingressPolicy = new IngressPolicy(Options.IngressBytesPerSecond, (long)(Options.AbuseWindow.TotalSeconds * Stopwatch.Frequency),
-                Options.AbuseRefusalsPerWindow, Options.AbuseWindows);
+                Options.AbuseRefusalsPerWindow, Options.AbuseWindows, IngressPolicy.PingAllowance * Math.Max(1, Options.PingHz));
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
@@ -293,6 +365,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingress.Realm = Realm0Frame;
             _ingress.Realms = engine.RealmTable;
             _ingress.Profiles = Profiles;
+            _ingress.GroupRequests = GroupRequests;
+            _ingress.Requests.ExplicitSets = GroupRequests?.ExplicitNames();
+            _frames.Requests = GroupRequests;
             _ingress.MultiRealm = engine.ConfiguredMaxRealms > 1;
             _frames.MultiRealm = _ingress.MultiRealm;
             _ingress.ReplicationStates = _replicationStates;
@@ -309,6 +384,39 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Events = EventHub.Build(registry, CatalogPlan);
             if (Events != null)
             {
+                // Reliable events (14 § 7): the bytes kept for every live session are load-bearing, so declared, never defaulted.
+                if (Events.HasReliable && Options.ReliableEventBytes <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "A reliable event is declared and SubscriptionsOptions.ReliableEventBytes is not set: it bounds the reliable events kept for the "
+                        + "sessions that may still be owed them, over CloseStalledAfter. Size it as the reliable bytes a burst emits per tick times the "
+                        + "ticks in CloseStalledAfter.");
+                }
+
+                // A reliable event that can never be emitted or never fit is a declaration error, said at Start rather than by every emit refused.
+                foreach (var type in Events.Types)
+                {
+                    if (!type.Reliable)
+                    {
+                        continue;
+                    }
+
+                    if (type.MaxBytes > Options.ReliableEventBytes || type.MaxBytes > Math.Min(Options.FrameBytes, FramePool.LargestClassBytes) / 2)
+                    {
+                        throw new InvalidOperationException(
+                            $"Reliable event '{type.Name}' encodes to up to {type.MaxBytes} bytes: more than ReliableEventBytes ({Options.ReliableEventBytes}) "
+                            + $"or half a frame ({Options.FrameBytes / 2}), so it could never be accepted or carried.");
+                    }
+
+                    // Its trial encoding at the emitter (SUB-35) frames a position over realm 0: with several realms that frame is not the event's.
+                    if (engine.ConfiguredMaxRealms > 1 && Array.Exists(type.Body.Fields, f => f.Kind is CodecKind.Pos2 or CodecKind.Pos3))
+                    {
+                        throw new NotSupportedException(
+                            $"Reliable event '{type.Name}' carries a position, and this engine holds several realms: a reliable event is checked at the "
+                            + "emitter against realm 0's frame. Carry the position as plain numbers, or make the event best effort.");
+                    }
+                }
+
                 Events.Realm = Realm0Frame;
                 Events.RealmFrames = _frames.RealmFrameFor;
 
@@ -355,6 +463,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
 
             _frames!.Events = Events;
+            Events?.BindReliable(_frames.CloseBoundTicks, Options.ReliableEventBytes);
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
             Commands = new SubscriptionsCommands(_ingress, Events);
@@ -470,6 +579,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     // What every realm's replication is built from (R4.4): the engine, the plans' push flags and encode plans, and the near budgets' archetype sets.
     private DatabaseEngine _engine;
     private bool[] _observed;
+
+    /// <summary>The compiled group sets (14 § 3.8), by set index; empty when none is declared.</summary>
+    internal CompiledGroupSet[] GroupSets { get; private set; } = [];
+
+    /// <summary>The explicit group sets' per-session keys and answers (14 § 4); null when no set is explicit.</summary>
+    internal GroupRequests GroupRequests { get; private set; }
     private bool[] _automatic;
     private ArchetypeEncodePlan[] _encodePlans;
     private ArchetypeSet[] _nearSets;
@@ -483,6 +598,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     {
         var (farPhase, farWindow) = Profiles.FarFold;
         push.ConfigureFar(farPhase, farWindow);
+        push.GroupSets = GroupSets;
+        push.MaxGroupsPerSession = Options.MaxGroupsPerSession;
+        push.Requests = GroupRequests;
         push.AttachEncodePlans(_encodePlans);
         ConfigureAggregates(push, frame, first);
         ConfigureRegions(push, grid, kind);
@@ -1109,82 +1227,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             states[i].AttachCollections(plan, engine, wire?.ArchetypeByName(plan.Name));
             states[i].AttachTo(clusterState);
 
-            // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the
-            // mask is all ones, which suppresses nothing — an archetype whose plan has not been published yet must not have its writes dropped.
-            clusterState.ProjectedComponentMask = ProjectedComponentMaskOf(plan);
-
             // The membership signal, on for every replicated archetype: the engine's own pushes — spawns, destroys, WriteSpatial, migrations — ride it.
             clusterState.TrackStructureChanges = true;
         }
 
         return states;
-    }
-
-    /// <summary>
-    /// The component slots one archetype's projection reads, as a bitmask.
-    /// </summary>
-    /// <param name="plan">The compiled plan.</param>
-    /// <returns>Bit <c>s</c> set for every component slot the plan reads; all ones when any slot is too wide for the mask to describe.</returns>
-    /// <remarks>
-    /// <para>
-    /// <b>Every reader of a component value has to appear here, and the cost of forgetting one is a change no client is told about.</b> The three are the
-    /// public fields, the owner fields, and the position — whose velocity may live in a component of its own when <c>VelocityFrom</c> named one, which is a
-    /// second slot the position contributes and the easiest of the three to miss.
-    /// </para>
-    /// <para>
-    /// <b>All ones on a slot at or past 64.</b> The mask cannot describe it, and admitting everything is the direction whose failure is wasted work rather
-    /// than a silent loss. Cluster layouts today are far narrower than that; the guard is for the day one is not.
-    /// </para>
-    /// </remarks>
-    private static ulong ProjectedComponentMaskOf(CompiledProjectionPlan plan)
-    {
-        var mask = 0UL;
-
-        static bool Add(ref ulong mask, int slot)
-        {
-            if ((uint)slot >= 64u)
-            {
-                return false;
-            }
-
-            mask |= 1UL << slot;
-            return true;
-        }
-
-        var fields = plan.Fields;
-        for (var i = 0; fields != null && i < fields.Length; i++)
-        {
-            if (!Add(ref mask, fields[i].ComponentSlot))
-            {
-                return ulong.MaxValue;
-            }
-        }
-
-        var owners = plan.OwnerFields;
-        for (var i = 0; owners != null && i < owners.Length; i++)
-        {
-            if (!Add(ref mask, owners[i].ComponentSlot))
-            {
-                return ulong.MaxValue;
-            }
-        }
-
-        var position = plan.Position;
-        if (position != null)
-        {
-            if (!Add(ref mask, position.ComponentSlot))
-            {
-                return ulong.MaxValue;
-            }
-
-            // 0xFF is "the velocity is measured from successive positions", not a slot.
-            if (position.VelocityComponentSlot != 0xFF && !Add(ref mask, position.VelocityComponentSlot))
-            {
-                return ulong.MaxValue;
-            }
-        }
-
-        return mask;
     }
 
     private static ArchetypeClusterState ClusterStateOf(DatabaseEngine engine, CompiledProjectionPlan plan)
@@ -1281,4 +1328,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// be sent, and the clients holding their baselines have to be told so.
     /// </remarks>
     internal int DiscardFrames() => _sendPump?.DiscardProduced() ?? 0;
+
+    private static string[] PlanNames(CompiledProjectionPlan[] plans)
+    {
+        var names = new string[plans.Length];
+        for (var a = 0; a < plans.Length; a++)
+        {
+            names[a] = plans[a].Name;
+        }
+
+        return names;
+    }
 }

@@ -177,14 +177,17 @@ internal sealed class TyphonHost : IDisposable
         return sb.ToString();
     }
 
-    /// <summary>Unevictability breakdown: writeback debt, live writers, slot refs, epoch holds, the union, and the cache size.</summary>
+    /// <summary>
+    /// Unevictability breakdown: writeback debt, live writers, slot refs, epoch holds, dirty marks, the pages only an epoch holds, the union, and the
+    /// cache size.
+    /// </summary>
     /// <remarks>
-    /// All six come from ONE pass over the page table, so they describe the same instant. An earlier version of this
+    /// All eight come from ONE pass over the page table, so they describe the same instant. An earlier version of this
     /// method returned hardcoded zeros for slot-ref and epoch-held; the census column therefore read 0 for the entire run
     /// and looked like evidence that epoch protection was never involved, while the back-pressure exception was
     /// simultaneously reporting 17,164 epoch-held pages. A gauge that reports a constant is worse than no gauge.
     /// </remarks>
-    public (int Dirty, int Acw, int SlotRef, int EpochHeld, int Unevictable, int Total) CountPinnedPages()
+    public (int Debt, int Acw, int SlotRef, int EpochHeld, int Marked, int EpochOnly, int Unevictable, int Total) CountPinnedPages()
         => DBE.MMF.CountUnevictablePages();
 
     /// <summary>Worst cache pressure seen DURING a back-pressure wait — the only sample taken while it matters.</summary>
@@ -207,9 +210,10 @@ internal sealed class TyphonHost : IDisposable
         var sb = new System.Text.StringBuilder();
         try
         {
-            var (debt, acw, slotRef, epochHeld, unevictable, total) = DBE.MMF.CountUnevictablePages();
+            var (debt, acw, slotRef, epochHeld, marked, epochOnly, unevictable, total) = DBE.MMF.CountUnevictablePages();
             sb.AppendLine($"  page cache : {total} resident of {DBE.MMF.PageCacheSlotCountForDiagnostics} slots");
-            sb.AppendLine($"  unevictable: {unevictable}  (writeback debt {debt}, activeWriters {acw}, slotRef {slotRef}, epochHeld {epochHeld})");
+            sb.AppendLine($"  unevictable: {unevictable}  (writeback debt {debt}, activeWriters {acw}, slotRef {slotRef}, epochHeld {epochHeld}, "
+                        + $"marked {marked}, epochOnly {epochOnly})");
             sb.AppendLine($"  marks held : {DBE.MMF.CountPagesWithDirtyMarks()} pages (must be 0 at quiesce — PS-05)");
             sb.AppendLine($"  worst seen under back-pressure: debt {DBE.MMF.PeakBackpressureDebt}, epochHeld {DBE.MMF.PeakBackpressureEpochHeld}");
             var cm = DBE.CheckpointManager;

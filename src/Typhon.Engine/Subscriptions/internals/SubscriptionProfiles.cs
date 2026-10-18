@@ -75,9 +75,16 @@ internal sealed class SubscriptionProfiles
 
         /// <summary>The profile's sessions are served one tick in this many.</summary>
         public int TickDivisor { get; init; }
+
+        /// <summary>The group sets the observer holds groups of (14 § 3), by set index; none for most profiles.</summary>
+        public ProfileGroup[] Groups { get; init; }
     }
 
     private readonly CompiledProfile[] _profiles;
+    private readonly IReadOnlyList<GroupSetDeclaration> _groupSets;
+
+    /// <summary>The group sets a profile's observer holds groups of: empty for a profile that names none.</summary>
+    public ProfileGroup[] GroupsOf(int profile) => _profiles[profile].Groups ?? [];
 
     // Each profile's archetypes as a set of plan indices, beside the list: the geometry tests an event's archetype against it (09 § 12).
     private readonly ArchetypeSet[] _sets;
@@ -106,6 +113,7 @@ internal sealed class SubscriptionProfiles
 
         _sessions = sessions;
         _planCount = plans.Length;
+        _groupSets = registry.GroupSets;
         _realmKinds = realmKinds is { Length: > 0 } ? realmKinds : [""];
         var declared = registry.Profiles;
         _declaredCount = declared.Count;
@@ -164,7 +172,10 @@ internal sealed class SubscriptionProfiles
         kind < 0 || (uint)profile >= (uint)_declaredCount || kind >= _realmKinds.Length ? profile : _variantOf[(profile * _realmKinds.Length) + kind];
 
     /// <summary>Whether compiled profile <paramref name="profile"/> serves anything: some observer reaches an archetype.</summary>
-    public bool IsServed(int profile) => (uint)profile < (uint)_profiles.Length && _profiles[profile].ArchetypeIndices.Length > 0;
+    public bool IsServed(int profile) => (uint)profile < (uint)_profiles.Length && Serves(_profiles[profile]);
+
+    // A profile serves something when its observer names an archetype or a group set: a Sphere holding towns alone (14 § 3) is served.
+    private static bool Serves(CompiledProfile p) => p.ArchetypeIndices.Length > 0 || p.Groups is { Length: > 0 };
 
     /// <summary>Compiled profile <paramref name="profile"/>'s tick divisor: its sessions are served one tick in this many.</summary>
     public int DivisorOf(int profile) => _profiles[profile].TickDivisor;
@@ -272,7 +283,37 @@ internal sealed class SubscriptionProfiles
             // A World's aggregate covers every tile and a ClientRegion's its hull (09 § 8): only a Sphere's has a radius.
             AggregateRadiusM = aggregate == null || observer.Kind != ObserverKind.Sphere ? 0d : aggregate.AggregateRadiusM,
             AggregateArchetypes = aggregate == null ? [] : AggregateIndices(plans, name, aggregate),
+            Groups = GroupsOf(observer),
         };
+    }
+
+    private ProfileGroup[] GroupsOf(ObserverDeclaration observer)
+    {
+        if (observer.GroupInterests.Count == 0)
+        {
+            return [];
+        }
+
+        var groups = new ProfileGroup[observer.GroupInterests.Count];
+        for (var i = 0; i < groups.Length; i++)
+        {
+            var interest = observer.GroupInterests[i];
+            var set = -1;
+            for (var s = 0; s < _groupSets.Count; s++)
+            {
+                if (string.Equals(_groupSets[s].Name, interest.Set, StringComparison.Ordinal))
+                {
+                    set = s;
+                }
+            }
+
+            // The registry refuses an unknown set at Start; one built directly reaches here.
+            groups[i] = set >= 0
+                ? new ProfileGroup(set, interest.ReachM)
+                : throw new InvalidOperationException($"An observer names group set '{interest.Set}', which is not declared.");
+        }
+
+        return groups;
     }
 
     private static int[] AggregateIndices(CompiledProjectionPlan[] plans, string profile, ObserverDeclaration aggregate)
@@ -417,7 +458,7 @@ internal sealed class SubscriptionProfiles
         divisor = 1;
         var index = _sessions.ProfileIndex(session);
         profile = index;
-        if (index < 0 || _profiles[index].ArchetypeIndices.Length == 0)
+        if (index < 0 || !Serves(_profiles[index]))
         {
             return false;
         }

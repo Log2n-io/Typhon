@@ -62,6 +62,66 @@ public class FrameApplierTests
         });
     }
 
+    /// <summary>
+    /// 14 § 3.5: a group is complete from its <c>GROUP_COMPLETE</c> to its <c>GROUP_RELEASED</c> or a <c>RESET</c>; a release of a group never completed
+    /// is a release mid-fill and nothing wrong; a second completion with no release between is the server's inconsistency, absorbed and counted.
+    /// </summary>
+    [Test]
+    public void AGroupIsCompleteUntilReleasedOrResetAndASecondCompletionIsAnAnomaly()
+    {
+        var store = new WorldStore(Plan);
+        var applier = new FrameApplier(store);
+
+        byte[] Groups(uint tick, TickFlags flags, params (byte Kind, uint Set, long Key)[] records)
+        {
+            var w = new WireWriter(new byte[256]);
+            TickWriter.WriteHeader(ref w, tick, flags);
+            TickWriter.WriteSources(ref w, [], records);
+            return w.Written.ToArray();
+        }
+
+        applier.Apply(Groups(1, TickFlags.None, (SourceStatus.GroupComplete, 1, -7), (SourceStatus.GroupReleased, 0, 3)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.IsGroupComplete(1, -7), Is.True);
+            Assert.That(store.IsGroupComplete(0, 3), Is.False);
+            Assert.That(store.Groups, Has.Count.EqualTo(2), "this frame's records, in stream order");
+            Assert.That(store.Anomalies, Is.Zero, "a release of a group never completed is a release mid-fill");
+        });
+
+        applier.Apply(Groups(2, TickFlags.None, (SourceStatus.GroupComplete, 1, -7)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Anomalies, Is.EqualTo(1), "completed twice in one hold");
+            Assert.That(store.IsGroupComplete(1, -7), Is.True);
+        });
+
+        applier.Apply(Groups(3, TickFlags.None));
+        Assert.That(store.Groups, Is.Empty, "a frame with no record clears the last frame's");
+
+        applier.Apply(Groups(4, TickFlags.Reset, (SourceStatus.GroupComplete, 0, 5)));
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.IsGroupComplete(1, -7), Is.False, "a RESET releases every group");
+            Assert.That(store.IsGroupComplete(0, 5), Is.True, "and what the frame completes is held");
+            Assert.That(store.CompleteGroupCount, Is.EqualTo(1));
+        });
+
+        applier.Apply(Groups(5, TickFlags.None, (SourceStatus.GroupReleased, 0, 5)));
+        Assert.That(store.CompleteGroupCount, Is.Zero);
+    }
+
+    /// <summary>A group record naming a set the catalog does not declare is malformed: the set index is what a client maps to its declaration.</summary>
+    [Test]
+    public void AGroupRecordForAnUndeclaredSetIsMalformed()
+    {
+        var w = new WireWriter(new byte[64]);
+        TickWriter.WriteHeader(ref w, 1, TickFlags.None);
+        TickWriter.WriteSources(ref w, [], [(SourceStatus.GroupComplete, (uint)Plan.GroupSets.Length, 1)]);
+        var message = w.Written.ToArray();
+        Assert.That(() => new FrameApplier(new WorldStore(Plan)).Apply(message), Throws.TypeOf<WireFormatException>());
+    }
+
     [Test]
     public void AFreedSlotIsReusedOnlyInALaterFrame()
     {

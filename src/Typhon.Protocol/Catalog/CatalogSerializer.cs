@@ -101,6 +101,25 @@ public static class CatalogSerializer
             grids[i] = new CatalogGrid { Idx = i, TileCells = g.TileCells, Archetypes = g.Archetypes };
         }
 
+        // Group sets in ordinal name order, members by canonical archetype index: a SOURCES group record names its set by this position.
+        CatalogGroupSet[] groupSets = null;
+        if (catalog.GroupSets is { Length: > 0 })
+        {
+            groupSets = Sorted(catalog.GroupSets, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+            for (var i = 0; i < groupSets.Length; i++)
+            {
+                var s = groupSets[i];
+                var members = new int[s.Members.Length];
+                for (var j = 0; j < members.Length; j++)
+                {
+                    members[j] = canonicalIdxOfDeclared[s.Members[j]];
+                }
+
+                Array.Sort(members);
+                groupSets[i] = new CatalogGroupSet { Idx = i, Name = s.Name, Selector = s.Selector, Key = s.Key, Members = members };
+            }
+        }
+
         return new Catalog
         {
             Protocol = catalog.Protocol,
@@ -114,6 +133,7 @@ public static class CatalogSerializer
             Events = events,
             Commands = commands,
             Grids = grids,
+            GroupSets = groupSets,
             Metrics = metrics,
         };
     }

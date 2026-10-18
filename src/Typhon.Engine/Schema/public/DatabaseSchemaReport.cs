@@ -81,6 +81,9 @@ public class FieldSchemaReport
 
     /// <summary>True when the field's index permits multiple entities per key (non-unique).</summary>
     public bool IndexAllowMultiple { get; init; }
+
+    /// <summary>True when the field's index skips key 0, "no data" (<c>[Index(Sparse = true)]</c>).</summary>
+    public bool IndexSparse { get; init; }
 }
 
 /// <summary>

@@ -304,6 +304,99 @@ unsafe class IngressHardeningTests : TestBase<IngressHardeningTests>
     }
 
     /// <summary>
+    /// #1025: a <c>PING</c> flood is capped and then closed. Past the cap (4 × the declared 4 Hz, one second deep: 16) a <c>PING</c> is dropped unanswered
+    /// and counted as a refusal, so a session sending nothing but <c>PING</c>s far above the rate is closed with 1008 at its third abusive window, exactly
+    /// as a command flood is. Before the cap it was charged and answered every time and never closed.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-27")]
+    public void APingFloodIsCappedAndClosedWith1008()
+    {
+        const int Flood = 200;
+        const int Cap = 16;
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var window = TimeSpan.FromSeconds(1);
+        using var harness = Harness(dbe, nameof(APingFloodIsCappedAndClosedWith1008), budget: 1_000_000, abuseWindow: window, abuseRefusals: 64,
+            abuseWindows: 3);
+        var steady = Connect(harness);
+        var abuser = Connect(harness);
+        harness.RunTick(++_tick);
+
+        var closedAfter = new List<bool>();
+        uint ms = 0;
+        for (var w = 0; w < 3; w++)
+        {
+            // The clock is still: the whole flood lands in one instant, so the bucket answers exactly what it holds.
+            for (var i = 0; i < Flood; i++)
+            {
+                abuser.Connection.OnMessage(ClientMessages.Ping(ms++, 0));
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                steady.Connection.OnMessage(ClientMessages.Ping(ms++, 0));
+            }
+
+            Advance(window);
+
+            // The first message of the next window evaluates the window that just ended; one PING, answered, since the bucket has refilled.
+            abuser.Connection.OnMessage(ClientMessages.Ping(ms++, 0));
+            steady.Connection.OnMessage(ClientMessages.Ping(ms++, 0));
+            closedAfter.Add(abuser.Connection.State == SubscriptionConnectionState.Closed);
+        }
+
+        harness.RunTick(++_tick);
+        var deadline = Environment.TickCount64 + 5000;
+        while (!abuser.Link.IsClosed && Environment.TickCount64 < deadline)
+        {
+            Thread.Yield();
+        }
+
+        Assert.Multiple(() =>
+        {
+            // Window 0 starts full (16 answered); windows 1 and 2 start with the refill less the probe that evaluated the window before (15 answered).
+            Assert.That(abuser.Connection.PingsRefused, Is.EqualTo((Flood - Cap) + (2L * (Flood - (Cap - 1)))), "every PING past the cap dropped");
+            Assert.That(closedAfter, Is.EqualTo(new[] { false, false, true }), "closed at the third abusive window, not before");
+            Assert.That(abuser.Link.CloseCode, Is.EqualTo(CloseCodes.PolicyViolation));
+            Assert.That(steady.Connection.PingsRefused, Is.Zero, "a client at the declared rate is never refused");
+            Assert.That(steady.Connection.State, Is.EqualTo(SubscriptionConnectionState.Open));
+        });
+    }
+
+    /// <summary>
+    /// The cap's other side: a client keeping the declared 4 Hz for ten seconds is never refused, and neither is one that falls a whole second behind and
+    /// sends the four PINGs it owed at once.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-27")]
+    public void AClientAtTheDeclaredPingRateIsNeverRefused()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = Harness(dbe, nameof(AClientAtTheDeclaredPingRateIsNeverRefused), budget: 256, abuseRefusals: 3, abuseWindows: 2);
+        var client = Connect(harness);
+        harness.RunTick(++_tick);
+
+        uint ms = 0;
+        for (var i = 0; i < 40; i++)
+        {
+            Advance(TimeSpan.FromMilliseconds(250));
+            client.Connection.OnMessage(ClientMessages.Ping(ms += 250, 0));
+        }
+
+        Advance(TimeSpan.FromSeconds(1));
+        for (var i = 0; i < 4; i++)
+        {
+            client.Connection.OnMessage(ClientMessages.Ping(ms, 0));
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(client.Connection.PingsRefused, Is.Zero);
+            Assert.That(client.Connection.State, Is.EqualTo(SubscriptionConnectionState.Open));
+        });
+    }
+
+    /// <summary>
     /// Q6 and the rails' own sanity: Start refuses a catalog with commands and no budget, a budget below the message cap, and an abuse rule off.
     /// </summary>
     [Test]
@@ -419,9 +512,38 @@ class IngressRailsTests
         Assert.Multiple(() =>
         {
             Assert.That(afterBurst, Is.EqualTo((1, 1)), "the second 60 bytes did not fit the 40 left");
-            Assert.That(pingsAnswered, Is.EqualTo(5), "a PING is never refused");
+            Assert.That(pingsAnswered, Is.EqualTo(5), "a PING within the budget is answered");
             Assert.That(_host.CommandMessages, Is.EqualTo(1), "the pings were charged: 40 + 20 refilled − 5 pings is under 60");
             Assert.That(_host.RefusedMessages, Is.EqualTo(2));
+        });
+    }
+
+    /// <summary>
+    /// #1025: a <c>PING</c> that finds the budget empty is dropped, unanswered and uncharged, and counted as a refusal; the next one after a refill is
+    /// answered. It used to be charged and answered whatever the budget held, so a flood of them was never bounded by it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-27")]
+    public void APingOverTheBudgetIsDroppedNotAnswered()
+    {
+        var connection = Open();
+        connection.OnMessage(ClientMessages.Commands(100));
+        var answered = _host.PongRequests.Count;
+
+        connection.OnMessage(ClientMessages.Ping(1, 7));
+        var droppedAnswered = _host.PongRequests.Count;
+        var droppedAck = connection.LastAppliedTick;
+
+        _now += Second;
+        connection.OnMessage(ClientMessages.Ping(2, 8));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(droppedAnswered, Is.EqualTo(answered), "the PING over the budget was not answered");
+            Assert.That(droppedAck, Is.EqualTo(7u), "but its acknowledgement was kept: the lag rule reads it, and losing it closes a healthy client with 4001");
+            Assert.That(connection.PingsRefused, Is.EqualTo(1));
+            Assert.That(_host.PongRequests.Count, Is.EqualTo(answered + 1), "the one after a refill is");
+            Assert.That(connection.State, Is.EqualTo(SubscriptionConnectionState.Open));
         });
     }
 

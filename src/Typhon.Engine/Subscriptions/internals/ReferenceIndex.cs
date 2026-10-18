@@ -120,6 +120,30 @@ internal sealed unsafe class ReferenceResolver
         _locators = new EntityLocator[index.RoutingCount];
     }
 
+    // The block being projected: its cluster's entity ids, and the slot whose reference is resolved now — the referrer a positionless target with no block
+    // yet is waiting for (14 § 5). Cluster memory, read during the block's projection.
+    private long* _referrers;
+
+    /// <summary>The slot of the block being projected whose references are resolved next.</summary>
+    internal int ReferrerSlot;
+
+    // References that named a positionless entity with no block, as (target, referrer): drained by the next blocks step into the hub.
+    private readonly List<(ulong Target, ulong Referrer)> _lazyMisses = [];
+
+    /// <summary>Binds the block about to be projected: <paramref name="entityIds"/> is its cluster's entity id column.</summary>
+    internal void BindReferrers(long* entityIds) => _referrers = entityIds;
+
+    /// <summary>Hands the references that named a lazy entity with no block to <paramref name="hub"/>, and forgets them. Serial, at the blocks step.</summary>
+    internal void DrainLazyMisses(PushHub hub)
+    {
+        foreach (var (target, referrer) in _lazyMisses)
+        {
+            hub.WaitForBlock(target, referrer);
+        }
+
+        _lazyMisses.Clear();
+    }
+
     /// <summary>Opens the worker's locators for its share of one archetype's blocks.</summary>
     public void Open()
     {
@@ -162,10 +186,15 @@ internal sealed unsafe class ReferenceResolver
         // Every pushed cluster has a block by now (the blocks step attached them). One without was never pushed — a realm nobody serves, or a pool that ran
         // dry — and waiting would re-push the referrer every tick for nothing. The realm case costs no client anything: a session holds its own realm only
         // (SUB-28), so a target in a realm nobody serves is one no referrer's client could hold. The pool case is 06 § 8's open item.
-        var table = state.BlockByChunk;
-        var block = (uint)chunk < (uint)table.Length ? (byte*)table[chunk] : null;
+        var block = (byte*)state.BlockAt(chunk);
         if (block == null || (uint)slot >= (uint)state.Layout.SlotCount)
         {
+            // A positionless member has a block only while a held key needs it (14 § 5): 0 now, and the referrer is pushed again when the block attaches.
+            if (block == null && state.Lazy && _referrers != null)
+            {
+                _lazyMisses.Add((target.RawValue, (ulong)_referrers[ReferrerSlot]));
+            }
+
             return NetIdAllocator.NoNetId;
         }
 
@@ -400,6 +429,15 @@ internal sealed unsafe class ReferenceIndex : IDisposable
         }
     }
 
+    /// <summary>Every worker's references to a lazy entity with no block, to <paramref name="hub"/>. Serial, at the blocks step.</summary>
+    internal void DrainLazyMisses(PushHub hub)
+    {
+        foreach (var resolver in _resolvers)
+        {
+            resolver?.DrainLazyMisses(hub);
+        }
+    }
+
     /// <summary>
     /// The blocks step's half (13 § 5): merges the logs, then pushes again — this tick — every referrer of an identity released since the last step. Serial,
     /// before <see cref="PushHub.PrepareBlocks"/>.
@@ -491,8 +529,7 @@ internal sealed unsafe class ReferenceIndex : IDisposable
     // dormant cluster's skip does not pass it by. A parked entry is not reachable here; its −1 is then dropped (DroppedDecrements).
     private static void Forget(ArchetypeReplicationState state, int chunk, int slot, EntityId referrer, uint netId)
     {
-        var table = state.BlockByChunk;
-        var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+        var block = state.BlockAt(chunk);
         var layout = state.Layout;
         if (block == null || (uint)slot >= (uint)layout.SlotCount)
         {

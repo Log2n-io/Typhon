@@ -154,8 +154,21 @@ internal interface ISubscriptionsHost
 /// <param name="WindowTicks">The abuse window, in <see cref="Stopwatch"/> ticks; 0 for no abuse rule.</param>
 /// <param name="RefusalsPerWindow">Refusals past which a window counts as abusive.</param>
 /// <param name="Windows">Consecutive abusive windows after which the session is closed with 1008.</param>
-internal readonly record struct IngressPolicy(int BytesPerSecond, long WindowTicks, int RefusalsPerWindow, int Windows)
+/// <param name="PingsPerSecond">
+/// The most <c>PING</c>s a session is answered per second, one second deep; one over it is dropped unanswered and counted as a refusal. Set from the server's
+/// own declared keepalive rate (<see cref="PingAllowance"/> × <c>PingHz</c>), so a client keeping the rate it was told never meets it; 0 for no cap.
+/// </param>
+internal readonly record struct IngressPolicy(int BytesPerSecond, long WindowTicks, int RefusalsPerWindow, int Windows, int PingsPerSecond = 0)
 {
+    /// <summary>
+    /// How many times the declared keepalive rate a session's <c>PING</c>s may run before they are dropped. Four: a client a whole second behind on its
+    /// timer catches up inside the bucket, and a flood at any rate that costs the server something is still cut to sixteen answers a second at 4 Hz.
+    /// </summary>
+    public const int PingAllowance = 4;
+
+    /// <summary>Whether <c>PING</c>s are capped.</summary>
+    public bool PingCapped => PingsPerSecond > 0;
+
     /// <summary>Whether there is an inbound budget.</summary>
     public bool Budgeted => BytesPerSecond > 0;
 
@@ -234,6 +247,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
     private IngressPolicy _policy;
     private long _budget;
     private long _budgetStamp;
+    private long _pings;
+    private long _pingStamp;
+    private long _pingsRefused;
     private long _windowStart;
     private long _windowRefusals;
     private long _hostRefusedMark;
@@ -516,7 +532,8 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         _clientMessageBytes = row.ClientMessageBytes;
         _policy = _host.IngressPolicy;
         _budget = BudgetDepth;
-        _budgetStamp = _windowStart = Now();
+        _pings = PingDepth;
+        _budgetStamp = _pingStamp = _windowStart = Now();
         _capsGranted = GrantCaps(hello.Caps, row.Flags);
 
         // Before the WELCOME, so a session cannot be served a frame for a tick between the client being told it has STATS and the producer knowing it.
@@ -634,9 +651,31 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
     // second of budget — is BytesPerSecond × Frequency, below 2^63 for any int rate at a nanosecond clock.
     private long BudgetDepth => _policy.BytesPerSecond * Stopwatch.Frequency;
 
+    // The PING bucket, in the budget's units: pings × Stopwatch.Frequency, one second deep.
+    private long PingDepth => _policy.PingsPerSecond * Stopwatch.Frequency;
+
+    /// <summary><c>PING</c>s dropped unanswered since the session opened, over the rate cap or the byte budget (#1025). Read by tests.</summary>
+    internal long PingsRefused => Volatile.Read(ref _pingsRefused);
+
     private void HandleOpen(ReadOnlySpan<byte> message)
     {
         var now = Now();
+        if (message[0] == MessageTypes.Ping && _policy.PingCapped)
+        {
+            var elapsed = Math.Min(now - _pingStamp, Stopwatch.Frequency);
+            _pings = Math.Min(PingDepth, _pings + (Math.Max(0, elapsed) * _policy.PingsPerSecond));
+            _pingStamp = now;
+            if (_pings < Stopwatch.Frequency)
+            {
+                // Not answered and not charged: answering it is exactly the per-message wake of the pump the cap exists to bound. Counted towards the abuse
+                // rule, so a flood is closed like a command flood (SUB-27, #1025).
+                RefusePing(message, now);
+                return;
+            }
+
+            _pings -= Stopwatch.Frequency;
+        }
+
         if (_policy.Budgeted)
         {
             var elapsed = Math.Min(now - _budgetStamp, Stopwatch.Frequency);
@@ -653,8 +692,14 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
                 return;
             }
 
-            // Every other message is charged and never refused: a PING keeps the session's acknowledgement alive, a BYE is a client leaving, and anything
-            // else is a protocol error that must close now rather than wait for the budget.
+            if (message[0] == MessageTypes.Ping && _budget < cost)
+            {
+                RefusePing(message, now);
+                return;
+            }
+
+            // Everything else is charged and never refused: a BYE is a client leaving, and anything else is a protocol error that must close now rather
+            // than wait for the budget.
             _budget = Math.Max(0, _budget - cost);
         }
 
@@ -662,10 +707,30 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         CheckAbuse(now);
     }
 
+    /// <summary>Refuses a <c>PING</c> its answer, and only its answer.</summary>
+    /// <remarks>
+    /// <b>Its acknowledgement is kept.</b> A <c>PING</c> carries the tick the client has applied, which the lag rule closes sessions on (4001); dropping the
+    /// whole message dropped that too, so a client acknowledging faster than the cap read as one that had stopped acknowledging, and was closed for it.
+    /// Recording it is a slot check and two stores; the expensive half of a flood is the pump wake, and that is what is refused.
+    /// </remarks>
+    private void RefusePing(ReadOnlySpan<byte> message, long now)
+    {
+        NotePing(PingMessage.Parse(message));
+        Volatile.Write(ref _pingsRefused, _pingsRefused + 1);
+        _windowRefusals++;
+        CheckAbuse(now);
+    }
+
+    private void NotePing(in PingMessage ping)
+    {
+        Volatile.Write(ref _lastAppliedTick, ping.LastAppliedTick);
+        _host.NoteSessionPing(_session, ping.LastAppliedTick);
+    }
+
     /// <summary>
-    /// Closes a session whose commands keep being refused: past <see cref="IngressPolicy.RefusalsPerWindow"/> refused commands — this connection's
-    /// over-budget ones and the ingress's rate and role ones — in <see cref="IngressPolicy.Windows"/> consecutive windows, it is closed with 1008 rather than
-    /// refused forever. Evaluated as messages arrive: a client that has stopped sending is not abusing anything.
+    /// Closes a session whose messages keep being refused: past <see cref="IngressPolicy.RefusalsPerWindow"/> refusals — this connection's over-budget
+    /// commands and dropped <c>PING</c>s, and the ingress's rate and role refusals — in <see cref="IngressPolicy.Windows"/> consecutive windows, it is closed
+    /// with 1008 rather than refused forever. Evaluated as messages arrive: a client that has stopped sending is not abusing anything.
     /// </summary>
     /// <param name="now">The rails' clock.</param>
     private void CheckAbuse(long now)
@@ -693,7 +758,7 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         if (_abusiveWindows >= _policy.Windows)
         {
             CloseWithKick(CloseCodes.PolicyViolation,
-                $"sustained abuse: over {_policy.RefusalsPerWindow} refused commands a window for {_policy.Windows} windows", SessionCloseReason.Abusive);
+                $"sustained abuse: over {_policy.RefusalsPerWindow} refused messages a window for {_policy.Windows} windows", SessionCloseReason.Abusive);
         }
     }
 
@@ -703,8 +768,7 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
         {
             case MessageTypes.Ping:
                 var ping = PingMessage.Parse(message);
-                Volatile.Write(ref _lastAppliedTick, ping.LastAppliedTick);
-                _host.NoteSessionPing(_session, ping.LastAppliedTick);
+                NotePing(ping);
                 // Answered by the session's pump, the link's only writer once the session is open. A refusal means the link is gone, so there is nobody
                 // to answer.
                 _host.RequestPong(_session, ping.ClientMs);

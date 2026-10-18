@@ -2953,6 +2953,13 @@ public unsafe partial class Transaction : EntityAccessor
 
                 ref var idxAccessor = ref ClusterCommitIndexAccessor(clusterState, field.Index.Segment);
                 mutations++;   // past the guard, so this is real tree work (#665)
+
+                // A group key leaving its value (14 § 5): logged BEFORE the index moves, so a replication gather that misses the entry in the tree finds it here.
+                if (oldComp != null)
+                {
+                    clusterState.GroupKeyMoves?.Note(compSlot, field.FieldOffset, clusterLocation, oldComp + field.FieldOffset);
+                }
+
                 if (newComp != null && oldComp != null)
                 {
                     // Update: move this entity's entry from the old key to the new key.

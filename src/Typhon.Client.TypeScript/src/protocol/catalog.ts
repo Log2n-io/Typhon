@@ -145,6 +145,19 @@ export interface CatalogGrid {
   readonly archetypes: readonly number[];
 }
 
+/** A group set (14 § 3.5): entities sharing a key, held whole. */
+export interface CatalogGroupSet {
+  /** The wire index, the set's position in ordinal name order. */
+  readonly idx: number;
+  readonly name: string;
+  /** `region`: a session holds a group while its observer meets the region's extent. */
+  readonly selector: string;
+  /** The key's integer type (`u8` … `i64`); on the wire every key is a `vari`. */
+  readonly key: string;
+  /** The member archetypes' indices, ascending. */
+  readonly members: readonly number[];
+}
+
 export interface CatalogMetric {
   readonly idx: number;
   readonly name: string;
@@ -171,6 +184,8 @@ export interface Catalog {
   readonly events: readonly CatalogEvent[];
   readonly commands: readonly CatalogCommand[];
   readonly grids: readonly CatalogGrid[];
+  /** The group sets, in canonical order; absent when none is declared. */
+  readonly groupSets?: readonly CatalogGroupSet[];
   readonly metrics: readonly CatalogMetric[];
 }
 
@@ -274,6 +289,18 @@ function readCatalog(raw: unknown, p: string[]): Catalog {
       tileCells: int(g, 'tileCells', where, p),
       archetypes: intArray(g.archetypes, `${where}.archetypes`, p),
     })),
+    // Absent when none is declared; null reads as absent, as the C# model deserializes it.
+    ...(o.groupSets === undefined || o.groupSets === null
+      ? {}
+      : {
+          groupSets: list(o.groupSets, 'groupSets', p, (g, where) => ({
+            idx: int(g, 'idx', where, p),
+            name: str(g, 'name', where, p),
+            selector: str(g, 'selector', where, p),
+            key: str(g, 'key', where, p),
+            members: intArray(g.members, `${where}.members`, p),
+          })),
+        }),
     metrics: list(o.metrics, 'metrics', p, (m, where) => readMetric(m, where, p)),
   };
 }
@@ -1085,6 +1112,8 @@ export class CatalogPlan {
   /** Values across every metric: the size of a flattened value table. */
   readonly metricValueCount: number;
   readonly grids: readonly GridPlan[];
+  /** The group sets, by index: what a `SOURCES` group record's set names. */
+  readonly groupSets: readonly CatalogGroupSet[];
   /** The realm kinds: a `REALM` block's `kindIdx` indexes this. `[""]` for a catalog that declares none. */
   readonly realmKinds: readonly string[];
 
@@ -1139,6 +1168,17 @@ export class CatalogPlan {
 
       return new GridPlan(g, catalog.archetypes.length);
     });
+    this.groupSets = catalog.groupSets ?? [];
+    this.groupSets.forEach((g, i) => {
+      if (g.idx !== i) {
+        throw refuse(`group set at position ${i} has index ${g.idx}`);
+      }
+    });
+  }
+
+  /** The index of the group set named `name`, or -1. */
+  groupSetIndex(name: string): number {
+    return this.groupSets.findIndex((g) => g.name === name);
   }
 
   /**

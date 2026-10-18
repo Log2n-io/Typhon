@@ -49,6 +49,9 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The owner routing, when an archetype declares owner fields (11 § 2.2); <see langword="null"/> otherwise.</summary>
     internal SelfTracker Self;
 
+    /// <summary>A group set is declared (14 § 3.8): a geometric and a group path may decide one entity alike, so each sorted sub-list is deduplicated.</summary>
+    internal bool HasGroups;
+
     private readonly AckHistory _ackHistory;
 
     /// <summary><c>SELF</c> blocks published, over the assembler's life.</summary>

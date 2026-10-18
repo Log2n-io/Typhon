@@ -1396,6 +1396,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
         }
 
+        var sparseZero = false;
         try
         {
             // Open a sorted stream for each matching cluster archetype
@@ -1469,6 +1470,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     KeyRange.Intersect(evaluators, fieldIdx, keyType, ref scanMin, ref scanMax);
                 }
 
+                // A sparse tree holds no key 0 (IX-09): streamed over a range admitting it, the merge would drop every entity holding 0.
+                if (field.Index.Sparse && KeyRange.AdmitsZero(keyType, scanMin, scanMax))
+                {
+                    sparseZero = true;
+                    break;
+                }
+
                 // #1347: an archetype that promises snapshot isolation streams at the reader's snapshot. A destroy newer than it removed entries the
                 // snapshot still sees, so each cluster such a death touched is read whole into a sorted side stream, and the tree stream drops its rows.
                 StreamSnapshot? snapshot = null;
@@ -1528,6 +1536,19 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     (ownSpawnSources ??= []).Add((meta, matchSlot.Slot, field.FieldOffset, keyType));
                 }
+            }
+
+            if (sparseZero)
+            {
+                // The sort fallback reads component data, which holds the 0s.
+                for (var i = 0; i < streamCount; i++)
+                {
+                    streams[i].Dispose();
+                }
+
+                ArrayPool<ArchetypeSortedStream>.Shared.Return(streams, true);
+                streams = null;
+                return ExecuteOrderedViaSortFallback(evaluators, plan);
             }
 
             // Read-your-own-writes: the spawns this transaction matched, by their own values, merged like any archetype's rows.
@@ -2800,14 +2821,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Whether this archetype should be scanned via Path A (selective B+Tree range scan) rather than Path B (zone map + SoA evaluation).
     /// </summary>
     /// <remarks>
-    /// The two hard preconditions come first and are not overridable, because they are not preferences: a Transient home has no
-    /// <c>BTreeBase&lt;PersistentStore&gt;</c> for the collector to walk, and without a primary field there is no range to scan. Only the selectivity
-    /// judgement — the part that is an estimate — answers to <see cref="QueryPathProbe.Forced"/>.
+    /// The hard preconditions come first and are not overridable, because they are not preferences: a Transient home has no
+    /// <c>BTreeBase&lt;PersistentStore&gt;</c> for the collector to walk, without a primary field there is no range to scan, and a sparse tree holds no
+    /// key 0 (IX-09), so a range admitting 0 scanned over it misses every entity holding 0. Only the selectivity judgement — the part that is an estimate —
+    /// answers to <see cref="QueryPathProbe.Forced"/>.
     /// </remarks>
     private static bool ChooseSelectivePath(ExecutionPlan plan, ArchetypeClusterState clusterState, ArchetypeEngineState engineState, int ixSlotIdx,
         bool transientHome)
     {
-        if (transientHome || !plan.UsesSecondaryIndex)
+        if (transientHome || !plan.UsesSecondaryIndex || ScanMissesSparseZero(plan, clusterState, ixSlotIdx))
         {
             return false;
         }
@@ -2818,6 +2840,22 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             ClusterScanPath.FullScan => false,
             _ => HasFanOutForSelectiveScan(plan, clusterState, engineState, ixSlotIdx)
         };
+    }
+
+    /// <summary>
+    /// Whether the plan's primary range admits key 0 and the archetype's tree for that field is sparse: a scan of it would miss the 0s (IX-09).
+    /// </summary>
+    private static bool ScanMissesSparseZero(ExecutionPlan plan, ArchetypeClusterState clusterState, int ixSlotIdx)
+    {
+        var ixSlots = clusterState.IndexSlots;
+        if (ixSlots == null || (uint)ixSlotIdx >= (uint)ixSlots.Length)
+        {
+            return false;
+        }
+
+        var fields = ixSlots[ixSlotIdx].Fields;
+        return fields != null && (uint)plan.PrimaryFieldIndex < (uint)fields.Length && fields[plan.PrimaryFieldIndex].Index.Sparse
+               && KeyRange.AdmitsZero(plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax);
     }
 
     /// <summary>

@@ -92,7 +92,10 @@ sealed unsafe class FrameHarness : IDisposable
         return sessions;
     }
 
-    /// <summary>The netId replication gave <paramref name="entity"/>, located as a frame locates a controlled entity; 0 when it has none.</summary>
+    /// <summary>
+    /// The netId replication gave <paramref name="entity"/>, located as a frame locates a controlled entity — or through its EntityMap when it has no
+    /// position (14 § 5); 0 when it has none.
+    /// </summary>
     /// <param name="entity">The entity.</param>
     /// <returns>The netId.</returns>
     public uint NetIdOf(EntityId entity)
@@ -101,12 +104,28 @@ sealed unsafe class FrameHarness : IDisposable
         var locator = new BoundViewpoint(Engine) { Push = Subscriptions.Push };
         try
         {
-            return locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
-                && Subscriptions.Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var netId) ? netId : 0u;
+            if (locator.TryLocate(entity, out var clusters, out var chunk, out var slot))
+            {
+                return Subscriptions.Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var netId) ? netId : 0u;
+            }
         }
         finally
         {
             locator.Dispose();
+        }
+
+        var any = new EntityLocator(Engine);
+        try
+        {
+            var states = Engine._stateByRouting;
+            return any.TryLocate(entity, out var chunk, out var slot) && entity.ArchetypeId < states.Length
+                && Subscriptions.Push.TryReplicaAt(states[entity.ArchetypeId].ClusterState, chunk, slot, entity, out _, out _, out var netId)
+                ? netId
+                : 0u;
+        }
+        finally
+        {
+            any.Dispose();
         }
     }
 
@@ -164,6 +183,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>Called after the ingress drain of each tick, where an application system would apply (or reject) the tick's commands.</summary>
     public Action<long> AfterIngress { get; set; }
 
+    /// <summary>Runs after the tick fence and before the blocks step, when <see cref="RunFence"/> is set: where an off-DAG commit lands on the next tick's marks.</summary>
+    public Action<long> AfterFence { get; set; }
+
     private readonly SubscriptionsContext _ingressContext = new();
 
     /// <summary>Runs one tick's ingress drain, exactly as the Engine-Pre system dispatches it.</summary>
@@ -215,6 +237,7 @@ sealed unsafe class FrameHarness : IDisposable
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
+            AfterFence?.Invoke(tick);
         }
 
         // The shadow oracle's checks queued by the previous tick, where the ingress drain runs them: before this tick's projection moves a block.
@@ -476,6 +499,14 @@ sealed unsafe class FrameHarness : IDisposable
             Mix(requestId);
             Mix(status);
             Mix(code);
+        }
+
+        public void Group(byte kind, uint set, long key)
+        {
+            Mix(12);
+            Mix(kind);
+            Mix(set);
+            Mix((ulong)key);
         }
 
         public void BeginAggregate(CatalogGrid grid, bool reset)
@@ -1060,6 +1091,17 @@ sealed class FrameLog : ITickSink
     /// <inheritdoc />
     public void Source(ushort requestId, byte status, ushort code) => Calls.Add($"source {requestId}");
 
+    /// <summary>Every group record decoded so far, in stream order: kind, set and key.</summary>
+    public List<(byte Kind, uint Set, long Key)> Groups { get; } = [];
+
+    /// <inheritdoc />
+    public void Group(byte kind, uint set, long key)
+    {
+        _inSelf = false;
+        Groups.Add((kind, set, key));
+        Calls.Add($"group {kind} {set} {key}");
+    }
+
     /// <inheritdoc />
     public void BeginAggregate(CatalogGrid grid, bool reset) => Calls.Add($"beginAggregate {grid.Idx}");
 
@@ -1142,6 +1184,8 @@ sealed class FrameLog : ITickSink
         public void Ack(ushort seq, byte reason) => _log.Ack(seq, reason);
 
         public void Source(ushort requestId, byte status, ushort code) => _log.Source(requestId, status, code);
+
+        public void Group(byte kind, uint set, long key) => _log.Group(kind, set, key);
 
         public void BeginAggregate(CatalogGrid grid, bool reset) => _log.BeginAggregate(grid, reset);
 

@@ -122,7 +122,9 @@ public class StreamGoldenTests
         ], TestFrames.Kitchen);
         TickWriter.WriteSelf(ref w, drone, 100, 6, 0b10, new RecordValues { ["pin"] = FieldValue.Of(43), ["vault"] = FieldValue.Of(0) }, TestFrames.Kitchen);
         TickWriter.WriteAcks(ref w, [(6, AckReasons.Rejected)]);
-        TickWriter.WriteSources(ref w, [(9, SourceStatus.Applied, 0)]);
+        // Two groups completed (crew 3, zone -7), and one released that never completed: nothing to remove.
+        TickWriter.WriteSources(ref w, [(9, SourceStatus.Applied, 0)],
+            [(SourceStatus.GroupComplete, 1, -7), (SourceStatus.GroupComplete, 0, 3), (SourceStatus.GroupReleased, 0, 99)]);
         TickWriter.WriteAggregate(ref w, plan.Grids[0], reset: false, [(1u, [0u, 0u]), (7u, [4u, 4u])]);
         frames.Add(w.Written.ToArray());
 
@@ -141,6 +143,9 @@ public class StreamGoldenTests
         ], TestFrames.Kitchen);
         TickWriter.WriteEntities(ref w, 1002, drone, [DroneEnter(102, 1002)], [], [], [], TestFrames.Kitchen);
         TickWriter.WriteEntities(ref w, 1002, ledger, [new EnterRecord { NetId = 3, Values = LedgerValues(9, 5) }], [], [], [], TestFrames.Kitchen);
+
+        // zone -7 released; crew 3 stays complete.
+        TickWriter.WriteSources(ref w, [], [(SourceStatus.GroupReleased, 1, -7)]);
         frames.Add(w.Written.ToArray());
 
         // Frame 4 — RESET: only what this frame carries survives.
@@ -148,6 +153,9 @@ public class StreamGoldenTests
         TickWriter.WriteHeader(ref w, 1003, TickFlags.Reset);
         TickWriter.WriteRealm(ref w, TestFrames.Kitchen);
         TickWriter.WriteEntities(ref w, 1003, beacon, [Enter(50, [0, 0], ("channel", 3), ("strength", 0), ("drift", 0))], [], [], [], TestFrames.Kitchen);
+
+        // The RESET dropped crew 3; only what this frame completes is held.
+        TickWriter.WriteSources(ref w, [], [(SourceStatus.GroupComplete, 1, 5)]);
         frames.Add(w.Written.ToArray());
 
         return frames;

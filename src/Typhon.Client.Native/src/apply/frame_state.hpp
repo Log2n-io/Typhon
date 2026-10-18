@@ -137,4 +137,12 @@ struct SourceEntry {
     std::uint32_t code;
 };
 
+// This frame's group lifecycle records (SOURCES, 14 § 3.5): SourceStatus::GroupComplete or GroupReleased, the set's index, the key.
+// Laid out as the C API's typhon_group_record, which a span of these is handed out as.
+struct GroupEntry {
+    std::uint32_t kind;
+    std::uint32_t set;
+    std::int64_t key;
+};
+
 }  // namespace typhon::client

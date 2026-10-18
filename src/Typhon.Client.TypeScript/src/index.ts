@@ -31,7 +31,15 @@ export { Clock, type ClockOptions } from './clock/clock.js';
 export { monotonicNow } from './clock/now.js';
 export { AggregateGrid, type GridSchema } from './aggregates/aggregate-grid.js';
 export { FrameApplier, type FrameApplierOptions } from './apply/frame-applier.js';
-export { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './apply/frame-state.js';
+export {
+  AckList,
+  EventRecord,
+  GroupState,
+  retainBytes,
+  SelfState,
+  SourceList,
+  StatsState,
+} from './apply/frame-state.js';
 export { fieldKindOf, gridSchemaFromCatalog, worldSchemaFromCatalog } from './apply/schema-from-catalog.js';
 
 export {
@@ -173,6 +181,7 @@ export {
   type EventInput,
   type SegmentRecord,
   type SourceInput,
+  type GroupInput,
   type StateRecord,
 } from './protocol/tick-writer.js';
 export { readCommands, writeCommands, type CommandInput, type CommandSink } from './protocol/commands.js';
@@ -240,6 +249,14 @@ export {
 } from './net/reconnect.js';
 export { forEachMessage, replayStream, StreamRecorder, type FrameConsumer } from './net/recorder.js';
 export { CommandQueue, CommandRefused, type CommandQueueOptions } from './commands/queue.js';
+export {
+  GroupSubscriptions,
+  SubscribeOp,
+  type GroupSubscriptionsOptions,
+  type SubscribeOutcome,
+  type SubscribeResult,
+  type TrySend,
+} from './commands/group-subscriptions.js';
 export {
   createClientRegion,
   REGION_MAX_VERTICES,

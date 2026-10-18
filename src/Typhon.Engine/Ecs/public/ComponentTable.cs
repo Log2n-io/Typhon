@@ -898,6 +898,11 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
                 : new String64SingleBTree<TStore>(s, load, key, changeSet),
             _                  => null
         };
+        if (index != null)
+        {
+            index.Sparse = field.IndexSparse;
+        }
+
         return index;
     }
 

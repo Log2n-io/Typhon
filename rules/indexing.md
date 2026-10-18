@@ -252,6 +252,43 @@ scoped.
             compaction); MigrateUniqueIndexTests [VerifiesRule] (#1348: the loser's migration repointed the holder's key) and
             BTreeBulkUpdateTests.UpdateValues_AnEntryExpectingAnotherValue_IsSkipped (every applier path)
 
+### IX-09: A sparse index never files key 0, and nothing reads one as if it had `[silent]`
+  invariant a field declared `[Index(Sparse = true)]` (integer key types only) indexes no entity whose key is 0 — "no data", the engine's rule for an
+            optional value. The tree itself enforces it, at every entry point (`BTreeBase.Sparse`, `BTree.SkipsKey`): an insert of 0 stores nothing and
+            returns element id 0; a removal of 0 succeeds; a lookup of 0 finds nothing; a move off 0 is an insert, a move onto 0 a removal (the entity's
+            element id becomes 0); 0 to 0 is nothing; a unique move off 0 onto a key another entity holds changes nothing and answers false, as a move
+            between two keys does. The fence's batch gathers only the non-zero side of a move (a departure alone, an arrival alone — the unbalanced moves
+            IX-08 applies), samples its cuts and sizes its ranges from non-zero keys only, and hands back element id 0 for a move onto 0. Migration's
+            location update stages nothing for a migrant holding 0 (`ClusterMigration` staging, `SkipsKey`); a bulk update naming an absent key skips it
+  invariant a unique sparse index lets any number of entities hold 0, and still refuses two entities one real key (`Transaction.ClaimOwnKey`)
+  invariant no QUERY answers a range that admits 0 from a sparse tree: the selective scan is refused before any forcing
+            (`EcsQuery.ScanMissesSparseZero`, `KeyRange.AdmitsZero`) and the ordered merge falls back to the sort over data; a range that excludes 0 reads
+            the tree as before. The integrity check's missing-entry finding (IDX-04) does not count a sparse field's 0s. The raw index enumeration
+            (`Transaction.EnumerateIndex`) is the tree itself and never yields key 0 — documented, not a query
+  invariant the flag is persisted (`FieldR1.IndexSparse`); turning it on or off is an index-kind change: the tree is rebuilt from the data at open rather
+            than loaded (`SchemaEvolutionEngine.GetNewIndexFieldIds`), and the catalog row is rewritten so the next open sees no change and the integrity
+            check reads the kind the tree has
+  scope: BTreeBase.Sparse, BTree.SkipsKey, BTree.Add, BTree.Remove, BTree.TryGet, BTree.RemoveValue, BTree.TryGetMultiple, BTree.Move,
+         BTree.MoveValue, BTree.GatherMoveEvents, BTree.SampleMoveKeys, BTree.DeferredMultiMoves, ComponentTable.CreateIndexForFieldCore,
+         EcsQuery.ScanMissesSparseZero, KeyRange.AdmitsZero, Transaction.ClaimOwnKey, SchemaEvolutionEngine.GetNewIndexFieldIds, FieldR1.IndexSparse
+  on_violation: a key-0 entry makes the index's size scale with every entity instead of the ones that set the field, and is never removed by a sparse
+                tree; a reader that trusts the tree for a range holding 0 silently drops every entity holding it; a unique sparse index that counts 0 as a
+                key refuses the second entity with no value
+  rationale: #1027 Phase 4 groups (step 4.0b): membership is an integer key field indexed `AllowMultiple`, and most entities belong to no group. A dense
+             index files them all under 0 — one VSBS buffer holding most of the archetype, rewritten by every join and leave. The guard lives in the tree
+             so that no caller (~25 index call sites across commit, fence, migration and destroy) tests for 0
+  requires IX-08 (the unbalanced moves the batch already applies), IX-07
+  verified: SparseBTreeTests [VerifiesRule] — every single-entry entry point on both kinds; a batch on and off 0 whole (element ids handed back move
+            each value out again; 0 for a move onto 0) and partitioned over mostly-0 keys (red with the gather's skip removed: misses and stray events;
+            red with the write-back of 0 removed: stale ids from the previous batch; red with the all-0 sample guard removed: cuts on a stale sample);
+            SparseIndexTests [VerifiesRule] — spawn, moves on and off 0 over ticks, destroy, on the SingleVersion (fence) and Versioned (commit)
+            archetypes, every query on the planner's path and both forced paths, IndexDataOracle both directions (red with the planner refusal removed;
+            red with ClaimOwnKey's skip removed); the ordered query (red with its fallback removed); a range excluding 0 still taking the selective
+            path (QueryPathProbe); SparseBTreeTests' planted key-0 lookups (red with either lookup guard removed) and unique move off 0 onto a held key (red
+            without its check: the insert threw); SparseSchemaToggleTests [VerifiesRule] (red with IndexTypeChanged not rebuilt; red with the catalog
+            not rewritten: the reopened kind unrecorded, the integrity check reading the old one). Mutants:
+            SparseIndexTests.Mutant_AKeyZeroEntry_IsReportedByTheOracle, Mutant_APlannerBlindToSparse_MissesTheZeros [RuleMutant]
+
 ## Module: IXS — Ordered index reads
 
 An ordered query reads its index through an OLC (optimistic lock coupling) scan: no locks, a version snapshot per leaf,
@@ -688,6 +725,12 @@ written for the read path; these are the write-path obligations that went unwrit
             never carried across a latch release
   invariant the key of a buffer one thread has emptied is removed from the tree only if, under the removing leaf's write latch, the buffer STILL holds
             no element (`RemoveArguments.OnlyIfBufferEmpty`); an append that got the latch in between keeps the key alive
+  invariant off the fence, the buffer of a key removed from the tree is retired, never freed on the spot (`BTree.ReleaseBuffer`, after the leaf's
+            latch is released): stamped with `BumpEpochForRetire` after the unlink and freed once `MinActiveEpoch` is past the stamp
+            (`BTree.ReclaimRetiredBuffers`, oldest first, outside every latch, never failing the write that runs it) — an optimistic reader
+            (`TryGetMultiple`, the range readers) reads the buffer id, validates the leaf, then enters the buffer holding nothing in between, so only its
+            pinned epoch keeps the root it is about to enter from being freed and re-issued (#1399). On the fence's own thread it is freed at once, as the
+            fence's buffer compaction frees a live buffer's chunks: EW-01's readers clause excludes readers from the fence
   invariant a miss on a latched leaf means "absent" only if that leaf OWNS the key's range (`KeyOutsideLeafAuthority` false, both bounds); a miss on a
             leaf that does not is a descent that landed beside its target and is re-descended, never reported
   never `FindLeaf` + `GetItem` + `Append`/`RemoveFromBuffer` with no latch between them — that is what `MoveValuePessimistic` did
@@ -721,7 +764,8 @@ written for the read path; these are the write-path obligations that went unwrit
   enforce `CanLoseAnEntryInPlace` (root, or strictly above half full) gates the entry removal on both optimistic `MoveValue` paths when
           `BufferElementCount(oldBufferId) == 1`
   scope: BTree.Move.cs (`MoveValue`, `MoveValuePessimistic`, `MovePessimistic`, `CanLoseAnEntryInPlace`), BTree.cs (`RemoveValue`,
-         `RemoveElementLatched`, `TryLatchAuthoritativeLeaf`, `RemoveKeyIfBufferStillEmpty`, `RemoveArguments`), BTree.Remove.cs (`RemoveCorePessimistic`,
+         `RemoveElementLatched`, `TryLatchAuthoritativeLeaf`, `RemoveKeyIfBufferStillEmpty`, `RemoveArguments`, `ReleaseBuffer`,
+         `ReclaimRetiredBuffers`), BTree.Remove.cs (`RemoveCorePessimistic`,
          `RemoveIterative`), BTree.NodeWrapper.cs (`RemoveLeaf`),
          BTree.Insert.cs (`KeyOutsideLeafAuthority`), BTree.BaseNodeStorage.cs (`BufferElementCount`),
          DatabaseEngine.ClusterMigration.cs (`DrainClusterShadowSlots`, `ProcessShadowFieldEntries`), DatabaseEngine.TickFence.cs (`RunPrepSlice`)
@@ -753,6 +797,9 @@ written for the read path; these are the write-path obligations that went unwrit
             `..._UniqueKeysToFreshKeys_KeepsEveryElement` (shape 2), 2 x CPU threads, census — probabilistic in the way OlcBTreeStressTests is, so a single
             green run is weak and the un-quarantined nightly is the real net. Their single-threaded twins pin the oracle.
             `Mutant_AnElementRemovedBehindTheCensus_IsReported` shows the census detects the loss shape rather than passing vacuously.
+            `BTreeRetiredBufferTests` [VerifiesRule] (#1399) — a reader pinned before the key's last value is removed (by `RemoveValue` or by
+            `MoveValue`) keeps the buffer's root live and out of the buffers created meanwhile once the remover has left, and it is freed once the reader
+            leaves (red with the reclaim ignoring the epoch); on the fence the root is freed with its key (red with the fence check removed).
   requires IXW-04 (the leaf-authority proof both paths take, and which says nothing about the buffer behind the entry)
 
 ### IXW-07: A writer never allocates storage while it holds a node or bucket latch `[fatal]`

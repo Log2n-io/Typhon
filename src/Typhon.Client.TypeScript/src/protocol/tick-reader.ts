@@ -10,6 +10,7 @@ import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, ProtocolConstants, SourceStatus, TickFlags } from './constants.js';
 import { malformed, protocolError } from './errors.js';
 import { readNumber, readSection, type FieldSink } from './field-codec.js';
+import { bigintOf, HIGH_WORD, LOW_WORD } from './int64.js';
 import { WireReader } from './reader.js';
 import { RealmFrame } from './realm-frame.js';
 import type { ArchetypeStore } from '../store/archetype-store.js';
@@ -59,6 +60,8 @@ export interface TickSink extends FieldSink {
   ack(seq: number, reason: number): void;
   /** A source lifecycle entry; `code` is 0 unless `status` is {@link SourceStatus.Error}. */
   source(requestId: number, status: number, code: number): void;
+  /** A group lifecycle record: {@link SourceStatus.GroupComplete} or {@link SourceStatus.GroupReleased}, the set's index, the key. */
+  group(kind: number, set: number, key: bigint): void;
   /** An `AGG` block begins; with `reset`, every cell not listed is now empty. */
   beginAggregate(grid: GridPlan, reset: boolean): void;
   /** One changed cell's counts, one per grid archetype. */
@@ -153,6 +156,7 @@ export class TickReader {
   private readonly velocities: readonly Float64Array[];
   /** The start tick handed to {@link TickSink.enter} and {@link TickSink.segment}. */
   private readonly t0 = new Uint32Array(1);
+  private readonly keyWords = new Uint32Array(2);
   /** Per archetype: the {@link reads} count of the message whose `ENTITIES` block for it was last read. */
   private readonly entitiesSeenAt: Uint32Array;
   private reads = 0;
@@ -302,13 +306,23 @@ export class TickReader {
           break;
         case BlockType.Sources:
           for (let n = r.varu(); n > 0; n--) {
-            const requestId = r.u16();
-            const status = r.u8();
-            if (status > SourceStatus.Error) {
-              throw malformed(`SOURCES status ${status} is unknown`);
-            }
+            const kind = r.u8();
+            if (kind === SourceStatus.Applied) {
+              sink.source(r.u16(), kind, 0);
+            } else if (kind === SourceStatus.Error) {
+              const requestId = r.u16();
+              sink.source(requestId, kind, r.u16());
+            } else if (kind === SourceStatus.GroupComplete || kind === SourceStatus.GroupReleased) {
+              const set = r.varu();
+              if (set >= this.plan.groupSets.length) {
+                throw malformed(`SOURCES group set ${set} is not in the catalog`);
+              }
 
-            sink.source(requestId, status, status === SourceStatus.Error ? r.u16() : 0);
+              r.vari64Into(this.keyWords, 0);
+              sink.group(kind, set, bigintOf(this.keyWords[LOW_WORD]!, this.keyWords[HIGH_WORD]!, true));
+            } else {
+              throw malformed(`SOURCES record kind ${kind} is unknown`);
+            }
           }
 
           break;

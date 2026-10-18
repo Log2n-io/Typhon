@@ -262,7 +262,31 @@
     {
       "name": "sources-unknown-status",
       "kind": "tick",
-      "hex": "027011010000080401010002",
+      "hex": "027011010000080401040100",
+      "closeCode": 1007
+    },
+    {
+      "name": "sources-error-truncated",
+      "kind": "tick",
+      "hex": "027011010000080401010100",
+      "closeCode": 1007
+    },
+    {
+      "name": "sources-group-set-unknown",
+      "kind": "tick",
+      "hex": "027011010000080401020200",
+      "closeCode": 1007
+    },
+    {
+      "name": "sources-group-key-truncated",
+      "kind": "tick",
+      "hex": "0270110100000803010300",
+      "closeCode": 1007
+    },
+    {
+      "name": "sources-group-set-past-32-bits",
+      "kind": "tick",
+      "hex": "02701101000008080102ffffffff7f00",
       "closeCode": 1007
     },
     {
