@@ -1277,6 +1277,9 @@ internal sealed unsafe partial class FrameAssembler
             ResolveFollowed(index, session, ref follow, ref lost);
         }
 
+        // The session's visibility mask for this frame (14 § 6): a change of it makes this frame a RESET.
+        push.NoteVisibility(session, _sessions.VisibilityOf(session));
+
         bool reset, complete;
         if (_pushRegion[index])
         {
@@ -1632,6 +1635,8 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
 
     public bool Sees(float x, float y, float z, float viewRadius) =>
         World ? _push.WorldSeesPoint(_session, x, y, z) : _push.SeesPoint(_session, x, y, z, viewRadius);
+
+    public bool SeesTags(uint mask) => _push.SessionSees(_session, mask);
 }
 
 /// <summary>No geometry: a session with no profile sees no point, so the geometric routes never match it (09 § 11).</summary>
@@ -1661,6 +1666,8 @@ internal readonly ref struct NoEventGeometry : IEventGeometry
     }
 
     public bool Sees(float x, float y, float z, float viewRadius) => false;
+
+    public bool SeesTags(uint mask) => mask == 0;
 }
 
 /// <summary>The realm parent tree, for <see cref="EventRouting.ToRealm"/> (12-realms § 3): routing only, never visibility.</summary>

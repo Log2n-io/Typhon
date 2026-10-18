@@ -437,6 +437,7 @@
   invariant ∀ session s whose Sphere observer names group sets (14 § 3.8): s holds e iff the clause above holds e OR one of e's keys is held by s
     (SUB-33) — the union, held once: an entity both name is one entity in the store, entered by whichever reaches it first and left only when neither
     holds it after the frame
+  invariant every clause of this rule is ANDed with SUB-34's visibility: an entity whose mask the session does not see is held by no shape
   invariant ∀ session s with a World observer: s holds every live entity of its archetypes whose cell the delivery cursor has passed
   invariant ∀ session s with a ClientRegion observer (09 § 7): s holds entity e iff e's v̂ lies in s's committed hull — the convex region it last sent,
     clamped to its profile's maxEdgeM, as half-spaces — AND v̂'s cell is in s's delivered region window. The hull is the anchor: a new one sweeps the
@@ -597,6 +598,46 @@
     the shard the fill passed unsent to be caught. The oracle is also red when completion ignores pending members, when the positionless log is not
     folded, when a fence with no work publishes no structure words, when a lazy cluster is attached only for a newly held key, when an APPLIED is sent
     before its key completes, and when the gather ignores the requested keys — every answer is checked against the client's store in the frame it arrives.
+
+### SUB-34: A session holds, is sent and names only what its visibility mask sees `[fatal][silent]`
+  invariant ∀ session s, ∀ entity e of an archetype whose projection declares Visibility(component, mask field) — a u32 —: sees(s, e) ⟺ vis(e) = 0 ∨
+    (vis(e) & mask(s)) ≠ 0; an archetype that declares none is public. s holds e iff SUB-16's shapes or SUB-33's keys hold it AND sees(s, e), on every
+    path: the live push step, a catch-up from the log, the sweeps and the LOD far sweep, a Region, a World, the group fill, release and post-pass, and
+    the push shadow that checks them
+  invariant vis(e) is the projected value, kept in e's cold entry (it follows e through a migration): a change is projected the tick it is written,
+    like any projected field (SUB-10), and is that frame's leave for a session that stops seeing e and enter for one that starts — never a RESET; a
+    session that sees e before and after is told nothing of it. A destroy, an orphan (a drained cluster, a positionless member's included) or a realm
+    exit of a hidden e is a leave only for a session that saw it: the leave carries e's last mask
+  invariant a catch-up judges "was" by the mask before the window's first change of e and "is" by e's current mask
+  invariant mask(s) is SessionRequest.SetVisibility's, 0 at admission (s sees only public entities); the assembler reads it at the start of s's frame,
+    and a change makes that frame a RESET — the fill of what the new mask sees, every key re-completed; setting the mask s already has changes nothing
+  invariant an event routed by geometry naming e (RouteToKnown) reaches only sessions that see e; a command's reference resolves e only for a session
+    that sees it (SUB-26)
+  note AGG counts every entity of its cells, hidden ones included: an aggregate is a density, and filtering it per mask would make it per session.
+    A game that must hide a count keeps hidden entities out of the aggregated archetypes
+  note an event's payload entity fields are not filtered: a hidden entity travels as its netId, which the session does not hold and cannot resolve —
+    the same as an entity beyond its view (events inform, they do not grant reach, SUB-26)
+  note the controlled entity has no exemption in ENTITIES: a session whose mask does not see its own entity does not hold it there; SELF still names it
+    and its commands still resolve it (SUB-11, SUB-26)
+  scope: ArchetypeProjectionBuilder.Visibility, ArchetypeProjection.SetVisibility, SessionRequest.SetVisibility, SessionTable.SetVisibility,
+    GroupSetCompiler.CompileTagMasks, ReplicationBlockLayout.WithTagMask, ProjectionPass, PushReplication.NoteTagChange, PushReplication.FoldTagChanges,
+    PushReplication.MergeTagChanges, PushReplication.NoteOrphanTags, PushReplication.NoteVisibility, PushReplication.SessionSees, PushReplication.Sees,
+    PushReplication.SeesNow, PushReplication.MaskOf, PushReplication.PostPass, PushReplication.MemberKeysHeld, PushHub.NoteUnplacedTagChange,
+    PushHub.OrphanUnplaced, EventHub, FrameAssembler.TryHeldNetId, FrameAssembler.AssemblePush
+  on_violation: silent on both sides. A hidden entity sent to a session that may not see it is a stealthed player drawn on every screen, or a GM-only
+    object in every client's store — an information leak no error reports; a missed enter leaves an entity a session may see absent from it.
+  rationale: one AND beside every enter decision costs a load and a test; a per-session known-set (what push replaced) would cost memory per session.
+    A session mask change is rare, and a sweep of everything delivered would cost more than the refill a RESET is (11 § 6).
+  verified: PushGroupTests.SessionsHoldExactlyWhatTheySee (the group oracle with random member masks, mask flips and session mask changes: at every
+    quiet point each session holds exactly the members it holds AND sees; red when the live or catch-up "is" or "was" ignores the mask, when delivery,
+    the sweep, the fill, the fold or the post-pass does, when a flip is not flagged, and without the reset),
+    PushOracleTests.TaggedSessionsHoldOnlyWhatTheySee (the house oracle with masks over Sphere, World, LOD and Region shapes: red when the World live
+    or catch-up, the Sphere catch-up, the flushed entries, the far sweep or a Region's delivery, sweep, live or catch-up path ignores the mask, and when
+    a hidden leave or orphan is not flagged), PushVisibilityTests.AMaskFlipIsALeaveForOneSessionAndAnEnterForTheOther,
+    PushVisibilityTests.ASessionMaskChangeResetsItsStore, PushVisibilityTests.AHiddenShardOrphanedIsALeaveOnlyForTheSessionThatSawIt (red when the
+    hub's orphan does not carry the mask), PushVisibilityTests.AnEventAboutAHiddenEntityReachesOnlyTheSessionsThatSeeIt (red when an event's filing
+    ignores the mask), PushVisibilityTests.ACommandNamesAGroupMemberOnlyForTheSessionsThatHoldAndSeeIt. Falsifiability:
+    PushGroupTests.AMaskFlipTheProjectionNeverReadsIsDetected writes masks without telling replication and requires the oracle to reject the run.
 
 ### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
   invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push
@@ -813,7 +854,9 @@
   invariant TryResolve(s, netId) = e ⟺ netId is bound to e (the projection binds each identity it assigns and every release unbinds it), e is live in
     the EntityMap and its replica still carries netId, AND (e is s's controlled entity OR s's COMMITTED geometry holds e: e's archetype is in the set of
     the profile s's last published frame was built against — not a profile switched to since — and its v̂ passes SUB-16's test against that frame's
-    anchor, radius and delivered cells, or its committed hull and window, or its World cursor)
+    anchor, radius and delivered cells, or its committed hull and window, or its World cursor; OR one of e's current keys is a key s's committed
+    frame holds, filled past e's netId (SUB-33) — a positionless member included, through the keys of the realm s is placed in) AND, unless e is the
+    controlled entity, s sees e (SUB-34)
   invariant an entity a client learned of only from an event (an attacker beyond its view) does not resolve: events inform, they do not grant reach
   note the committed geometry is the last PUBLISHED frame's, which the client may not have applied yet: an entity that left in a frame still in flight is
     refused while the client may still draw it. Judging each command against the frame the client last applied (COMMANDS.clientTick) would need per-session
@@ -822,7 +865,7 @@
   note TryResolveAny keeps the liveness-only answer — bound, live, still that identity — for tools that are not clients (an admin console), under a name
     that says so
   scope: SubscriptionsCommands.TryResolve, SubscriptionsCommands.TryResolveAny, FrameAssembler.Holds, PushReplication.HoldsCommitted,
-    PushReplication.TryVisibilityAt, FrameAssembler.IsLive, SessionFrameState.CommittedProfile, NetIdEntityIndex.Bind, NetIdEntityIndex.Unbind,
+    PushReplication.TryVisibilityAt, FrameAssembler.IsLive, FrameAssembler.TryHeldNetId, PushReplication.GroupHoldsCommitted, PushHub.PlacedFor, SessionFrameState.CommittedProfile, NetIdEntityIndex.Bind, NetIdEntityIndex.Unbind,
     NetIdEntityIndex.Reserve
   on_violation: silent. A client that names a netId it guessed — or remembered from an event — targets, inspects or trades with an entity behind a wall or
     across the map: an information leak and a cheat, and no error anywhere.
@@ -832,7 +875,10 @@
     equals the replica the session's frames built — red when the geometric test is skipped), TryResolveTests.WhatResolvesFollowsTheViewTheClientWasSent,
     TryResolveTests.APartialWorldFillAndAnUnobservedArchetypeAreRefused (red when a World session holds everything, and for an archetype outside the
     set), TryResolveTests.AProfileSwitchResolvesTheOldViewUntilItsFrameIsPublished (red when the current profile is judged),
-    TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView.
+    TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView,
+    PushVisibilityTests.ACommandNamesAGroupMemberOnlyForTheSessionsThatHoldAndSeeIt (a building no observer reaches and a positionless shard, held
+    through their town, both ways; a hidden one refused; a town not held, and the town released — red when the group clause is skipped, and when the
+    mask is).
 
 ### SUB-27: A command the server refuses is acknowledged, and a session refused for long enough is closed `[fatal][silent]`
   invariant every command a well-formed COMMANDS message carries is either framed into the tick or answered with an ACK — over the session's inbound

@@ -116,7 +116,8 @@ drops what is still waiting — a new session holds none of it.
   key it may hold at once), and a request past it — or past the answers a session may be owed, twice `MaxGroupsPerSession` and at least 64 — is an
   `ACK`, not an answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
   naming the set is answered `NotInProfile`. A realm-kind variant names the same explicit sets as its profile.
-- Not built yet: visibility tags.
+- Visibility tags apply to members as to everything else ([Profiles & observers](./profiles-observers.md)): a town is complete when every member
+  the session sees has entered, and a hidden member is never sent.
 - Measured (`GroupRegionBench`, 14 § 3.6): a 456 m town on a 192 m Sphere costs no measurable gather time (within 1 µs over 128 sessions) and no steady-state bytes; widening
   the Sphere to 456 m instead sends 2.8× the bytes.
 

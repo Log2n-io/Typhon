@@ -257,6 +257,19 @@ internal sealed unsafe partial class PushHub
     // Realm-local slots nobody was placed in are given back every this many ticks: a session that closed or lost its profile leaves its slot until then.
     private const uint SweepEvery = 64;
 
+    /// <summary>The replication of the realm <paramref name="session"/> was last placed in, or <see langword="null"/> when it holds no realm's slot.</summary>
+    internal PushReplication PlacedFor(SessionId session)
+    {
+        var slot = (uint)session.Slot;
+        if (slot >= (uint)_placement.Length)
+        {
+            return null;
+        }
+
+        var p = _placement[slot];
+        return p != 0 && (ushort)p == session.Generation ? For((ushort)(p >> 16)) : null;
+    }
+
     /// <summary>The realm-local slot <paramref name="session"/> holds in <paramref name="realm"/>'s replication, or 0 when it holds none there.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int LocalSlot(SessionId session, ushort realm)

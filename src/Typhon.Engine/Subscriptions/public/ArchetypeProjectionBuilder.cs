@@ -171,6 +171,27 @@ public sealed class ArchetypeProjectionBuilder
     }
 
     /// <summary>
+    /// Who may see this archetype's entities (14 § 6, P18): a <c>u32</c> tag mask per entity, <c>0</c> for public. An entity whose mask is not 0 is sent only
+    /// to a session whose own mask (<see cref="SessionRequest.SetVisibility"/>) shares a bit with it — by every path: its sphere, its region, its groups.
+    /// </summary>
+    /// <typeparam name="TComponent">The component holding the mask.</typeparam>
+    /// <param name="component">The component handle.</param>
+    /// <param name="selector">Selects the mask: a <c>uint</c> field, 0 for public.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// The mask is read on every push, like any projected field, and a change of it is the entity's leave from a session that no longer sees it and its enter
+    /// to one that now does — push the write with <c>Replicate</c>. It never travels on the wire. A predicate that needs code — faction relations, stealth
+    /// against perception — runs in the simulation and writes the mask: the replication tests one AND, never a callback per session and entity.
+    /// </remarks>
+    public ArchetypeProjectionBuilder Visibility<TComponent>(Comp<TComponent> component, Expression<Func<TComponent, uint>> selector)
+        where TComponent : unmanaged
+    {
+        _projection.SetVisibility(SubscriptionsNames.ComponentTypeId(component), typeof(TComponent).Name,
+            SubscriptionsNames.SelectorField(selector, "Visibility"));
+        return this;
+    }
+
+    /// <summary>
     /// Fields visible only to the session controlling this entity — an inventory, a credit balance, a private waypoint. They travel in the archetype's own
     /// owner section, with their own group bit space, carried by <c>SELF</c> and unreachable from the public record by construction.
     /// </summary>
@@ -308,8 +329,28 @@ public sealed class ArchetypeProjection
     /// <summary>The owner change groups, in first-declared order.</summary>
     public IReadOnlyList<string> OwnerGroups => _ownerGroups;
 
+    /// <summary>The component holding the visibility mask (<see cref="ArchetypeProjectionBuilder.Visibility"/>), or <see langword="null"/> for none.</summary>
+    public string VisibilityComponentName { get; private set; }
+
+    /// <summary>The visibility mask's field, or <see langword="null"/>.</summary>
+    public string VisibilityFieldName { get; private set; }
+
+    internal int VisibilityComponentTypeId { get; private set; } = -1;
+
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_fields.Count} field(s), {_ownerFields.Count} owner field(s)";
+
+    internal void SetVisibility(int componentTypeId, string componentName, string fieldName)
+    {
+        if (VisibilityFieldName != null)
+        {
+            throw new InvalidOperationException($"Archetype '{Name}' already declared its visibility mask; an archetype has one.");
+        }
+
+        VisibilityComponentTypeId = componentTypeId;
+        VisibilityComponentName = componentName;
+        VisibilityFieldName = fieldName;
+    }
 
     internal void SetPosition(PositionProjection position)
     {

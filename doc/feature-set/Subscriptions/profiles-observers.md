@@ -30,6 +30,10 @@ what it holds.
 - **ClientRegion**: the client sends a convex footprint (3–16 vertices on a flat world, 4–16 in 3D) through the built-in `ClientRegion`
   command (≤ 5 Hz); the engine takes the hull, clamps it to `maxEdgeM`, and holds the entities inside it; `.Near(budget)` caps the entities
   held, whole cells nearest the centroid first, with a deadband.
+- **Visibility tags**: an archetype's projection may declare a `uint` mask field (`.Visibility(Comp, c => c.Mask)`); 0 is public. A session
+  sees a tagged entity when its own mask (`SessionRequest.SetVisibility`, 0 at admission) shares a bit with it — on every observer and every
+  group, so a GM-only object or a stealthed player is never sent to a session that may not see it. A mask change is a leave or an enter in
+  the next frame; a session's own mask change resets its view.
 - **Refinements**: a **leave radius** (hysteresis — an entity pacing on the boundary never flaps); a **run-time range**
   (`max:` + `ctx.Subscriptions.SetRadius`, no reset); **distance bands** (`.Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.75))`:
   far updates every N ticks); **cadence** (`.Every(2 | 4)`: serve the profile one tick in N, replaying missed ticks).
@@ -50,6 +54,10 @@ subs.Profile("god", p =>
 });
 
 subs.Profile("tool", p => p.World().Of<Creature>().Of<Player>());
+
+// GM-only objects: bit 1 hidden from everyone but GMs.
+subs.Archetype<Marker>(a => a.Position(Marker.Bounds).Visibility(Marker.Tag, t => t.Mask));
+ctx.Subscriptions.Session(session).SetVisibility(GmBit);   // at a GM's admission
 ```
 
 | Option | Default | Effect |
@@ -62,6 +70,10 @@ subs.Profile("tool", p => p.World().Of<Creature>().Of<Player>());
 ## ⚠️ Guarantees & limits
 
 - **A session holds exactly what its geometry names**; one never placed holds nothing — not the area around the origin (SUB-16).
+- **A session holds, is sent and names only what its mask sees** (SUB-34): a hidden entity never enters, an event routed to the sessions that
+  know it skips the others, and a command naming it is refused. Not filtered: `AGG` counts (a density counts hidden entities too — keep them out
+  of the aggregated archetypes if the count itself is secret) and an event's entity fields (a hidden one travels as a netId the client cannot
+  resolve, like any entity beyond its view). A session's own controlled entity is not exempt from its mask in `ENTITIES`; `SELF` still names it.
 - **Worlds are flat or volumetric**: a spatial grid one cell deep is served in the plane; a deeper one in 3D (2D archetypes then live on
   z = 0).
 - A Sphere window is bounded (at most 15 cells per axis flat, 13 in 3D; a `ClientRegion` window at most 2 809 cells); `Start` refuses a
@@ -72,6 +84,7 @@ subs.Profile("tool", p => p.World().Of<Creature>().Of<Player>());
 ## 🧪 Tests
 
 - [SphereObserverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SphereObserverTests.cs) — a session holds exactly its disc
+- [PushVisibilityTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushVisibilityTests.cs) — a mask flip, a session mask change, a hidden orphan, events and commands; the tagged oracles are in [PushOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushOracleTests.cs) and [PushGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupTests.cs)
 - [PushRegionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushRegionTests.cs) · [PushAggregateTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushAggregateTests.cs) · [PushLodLevelTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushLodLevelTests.cs) · [PushOracle3DTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushOracle3DTests.cs)
 
 ## 🔗 Related

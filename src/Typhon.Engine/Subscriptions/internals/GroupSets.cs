@@ -42,6 +42,10 @@ internal readonly struct ClusterFieldReader
         };
     }
 
+    /// <summary>A <c>u32</c> field's value: the visibility tag mask (14 § 6).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public unsafe uint ReadMask(byte* clusterBase, int slot) => *(uint*)At(clusterBase, slot);
+
     /// <summary>A key logged as raw bytes (<see cref="GroupKeyMove.Raw"/>), read as <paramref name="type"/> reads it: sign- or zero-extended like <see cref="ReadKey"/>.</summary>
     public static long DecodeRaw(ulong raw, FieldType type) => type switch
     {
@@ -142,6 +146,10 @@ internal struct GroupFold
     public uint LastTick;
     public KeySlots Before;
     public KeySlots After;
+
+    // Visibility tags (14 § 6): the mask before the window's first change of it, once one was met.
+    public uint WasTags;
+    public bool TagsSeen;
 
     [InlineArray(MaxKeySlots)]
     public struct KeySlots
@@ -604,6 +612,53 @@ internal static class GroupSetCompiler
         }
 
         return reach;
+    }
+
+    /// <summary>
+    /// The visibility tag masks (14 § 6, P18): each declaring archetype's <c>u32</c> field resolved through its cluster layout, and its cold entry widened by
+    /// the four bytes its last push read. Before the replication state is carved to the layout.
+    /// </summary>
+    internal static void CompileTagMasks(SubscriptionsRegistry registry, DatabaseEngine engine, CompiledProjectionPlan[] plans)
+    {
+        foreach (var projection in registry.Archetypes)
+        {
+            if (projection.VisibilityFieldName == null)
+            {
+                continue;
+            }
+
+            var plan = PlanOf(plans, projection.ArchetypeType);
+            if (plan < 0)
+            {
+                continue;
+            }
+
+            ArchetypeRegistry.EnsureFinalized(projection.ArchetypeType);
+            ArchetypeMetadata meta = null;
+            foreach (var candidate in ArchetypeRegistry.GetAllArchetypes())
+            {
+                meta = candidate.ArchetypeType == projection.ArchetypeType ? candidate : meta;
+            }
+
+            if (meta is not { IsClusterEligible: true, ClusterLayout: not null })
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' declares a visibility mask but is not cluster-backed: the mask is read through the cluster layout.");
+            }
+
+            var (_, field, reader) = ResolveField(meta, engine, projection.VisibilityComponentTypeId, projection.VisibilityFieldName,
+                $"visibility mask of archetype '{meta.Name}'");
+            if (field.Type != FieldType.UInt)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{meta.Name}': the visibility mask '{projection.VisibilityComponentName}.{projection.VisibilityFieldName}' is a {field.Type}. "
+                    + "A mask is a uint, 0 for public.");
+            }
+
+            plans[plan].HasTagMask = true;
+            plans[plan].TagMask = reader;
+            plans[plan].BlockLayout = plans[plan].BlockLayout.WithTagMask();
+        }
     }
 
     private static int PlanOf(CompiledProjectionPlan[] plans, Type archetype)

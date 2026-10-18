@@ -85,6 +85,11 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     private long _tick;
 
+    // Visibility tags (14 § 6): each session's mask — public only, one tag, both — and the generator that now and then changes one.
+    private readonly uint[] _masks;
+    private readonly Random _tagWalker;
+    private bool _tags;
+
     // The region mode (09 § 7): each session's region as the oracle last sent it — a polygon it pans, reshapes and now and then jumps — and its widest
     // accepted extent. Zero when the profile is not a ClientRegion.
     private readonly double _regionEdge;
@@ -110,7 +115,9 @@ internal sealed unsafe class OracleHarness : IDisposable
         _radius = radius;
         _walk = walk;
         _walker = new Random(seed ^ 0x5EED);
+        _tagWalker = new Random(seed ^ 0x7A6);
         _sessions = harness.OpenSessions(skipPercent.Length, Profile);
+        _masks = new uint[_sessions.Length];
         _viewpoints = new Vector3D[_sessions.Length];
         _sessionRadius = new double[_sessions.Length];
         _anchorSlack = new double[_sessions.Length];
@@ -153,6 +160,30 @@ internal sealed unsafe class OracleHarness : IDisposable
             }
         }
     }
+
+    /// <summary>Entities a session was required not to hold because it does not see them, at the most recent comparison.</summary>
+    public long HiddenAtLastPoint { get; private set; }
+
+    /// <summary>Session masks the oracle changed, each a reset of its session.</summary>
+    public int SessionMaskChanges { get; private set; }
+
+    // Turns visibility tags on (14 § 6): the members declare their masks, the workload spawns and flips them, the sessions see by masks of their own.
+    private void EnableTags()
+    {
+        _tags = true;
+        Workload.Tags = true;
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            _masks[i] = (i % 3) switch { 0 => 0u, 1 => 1u, _ => 3u };
+            Assert.That(_harness.Sessions.SetVisibility(_sessions[i], _masks[i]), Is.True);
+        }
+    }
+
+    // P19: public, or a bit in common with the session's mask.
+    private bool Sees(int session, uint mask) => mask == 0 || (mask & _masks[session]) != 0;
+
+    private uint MaskOf(Transaction tx, int plan, EntityId entity) =>
+        plan == _creatureIndex ? tx.Open(entity).Read(ProjCreature.Visibility).Mask : tx.Open(entity).Read(ProjRock.Visibility).Mask;
 
     /// <summary>How many region jumps the oracle made: each is a hull change most of whose cells leave, which resets its session.</summary>
     public int RegionJumps { get; private set; }
@@ -344,10 +375,11 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// compared against its own region.
     /// </param>
     /// <param name="nearBudget">The ClientRegion's near budget, in entities; 0 for none.</param>
+    /// <param name="tags">Visibility tags (14 § 6): the members declare masks the workload spawns and flips, and the sessions see by masks of their own.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
         double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0,
-        int farEvery = 0, Action<BandBuilder> bands = null, int aggregateCells = 0, double regionEdgeM = 0, int nearBudget = 0)
+        int farEvery = 0, Action<BandBuilder> bands = null, int aggregateCells = 0, double regionEdgeM = 0, int nearBudget = 0, bool tags = false)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
@@ -356,7 +388,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         var radius = walk ? walkRadius : PushRadiusM;
         var cellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius);
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius, farEvery, bands,
-                aggregateCells * cellM, regionEdgeM, nearBudget), name,
+                aggregateCells * cellM, regionEdgeM, nearBudget, tags), name,
             Options(detection == PushDetection.Automatic, deterministicProjection, cellM, forceDeep, visibilitySlackM));
         try
         {
@@ -368,6 +400,10 @@ internal sealed unsafe class OracleHarness : IDisposable
             {
                 _budgeted = nearBudget > 0,
             };
+            if (tags)
+            {
+                oracle.EnableTags();
+            }
 
             // A walking disc or a region covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
             oracle.Workload.Seed(creatures: walk || region || bigWorld ? 400 : 24, rocks: walk || region || bigWorld ? 120 : 8);
@@ -398,6 +434,14 @@ internal sealed unsafe class OracleHarness : IDisposable
         if (_regionEdge > 0)
         {
             MoveRegions();
+        }
+
+        if (_tags && _tagWalker.Next(100) < 2)
+        {
+            var i = _tagWalker.Next(_sessions.Length);
+            _masks[i] = (uint)_tagWalker.Next(4);
+            Assert.That(_harness.Sessions.SetVisibility(_sessions[i], _masks[i]), Is.True);
+            SessionMaskChanges++;
         }
 
         _tick++;
@@ -537,6 +581,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         IdentitiesAccountedFor(truth, divergences);
         var before = Compared;
         RequiredAtLastPoint = 0;
+        HiddenAtLastPoint = 0;
 
         // One transaction for the whole comparison. Opening one per entity was measurably the dominant cost of a run: a gate case compares tens of entities
         // across several sessions at five points, and a quick transaction is not free.
@@ -700,6 +745,17 @@ internal sealed unsafe class OracleHarness : IDisposable
 
         foreach (var (netId, entity) in expected)
         {
+            if (_tags && !Sees(session, MaskOf(tx, plan, entity)))
+            {
+                HiddenAtLastPoint++;
+                if (seen.Contains(netId))
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is held and the session does not see it");
+                }
+
+                continue;
+            }
+
             if (!seen.Contains(netId))
             {
                 divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is in the server's world and not in the client's");
@@ -742,6 +798,17 @@ internal sealed unsafe class OracleHarness : IDisposable
         foreach (var (netId, entity) in expected)
         {
             var reference = tx.Open(entity);
+            if (_tags && !Sees(session, MaskOf(tx, plan, entity)))
+            {
+                HiddenAtLastPoint++;
+                if (held.Contains(netId))
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is held and the session does not see it");
+                }
+
+                continue;
+            }
+
             var bounds = plan == _creatureIndex ? reference.Read(ProjCreature.Bounds) : reference.Read(ProjRock.Bounds);
             var dx = ((bounds.Bounds.MinX + bounds.Bounds.MaxX) * 0.5) - viewpoint.X;
             var dy = ((bounds.Bounds.MinY + bounds.Bounds.MaxY) * 0.5) - viewpoint.Y;
@@ -795,6 +862,17 @@ internal sealed unsafe class OracleHarness : IDisposable
         foreach (var (netId, entity) in expected)
         {
             var reference = tx.Open(entity);
+            if (_tags && !Sees(session, MaskOf(tx, plan, entity)))
+            {
+                HiddenAtLastPoint++;
+                if (held.Contains(netId))
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is held and the session does not see it");
+                }
+
+                continue;
+            }
+
             var bounds = plan == _creatureIndex ? reference.Read(ProjCreature.Bounds) : reference.Read(ProjRock.Bounds);
             var x = (bounds.Bounds.MinX + bounds.Bounds.MaxX) * 0.5;
             var y = (bounds.Bounds.MinY + bounds.Bounds.MaxY) * 0.5;
@@ -955,10 +1033,11 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <summary>The projections and the profile the oracle runs against: a disc, or the whole world.</summary>
     private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every, double leaveRadius = 0,
-        double secondRadius = 0, int farEvery = 0, Action<BandBuilder> bands = null, double aggregateTileM = 0, double regionEdgeM = 0, int nearBudget = 0)
+        double secondRadius = 0, int farEvery = 0, Action<BandBuilder> bands = null, double aggregateTileM = 0, double regionEdgeM = 0, int nearBudget = 0,
+        bool tags = false)
     {
-        ProjectionTestSchema.DeclareCreature(subs);
-        ProjectionTestSchema.DeclareRock(subs);
+        ProjectionTestSchema.DeclareCreature(subs, tags);
+        ProjectionTestSchema.DeclareRock(subs, tags);
         if (regionEdgeM > 0)
         {
             subs.Profile(Profile, p =>

@@ -66,6 +66,10 @@ internal sealed unsafe class GroupOracle : IDisposable
     private readonly long[] _tokensAt;
     private const int Lists = 6;
 
+    // Visibility tags (14 § 6): whether the members declare a mask, and each session's own.
+    private readonly bool _tags;
+    private readonly uint[] _masks;
+
     private readonly List<EntityId> _towns = [];
     private readonly List<EntityId> _buildings = [];
     private readonly List<EntityId> _citizens = [];
@@ -74,9 +78,10 @@ internal sealed unsafe class GroupOracle : IDisposable
     private int _nextTemplate = 1;
     private long _tick;
 
-    private GroupOracle(FrameHarness harness, int seed, int[] skipPercent)
+    private GroupOracle(FrameHarness harness, int seed, int[] skipPercent, bool tags)
     {
         _harness = harness;
+        _tags = tags;
         _skipPercent = skipPercent;
         _random = new Random(seed);
         _sessions = harness.OpenSessions(skipPercent.Length, GroupTestSchema.Profile);
@@ -104,6 +109,38 @@ internal sealed unsafe class GroupOracle : IDisposable
         {
             _delivery[i] = new Random(seed + (7919 * (i + 1)));
         }
+
+        // Public only, one tag, both: what a player, a faction member and a GM see.
+        _masks = new uint[_sessions.Length];
+        for (var i = 0; tags && i < _sessions.Length; i++)
+        {
+            _masks[i] = (i % 3) switch { 0 => 0u, 1 => 1u, _ => 3u };
+            Assert.That(harness.Sessions.SetVisibility(_sessions[i], _masks[i]), Is.True);
+        }
+    }
+
+    /// <summary>Members whose mask the workload changed, each pushed; session masks it changed, each a reset.</summary>
+    public int MaskFlips { get; private set; }
+
+    /// <inheritdoc cref="MaskFlips"/>
+    public int SessionMaskChanges { get; private set; }
+
+    /// <summary>Members a session was required not to hold because it does not see them, summed over the comparisons.</summary>
+    public long HiddenMembers { get; private set; }
+
+    // P19: public, or a bit in common with the session's mask.
+    private bool Sees(int session, uint mask) => mask == 0 || (mask & _masks[session]) != 0;
+
+    // Most members public; the rest carry one of two tags.
+    private uint RandomMask()
+    {
+        if (!_tags)
+        {
+            return 0;
+        }
+
+        var roll = _random.Next(10);
+        return roll < 6 ? 0u : roll < 8 ? 1u : 2u;
     }
 
     /// <summary>Entity comparisons made, summed: an oracle that compared nothing proves nothing.</summary>
@@ -157,9 +194,17 @@ internal sealed unsafe class GroupOracle : IDisposable
         }
     }
 
-    public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget)
+    /// <summary>
+    /// The mutant SUB-34's projection clause forbids, made from the test side: a member's mask is written and replication is not told, so the world's
+    /// mask and the one the sessions are judged by part.
+    /// </summary>
+    public void FlipMasksUntoldForTest() => _untoldFlips = true;
+
+    private bool _untoldFlips;
+
+    public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget, bool tags = false)
     {
-        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true), name, new SubscriptionsOptions
+        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true, tags: tags), name, new SubscriptionsOptions
         {
             IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 16,
@@ -175,7 +220,7 @@ internal sealed unsafe class GroupOracle : IDisposable
             harness.RunFence = true;
             harness.DrainNetIds = true;
             harness.RunIngress = true;
-            var oracle = new GroupOracle(harness, seed, skipPercent);
+            var oracle = new GroupOracle(harness, seed, skipPercent, tags);
             oracle.Seed();
             for (var i = 0; i < oracle._sessions.Length; i++)
             {
@@ -248,7 +293,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         var bounds = GroupTestSchema.At(at.X, at.Y);
         var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
         _buildings.Add(tx.Spawn<GroupBuilding>(GroupBuilding.Bounds.Set(in bounds), GroupBuilding.Ai.Set(in ai),
-            GroupBuilding.Key.Set(new GroupKey { Town = key })));
+            GroupBuilding.Key.Set(new GroupKey { Town = key }), GroupBuilding.Tag.Set(new GroupTag { Mask = RandomMask() })));
     }
 
     private void SpawnShard(Transaction tx, int key)
@@ -256,7 +301,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
         var list = _random.Next(Lists + 2);   // 0 and Lists + 1: no list, or one nobody may ask for twice as often as any other
         _shards.Add(tx.Spawn<GroupPositionless>(GroupPositionless.Ai.Set(in ai), GroupPositionless.Key.Set(new GroupKey { Town = key }),
-            GroupPositionless.List.Set(new GroupListKey { List = list > Lists ? 0 : list })));
+            GroupPositionless.List.Set(new GroupListKey { List = list > Lists ? 0 : list }), GroupPositionless.Tag.Set(new GroupTag { Mask = RandomMask() })));
     }
 
     private void SpawnCitizen(Transaction tx, int key, (float X, float Y) at)
@@ -264,7 +309,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         var bounds = GroupTestSchema.At(at.X, at.Y);
         var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
         _citizens.Add(tx.Spawn<GroupCitizen>(GroupCitizen.Bounds.Set(in bounds), GroupCitizen.Ai.Set(in ai),
-            GroupCitizen.Key.Set(new GroupKey { Town = key })));
+            GroupCitizen.Key.Set(new GroupKey { Town = key }), GroupCitizen.Tag.Set(new GroupTag { Mask = RandomMask() })));
     }
 
     private float Coordinate() => ((float)_random.NextDouble() * 2f - 1f) * Spread;
@@ -341,6 +386,20 @@ internal sealed unsafe class GroupOracle : IDisposable
     private void Churn()
     {
         using var tx = _harness.Engine.CreateQuickTransaction();
+
+        // Visibility (14 § 6): a member's mask changes, pushed as any projected field is; now and then a session's own, which resets its view.
+        if (_tags && _random.Next(100) < 25)
+        {
+            FlipMask(tx);
+        }
+
+        if (_tags && _random.Next(100) < 2)
+        {
+            var i = _random.Next(_sessions.Length);
+            _masks[i] = (uint)_random.Next(4);
+            Assert.That(_harness.Sessions.SetVisibility(_sessions[i], _masks[i]), Is.True);
+            SessionMaskChanges++;
+        }
 
         // The shards' own churn, beside the rest: their key changes reach a cluster with no block, or attach one, or leave one idle.
         var shardRoll = _random.Next(100);
@@ -510,6 +569,54 @@ internal sealed unsafe class GroupOracle : IDisposable
         }
     }
 
+    private void FlipMask(Transaction tx)
+    {
+        var mask = RandomMask();
+        switch (_random.Next(3))
+        {
+            case 0 when _buildings.Count > 0:
+            {
+                var e = tx.OpenMut(_buildings[_random.Next(_buildings.Count)]);
+                e.Set(GroupBuilding.Tag, new GroupTag { Mask = mask });
+                if (!_untoldFlips)
+                {
+                    _harness.Subscriptions.Commands.Replicate(in e);
+                }
+
+                break;
+            }
+
+            case 1 when _citizens.Count > 0:
+            {
+                var e = tx.OpenMut(_citizens[_random.Next(_citizens.Count)]);
+                e.Set(GroupCitizen.Tag, new GroupTag { Mask = mask });
+                if (!_untoldFlips)
+                {
+                    _harness.Subscriptions.Commands.Replicate(in e);
+                }
+
+                break;
+            }
+
+            case 2 when _shards.Count > 0:
+            {
+                var e = tx.OpenMut(_shards[_random.Next(_shards.Count)]);
+                e.Set(GroupPositionless.Tag, new GroupTag { Mask = mask });
+                if (!_untoldFlips)
+                {
+                    _harness.Subscriptions.Commands.Replicate(in e);
+                }
+
+                break;
+            }
+
+            default:
+                return;
+        }
+
+        MaskFlips++;
+    }
+
     private void ChangeKeys(Transaction tx, List<EntityId> from, Comp<GroupKey> key, int count)
     {
         for (var i = 0; i < count && from.Count > 0; i++)
@@ -672,18 +779,22 @@ internal sealed unsafe class GroupOracle : IDisposable
         var missing = new List<string>();
         using var tx = _harness.Engine.CreateQuickTransaction();
         var lists = set == _listSet;
-        foreach (var (list, comp, name) in lists
-                     ? new[] { (_shards, GroupPositionless.Key, nameof(GroupPositionless)) }
+        foreach (var (list, comp, tag, name) in lists
+                     ? new[] { (_shards, GroupPositionless.Key, GroupPositionless.Tag, nameof(GroupPositionless)) }
                      : new[]
                      {
-                         (_buildings, GroupBuilding.Key, nameof(GroupBuilding)), (_citizens, GroupCitizen.Key, nameof(GroupCitizen)),
-                         (_shards, GroupPositionless.Key, nameof(GroupPositionless)),
+                         (_buildings, GroupBuilding.Key, GroupBuilding.Tag, nameof(GroupBuilding)),
+                         (_citizens, GroupCitizen.Key, GroupCitizen.Tag, nameof(GroupCitizen)),
+                         (_shards, GroupPositionless.Key, GroupPositionless.Tag, nameof(GroupPositionless)),
                      })
         {
             foreach (var entity in list)
             {
-                var member = lists ? tx.Open(entity).Read(GroupPositionless.List).List : tx.Open(entity).Read(comp).Town;
-                if (member != key)
+                var reference = tx.Open(entity);
+                var member = lists ? reference.Read(GroupPositionless.List).List : reference.Read(comp).Town;
+
+                // Complete means every member the session sees (P19): one it does not is never sent.
+                if (member != key || !Sees(session, reference.Read(tag).Mask))
                 {
                     continue;
                 }
@@ -855,6 +966,17 @@ internal sealed unsafe class GroupOracle : IDisposable
             var list = reference.Read(GroupPositionless.List).List;
             var netId = _harness.NetIdOf(entity);
             var holds = netId != 0 && held.Contains(netId);
+            if (!Sees(session, reference.Read(GroupPositionless.Tag).Mask))
+            {
+                HiddenMembers++;
+                if (holds)
+                {
+                    divergences.Add($"session {session}: shard netId {netId} (entity {entity.RawValue}) is held and the session does not see it");
+                }
+
+                continue;
+            }
+
             if (complete.Contains(key) || completeLists.Contains(list))
             {
                 RequiredMembers++;
@@ -897,6 +1019,19 @@ internal sealed unsafe class GroupOracle : IDisposable
         {
             var reference = tx.Open(entity);
             var key = plan == _buildingPlan ? reference.Read(GroupBuilding.Key).Town : reference.Read(GroupCitizen.Key).Town;
+            var mask = plan == _buildingPlan ? reference.Read(GroupBuilding.Tag).Mask : reference.Read(GroupCitizen.Tag).Mask;
+            if (!Sees(session, mask))
+            {
+                // Neither its town nor the disc licenses an entity the session does not see (P19).
+                HiddenMembers++;
+                if (held.Contains(netId))
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}, mask {mask}) is held and the session does not see it");
+                }
+
+                continue;
+            }
+
             var mustByKey = complete.Contains(key);
             var mayByKey = mustByKey;
             var mustByDisc = false;

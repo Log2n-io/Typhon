@@ -454,6 +454,24 @@ internal sealed unsafe partial class PushReplication<TEvent>
             : GroupKeyState.Filling;
     }
 
+    internal override bool GroupHoldsCommitted(SessionId session, int archetype, nint block, int slot, uint netId)
+    {
+        var gs = GroupStateAtOrNull(L(session));
+        var groupKeys = _plans[archetype].GroupKeys;
+        if (gs == null || gs.Generation != session.Generation || groupKeys.Length == 0)
+        {
+            return false;
+        }
+
+        GroupFold.KeySlots keys = default;
+        for (var g = 0; g < groupKeys.Length; g++)
+        {
+            keys[groupKeys[g].Slot] = CurrentKey((ushort)archetype, block, (byte)slot, netId, groupKeys[g].Slot);
+        }
+
+        return KeysHeld(gs, true, (ushort)archetype, netId, ref keys);
+    }
+
     private GroupSessionState GroupStateOf(int local, ushort generation)
     {
         Debug.Assert((uint)local < (uint)_groupSessions.Length, "the group sessions are sized with the session slots");
@@ -719,11 +737,20 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
             if (geoWas && geoIs)
             {
-                continue;   // held by geometry on both sides: its update, with its distance LOD, is the geometry's
+                continue;   // held by geometry on both sides: its update, with its distance LOD, is the geometry's — its visibility too
             }
 
-            var was = geoWas || KeysHeld(gs, true, f.Archetype, netId, ref f.Before);
-            var isIn = geoIs || ((f.LastFlags & PushEvent.HasNew) != 0 && KeysHeld(gs, false, f.Archetype, netId, ref f.After));
+            // Visibility (P19): the union is held only where the session sees the entity — before the frame by the mask it had then, after by its current one.
+            var tagged = _tagOffset[f.Archetype] >= 0;
+            uint tagsWas = 0, tagsIs = 0;
+            if (tagged)
+            {
+                FoldTagsOf(ref f, log, inSet, netId, out tagsWas, out tagsIs);
+            }
+
+            var was = (geoWas || KeysHeld(gs, true, f.Archetype, netId, ref f.Before)) && (!tagged || Sees(local, tagsWas));
+            var isIn = (geoIs || ((f.LastFlags & PushEvent.HasNew) != 0 && KeysHeld(gs, false, f.Archetype, netId, ref f.After)))
+                && (!tagged || Sees(local, tagsIs));
             if (isIn && !was)
             {
                 scratch.Add(f.Archetype, FrameListKind.Enter, new FrameRecord { NetId = netId, Block = f.Block, Slot = f.Slot, Archetype = f.Archetype });
@@ -764,6 +791,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         continue;
                     }
 
+                    // No event in the window, so its mask is the one it had: a member the session does not see is passed, never sent (P19).
+                    if (!SeesNow(local, member.Archetype, member.Block, member.Slot))
+                    {
+                        continue;
+                    }
+
                     if (!Untouched(member, gs, true, in a, oOriginX, oOriginY, oOriginZ, o, in archetypes))
                     {
                         continue;   // held before — by geometry or another key
@@ -800,6 +833,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         continue;
                     }
 
+                    // Never sent while the session did not see it, so it has nothing to leave.
+                    if (!SeesNow(local, member.Archetype, member.Block, member.Slot))
+                    {
+                        continue;
+                    }
+
                     if (!Untouched(member, gs, false, in n, nOriginX, nOriginY, nOriginZ, d, in archetypes))
                     {
                         continue;   // still held — by geometry or another key
@@ -815,7 +854,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
         }
 
         // ── 6. The geometric records, kept true to the union ────────────────────────────────────────────────────────────────────────────────────
-        PostPass(gs, in archetypes, scratch);
+        PostPass(local, gs, in archetypes, scratch);
         return entered;
     }
 
@@ -1103,6 +1142,23 @@ internal sealed unsafe partial class PushReplication<TEvent>
     }
 
 
+    /// <summary>
+    /// A folded member's masks before and after the frame (P20): a catch-up's geometric entry when the window met it there — the same entry geometry decided
+    /// on — else the fold's own; the current mask after, 0 for a leave.
+    /// </summary>
+    private void FoldTagsOf(ref GroupFold f, LogTable log, bool inSet, uint netId, out uint was, out uint isNow)
+    {
+        var index = log != null && inSet ? log.IndexOf(netId) : -1;
+        if (index >= 0)
+        {
+            EntryTags(ref log.Entries[index], out was, out isNow);
+            return;
+        }
+
+        isNow = (f.LastFlags & PushEvent.HasNew) != 0 ? MaskAt(f.Archetype, f.Block, f.Slot) : 0u;
+        was = f.TagsSeen ? f.WasTags : isNow;
+    }
+
     /// <summary>Folds one tick's member entries of the held keys into the session's per-identity fold.</summary>
     private void FoldKeys(TickLog slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)
     {
@@ -1125,6 +1181,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     fold.OldZ = e.OldZ;
                     fold.OldCell = e.OldKey;
                     InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
+                }
+
+                if ((e.Flags & PushEvent.TagsChanged) != 0 && !fold.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var tagsWas, out _))
+                {
+                    fold.WasTags = tagsWas;
+                    fold.TagsSeen = true;
                 }
 
                 // A set's key before the window is its first entry's old key — whichever set's bucket met the identity first, and in whichever tick — and
@@ -1174,6 +1236,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     fold = default;
                     fold.FirstFlags = e.Flags;
                     InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
+                }
+
+                if ((e.Flags & PushEvent.TagsChanged) != 0 && !fold.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var tagsWas, out _))
+                {
+                    fold.WasTags = tagsWas;
+                    fold.TagsSeen = true;
                 }
 
                 if ((fold.SeenSlots & (1 << keySlot)) == 0)
@@ -1273,7 +1341,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// The union with geometry (P9), on the geometric steps' own records: an enter of a member its keys already held before the frame is dropped, and so is a
     /// leave of a member its keys still hold after it. The group steps' records pass untouched — they were decided on the union.
     /// </summary>
-    private void PostPass(GroupSessionState gs, in ArchetypeSet archetypes, FrameWorkerScratch scratch)
+    private void PostPass(int local, GroupSessionState gs, in ArchetypeSet archetypes, FrameWorkerScratch scratch)
     {
         foreach (var a in _pushIndices)
         {
@@ -1288,7 +1356,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             for (var i = 0; i < enters.Length; i++)
             {
                 ref var r = ref enters[i];
-                if (!MemberKeysHeld(gs, true, r, scratch))
+                if (!MemberKeysHeld(local, gs, true, r, scratch))
                 {
                     enters[keep++] = r;
                 }
@@ -1301,7 +1369,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             for (var i = 0; i < leavesList.Length; i++)
             {
                 ref var r = ref leavesList[i];
-                if (!MemberKeysHeld(gs, false, r, scratch))
+                if (!MemberKeysHeld(local, gs, false, r, scratch))
                 {
                     leavesList[keep++] = r;
                 }
@@ -1311,8 +1379,11 @@ internal sealed unsafe partial class PushReplication<TEvent>
         }
     }
 
-    /// <summary>A record's member, held by one of its keys before or after the frame: its fold's keys when it had member events, else its entry's.</summary>
-    private bool MemberKeysHeld(GroupSessionState gs, bool committed, in FrameRecord r, FrameWorkerScratch scratch)
+    /// <summary>
+    /// A record's member, held by one of its keys before or after the frame — and seen by the session then (P19): its fold's keys and masks when it had member
+    /// events, else its entry's.
+    /// </summary>
+    private bool MemberKeysHeld(int local, GroupSessionState gs, bool committed, in FrameRecord r, FrameWorkerScratch scratch)
     {
         if (scratch.GroupFolds.TryGetValue(r.NetId, out var fold))
         {
@@ -1321,7 +1392,21 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 return false;
             }
 
+            if (_tagOffset[r.Archetype] >= 0)
+            {
+                var tagsIs = (fold.LastFlags & PushEvent.HasNew) != 0 ? MaskAt(fold.Archetype, fold.Block, fold.Slot) : 0u;
+                if (!Sees(local, committed && fold.TagsSeen ? fold.WasTags : tagsIs))
+                {
+                    return false;
+                }
+            }
+
             return committed ? KeysHeld(gs, true, r.Archetype, r.NetId, ref fold.Before) : KeysHeld(gs, false, r.Archetype, r.NetId, ref fold.After);
+        }
+
+        if (!SeesNow(local, r.Archetype, r.Block, r.Slot))
+        {
+            return false;
         }
 
         var groupKeys = _plans[r.Archetype].GroupKeys;

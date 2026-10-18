@@ -32,6 +32,9 @@ internal enum SessionRequestKind : byte
 
     /// <summary>Point the session's viewpoint at an entity it does not control.</summary>
     Follow = 8,
+
+    /// <summary>Set the session's visibility tag mask.</summary>
+    SetVisibility = 9,
 }
 
 /// <summary>A <see cref="SessionRequest.SetSources"/> request's payload: the explicit set and the full list of keys the server chooses in it.</summary>
@@ -333,6 +336,9 @@ internal sealed class SessionRequestLog
 
             case SessionRequestKind.SetBudget:
                 return table.SetBudget(session, (int)record.Payload);
+
+            case SessionRequestKind.SetVisibility:
+                return table.SetVisibility(session, (uint)record.Payload);
 
             case SessionRequestKind.Kick:
                 return table.Close(session, SessionCloseReason.Kicked, record.Code, (string)segment.ObjectAt(record.ObjectIndex));

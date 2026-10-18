@@ -136,6 +136,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // Group sets (14 § 3.8): resolved against the schema, and each member plan's cold entry widened by its keys — before the replication state is
             // carved to that layout below.
             GroupSets = GroupSetCompiler.Compile(registry, engine, Plans);
+
+            // Visibility tags (14 § 6): the mask's field, and four bytes of cold entry for the mask each push read.
+            GroupSetCompiler.CompileTagMasks(registry, engine, Plans);
             foreach (var set in GroupSets)
             {
                 if (set.Region == null)

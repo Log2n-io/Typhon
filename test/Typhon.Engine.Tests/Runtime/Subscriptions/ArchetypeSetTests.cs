@@ -545,6 +545,7 @@ class ArchetypeSetTests : TestBase<ArchetypeSetTests>
         dbe.RegisterComponentFromAccessor<ProjAi>();
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.RegisterComponentFromAccessor<ProjVisibility>();
         dbe.RegisterComponentFromAccessor<ProjWideBounds>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-ProjectionTestSchema.WorldExtentM, -ProjectionTestSchema.WorldExtentM),

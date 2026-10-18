@@ -28,6 +28,10 @@ internal sealed class UnplacedTick
     /// <summary>The tick's member entries by (set, key), ascending; <see cref="MemberEntry.Event"/> indexes <see cref="Events"/>.</summary>
     public MemberEntry[] Members = [];
     public int MemberCount;
+
+    /// <summary>The tick's visibility mask changes (14 § 6) by netId, ascending: an event with <see cref="PushEvent.TagsChanged"/> finds its masks here.</summary>
+    public TagChange[] Tags = [];
+    public int TagCount;
 }
 
 // Positionless members (14 § 5, P17 and P5′): the engine-wide half. A member with no position belongs to no realm and to no cell, so its events go to one
@@ -648,6 +652,12 @@ internal sealed unsafe partial class PushHub
     private int _unplacedOrphanKeyCount;
 
     private readonly Dictionary<ulong, GroupKeyChange> _unplacedKeyMap = [];
+
+    // Visibility tags (14 § 6): per worker, this tick's mask changes; the orphans' under the orphan lock.
+    private TagChange[][] _unplacedTags = [];
+    private int[] _unplacedTagCount = [];
+    private TagChange[] _unplacedOrphanTags = new TagChange[16];
+    private int _unplacedOrphanTagCount;
     // No tick yet: the first tick the track finishes is never mistaken for one already finished.
     private uint _unplacedFinished = uint.MaxValue;
 
@@ -680,14 +690,18 @@ internal sealed unsafe partial class PushHub
             Array.Resize(ref _unplacedKeys, workers);
             Array.Resize(ref _unplacedCount, workers * CountStride);
             Array.Resize(ref _unplacedKeyCount, workers * CountStride);
+            Array.Resize(ref _unplacedTags, workers);
+            Array.Resize(ref _unplacedTagCount, workers * CountStride);
         }
 
         for (var w = 0; w < _unplacedEvents.Length; w++)
         {
             _unplacedEvents[w] ??= new UnplacedEvent[64];
             _unplacedKeys[w] ??= new GroupKeyChange[16];
+            _unplacedTags[w] ??= new TagChange[16];
             _unplacedCount[w * CountStride] = 0;
             _unplacedKeyCount[w * CountStride] = 0;
+            _unplacedTagCount[w * CountStride] = 0;
         }
     }
 
@@ -729,6 +743,20 @@ internal sealed unsafe partial class PushHub
         _unplacedKeyCount[worker * CountStride] = n + 1;
     }
 
+    /// <summary>A positionless member's visibility mask change (14 § 6), from the worker projecting it.</summary>
+    internal void NoteUnplacedTagChange(int worker, uint netId, uint oldMask, uint newMask)
+    {
+        ref var list = ref _unplacedTags[worker];
+        var n = _unplacedTagCount[worker * CountStride];
+        if (n == list.Length)
+        {
+            Array.Resize(ref list, n * 2);
+        }
+
+        list[n] = new TagChange { NetId = netId, Old = oldMask, New = newMask };
+        _unplacedTagCount[worker * CountStride] = n + 1;
+    }
+
     /// <summary>A positionless member's entry ended with no projection to see it: every session holding it through a key is told it left.</summary>
     internal void OrphanUnplaced(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId)
     {
@@ -758,10 +786,27 @@ internal sealed unsafe partial class PushHub
                 Array.Resize(ref _unplacedOrphans, _unplacedOrphanCount * 2);
             }
 
+            // A hidden member leaves with its mask (14 § 6), so a session that never saw it is told nothing.
+            var tagged = false;
+            if (_plans[archetype].HasTagMask)
+            {
+                var mask = *(uint*)(cold + layout.TagMaskOffsetInColdEntry);
+                if (mask != 0)
+                {
+                    if (_unplacedOrphanTagCount == _unplacedOrphanTags.Length)
+                    {
+                        Array.Resize(ref _unplacedOrphanTags, _unplacedOrphanTagCount * 2);
+                    }
+
+                    _unplacedOrphanTags[_unplacedOrphanTagCount++] = new TagChange { NetId = netId, Old = mask, New = 0 };
+                    tagged = true;
+                }
+            }
+
+            var flags = keyChanged ? (byte)(PushEvent.HasOld | PushEvent.KeyChanged) : PushEvent.HasOld;
             _unplacedOrphans[_unplacedOrphanCount++] = new UnplacedEvent
             {
-                Block = (nint)block, NetId = netId, Archetype = (ushort)archetype,
-                Flags = keyChanged ? (byte)(PushEvent.HasOld | PushEvent.KeyChanged) : PushEvent.HasOld,
+                Block = (nint)block, NetId = netId, Archetype = (ushort)archetype, Flags = tagged ? (byte)(flags | PushEvent.TagsChanged) : flags,
             };
         }
     }
@@ -835,6 +880,30 @@ internal sealed unsafe partial class PushHub
             }
 
             _unplacedOrphanKeyCount = 0;
+
+            // The mask changes: the orphans' first (recorded before this tick's projection), then the workers', folded per identity.
+            var tags = _unplacedOrphanTagCount;
+            for (var w = 0; w < _unplacedTags.Length; w++)
+            {
+                tags += _unplacedTagCount[w * CountStride];
+            }
+
+            if (slot.Tags.Length < tags)
+            {
+                slot.Tags = new TagChange[Math.Max(16, (int)BitOperations.RoundUpToPowerOf2((uint)tags))];
+            }
+
+            Array.Copy(_unplacedOrphanTags, 0, slot.Tags, 0, _unplacedOrphanTagCount);
+            var t = _unplacedOrphanTagCount;
+            _unplacedOrphanTagCount = 0;
+            for (var w = 0; w < _unplacedTags.Length; w++)
+            {
+                var n = _unplacedTagCount[w * CountStride];
+                Array.Copy(_unplacedTags[w], 0, slot.Tags, t, n);
+                t += n;
+            }
+
+            slot.TagCount = PushReplication.FoldTagChanges(slot.Tags, t);
         }
 
         slot.Count = count;

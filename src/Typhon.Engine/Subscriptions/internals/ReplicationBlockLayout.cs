@@ -207,7 +207,8 @@ internal readonly struct ReplicationBlockLayout
     }
 
     private ReplicationBlockLayout(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes, int ownerEntrySize,
-        int enterPositionBytes, int enterBodyBytes, int visibilityPositionBytes = 0, int headingBytes = 0, int referenceBytes = 0, int groupKeyBytes = 0)
+        int enterPositionBytes, int enterBodyBytes, int visibilityPositionBytes = 0, int headingBytes = 0, int referenceBytes = 0, int groupKeyBytes = 0,
+        int tagMaskBytes = 0)
     {
         // A zero or negative slot count yields a block with no entries, which the pool would happily carve and hand out forever; a negative owner entry size
         // shrinks the block below its own regions. Both are construction-time mistakes, so they fail here rather than as arithmetic nonsense later.
@@ -231,6 +232,7 @@ internal readonly struct ReplicationBlockLayout
         ArgumentOutOfRangeException.ThrowIfNegative(headingBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(referenceBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(groupKeyBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(tagMaskBytes);
 
         SlotCount = slotCount;
         OwnerEntrySize = ownerEntrySize;
@@ -244,13 +246,14 @@ internal readonly struct ReplicationBlockLayout
         HeadingBytes = headingBytes;
         ReferenceBytes = referenceBytes;
         GroupKeyBytes = groupKeyBytes;
+        TagMaskBytes = tagMaskBytes;
 
         // The strides are the whole point of sizing here rather than in a struct declaration: an entry that straddles two cache lines costs the per-hit passes
         // a second line on every read, so the stride is rounded UP to whole lines rather than packed. An archetype whose regions fit one line keeps AC-5's
         // 64 B; one that does not pays 128 B knowingly, and the layout is where that becomes visible.
         HotStride = RoundUpTo(HotFixedBytes + segmentBytes + packedStateBytes, HotEntrySize);
         ColdStride = RoundUpTo(ColdFixedBytes + prevPositionBytes + runStartBytes + visibilityPositionBytes + enterPositionBytes + enterBodyBytes + headingBytes
-            + referenceBytes + groupKeyBytes, ColdEntrySize);
+            + referenceBytes + groupKeyBytes + tagMaskBytes, ColdEntrySize);
 
         // Computed once. These are fixed for the archetype's lifetime and are read on paths that become per-cluster and then per-hit, so recomputing a
         // multiply-and-add on every access is work with a known answer.
@@ -296,7 +299,7 @@ internal readonly struct ReplicationBlockLayout
         PrevPositionBytes == 0 || VisibilityPositionBytes > 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, PrevPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes);
+                EnterBodyBytes, PrevPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, TagMaskBytes);
 
     /// <summary>
     /// This layout with the keys of <paramref name="sets"/> group sets in every cold entry (14 § 3.8): eight bytes each, the key the entity's last push read,
@@ -308,7 +311,18 @@ internal readonly struct ReplicationBlockLayout
         sets <= 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, 8 * sets);
+                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, 8 * sets, TagMaskBytes);
+
+    /// <summary>
+    /// This layout with the entity's visibility tag mask in every cold entry (14 § 6): four bytes, the mask its last push read, for an archetype that declares
+    /// one. A change is detected against it, and every session's visibility test reads it.
+    /// </summary>
+    /// <returns>The widened layout.</returns>
+    public ReplicationBlockLayout WithTagMask() =>
+        TagMaskBytes > 0
+            ? this
+            : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
+                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, 4);
 
     /// <summary>The archetype's cluster slot count, <c>N</c>.</summary>
     public int SlotCount { get; }
@@ -415,6 +429,12 @@ internal readonly struct ReplicationBlockLayout
 
     /// <summary>Bytes of the group keys in every cold entry; <c>0</c> when the archetype is a member of no group set.</summary>
     public int GroupKeyBytes { get; }
+
+    /// <summary>Where the visibility tag mask is (14 § 6): the <c>u32</c> the entity's last push read.</summary>
+    public int TagMaskOffsetInColdEntry => GroupKeyOffsetInColdEntry + GroupKeyBytes;
+
+    /// <summary>Bytes of the tag mask in every cold entry: 4, or <c>0</c> when the archetype declares no visibility.</summary>
+    public int TagMaskBytes { get; }
 
     /// <summary>Byte offset of <c>hot[0]</c> from the start of the block.</summary>
     public int HotOffset { get; }

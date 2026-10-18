@@ -655,6 +655,22 @@ internal static unsafe class ProjectionPass
                     }
                 }
 
+                // The visibility tag mask (14 § 6): read on every push like a key, and a change is an event with its masks on both sides — a session that
+                // stops or starts seeing the entity hears of it as a leave or an enter. A new entry starts from 0, public, so a hidden one's first mask is
+                // a change from nothing.
+                if (plan.HasTagMask)
+                {
+                    var stored = (uint*)(coldBytes + layout.TagMaskOffsetInColdEntry);
+                    var vn = plan.TagMask.ReadMask(clusterBase, slot);
+                    var vo = initialize ? 0u : *stored;
+                    if (vn != vo)
+                    {
+                        *stored = vn;
+                        pushFlags |= PushEvent.TagsChanged;
+                        push.NoteTagChange(worker, pushIndex, hot->NetId, vo, vn);
+                    }
+                }
+
                 push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
             }
 
@@ -1421,8 +1437,19 @@ internal static unsafe class ProjectionPass
             }
         }
 
+        // A hidden entity leaves with its mask (14 § 6): a session that saw it hears the leave, one that did not is told nothing — it never had it.
+        if (plan.HasTagMask)
+        {
+            var vo = *(uint*)(cold + layout.TagMaskOffsetInColdEntry);
+            if (vo != 0)
+            {
+                flags |= PushEvent.TagsChanged;
+                push.NoteTagChange(worker, archetype, netId, vo, 0);
+            }
+        }
+
         push.AddEvent(worker, archetype, block, slot, null, netId, flags, x, y, z, 0f, 0f, 0f);
-        leases.Depart(worker, entity, netId, x, y, z, push.ServedRealm);
+        leases.Depart(worker, entity, netId, x, y, z, push.ServedRealm, plan.HasTagMask ? *(uint*)(cold + layout.TagMaskOffsetInColdEntry) : 0u);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1547,10 +1574,13 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
 
         /// <summary>The realm it was last in, whose frame X, Y, Z are in.</summary>
         public ushort Realm;
+
+        /// <summary>Its visibility tag mask when it departed (14 § 6): an event naming it reaches only the sessions that saw it.</summary>
+        public uint Mask;
     }
 
     /// <summary>Records, from <paramref name="worker"/>'s chunk, the entity whose identity it released and where it was last.</summary>
-    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z, ushort realm = 0)
+    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z, ushort realm = 0, uint mask = 0)
     {
         ref var lease = ref _leases[worker];
         if (lease.DepartedCount == lease.DepartedCapacity)
@@ -1561,7 +1591,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             lease.DepartedCapacity = capacity;
         }
 
-        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z, Realm = realm };
+        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z, Realm = realm, Mask = mask };
     }
 
     /// <summary>This tick's departed entities, every worker's: read serially, in the frame prologue, before the next tick's <see cref="BeginTick"/>.</summary>

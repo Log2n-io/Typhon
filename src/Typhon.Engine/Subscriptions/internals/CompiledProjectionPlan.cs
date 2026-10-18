@@ -474,6 +474,14 @@ internal sealed class CompiledProjectionPlan
     public CompiledGroupKey[] GroupKeys { get; internal set; } = [];
 
     /// <summary>
+    /// Whether the archetype declares a visibility tag mask (14 § 6). When it does not, every visibility test of its entities is this flag alone: no read.
+    /// </summary>
+    public bool HasTagMask { get; internal set; }
+
+    /// <summary>The visibility tag mask a push of this archetype reads, when <see cref="HasTagMask"/>.</summary>
+    public ClusterFieldReader TagMask { get; internal set; }
+
+    /// <summary>
     /// The archetype's visibility slack <c>h_A</c> in metres (09 § 2): v̂ moves to the entity's position only when that position is more than this far
     /// from it. Zero is exact — v̂ is the last projected position, every tick. Resolved by the compiler from the profiles that observe the archetype.
     /// </summary>

@@ -9,18 +9,18 @@
         "beginTick 1",
         "realm 0",
         "beginEntities ProjCreature",
-        "enter 50",
-        "enter 51",
-        "enter 52",
-        "enter 53",
-        "enter 54",
+        "enter 28",
+        "enter 29",
+        "enter 30",
+        "enter 31",
+        "enter 32",
         "beginEntities ProjPlayer",
-        "enter 107",
-        "enter 108",
+        "enter 85",
+        "enter 86",
         "beginEntities ProjRock",
-        "enter 155",
-        "enter 156",
-        "enter 157",
+        "enter 128",
+        "enter 129",
+        "enter 130",
         "endTick"
       ]
     },
@@ -30,9 +30,9 @@
       "calls": [
         "beginTick 2",
         "beginEntities ProjCreature",
-        "segment 52",
-        "segment 53",
-        "segment 54",
+        "segment 30",
+        "segment 31",
+        "segment 32",
         "endTick"
       ]
     },
@@ -42,11 +42,11 @@
       "calls": [
         "beginTick 3",
         "beginEntities ProjCreature",
-        "state 50 0x02",
-        "state 51 0x02",
-        "state 52 0x02",
-        "state 53 0x02",
-        "state 54 0x02",
+        "state 28 0x02",
+        "state 29 0x02",
+        "state 30 0x02",
+        "state 31 0x02",
+        "state 32 0x02",
         "endTick"
       ]
     },
@@ -56,9 +56,9 @@
       "calls": [
         "beginTick 4",
         "beginEntities ProjCreature",
-        "enter 32",
-        "leave 53",
-        "leave 54",
+        "enter 135",
+        "leave 31",
+        "leave 32",
         "endTick"
       ]
     },
@@ -69,17 +69,17 @@
         "beginTick 5",
         "realm 0",
         "beginEntities ProjCreature",
-        "enter 32",
-        "enter 50",
-        "enter 51",
-        "enter 52",
+        "enter 28",
+        "enter 29",
+        "enter 30",
+        "enter 135",
         "beginEntities ProjPlayer",
-        "enter 107",
-        "enter 108",
+        "enter 85",
+        "enter 86",
         "beginEntities ProjRock",
-        "enter 155",
-        "enter 156",
-        "enter 157",
+        "enter 128",
+        "enter 129",
+        "enter 130",
         "endTick"
       ]
     }

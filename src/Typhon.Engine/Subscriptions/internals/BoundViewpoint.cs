@@ -146,9 +146,10 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
     public PushReplication Push;
 
     /// <inheritdoc />
-    public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm)
+    public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm, out uint mask)
     {
         netId = 0;
+        mask = 0;
         x = y = z = 0f;
         realm = RealmId.Default.Value;
         if (Push == null || !TryLocate(entity, out var clusters, out var chunk, out var slot))
@@ -160,7 +161,7 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
         var map = System.Threading.Volatile.Read(ref clusters.ClusterRealmMap);
         realm = map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value;
         var owner = Push.Hub?.For(realm) ?? (realm == RealmId.Default.Value ? Push : null);
-        return owner != null && owner.TryEntityAt(clusters, chunk, slot, entity, out netId, out x, out y, out z);
+        return owner != null && owner.TryEntityTagsAt(clusters, chunk, slot, entity, out netId, out x, out y, out z, out mask);
     }
 
     /// <summary>Releases the accessors.</summary>

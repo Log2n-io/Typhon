@@ -58,6 +58,9 @@ internal sealed class OracleWorkload
 
     private int _nextTemplate = 1;
 
+    // Visibility tags (14 § 6): their own generator, so a run without them replays exactly as it did before they existed.
+    private readonly Random _tagRandom;
+
     // Stands in for the spatial column when a writer does not touch it.
     private readonly ProjBounds[] _noBounds = new ProjBounds[64];
 
@@ -71,6 +74,7 @@ internal sealed class OracleWorkload
         _harness = harness;
         _engine = harness.Engine;
         _random = new Random(seed);
+        _tagRandom = new Random(seed ^ 0x7A65);
     }
 
     /// <summary>A workload over a bare engine, with no replication at all — for reproducing an engine defect the oracle surfaced.</summary>
@@ -82,6 +86,7 @@ internal sealed class OracleWorkload
 
         _engine = engine;
         _random = new Random(seed);
+        _tagRandom = new Random(seed ^ 0x7A65);
     }
 
     /// <summary>The moving entities alive right now.</summary>
@@ -110,6 +115,23 @@ internal sealed class OracleWorkload
 
     /// <summary>How many slots were pushed.</summary>
     public int Pushed { get; private set; }
+
+    /// <summary>Whether entities carry visibility masks (14 § 6): spawned with one, and changing them — most public, the rest under one of two tags.</summary>
+    public bool Tags { get; set; }
+
+    /// <summary>How many masks the workload changed.</summary>
+    public int MaskFlips { get; private set; }
+
+    private uint RandomMask()
+    {
+        if (!Tags)
+        {
+            return 0;
+        }
+
+        var roll = _tagRandom.Next(10);
+        return roll < 6 ? 0u : roll < 8 ? 1u : 2u;
+    }
 
     /// <summary>
     /// What the workload last wrote through a span, per live creature: <c>mode</c> and <c>level</c>. Not a shadow of the world — only what the ECS was told,
@@ -153,6 +175,11 @@ internal sealed class OracleWorkload
         if (WalkStrideM > 0)
         {
             WalkAll();
+        }
+
+        if (Tags && _tagRandom.Next(100) < 30)
+        {
+            FlipMasks();
         }
 
         var roll = _random.Next(100);
@@ -208,7 +235,8 @@ internal sealed class OracleWorkload
             };
 
             var vitals = new ProjVitals { Health = _random.Next(1, 21), MaxHealth = 20 };
-            _creatures.Add(tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals)));
+            _creatures.Add(tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals),
+                ProjCreature.Visibility.Set(new ProjVisibility { Mask = RandomMask() })));
             Spawned++;
         }
 
@@ -222,8 +250,34 @@ internal sealed class OracleWorkload
         {
             var bounds = BoundsAt(RandomCoordinate(), RandomCoordinate());
             var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
-            _rocks.Add(tx.Spawn<ProjRock>(ProjRock.Bounds.Set(in bounds), ProjRock.Ai.Set(in ai)));
+            _rocks.Add(tx.Spawn<ProjRock>(ProjRock.Bounds.Set(in bounds), ProjRock.Ai.Set(in ai), ProjRock.Visibility.Set(new ProjVisibility { Mask = RandomMask() })));
             Spawned++;
+        }
+
+        tx.Commit();
+    }
+
+    // One or two entities change their mask, pushed as any projected field is under an explicit profile.
+    private void FlipMasks()
+    {
+        using var tx = _engine.CreateQuickTransaction();
+        for (var i = 1 + _tagRandom.Next(2); i > 0; i--)
+        {
+            var rock = _tagRandom.Next(4) == 0;
+            var from = rock ? _rocks : _creatures;
+            if (from.Count == 0)
+            {
+                continue;
+            }
+
+            var e = tx.OpenMut(from[_tagRandom.Next(from.Count)]);
+            e.Set(rock ? ProjRock.Visibility : ProjCreature.Visibility, new ProjVisibility { Mask = RandomMask() });
+            if (Replicate)
+            {
+                _harness?.Subscriptions.Commands.Replicate(in e);
+            }
+
+            MaskFlips++;
         }
 
         tx.Commit();

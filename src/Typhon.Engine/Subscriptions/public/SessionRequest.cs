@@ -194,6 +194,23 @@ public readonly ref struct SessionRequest
     }
 
     /// <summary>
+    /// Sets which entities with a visibility mask the session sees (14 § 6, P18): one whose mask is 0, or shares a bit with <paramref name="mask"/>. Default 0:
+    /// public entities only.
+    /// </summary>
+    /// <param name="mask">The session's tag mask.</param>
+    /// <returns>This request, so several may be chained.</returns>
+    /// <remarks>
+    /// A change is a <c>RESET</c> of the session's view (P20): every entity it should hold is delivered again under the new mask. Rare by design — a GM
+    /// mode, a team change — since a sweep of everything delivered would cost more than the refill. An entity's own mask changing is cheap instead: a leave
+    /// or an enter for the sessions it stops or starts being visible to.
+    /// </remarks>
+    public SessionRequest SetVisibility(uint mask)
+    {
+        _segment.Add(_session, SessionRequestKind.SetVisibility, mask, null);
+        return this;
+    }
+
+    /// <summary>
     /// Ends the session.
     /// </summary>
     /// <param name="code">The close code, in the application range <c>4100-4999</c>.</param>

@@ -229,8 +229,11 @@ internal delegate ushort EventRealmReader(ReadOnlySpan<byte> payload);
 /// <summary>Resolves a live entity an event names: its netId and v̂ (09 § 11).</summary>
 internal interface IEventEntities
 {
-    /// <summary>An entity's identity and v̂ in its realm, and that realm (12-realms § 3: ToKnown files in the entity's realm).</summary>
-    bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm);
+    /// <summary>
+    /// An entity's identity and v̂ in its realm, that realm (12-realms § 3: ToKnown files in the entity's realm), and its visibility mask (14 § 6: an event
+    /// naming an entity reaches only the sessions that see it).
+    /// </summary>
+    bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm, out uint mask);
 }
 
 /// <summary>A session's geometry for the geometric routes: the cells it spans, and whether it sees a point (09 § 11).</summary>
@@ -245,6 +248,9 @@ internal interface IEventGeometry
 
     /// <summary>The session's realm: a geometric filing of another realm never matches, whatever its coordinates (SUB-28).</summary>
     ushort Realm { get; }
+
+    /// <summary>Whether the session sees an entity with <paramref name="mask"/> (14 § 6, P19): 0 is public.</summary>
+    bool SeesTags(uint mask);
 
     /// <summary>Whether a <see cref="EventRouting.ToRealm"/> filing for <paramref name="realm"/> reaches the session (with its subtree, when asked).</summary>
     bool InRealm(ushort realm, bool subtree);
@@ -814,9 +820,11 @@ internal sealed class EventHub
         public float Y;
         public float Z;
         public ushort Realm;
+        public uint Mask;
     }
 
-    private bool Resolve<TEntities>(ref TEntities entities, EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm)
+    private bool Resolve<TEntities>(ref TEntities entities, EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm,
+        out uint mask)
         where TEntities : IEventEntities, allows ref struct
     {
         var raw = entity.RawValue;
@@ -825,19 +833,19 @@ internal sealed class EventHub
             ref var m = ref _memo[i];
             if (m.Entity == raw && raw != 0)
             {
-                (netId, x, y, z, realm) = (m.NetId, m.X, m.Y, m.Z, m.Realm);
+                (netId, x, y, z, realm, mask) = (m.NetId, m.X, m.Y, m.Z, m.Realm, m.Mask);
                 return m.Found;
             }
         }
 
-        var found = entities.TryResolve(entity, out netId, out x, out y, out z, out realm);
+        var found = entities.TryResolve(entity, out netId, out x, out y, out z, out realm, out mask);
         if (!found && _departed.TryGetValue((long)raw, out var gone))
         {
-            (netId, x, y, z, realm) = (gone.NetId, gone.X, gone.Y, gone.Z, gone.Realm);
+            (netId, x, y, z, realm, mask) = (gone.NetId, gone.X, gone.Y, gone.Z, gone.Realm, gone.Mask);
             found = true;
         }
 
-        _memo[_memoNext] = new Memo { Entity = raw, Found = found, NetId = netId, X = x, Y = y, Z = z, Realm = realm };
+        _memo[_memoNext] = new Memo { Entity = raw, Found = found, NetId = netId, X = x, Y = y, Z = z, Realm = realm, Mask = mask };
         _memoNext = (_memoNext + 1) & (_memo.Length - 1);
         return found;
     }
@@ -880,19 +888,20 @@ internal sealed class EventHub
                 foreach (var offset in info.EntityOffsets)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
-                    if (!entity.IsNull && Resolve(ref entities, entity, out var netId, out var x, out var y, out var z, out var realm)
+                    if (!entity.IsNull && Resolve(ref entities, entity, out var netId, out var x, out var y, out var z, out var realm, out var mask)
                         && hub.For(realm) is { } push)
                     {
-                        // Filed in the entity's realm (12-realms § 3), where its sessions knew it.
+                        // Filed in the entity's realm (12-realms § 3), where its sessions knew it — and with its mask, which only the sessions that see it
+                        // pass (14 § 6).
                         push.CellOf(x, y, z, out var cx, out var cy, out var cz);
-                        slot.AddGeo(CellKey(cx, cy, cz), e, x, y, z, 0f, realm);
+                        slot.AddGeo(CellKey(cx, cy, cz), e, x, y, z, 0f, realm, mask);
 
                         // was ∨ is: an entity this tick moved to another cell is filed where it was too, so a session that knew it there hears of it
                         // — "X killed Y" as Y leaves the view. The match is deduplicated.
                         if (netId != 0 && push.TryOldVisibility(netId, x, y, z, out var ox, out var oy, out var oz))
                         {
                             push.CellOf(ox, oy, oz, out cx, out cy, out cz);
-                            slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f, realm);
+                            slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f, realm, mask);
                         }
                     }
                 }
@@ -913,7 +922,7 @@ internal sealed class EventHub
                 foreach (var offset in info.EntityOffsets)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
-                    if (!entity.IsNull && Resolve(ref entities, entity, out _, out _, out _, out _, out var realm))
+                    if (!entity.IsNull && Resolve(ref entities, entity, out _, out _, out _, out _, out var realm, out _))
                     {
                         return realm;
                     }
@@ -972,7 +981,7 @@ internal sealed class EventHub
                 if (f.Entity)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[f.Offset..]));
-                    one[0] = !entity.IsNull && Resolve(ref entities, entity, out var netId, out _, out _, out _, out _) ? netId : 0u;
+                    one[0] = !entity.IsNull && Resolve(ref entities, entity, out var netId, out _, out _, out _, out _, out _) ? netId : 0u;
                 }
                 else
                 {
@@ -1136,6 +1145,9 @@ internal sealed class EventHub
         public float Z;
         public float Radius;
         public ushort Realm;
+
+        // The named entity's visibility mask (14 § 6), 0 for a point or a public entity.
+        public uint Mask;
     }
 
     /// <summary>
@@ -1221,14 +1233,14 @@ internal sealed class EventHub
 
         public void AddDirect(ulong key, int e) => Append(ref DirectKeys, ref DirectEvents, ref DirectCount, key, e);
 
-        public void AddGeo(ulong key, int e, float x, float y, float z, float radius, ushort realm)
+        public void AddGeo(ulong key, int e, float x, float y, float z, float radius, ushort realm, uint mask = 0)
         {
             if (GeoCount == Geos.Length)
             {
                 Array.Resize(ref Geos, GeoCount * 2);
             }
 
-            Geos[GeoCount++] = new Geo { Key = key, Event = e, X = x, Y = y, Z = z, Radius = radius, Realm = realm };
+            Geos[GeoCount++] = new Geo { Key = key, Event = e, X = x, Y = y, Z = z, Radius = radius, Realm = realm, Mask = mask };
         }
 
         public void AddRealm(ushort realm, bool subtree, int e) => Append(ref RealmKeys, ref RealmEvents, ref RealmCount, ((ulong)realm << 1) | (subtree ? 1UL : 0UL), e);
@@ -1352,7 +1364,7 @@ internal sealed class EventHub
                     for (var i = 0; i < GeoCount; i++)
                     {
                         ref var g = ref Geos[i];
-                        if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius))
+                        if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius) && (g.Mask == 0 || geometry.SeesTags(g.Mask)))
                         {
                             picks.AddTemp(g.Event);
                         }
@@ -1376,7 +1388,7 @@ internal sealed class EventHub
                             for (var i = LowerBound(CellKey(minCx, cy, cz)); i < GeoCount && Geos[i].Key <= hi; i++)
                             {
                                 ref var g = ref Geos[i];
-                                if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius))
+                                if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius) && (g.Mask == 0 || geometry.SeesTags(g.Mask)))
                                 {
                                     picks.AddTemp(g.Event);
                                 }

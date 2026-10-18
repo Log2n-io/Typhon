@@ -113,6 +113,9 @@ internal abstract unsafe partial class PushReplication
     // Per plan index: an observed archetype with no position (14 § 5), a group member only. Its events go to the hub's log, never to a cell.
     private protected readonly bool[] _unplaced;
 
+    /// <summary>Whether plan <paramref name="archetype"/> is observed with no position (14 § 5): held through its keys alone, in no realm of its own.</summary>
+    internal bool IsUnplaced(int archetype) => (uint)archetype < (uint)_unplaced.Length && _unplaced[archetype];
+
     /// <summary>The hub that collects this realm's blocks and routes them here (R4.1); set when the hub starts serving the realm.</summary>
     internal PushHub Hub;
 
@@ -623,6 +626,8 @@ internal abstract unsafe partial class PushReplication
     private protected virtual void ResetSlot(int local)
     {
         _sessions[local] = default;
+        _sessionTagsGeneration[local] = 0;
+        _sessionTags[local] = 0;
         if (local < _regions.Length && _regions[local] != null)
         {
             _regions[local].Generation = 0;
@@ -638,6 +643,8 @@ internal abstract unsafe partial class PushReplication
     private protected virtual void GrowSessions(int length)
     {
         Array.Resize(ref _sessions, length);
+        Array.Resize(ref _sessionTags, length);
+        Array.Resize(ref _sessionTagsGeneration, length);
         Array.Resize(ref _slotOwners, length);
         Array.Resize(ref _slotSeen, length);
         Array.Resize(ref _freeSlots, length);
@@ -828,6 +835,7 @@ internal abstract unsafe partial class PushReplication
         }
 
         ServedRealm = realm;
+        InitTags(plans, states);
         Codecs = codecs ?? RealmCodecs.FromPlans(plans);
         Bootstrapped = new bool[plans.Length];
         EverythingThisTick = new bool[plans.Length];
@@ -1113,6 +1121,23 @@ internal abstract unsafe partial class PushReplication
     public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z) =>
         TryVisibilityAt(clusters, chunk, slot, entity, out _, out netId, out x, out y, out z);
 
+    /// <summary>The entity's netId and v̂ as <c>TryEntityAt</c> reads them, with its visibility tag mask (14 § 6) — 0 for a public one.</summary>
+    public bool TryEntityTagsAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z,
+        out uint mask)
+    {
+        mask = 0;
+        if (!TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out netId))
+        {
+            x = y = z = 0f;
+            return false;
+        }
+
+        var layout = _states[archetype].Layout;
+        Decode(archetype, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(archetype), out x, out y, out z);
+        mask = MaskAt(archetype, block, slot);
+        return true;
+    }
+
     /// <summary><see cref="TryEntityAt"/>, with the entity's plan index — what an archetype-set test needs (SUB-26).</summary>
     public bool TryVisibilityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out int archetype, out uint netId, out float x,
         out float y, out float z)
@@ -1380,6 +1405,7 @@ internal abstract unsafe partial class PushReplication
         _indexedTick = uint.MaxValue;
         ResetWorkers(workers);
         ResetKeyChanges(workers);
+        ResetTagChanges(workers);
     }
 
     /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>

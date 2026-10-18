@@ -16,6 +16,15 @@ struct GroupKey
     public int Town;
 }
 
+/// <summary>A member's visibility tag mask (14 § 6): 0 public; a session sees it when its own mask shares a bit. Read only where a test declares it.</summary>
+[Component("Typhon.Test.Group.Tag", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct GroupTag
+{
+    [Field]
+    public uint Mask;
+}
+
 /// <summary>A region (14 § 3.3): the town's key and the extent a session's observer meets it by.</summary>
 [Component("Typhon.Test.Group.Zone", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
@@ -35,6 +44,7 @@ partial class GroupBuilding : Archetype<GroupBuilding>
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<GroupKey> Key = Register<GroupKey>();
+    public static readonly Comp<GroupTag> Tag = Register<GroupTag>();
 }
 
 /// <summary>A moving member: replicated by geometry and by its town, the union (P9).</summary>
@@ -44,6 +54,7 @@ partial class GroupCitizen : Archetype<GroupCitizen>
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<GroupKey> Key = Register<GroupKey>();
+    public static readonly Comp<GroupTag> Tag = Register<GroupTag>();
 }
 
 /// <summary>The region archetype: one entity per town, never replicated.</summary>
@@ -168,6 +179,7 @@ partial class GroupPositionless : Archetype<GroupPositionless>
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<GroupKey> Key = Register<GroupKey>();
     public static readonly Comp<GroupListKey> List = Register<GroupListKey>();
+    public static readonly Comp<GroupTag> Tag = Register<GroupTag>();
 }
 
 /// <summary>A shard whose town is Versioned: the one key an off-DAG commit may move between the projection and the gather (EW-02).</summary>
@@ -233,6 +245,7 @@ static class GroupTestSchema
         dbe.RegisterComponentFromAccessor<GroupUnsignedKey>();
         dbe.RegisterComponentFromAccessor<GroupShardLink>();
         dbe.RegisterComponentFromAccessor<GroupListKey>();
+        dbe.RegisterComponentFromAccessor<GroupTag>();
         dbe.ConfigureSpatialGrid(deep
             ? new SpatialGridConfig(worldMin: new Vector3D(-1024d, -1024d, -1024d), worldMax: new Vector3D(1024d, 1024d, 1024d), cellSize: 128d)
             : SpatialGridConfig.Flat(
@@ -251,17 +264,36 @@ static class GroupTestSchema
     /// <param name="reachM">The reach towns are met at.</param>
     /// <param name="leaveMarginM">The set's hysteresis.</param>
     /// <param name="shards">Positionless shards are members too (14 § 5).</param>
-    public static void Declare(SubscriptionsRegistry subs, double radiusM, double reachM, double leaveMarginM, bool shards = false)
+    /// <param name="tags">Every member declares its visibility mask (14 § 6).</param>
+    public static void Declare(SubscriptionsRegistry subs, double radiusM, double reachM, double leaveMarginM, bool shards = false, bool tags = false)
     {
-        subs.Static<GroupBuilding>(a => a
-            .Position(GroupBuilding.Bounds)
-            .Field(GroupBuilding.Ai, x => x.Template, Codec.U8, name: "kind"));
-        subs.Archetype<GroupCitizen>(a => a
-            .Motion(GroupCitizen.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
-            .OnEnter(GroupCitizen.Ai, x => x.Template, Codec.U8, name: "template"));
+        subs.Static<GroupBuilding>(a =>
+        {
+            a.Position(GroupBuilding.Bounds).Field(GroupBuilding.Ai, x => x.Template, Codec.U8, name: "kind");
+            if (tags)
+            {
+                a.Visibility(GroupBuilding.Tag, t => t.Mask);
+            }
+        });
+        subs.Archetype<GroupCitizen>(a =>
+        {
+            a.Motion(GroupCitizen.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
+                .OnEnter(GroupCitizen.Ai, x => x.Template, Codec.U8, name: "template");
+            if (tags)
+            {
+                a.Visibility(GroupCitizen.Tag, t => t.Mask);
+            }
+        });
         if (shards)
         {
-            subs.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+            subs.Archetype<GroupPositionless>(a =>
+            {
+                a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind");
+                if (tags)
+                {
+                    a.Visibility(GroupPositionless.Tag, t => t.Mask);
+                }
+            });
         }
 
         subs.Groups(Set, g =>

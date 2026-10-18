@@ -31,6 +31,13 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     internal virtual GroupKeyState GroupKeyStateOf(SessionId session, int set, long key) => GroupKeyState.NotHeld;
 
+    /// <summary>
+    /// Whether <paramref name="session"/>'s COMMITTED frame holds the member at (<paramref name="block"/>, <paramref name="slot"/>) through one of its keys:
+    /// a key the frame held, filled past the member's netId (SUB-33). Read from a system, like <see cref="HoldsCommitted"/>: the frame stage commits the
+    /// keys and the projection writes the member's, both after systems run.
+    /// </summary>
+    internal virtual bool GroupHoldsCommitted(SessionId session, int archetype, nint block, int slot, uint netId) => false;
+
     /// <summary>Whether any group set is declared: the one test every group step starts with.</summary>
     internal bool HasGroups => GroupSets.Length > 0;
 

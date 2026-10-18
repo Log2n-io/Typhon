@@ -112,6 +112,13 @@ internal struct PushEvent : IPushEvent<PushEvent>
     /// </summary>
     public const byte KeyChanged = 64;
 
+    /// <summary>
+    /// The entity's visibility tag mask before or after this event is not 0 and changed — or a hidden entity left (14 § 6): its old and new masks are in the
+    /// tick's mask-change list. Never dropped as a no-op: a session that stops or starts seeing it has to hear of it. An event without the flag has one mask
+    /// on both sides, its cold entry's — 0 for a leave.
+    /// </summary>
+    public const byte TagsChanged = 128;
+
     // Laid out to 48 bytes, a key's 42 bits in eight and six bytes: the struct is copied into the index and read by every session that reaches its cell.
     private nint _block;
 

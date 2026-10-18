@@ -42,6 +42,8 @@ ctx.Subscriptions.Emit(new Hit { Attacker = shooter, Target = victim, Damage = 1
 - **Best effort by design**: past the log, events are lost and counted, never retransmitted. Anything that must not be lost is state.
 - A session bound to no profile hears only broadcasts and its own `EmitTo`.
 - An event whose value its codec cannot carry is dropped and counted — the tick path never throws.
+- `RouteToKnown` skips a session whose visibility mask does not see the named entity, and it is geometric: an entity a session holds only
+  through a [group](groups.md) — beyond its Sphere, or with no position — does not reach it.
 - **Reliable events are not built.**
 
 ## 🧪 Tests

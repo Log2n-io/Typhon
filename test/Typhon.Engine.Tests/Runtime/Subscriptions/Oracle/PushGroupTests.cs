@@ -158,6 +158,43 @@ class PushGroupTests : TestBase<PushGroupTests>
         });
     }
 
+    /// <summary>
+    /// The oracle with masks (step 4.4's acceptance, 14 § 6): the same world, its members tagged — most public, the rest under one of two tags — and the
+    /// tags changing under the churn, with sessions that see public only, one tag, or both, now and then switching. At every quiet point a session holds
+    /// exactly what it is entitled to and sees; every completion the skip-free sessions receive holds every member they see; no record is ever illegal.
+    /// </summary>
+    [TestCase(11, 16)]
+    [TestCase(12, 500)]
+    [TestCase(13, 7)]
+    [VerifiesRule("SUB-34")]
+    [VerifiesRule("SUB-33")]
+    [VerifiesRule("SUB-03")]
+    public void SessionsHoldExactlyWhatTheySee(int seed, int enterBudget)
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var oracle = GroupOracle.Create(dbe, seed, [0, 0, 0, 30, 70, 90], nameof(SessionsHoldExactlyWhatTheySee) + seed, enterBudget, tags: true);
+        for (var round = 0; round < 8; round++)
+        {
+            for (var step = 0; step < 30; step++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"seed {seed}, budget {enterBudget}, round {round}");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Compared, Is.GreaterThan(200), "the comparison looked at members");
+            Assert.That(oracle.HiddenMembers, Is.GreaterThan(100), "members were hidden from sessions, and each checked not held");
+            Assert.That(oracle.MaskFlips, Is.GreaterThan(20), "members changed their masks");
+            Assert.That(oracle.SessionMaskChanges, Is.GreaterThan(0), "a session's own mask changed");
+            Assert.That(oracle.CompletionsChecked, Is.GreaterThan(3), "completions arrived and were checked against what each session sees");
+            Assert.That(oracle.Push.VisibilityResets, Is.GreaterThan(0), "a session mask change reset its view");
+        });
+    }
+
     /// <summary>What one frame told a session about town <paramref name="key"/>, and how many buildings entered and left in it.</summary>
     private static (int Completed, int Released, int Entered, int Left) Frame(FrameHarness harness, SessionId session, long key)
     {
@@ -525,6 +562,32 @@ class PushGroupTests : TestBase<PushGroupTests>
         using var oracle = GroupOracle.Create(dbe, 4, [0, 30, 70, 90], nameof(AKeyChangeTheProjectionNeverReadsIsDetected), 7);
         oracle.RemoveTheTapForTest();
         RuleMutants.AssertDetects("SUB-33", GroupOracle.FailureMarker, () =>
+        {
+            for (var round = 0; round < 8; round++)
+            {
+                for (var step = 0; step < 30; step++)
+                {
+                    oracle.Step();
+                }
+
+                oracle.Quiesce();
+                oracle.AssertConverged($"round {round}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// The tagged oracle against a projection that never reads a mask flip (SUB-34): members change their masks and replication is not told, so what the
+    /// sessions hold follows the old masks. The oracle must reject it.
+    /// </summary>
+    [Test]
+    [RuleMutant("SUB-34")]
+    public void AMaskFlipTheProjectionNeverReadsIsDetected()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var oracle = GroupOracle.Create(dbe, 11, [0, 30, 70, 90], nameof(AMaskFlipTheProjectionNeverReadsIsDetected), 16, tags: true);
+        oracle.FlipMasksUntoldForTest();
+        RuleMutants.AssertDetects("SUB-34", GroupOracle.FailureMarker, () =>
         {
             for (var round = 0; round < 8; round++)
             {

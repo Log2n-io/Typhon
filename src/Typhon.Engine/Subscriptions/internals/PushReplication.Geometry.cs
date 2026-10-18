@@ -625,6 +625,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         public MemberEntry[] Members = [];
         public int MemberCount;
 
+        // Visibility tags (14 § 6): this tick's mask changes by netId, ascending. An event flagged TagsChanged finds its masks here; one that is not has
+        // its cold entry's on both sides. Kept with the slot, so a skipped session's catch-up reads each tick's.
+        public TagChange[] Tags = [];
+        public int TagCount;
+
         // Distance LOD: this tick's far flushes for entities whose latest event is an earlier tick, by cell (compact, ascending). An entity whose latest
         // event IS this tick carries its flush on that event instead.
         public TEvent[] Flush = [];
@@ -947,9 +952,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         // A positionless member has no cell: its event goes to the hub's log, which every realm's group gather reads (14 § 5).
         if (_unplaced[archetype])
         {
-            if ((flags & (both | PushEvent.KeyChanged)) != both || groups != 0)
+            if ((flags & (both | PushEvent.KeyChanged | PushEvent.TagsChanged)) != both || groups != 0)
             {
-                Hub.AddUnplaced(worker, archetype, block, slot, netId, (byte)(flags & (both | PushEvent.KeyChanged)), groups);
+                Hub.AddUnplaced(worker, archetype, block, slot, netId, (byte)(flags & (both | PushEvent.KeyChanged | PushEvent.TagsChanged)), groups);
             }
 
             return;
@@ -957,7 +962,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         var arrived = (flags & PushEvent.Arrived) != 0;
         flags &= unchecked((byte)~PushEvent.Arrived);
-        if (!arrived && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
+        if (!arrived && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged | PushEvent.TagsChanged)) == both && groups == 0 && ox == nx && oy == ny
             && (!TEvent.Deep || oz == nz))
         {
             // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
@@ -1019,6 +1024,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 NoteOrphanKeys(archetype, cold, in layout, netId);
             }
 
+            // A hidden entity leaves with its mask (14 § 6).
+            var tagged = HasTags && NoteOrphanTags(archetype, cold, netId);
+
             if (_orphanCount == _orphans.Length)
             {
                 Array.Resize(ref _orphans, _orphanCount * 2);
@@ -1030,6 +1038,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             e.NetId = netId;
             e.Archetype = (ushort)archetype;
             e.Flags = keyChanged ? (byte)(PushEvent.HasOld | PushEvent.KeyChanged) : PushEvent.HasOld;
+            if (tagged)
+            {
+                e.Flags |= PushEvent.TagsChanged;
+            }
+
             e.OldX = x;
             e.OldY = y;
             e.OldZ = z;
@@ -1247,6 +1260,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         slot.Valid = true;
         slot.FlushCellCount = 0;
         _indexed = slot.Events;
+        slot.TagCount = HasTags ? MergeTagChanges(ref slot.Tags) : 0;
         if (HasGroups)
         {
             MergeKeyChanges();
@@ -2235,7 +2249,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                         Set(d, row, bit);
                         Set(fresh, row, bit);
-                        entered += DeliverCell(cx, cy, cz, in nBall, in archetypes, scratch, tick, gap);
+                        entered += DeliverCell(slotIndex, cx, cy, cz, in nBall, in archetypes, scratch, tick, gap);
                         Interlocked.Increment(ref CellsDelivered);
                     }
                 }
@@ -2249,7 +2263,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         // ── 2. The push events around both anchors ─────────────────────────────────────────────────────────────────────────────────────────────────
         if (gap > 0)
         {
-            EmitLog(log, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, scratch, ref enters, ref leaves,
+            EmitLog(slotIndex, log, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, scratch, ref enters, ref leaves,
                 ref updates, lod);
         }
 
@@ -2286,10 +2300,24 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         continue;
                     }
 
-                    if (interior && i < pe && (e.Flags & (PushEvent.HasOld | PushEvent.HasNew)) == (PushEvent.HasOld | PushEvent.HasNew) && e.OldKey == cell)
+                    // Visibility (P19): the masks the entity had before and after this tick, against the session's — one load for an archetype with none.
+                    var tagged = _tagOffset[e.Archetype] >= 0;
+                    uint tagsWas = 0, tagsIs = 0;
+                    if (tagged)
                     {
-                        EmitUpdateLod(ref e, e.OldX, e.OldY, e.OldZ, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, in aBall,
-                            in nBall, lod, scratch, ref updates);
+                        EventTags(index, ref e, out tagsWas, out tagsIs);
+                    }
+
+                    if (interior && i < pe && (e.Flags & (PushEvent.HasOld | PushEvent.HasNew)) == (PushEvent.HasOld | PushEvent.HasNew) && e.OldKey == cell
+                        && tagsWas == tagsIs)
+                    {
+                        // Seen on both sides or on neither: its mask did not move. A change of it is a leave or an enter, decided below.
+                        if (!tagged || Sees(slotIndex, tagsIs))
+                        {
+                            EmitUpdateLod(ref e, e.OldX, e.OldY, e.OldZ, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, in aBall,
+                                in nBall, lod, scratch, ref updates);
+                        }
+
                         continue;
                     }
 
@@ -2306,9 +2334,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         }
                     }
 
-                    var was = (e.Flags & PushEvent.HasOld) != 0 && Within(aBall, e.OldX, e.OldY, e.OldZ) && Held(o, oOriginX, oOriginY, oOriginZ, e.OldKey);
+                    var was = (e.Flags & PushEvent.HasOld) != 0 && Within(aBall, e.OldX, e.OldY, e.OldZ) && Held(o, oOriginX, oOriginY, oOriginZ, e.OldKey)
+                        && (!tagged || Sees(slotIndex, tagsWas));
                     var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(nBall, e.NewX, e.NewY, e.NewZ)
-                        && Held(d, nOriginX, nOriginY, nOriginZ, e.NewKey);
+                        && Held(d, nOriginX, nOriginY, nOriginZ, e.NewKey) && (!tagged || Sees(slotIndex, tagsIs));
                     if (isIn)
                     {
                         if (!was)
@@ -2362,7 +2391,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                             continue;
                         }
 
-                        SweepCell(cx, cy, cz, in aBall, in nBall, in archetypes, scratch, tick, gap, ref enters, ref leaves);
+                        SweepCell(slotIndex, cx, cy, cz, in aBall, in nBall, in archetypes, scratch, tick, gap, ref enters, ref leaves);
                     }
                 }
             }
@@ -2393,7 +2422,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                             continue;
                         }
 
-                        FarSweepCell(cx, cy, cz, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, in archetypes, scratch, tick, gap, ref updates);
+                        FarSweepCell(slotIndex, cx, cy, cz, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, in archetypes, scratch, tick, gap,
+                            ref updates);
                     }
                 }
             }
@@ -2403,7 +2433,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         // After missed frames the log's replay folded them, with the events.
         if (lod && gap == 0)
         {
-            FlushEntries(in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, in archetypes, scratch, ref updates);
+            FlushEntries(slotIndex, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, in archetypes, scratch,
+                ref updates);
         }
 
         if (scratch.Deferred != 0)
@@ -2442,7 +2473,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         ref long leaves, ref long updates, out bool complete)
     {
         var from = Stopwatch.GetTimestamp();
-        ref var st = ref _sessions[L(session)];
+        var local = L(session);
+        ref var st = ref _sessions[local];
         if (!st.Bound || st.Generation != session.Generation)
         {
             Bind(ref st, session);
@@ -2500,7 +2532,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             for (; k < _worldOrderCount && entered < enterBudget && visited < WorldCellsPerFrame; k++, visited++)
             {
                 var key = _worldOrder[k];
-                entered += DeliverCell(TEvent.KeyX(key), TEvent.KeyY(key), TEvent.KeyZ(key), in nowhere, in archetypes, scratch, tick, gap,
+                entered += DeliverCell(local, TEvent.KeyX(key), TEvent.KeyY(key), TEvent.KeyZ(key), in nowhere, in archetypes, scratch, tick, gap,
                     everywhere: true);
                 cursor = key + 1;
             }
@@ -2526,8 +2558,15 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 ref var entry = ref log.Entries[i];
                 ref var e = ref entry.Last;
-                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && entry.OldKey < oldCursor;
-                var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
+                var tagged = _tagOffset[e.Archetype] >= 0;
+                uint tagsWas = 0, tagsIs = 0;
+                if (tagged)
+                {
+                    EntryTags(ref entry, out tagsWas, out tagsIs);
+                }
+
+                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && entry.OldKey < oldCursor && (!tagged || Sees(local, tagsWas));
+                var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor && (!tagged || Sees(local, tagsIs));
                 EmitWorld(ref e, was, isIn, entry.Groups, entry.Segment, scratch, ref enters, ref leaves, ref updates);
             }
         }
@@ -2544,8 +2583,15 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         continue;
                     }
 
-                    var was = (e.Flags & PushEvent.HasOld) != 0 && e.OldKey < oldCursor;
-                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
+                    var tagged = _tagOffset[e.Archetype] >= 0;
+                    uint tagsWas = 0, tagsIs = 0;
+                    if (tagged)
+                    {
+                        EventTags(slot, ref e, out tagsWas, out tagsIs);
+                    }
+
+                    var was = (e.Flags & PushEvent.HasOld) != 0 && e.OldKey < oldCursor && (!tagged || Sees(local, tagsWas));
+                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor && (!tagged || Sees(local, tagsIs));
                     EmitWorld(ref e, was, isIn, e.Groups, (e.Flags & PushEvent.Segment) != 0, scratch, ref enters, ref leaves, ref updates);
                 }
             }
@@ -2617,6 +2663,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         entry.Replaced = true;
                     }
 
+                    FoldTags(slot, ref e, ref entry);
                     entry.Last = e;
                     entry.LastTick = t;
                     entry.Groups |= e.Groups;
@@ -2770,6 +2817,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         public bool FlushSegment;
         public bool Flushed;
         public bool Real;
+
+        // Visibility tags (14 § 6): the mask before the window's first change of it, once one was met.
+        public uint WasTags;
+        public bool TagsSeen;
     }
 
     /// <summary>Whether the log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
@@ -2846,6 +2897,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         entry.Replaced = true;
                     }
 
+                    FoldTags(slot, ref e, ref entry);
                     entry.Last = e;
                     entry.LastTick = t;
                     entry.Groups |= e.Groups;
@@ -2922,16 +2974,24 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         && Held(committed, st.OriginX, st.OriginY, st.OriginZ, entry.OldKey);
 
     /// <summary>The folded events against the committed sphere and window (was) and the new ones (is).</summary>
-    private void EmitLog(LogTable table, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX, int nOriginY,
-        int nOriginZ, ReadOnlySpan<ushort> d, FrameWorkerScratch scratch, ref long enters, ref long leaves, ref long updates, bool lod)
+    private void EmitLog(int local, LogTable table, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX,
+        int nOriginY, int nOriginZ, ReadOnlySpan<ushort> d, FrameWorkerScratch scratch, ref long enters, ref long leaves, ref long updates, bool lod)
     {
         for (var i = 0; i < table.Count; i++)
         {
             ref var entry = ref table.Entries[i];
             ref var e = ref entry.Last;
+            var tagged = _tagOffset[e.Archetype] >= 0;
+            uint tagsWas = 0, tagsIs = 0;
+            if (tagged)
+            {
+                EntryTags(ref entry, out tagsWas, out tagsIs);
+            }
+
             var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(a, entry.OldX, entry.OldY, entry.OldZ)
-                && Held(o, oOriginX, oOriginY, oOriginZ, entry.OldKey);
-            var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(n, e.NewX, e.NewY, e.NewZ) && Held(d, nOriginX, nOriginY, nOriginZ, e.NewKey);
+                && Held(o, oOriginX, oOriginY, oOriginZ, entry.OldKey) && (!tagged || Sees(local, tagsWas));
+            var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(n, e.NewX, e.NewY, e.NewZ) && Held(d, nOriginX, nOriginY, nOriginZ, e.NewKey)
+                && (!tagged || Sees(local, tagsIs));
 
             // Only far flushes and no event: the entity neither moved nor changed since, and a flush entry stamps nothing — so an enter or a leave is the cell
             // delivery's or the sweep's, and a crossing inward — between any two bands — is the inner crescent's. It speaks only to a session holding it in a
@@ -3045,8 +3105,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     }
 
     /// <summary>Distance LOD: this tick's flush entries in the sphere, to a session that held the entity before this frame and holds it in a band now.</summary>
-    private void FlushEntries(in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX, int nOriginY,
-        int nOriginZ, ReadOnlySpan<ushort> d, in ArchetypeSet archetypes, FrameWorkerScratch scratch, ref long updates)
+    private void FlushEntries(int local, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX,
+        int nOriginY, int nOriginZ, ReadOnlySpan<ushort> d, in ArchetypeSet archetypes, FrameWorkerScratch scratch, ref long updates)
     {
         var slot = _log[_tick % LogDepth];
         if (slot.FlushCellCount == 0 || slot.Tick != _tick)
@@ -3071,7 +3131,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 ref var f = ref slot.Flush[i];
                 if (!archetypes.Contains(f.Archetype) || !Within(n, f.NewX, f.NewY, f.NewZ) || !Held(d, nOriginX, nOriginY, nOriginZ, f.NewKey)
-                    || !Within(a, f.NewX, f.NewY, f.NewZ) || !Held(o, oOriginX, oOriginY, oOriginZ, f.NewKey))
+                    || !Within(a, f.NewX, f.NewY, f.NewZ) || !Held(o, oOriginX, oOriginY, oOriginZ, f.NewKey) || !SeesNow(local, f.Archetype, f.Block, f.Slot))
                 {
                     continue;
                 }
@@ -3109,7 +3169,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     /// session's last frame, get what changed in their old band's last N ticks: older changes went out in that band's flushes, and newer ones wait for one
     /// the new band does not share.
     /// </summary>
-    private void FarSweepCell(int cx, int cy, int cz, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n,
+    private void FarSweepCell(int local, int cx, int cy, int cz, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n,
         in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
     {
         if (!Local(oOriginX, oOriginY, oOriginZ, cx, cy, cz, out var row, out var bit) || !Has(o, row, bit) || _occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
@@ -3195,7 +3255,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     var bandBefore = a.BandOf(px, py, pz);
-                    if (n.BandOf(px, py, pz) >= bandBefore)
+                    if (n.BandOf(px, py, pz) >= bandBefore || !SeesNow(local, arch, (nint)block, slot))
                     {
                         continue;
                     }
@@ -3553,6 +3613,44 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
     }
 
+    // ══ Visibility tags (14 § 6) ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// An event's visibility masks before and after it (P20): from <paramref name="slot"/>'s change list when it is flagged, else its cold entry's on both
+    /// sides — 0 for a leave, whose hidden kind is always flagged.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EventTags(TickLog slot, ref TEvent e, out uint was, out uint isNow)
+    {
+        if ((e.Flags & PushEvent.TagsChanged) != 0 && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out was, out isNow))
+        {
+            return;
+        }
+
+        isNow = (e.Flags & PushEvent.HasNew) != 0 ? MaskAt(e.Archetype, e.Block, e.Slot) : 0u;
+        was = isNow;
+    }
+
+    /// <summary>A catch-up entry's masks: the window's first change's old one (or the current), and the current one — 0 for a leave.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EntryTags(ref LogEntry entry, out uint was, out uint isNow)
+    {
+        ref var e = ref entry.Last;
+        isNow = (e.Flags & PushEvent.HasNew) != 0 ? MaskAt(e.Archetype, e.Block, e.Slot) : 0u;
+        was = entry.TagsSeen ? entry.WasTags : isNow;
+    }
+
+    /// <summary>Notes an event's old mask in its catch-up entry when it is the window's first change of it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void FoldTags(TickLog slot, ref TEvent e, ref LogEntry entry)
+    {
+        if ((e.Flags & PushEvent.TagsChanged) != 0 && !entry.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var was, out _))
+        {
+            entry.WasTags = was;
+            entry.TagsSeen = true;
+        }
+    }
+
     // ══ Records, cell delivery and sweep ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -3573,7 +3671,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     }
 
     /// <summary>Enters every entity of the cell inside the sphere that was not pushed this tick (a pushed one is the push step's).</summary>
-    private int DeliverCell(int cx, int cy, int cz, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, bool everywhere = false)
+    private int DeliverCell(int local, int cx, int cy, int cz, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap,
+        bool everywhere = false)
     {
         // Nobody's last pushed position is in the cell: its cluster query could find nothing to enter.
         if (_occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
@@ -3649,7 +3748,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                     decoded++;
                     DecodeAt(a, cold + _positionOffset[a], out var px, out var py, out var pz);
-                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!everywhere && !Within(n, px, py, pz)))
+                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!everywhere && !Within(n, px, py, pz))
+                        || (_tagOffset[a] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
                     {
                         continue;
                     }
@@ -3671,8 +3771,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     }
 
     /// <summary>Emits the enters and leaves the anchor's move caused among one delivered cell's entities that were not pushed this tick.</summary>
-    private void SweepCell(int cx, int cy, int cz, in Ball a, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, ref long enters,
-        ref long leaves)
+    private void SweepCell(int local, int cx, int cy, int cz, in Ball a, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap,
+        ref long enters, ref long leaves)
     {
         if (_occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
         {
@@ -3747,7 +3847,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                     decoded++;
                     DecodeAt(arch, cold + _positionOffset[arch], out var px, out var py, out var pz);
-                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz))
+
+                    // No event since the session's last frame, so its mask is the one it had then: not seen then, not seen now, never held (P19).
+                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz)
+                        || (_tagOffset[arch] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[arch]))))
                     {
                         continue;
                     }
@@ -3793,7 +3896,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         if (CommittedAsRegion(session))
         {
-            ShadowCheckRegion(_regions[slotIndex], set, in archetypes);
+            ShadowCheckRegion(slotIndex, _regions[slotIndex], set, in archetypes);
             return;
         }
 
@@ -3842,7 +3945,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     DecodeAt(a, bytes + layout.ColdOffset + (s * layout.ColdStride) + _positionOffset[a], out var px, out var py, out var pz);
                     var delivered = Held(rows, st.OriginX, st.OriginY, st.OriginZ, CellKey(px, py, pz));
                     where[hot->NetId] = (px, py, pz, delivered);
-                    var known = Within(held, px, py, pz) && delivered;
+                    var known = Within(held, px, py, pz) && delivered && SeesNow(slotIndex, a, (nint)block, s);
                     if (!known)
                     {
                         continue;
