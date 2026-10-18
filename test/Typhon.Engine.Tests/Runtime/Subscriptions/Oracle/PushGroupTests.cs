@@ -986,14 +986,93 @@ class PushGroupTests : TestBase<PushGroupTests>
         tx.Commit();
     }
 
+    /// <summary>
+    /// A key on a Versioned component: its commit copies the HEAD into the cluster slot and marks it (the tap), and moves the index entry, before the
+    /// fence. A positioned member's archetype has a spatial field, so no off-DAG commit can write it (EW-02) and the gather reads the index the projection
+    /// saw: spawns, moves between held towns and moves out behave as a SingleVersion key's do.
+    /// </summary>
     [Test]
     [VerifiesRule("SUB-33")]
-    public void AKeyOnAVersionedComponentIsRefused() => Refused(s =>
+    public void AVersionedKeyMovesItsMemberLikeASingleVersionOne()
     {
-        s.Static<GroupVersionedMember>(a => a.Position(GroupVersionedMember.Bounds));
-        s.Groups("town", g => g.Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
-            .Member<GroupVersionedMember>(m => m.Key(GroupVersionedMember.Key, k => k.Town)));
-    }, "is on a Versioned component");
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Town(dbe, 7, -40f, 0f, 30f);
+        Town(dbe, 9, 40f, 0f, 30f);
+        Town(dbe, 11, 3000f, 0f, 30f);
+        var members = new List<EntityId>();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                members.Add(tx.Spawn<GroupVersionedMember>(GroupVersionedMember.Bounds.Set(GroupTestSchema.At(-60f + (i * 6f), 0f)),
+                    GroupVersionedMember.Key.Set(new GroupVersionedKey { Town = 7 })));
+            }
+
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, s =>
+        {
+            s.Static<GroupVersionedMember>(a => a.Position(GroupVersionedMember.Bounds));
+            s.Groups("town", g => g.Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
+                .Member<GroupVersionedMember>(m => m.Key(GroupVersionedMember.Key, k => k.Town)));
+
+            // A sphere too small to reach any member: whatever the session holds, it holds through a town.
+            s.Profile("p", p => p.Sphere(20).Groups("town", Reach));
+        }, nameof(AVersionedKeyMovesItsMemberLikeASingleVersionOne), Options());
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "p")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        var plan = harness.CatalogPlan.ArchetypeByName(nameof(GroupVersionedMember)).Idx;
+        var replica = harness.Replica(session);
+        var tick = 0L;
+
+        void Run(int ticks)
+        {
+            for (var t = 0; t < ticks; t++)
+            {
+                harness.RunTick(++tick);
+                harness.Deliver(session);
+            }
+        }
+
+        void SetKey(EntityId member, int key)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            tx.OpenMut(member).Set(GroupVersionedMember.Key, new GroupVersionedKey { Town = key });
+            tx.Commit();
+        }
+
+        Run(4);
+        Assert.Multiple(() =>
+        {
+            Assert.That(replica.Store.IsGroupComplete(0, 7) && replica.Store.IsGroupComplete(0, 9), Is.True, "both towns met");
+            Assert.That(replica.NetIds(plan), Has.Length.EqualTo(3), "town 7's members, through the town alone");
+        });
+
+        var stays = harness.NetIdOf(members[0]);
+        var goes = harness.NetIdOf(members[1]);
+        SetKey(members[0], 9);
+        SetKey(members[1], 11);
+        EntityId joined;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            joined = tx.Spawn<GroupVersionedMember>(GroupVersionedMember.Bounds.Set(GroupTestSchema.At(40f, 0f)),
+                GroupVersionedMember.Key.Set(new GroupVersionedKey { Town = 9 }));
+            tx.Commit();
+        }
+
+        Run(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(replica.Store.TryLocate(stays, out _, out _), Is.True, "7 to 9, both held: it stays");
+            Assert.That(replica.Store.TryLocate(goes, out _, out _), Is.False, "to a town nobody here holds: it leaves");
+            Assert.That(replica.Store.TryLocate(harness.NetIdOf(joined), out _, out _), Is.True, "a member spawned into a held town enters");
+            Assert.That(replica.NetIds(plan), Has.Length.EqualTo(3));
+            Assert.That(replica.Store.Anomalies, Is.Zero);
+            Assert.That(harness.Subscriptions.Push.ShadowIllegal, Is.Zero);
+        });
+    }
 
     [Test]
     [VerifiesRule("SUB-33")]

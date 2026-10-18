@@ -110,7 +110,8 @@
     the members of a key are read from the engine's own sparse multi-value index on that field (TryGetMultiple), the only structure that holds the
     relation, and each location it returns is resolved to its replication block by chunk (BlockOf), never through an entity map. The read is after
     the fence, inside the chunk's EpochGuard, with the gather worker's own accessor; SingleVersion trees are quiescent there and a Versioned one is
-    read OLC-consistent — in this phase only SingleVersion keys are admitted (SUB-33). Nothing else is reached through an index. Verified by
+    read OLC-consistent — a Versioned key is admitted on a positioned member only, whose archetype has a spatial field that no off-DAG commit may
+    write (EW-02), so its tree holds there what the projection read (SUB-33). Nothing else is reached through an index. Verified by
     PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet, whose every completion is checked against the database in the frame it arrives.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
@@ -504,8 +505,8 @@
   invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
     emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
   never accept at Start what is not built: a set with no Region, groups on a World or ClientRegion observer, a key that is not an integer, not
-    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), on a Versioned component (its index may change between the
-    projection and the gather), of another signedness than its region key, or on a positionless member; more than four sets per archetype or 256
+    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), of another signedness than its region key, or on a
+    positionless member; more than four sets per archetype or 256
     per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
@@ -528,7 +529,9 @@
     PushGroupTests.AResetInTheMiddleOfAFillFillsTheTownAgainAndCompletesItOnce, PushGroupTests.PastTheBoundTheHeldTownsAreKeptAndTheNearestAdded,
     PushGroupTests.ACatchUpKeepsAMemberThatLeftItsTownForTheSphereInTheWindow (red when the group path decides a catch-up's geometry from its own
     fold), PushGroupTests.AMemberOfTwoSetsIsHeldWhileEitherHoldsIt (a groups-only profile, two sets), PushGroupTests.TwoRegionsWithOneKeyAreOneGroup,
-    PushGroupTests.ADeepGridSessionAboveATwoDimensionalTownMeetsIt, PushGroupTests.TwoSetsDeclaredOutOfNameOrderCarryTheCatalogsIndices, and a
+    PushGroupTests.ADeepGridSessionAboveATwoDimensionalTownMeetsIt, PushGroupTests.TwoSetsDeclaredOutOfNameOrderCarryTheCatalogsIndices,
+    PushGroupTests.AVersionedKeyMovesItsMemberLikeASingleVersionOne (a Versioned key's spawn, move between held towns and move out; red without the
+    tap), and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
     requires the oracle to reject the run.
 

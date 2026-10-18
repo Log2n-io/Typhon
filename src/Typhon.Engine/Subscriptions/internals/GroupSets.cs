@@ -376,15 +376,10 @@ internal static class GroupSetCompiler
                         + "Transient indexes follow migration (#1162).");
                 }
 
-                if (table?.StorageMode == StorageMode.Versioned)
-                {
-                    // A Versioned index can be written by an off-DAG commit between the projection and the gather (EW-02): the fill would read a membership
-                    // the member events have not seen, and an entity counted held but never entered could then be left. Refused until the gather reads the
-                    // key it fills by consistently with the projection's.
-                    throw new NotSupportedException(
-                        $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is on a Versioned component. A group key field is SingleVersion in this "
-                        + "phase: a Versioned index may change between the projection and the gather.");
-                }
+                // A Versioned key is admitted: its commit copies the HEAD into the cluster slot, marks it (the tap) and moves the index entry, all before the
+                // fence. An off-DAG commit (EW-02) could move the index between the projection and the gather, but a positioned member's archetype has a
+                // spatial field, and EW-02 forbids an off-DAG thread to write any of its components. A positionless member (refused above) has no such
+                // guard: step 4.2 admits it with the fill reading the off-DAG moves it would otherwise miss.
 
                 if (!field.HasIndex || !field.IndexAllowMultiple || !field.IndexSparse)
                 {

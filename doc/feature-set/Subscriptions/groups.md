@@ -56,7 +56,7 @@ in the catalog's `groupSets`, in name order.
 ## ⚠️ Guarantees & limits
 
 - Refused at `Start`: a set with no region, groups on a `World` or `ClientRegion` observer, a key that is not an integer, not sparse and
-  multi-value, on a `Transient` (#1162) or `Versioned` component, or of another signedness than its region key, a member with no position or no
+  multi-value, on a `Transient` component (#1162), or of another signedness than its region key, a member with no position or no
   projection, more than four sets per archetype or 256 per runtime, an extent of another type, and a declaration without `MaxGroupsPerSession` (at
   most 1 024).
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.

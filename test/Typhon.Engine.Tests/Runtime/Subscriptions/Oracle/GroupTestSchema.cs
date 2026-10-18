@@ -97,7 +97,7 @@ struct GroupDistrictKey
     public int District;
 }
 
-/// <summary>A key on a Versioned component: refused in this phase.</summary>
+/// <summary>A key on a Versioned component: its commit moves the index and copies the HEAD into the cluster before the fence.</summary>
 [Component("Typhon.Test.Group.VersionedKey", 1, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct GroupVersionedKey
