@@ -148,12 +148,37 @@ partial class GroupUnsignedMember : Archetype<GroupUnsignedMember>
     public static readonly Comp<GroupUnsignedKey> Key = Register<GroupUnsignedKey>();
 }
 
-/// <summary>A member with no position: refused until step 4.2 builds positionless members.</summary>
+/// <summary>A shard: a member with no position (14 § 5), reached through its town alone, with replication state only while a town of it is held.</summary>
 [Archetype]
 partial class GroupPositionless : Archetype<GroupPositionless>
 {
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<GroupKey> Key = Register<GroupKey>();
+}
+
+/// <summary>A shard whose town is Versioned: the one key an off-DAG commit may move between the projection and the gather (EW-02).</summary>
+[Archetype]
+partial class GroupVersionedShard : Archetype<GroupVersionedShard>
+{
+    public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
+    public static readonly Comp<GroupVersionedKey> Key = Register<GroupVersionedKey>();
+}
+
+/// <summary>A positioned entity's reference to a shard (SUB-31): it resolves once the shard has a block, and to 0 before.</summary>
+[Component("Typhon.Test.Group.ShardLink", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct GroupShardLink
+{
+    [Field]
+    public EntityLink<GroupPositionless> Shard;
+}
+
+/// <summary>A positioned referrer of a shard, observed by geometry.</summary>
+[Archetype]
+partial class GroupAnchor : Archetype<GroupAnchor>
+{
+    public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
+    public static readonly Comp<GroupShardLink> Link = Register<GroupShardLink>();
 }
 
 /// <summary>The group fixtures' engine and declarations.</summary>
@@ -183,6 +208,7 @@ static class GroupTestSchema
         dbe.RegisterComponentFromAccessor<GroupDistrictKey>();
         dbe.RegisterComponentFromAccessor<GroupVersionedKey>();
         dbe.RegisterComponentFromAccessor<GroupUnsignedKey>();
+        dbe.RegisterComponentFromAccessor<GroupShardLink>();
         dbe.ConfigureSpatialGrid(deep
             ? new SpatialGridConfig(worldMin: new Vector3D(-1024d, -1024d, -1024d), worldMax: new Vector3D(1024d, 1024d, 1024d), cellSize: 128d)
             : SpatialGridConfig.Flat(
@@ -200,7 +226,8 @@ static class GroupTestSchema
     /// <param name="radiusM">The Sphere's radius.</param>
     /// <param name="reachM">The reach towns are met at.</param>
     /// <param name="leaveMarginM">The set's hysteresis.</param>
-    public static void Declare(SubscriptionsRegistry subs, double radiusM, double reachM, double leaveMarginM)
+    /// <param name="shards">Positionless shards are members too (14 § 5).</param>
+    public static void Declare(SubscriptionsRegistry subs, double radiusM, double reachM, double leaveMarginM, bool shards = false)
     {
         subs.Static<GroupBuilding>(a => a
             .Position(GroupBuilding.Bounds)
@@ -208,11 +235,22 @@ static class GroupTestSchema
         subs.Archetype<GroupCitizen>(a => a
             .Motion(GroupCitizen.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
             .OnEnter(GroupCitizen.Ai, x => x.Template, Codec.U8, name: "template"));
-        subs.Groups(Set, g => g
-            .Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
-            .Member<GroupBuilding>(m => m.Key(GroupBuilding.Key, k => k.Town))
-            .Member<GroupCitizen>(m => m.Key(GroupCitizen.Key, k => k.Town))
-            .Leave(leaveMarginM));
+        if (shards)
+        {
+            subs.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+        }
+
+        subs.Groups(Set, g =>
+        {
+            g.Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
+                .Member<GroupBuilding>(m => m.Key(GroupBuilding.Key, k => k.Town))
+                .Member<GroupCitizen>(m => m.Key(GroupCitizen.Key, k => k.Town))
+                .Leave(leaveMarginM);
+            if (shards)
+            {
+                g.Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town));
+            }
+        });
         subs.Profile(Profile, p => p.Detection(PushDetection.Explicit).Sphere(radiusM).Of<GroupCitizen>().Groups(Set, reachM));
     }
 

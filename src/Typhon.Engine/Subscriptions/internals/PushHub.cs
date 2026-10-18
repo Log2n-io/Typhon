@@ -23,7 +23,7 @@ namespace Typhon.Engine.Internals;
 /// its own gap detection and bootstrap (<see cref="PushReplication.BeginRealmTick"/>), so a realm activated late re-pushes its own entities only.
 /// </para>
 /// </remarks>
-internal sealed unsafe class PushHub
+internal sealed unsafe partial class PushHub
 {
     private readonly ArchetypeReplicationState[] _states;
     private readonly int[] _pushIndices;
@@ -538,6 +538,7 @@ internal sealed unsafe class PushHub
             _active[r].FinishIndex();
         }
 
+        FinishUnplaced();
         if (!sessions)
         {
             return 0;
@@ -607,6 +608,8 @@ internal sealed unsafe class PushHub
 
             _active[r].PrepareWorldOrder();
         }
+
+        FinishUnplaced();
     }
 
     /// <summary>Every served realm's far flushes into the tick's log slot.</summary>
@@ -672,6 +675,23 @@ internal sealed unsafe class PushHub
         for (var r = 0; r < active.Length; r++)
         {
             active[r].BeginRealmTick(tick);
+        }
+
+        // Positionless members (14 § 5): the keys every session holds decide which of them have state, and the referrers the last projection left waiting
+        // on one with no block are recorded for when it gets one. The key moves logged so far are older than the projection about to run, which reads them.
+        _tick = tick;
+        if (_anyLazy)
+        {
+            CollectWanted();
+            References?.DrainLazyMisses(this);
+            PurgeWaitingReferrers();
+            foreach (var a in _pushIndices)
+            {
+                if (_lazy[a])
+                {
+                    _states[a].ClusterState?.GroupKeyMoves?.Clear();
+                }
+            }
         }
 
         foreach (var a in _pushIndices)
@@ -766,9 +786,10 @@ internal sealed unsafe class PushHub
                 }
             }
 
-            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads.
+            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads. Not a
+            // positionless member's: most of its clusters have no block by design.
             _validating[a].Clear();
-            if (anyPartial && ValidateClustersPerTick > 0)
+            if (anyPartial && ValidateClustersPerTick > 0 && !_lazy[a])
             {
                 Validate(a, cs, tick, slotMask);
             }
@@ -786,6 +807,14 @@ internal sealed unsafe class PushHub
                 }
             }
 
+            // A positionless member's state follows the held keys (P5′): the clusters of a key newly held are pushed, and a block no held key needs any more is
+            // released — before the blocks below are attached, so a released block is never listed for this tick's projection.
+            if (_lazy[a])
+            {
+                PushNewlyWanted(a, slotMask);
+                SweepLazy(a);
+            }
+
             // Blocks for every cluster pushed into. Serial by contract (pool and directory are single-threaded here).
             if (_pushBlocks[a].Length < _pushChunks[a].Length)
             {
@@ -793,6 +822,14 @@ internal sealed unsafe class PushHub
             }
 
             var denied = 0;
+            if (_lazy[a])
+            {
+                denied = AttachLazy(a, state, slotMask);
+                blockless += denied;
+                NoteExhaustion(a, state, denied, tick);
+                continue;
+            }
+
             for (var i = 0; i < _pushCount[a]; i++)
             {
                 var chunk = _pushChunks[a][i];
@@ -961,6 +998,7 @@ internal sealed unsafe class PushHub
     public void MarkPushed(int workers, bool countInProject = false)
     {
         Workers = workers;
+        BeginUnplaced(workers);
         foreach (var a in _pushIndices)
         {
             var state = _states[a];

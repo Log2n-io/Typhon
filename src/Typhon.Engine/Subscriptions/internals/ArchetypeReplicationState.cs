@@ -380,6 +380,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </summary>
     internal ReferenceIndex References;
 
+    /// <summary>A positionless group member (14 § 5): its clusters have a block only while a held key needs one.</summary>
+    internal bool Lazy;
+
     // ── Collections (W34, 13 § 6.5) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The buffer segment of each collection the plan projects, by <see cref="CompiledCollection.Index"/>.</summary>

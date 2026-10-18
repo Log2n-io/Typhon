@@ -106,7 +106,12 @@ internal abstract unsafe partial class PushReplication
 {
     private protected readonly CompiledProjectionPlan[] _plans;
     private protected readonly ArchetypeReplicationState[] _states;
+
+    // The observed archetypes with a position: every geometric structure — the index, the occupancy, the sweeps, the shadow — is over these alone.
     private protected readonly int[] _pushIndices;
+
+    // Per plan index: an observed archetype with no position (14 § 5), a group member only. Its events go to the hub's log, never to a cell.
+    private protected readonly bool[] _unplaced;
 
     /// <summary>The hub that collects this realm's blocks and routes them here (R4.1); set when the hub starts serving the realm.</summary>
     internal PushHub Hub;
@@ -542,11 +547,11 @@ internal abstract unsafe partial class PushReplication
     // By realm-local slot (R4.3): slot 0 is a sentinel no session ever holds — never bound, never written — so a session not placed in this realm reads an
     // unbound state wherever it is looked up. The others are handed out by Join and given back by Release; the arrays grow ×2 from a few.
     private protected PushSessionState[] _sessions;
-    private SessionId[] _slotOwners;
+    private protected SessionId[] _slotOwners;
     private uint[] _slotSeen;
     private int[] _freeSlots;
     private int _freeCount;
-    private int _slotHigh = 1;
+    private protected int _slotHigh = 1;
 
     /// <summary>The realm-local slots a new replication starts with, the sentinel included; ×2 on demand.</summary>
     internal const int InitialSessionSlots = 8;
@@ -803,17 +808,20 @@ internal abstract unsafe partial class PushReplication
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
+        // A positionless observed archetype is a group member reached through its keys alone (the runtime refused it in any observer): no cell holds it.
+        _unplaced = new bool[isPush.Length];
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
-            count += isPush[a] ? 1 : 0;
+            _unplaced[a] = isPush[a] && plans[a].Position == null;
+            count += isPush[a] && !_unplaced[a] ? 1 : 0;
         }
 
         _pushIndices = new int[count];
         count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
-            if (isPush[a])
+            if (isPush[a] && !_unplaced[a])
             {
                 _pushIndices[count++] = a;
             }

@@ -3058,6 +3058,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         _structureSlotMask |= 1 << slot;
     }
 
+    /// <summary>
+    /// The group key moves of this archetype's commits (14 § 5), or null: set by replication for a positionless member whose key is Versioned, the one key
+    /// an off-DAG commit may move between the projection and the gather (EW-02).
+    /// </summary>
+    internal GroupKeyMoveLog GroupKeyMoves;
+
     /// <summary>Forgets every group key slot — the mutant a test makes to show the tap is load-bearing.</summary>
     internal void ClearGroupKeySlotsForTest()
     {

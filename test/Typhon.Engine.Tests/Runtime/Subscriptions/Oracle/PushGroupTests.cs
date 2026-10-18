@@ -134,7 +134,7 @@ class PushGroupTests : TestBase<PushGroupTests>
     {
         var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
         using var oracle = GroupOracle.Create(dbe, seed, [0, 30, 70, 90], nameof(SessionsHoldExactlyTheTownsTheyMeet) + seed, enterBudget);
-        for (var round = 0; round < 5; round++)
+        for (var round = 0; round < 8; round++)
         {
             for (var step = 0; step < 30; step++)
             {
@@ -524,7 +524,7 @@ class PushGroupTests : TestBase<PushGroupTests>
         oracle.RemoveTheTapForTest();
         RuleMutants.AssertDetects("SUB-33", GroupOracle.FailureMarker, () =>
         {
-            for (var round = 0; round < 5; round++)
+            for (var round = 0; round < 8; round++)
             {
                 for (var step = 0; step < 30; step++)
                 {
@@ -711,12 +711,13 @@ class PushGroupTests : TestBase<PushGroupTests>
 
     [Test]
     [VerifiesRule("SUB-33")]
-    public void APositionlessMemberIsRefused() => Refused(s =>
+    public void APositionlessArchetypeInAnObserverIsRefused() => Refused(s =>
     {
         s.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
         s.Groups("town", g => g.Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
             .Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
-    }, "Positionless members are not built yet");
+        s.Profile("p", p => p.Sphere(50).Of<GroupPositionless>().Groups("town", 10));
+    }, "has no position and a profile's observer names it");
 
     [Test]
     [VerifiesRule("SUB-33")]

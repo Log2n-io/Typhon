@@ -110,8 +110,10 @@
     the members of a key are read from the engine's own sparse multi-value index on that field (TryGetMultiple), the only structure that holds the
     relation, and each location it returns is resolved to its replication block by chunk (BlockOf), never through an entity map. The read is after
     the fence, inside the chunk's EpochGuard, with the gather worker's own accessor; SingleVersion trees are quiescent there and a Versioned one is
-    read OLC-consistent — a Versioned key is admitted on a positioned member only, whose archetype has a spatial field that no off-DAG commit may
-    write (EW-02), so its tree holds there what the projection read (SUB-33). Nothing else is reached through an index. Verified by
+    read OLC-consistent. A positioned member's archetype has a spatial field, which no off-DAG commit may write (EW-02), so its tree holds there what
+    the projection read; a positionless member's Versioned key can be moved off the DAG after the projection read it, so its archetype keeps a log of
+    the moves out of a key (GroupKeyMoveLog), appended by the commit before the tree changes and read after it — the fill's members are the tree's
+    and the log's, and the projected-key test keeps those the projection filed under the key (SUB-33). Nothing else is reached through an index. Verified by
     PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet, whose every completion is checked against the database in the frame it arrives.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
@@ -127,6 +129,8 @@
     whose client is still extrapolating it
   invariant ∀ tick T the track runs for, following a tick it did not run for (no session connected, an aborted tick, a failed fence): the push set
     is every live entity — the fence drained the skipped ticks' structure words, so their pushes exist nowhere else
+  invariant the structure words are published on every fence for every archetype that tracks them, including one with no fence work that tick: a
+    spawn writes no dirty bit, so a non-spatial archetype whose only change was a spawn would otherwise not be told of it until a later write
   invariant ∀ pushed entity e: e's projection is recomputed and compared with the copy its entry holds; the comparison, not the push, decides whether
     anything is sent — a redundant push costs an encode and never a byte on the wire
   invariant ∀ projected field f of e: the value compared is f's wire CODE. quantize(read(f)) is computed ONCE per entity per tick, and that
@@ -142,7 +146,7 @@
   scope: ProjectionPass.ProjectBlock, ProjectionPass.ApplyHeadingDeadband, ProjectionColumnWalk.Quantize, ProjectionColumnWalk.Walk, ProjectionColumnWalk.WalkRatio,
     ReplicationHotEntry.GroupTicks, ReplicationHotEntry.PackedState, ReplicationColdEntry.PrevQuantizedPosition,
     SubscriptionsCommands.Replicate, PushReplication.PrepareBlocks, PushReplication.MarkPushed, ArchetypeClusterState.NoteStructureSlots,
-    ClusterRef.GetSpan, ClusterRef.WriteSpatial
+    ArchetypeClusterState.PublishStructureChanges, DatabaseEngine.PrepareArchetypeFence, ClusterRef.GetSpan, ClusterRef.WriteSpatial
   on_violation: a write the application forgot to push leaves every client holding the old value, with no error on either side — the contract ADR-067
     accepted, narrowed by the push validator rather than closed. The quieter failure is the comparison's: comparing decoded values or quantizing a
     second time makes a record carry bytes that differ from the ones the comparison accepted, so the client's value and the server's stored copy disagree
@@ -162,6 +166,8 @@
     heading trails the entity's by at most the tolerance
   note `PushDetection.Automatic` pushes every live entity of an archetype each tick and lets the comparison find the changes. It is experimental and
     refused unless `SubscriptionsOptions.AllowAutomaticPushDetection` is set (ADR-067 decision 3).
+  verified: PushGroupShardTests.AShardSpawnedIntoAnAttachedClusterIsDescribedWhateverItsTown (spawns the only change of a non-spatial archetype:
+    described the next tick; red when a fence with no work publishes nothing).
   verified: ProjectionPassTests.AWriteThroughGetSpanIsDetected and ProjectionPassTests.AWriteThroughWriteSpatialIsDetected — the two write
     paths that set no signal, each on a marked slot, each requiring the comparison to have found the change and stamped the group tick. Falsifiability is
     proved by ProjectionPassTests.AChangeNoPassEverLooksAtIsNotDetected, which performs both writes and does NOT run the pass, requiring the entry to be
@@ -179,9 +185,12 @@
   invariant ∀ replicated archetype A that no profile observes: replication_memory(A) = 0 — no block, no identity, no event
   invariant ∀ observed archetype A: replication_memory(A) = O(clusters(A)) — every live entity of an observed archetype holds an entry and an identity,
     because what a session holds is geometry and the geometry needs every position (ADR-067, Consequences)
+  invariant ∀ positionless group member A (14 § 5, P5′): replication_memory(A) = O(clusters holding a member of a key some session holds) — a cluster
+    gets a block when a held key needs one of its entities, is then described whole, and gives the block back, identities through the quarantine,
+    once no held key has needed it for PushHub.LazyIdleTicks blocks steps (longer than the push log, so no session can still replay its events)
   never any per-cluster replication structure sized by A's chunk-id space, entity count, or segment capacity
   scope: ReplicationDirectory, ReplicationBlockPool, NetIdAllocator, ArchetypeReplicationState, ArchetypeReplicationState.BlockByChunk,
-    SubscriptionsOptions.StatePoolBudgetBytes
+    SubscriptionsOptions.StatePoolBudgetBytes, PushHub.AttachLazy, PushHub.SweepLazy, PushHub.PushNewlyWanted, PushHub.CollectWanted
   on_violation: a database holding a billion entities of a replicated type pays replication work for all of them every tick while a handful change,
     and, where a structure is keyed by chunk id, memory for every id the segment ever handed out.
   rationale: a cluster chunk id is a PERSISTED FILE ADDRESS, not a residency measure. Ids are handed out by the
@@ -197,6 +206,8 @@
     has a block for every live cluster, so its fill is high; replacing it with the directory's probe is the open item.
   note a flat array remains legitimate for a specific archetype behind a self-justifying size test — take it
     when that archetype's peak cluster count makes the array smaller than the map. It is never the default.
+  verified: PushGroupShardTests.AShardHasStateOnlyWhileATownOfItIsHeld — the group-only half: no block before a session holds the town, blocks and
+    identities while it does, none again once it has been unneeded for LazyIdleTicks.
   verified: ReplicationDirectoryTests.SparseChunkIdsCostOnlyWhatIsWatched — the directory's MEMORY shape, and
     NetIdAllocatorTests.ChurnAtAStablePopulationDoesNotGrowTheIdentitySpace for the identity space's half of it.
   verified: ProjectionPassTests.PerTickWorkFollowsThePushedSet — the PER-TICK-WORK invariant. It spawns an archetype across many clusters, marks one
@@ -502,22 +513,27 @@
   never keep a copy of the relation: membership is the engine's sparse multi-value index on the key field (SUB-01's amendment); 0 is "no group" and
     is never indexed
   invariant a profile whose Sphere names group sets and no archetype is served: it holds its keys' members and nothing by geometry
+  invariant a positionless member (14 § 5) is reached through its keys alone, and is held exactly like a positioned one; a key completes only when every
+    current member has entered — a member with no replication state yet (no block, no identity, not projected: a positionless one a held key is
+    attaching, one the pool deferred) is pending, and the fill passes what it took and waits
+  invariant a positionless member's Versioned key moved off the DAG after the projection read it is filled under the key the projection read (SUB-01's
+    move log), so the cursor never passes a member it did not send
   invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
     emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
   never accept at Start what is not built: a set with no Region, groups on a World or ClientRegion observer, a key that is not an integer, not
-    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), of another signedness than its region key, or on a
-    positionless member; more than four sets per archetype or 256
-    per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
+    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), or of another signedness than its region key; an observer naming
+    an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
     GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
-    TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups
+    TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups, PushReplication.AddMember, PushReplication.AddMoves,
+    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced
   on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
     walks to a terminal that is not there; a duplicate or a missing release leaves a client holding a town it left; a key change the projection never
     reads leaves a member in its old town on every client.
   rationale: a set anchored on something other than the observer cannot be expressed by any radius (14 § 3.6), and its completion edge is only
     meaningful because the set has a definition; the engine already maintains the relation on every path, so replication reads it and keeps nothing.
-  verified: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (towns, buildings and citizens under seeded churn — key changes through the tap alone,
+  verified: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (towns, buildings, citizens and positionless shards — about half the members — under seeded churn — key changes through the tap alone,
     spawns, destroys, teleports, towns appearing, vanishing and moving — walking sessions skipping 0–90 %, gathered on four workers: at every quiet
     point, once no key is filling, each session holds exactly the members of the towns it holds complete and of its disc, and holds complete every town
     its observer meets and none beyond reach and margin; on the session that skips nothing, every GROUP_COMPLETE is checked against the world in the
@@ -531,9 +547,14 @@
     fold), PushGroupTests.AMemberOfTwoSetsIsHeldWhileEitherHoldsIt (a groups-only profile, two sets), PushGroupTests.TwoRegionsWithOneKeyAreOneGroup,
     PushGroupTests.ADeepGridSessionAboveATwoDimensionalTownMeetsIt, PushGroupTests.TwoSetsDeclaredOutOfNameOrderCarryTheCatalogsIndices,
     PushGroupTests.AVersionedKeyMovesItsMemberLikeASingleVersionOne (a Versioned key's spawn, move between held towns and move out; red without the
-    tap), and a
+    tap), PushGroupShardTests.AShardHasStateOnlyWhileATownOfItIsHeld, PushGroupShardTests.AShardJoiningAHeldTownEntersAndOneLeavingItLeaves,
+    PushGroupShardTests.ShardsFillUnderTheEnterBudget, PushGroupShardTests.JointedStructuresAndTheirShardsFollowTheirGroupThroughASplitAndAMerge
+    (#1389's scenario: a group met by its box, delivered under the budget, a RESET mid-fill, a split and a merge),
+    PushGroupShardTests.AnOffDagMoveOutOfAFillingTownIsSentThenLeaves (a commit on another thread between the projection and the gather), and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
-    requires the oracle to reject the run.
+    requires the oracle to reject the run; PushGroupShardTests.WithoutTheMoveLogAnOffDagMoveIsCaught takes the move log away and requires the leave of
+    the shard the fill passed unsent to be caught. The oracle is also red when completion ignores pending members, when the positionless log is not
+    folded, when a fence with no work publishes no structure words, and when a lazy cluster is attached only for a newly held key.
 
 ### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
   invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push
@@ -824,8 +845,10 @@
     with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
   invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
     the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
+  invariant a positionless group member (14 § 5) is in no realm: it has no position, so no cluster realm map; its events go to one engine-wide log
+    that every served realm's group gather reads, and a session holds it only through a key it holds — which its own realm's regions decided
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
-  scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
+  scope: PushHub.FinishUnplaced, PushHub.UnplacedAt, PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
     ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
     PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
     PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
@@ -834,7 +857,9 @@
   verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
     RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
-    RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+    RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession,
+    RealmGroupTests.AShardIsHeldBySessionsOfTheRealmItsTownIsIn (shards identified by realm 0's town are filled by realm 1's session from a block of no
+    realm of its own; red when the fill keeps a positionless member to the session's realm)
   note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
     Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
     are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
@@ -1218,9 +1243,12 @@
   invariant the reverse index counts exactly what live entries name: a projection logs ±1 only where a resolution differs from the entry's held netId,
     and every path that ends an entry (the projection's ClearEntry, a cross-realm move, a migration or drain overwrite, a dropped park, a released block)
     logs its −1s
+  invariant a target that is a positionless group member with no block (14 § 5) reads 0 and does not push its referrer again every tick; the referrer
+    is recorded, and pushed again at the blocks step that attaches the target's block, so it resolves the tick after
   never declare a reference in an onEnter section or on a static archetype: sent once, it can never be corrected (refused at Start)
   never replicate an EntityLink<T> whose T, and every archetype deriving from it, no profile observes (refused at Start)
-  scope: ReferenceIndex.Step, ReferenceIndex.Note, ReferenceIndex.NoteShared, ReferenceResolver.Resolve, ProjectionPass.ProjectBlock,
+  scope: ReferenceIndex.Step, ReferenceIndex.Note, ReferenceIndex.NoteShared, ReferenceIndex.DrainLazyMisses, ReferenceResolver.Resolve,
+    PushHub.WaitForBlock, ProjectionPass.ProjectBlock,
     ArchetypeReplicationState.EndEntry, NetIdAllocator.IsLeased, NetIdLeaseSet.BeginTick, ReplicationBlockLayout.ReferenceOffsetInColdEntry
   on_violation: silent. A reference left naming a released netId resolves, once the number is reissued, to whoever holds it next: a client draws a
     sword in the wrong hand, a target lock on a stranger, with no error anywhere.
@@ -1229,4 +1257,6 @@
   verified: ReferenceTests.UnderReuseNoFrameNamesAnotherHolder (a churning oracle with identities reissued every tick it can: in every frame a reference
     names 0 or its own target, and one naming an identity nobody holds is fixed by the next frame — red when the reverse index's step is skipped),
     ReferenceTests.ADestroyedTargetMakesEveryReferrerSendZeroWithinOneTick, ReferenceTests.AReferenceCarriesItsTargetsNetIdAndATargetIdentifiedThisTickResolvesTheNext,
-    ReferenceTests.TheIndexCountsExactlyWhatLiveEntriesNameAfterChurn, ReferenceTests.AReferenceOnEnterOrToAnArchetypeNobodyObservesIsRefused.
+    ReferenceTests.TheIndexCountsExactlyWhatLiveEntriesNameAfterChurn, ReferenceTests.AReferenceOnEnterOrToAnArchetypeNobodyObservesIsRefused,
+    PushGroupShardTests.AReferenceToAShardResolvesOnceTheShardHasABlock (0 and no repush while the shard has no block, its netId once it has one; red
+    when the attach wakes no referrer).

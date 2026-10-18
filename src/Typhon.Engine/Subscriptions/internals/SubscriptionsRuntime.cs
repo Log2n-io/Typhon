@@ -189,6 +189,17 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
 
+            // An observer reaches what is somewhere (14 § 5, P17): an archetype with no position is a group set's member, reached through its keys alone.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                if (observed[a] && Plans[a].Position == null)
+                {
+                    throw new NotSupportedException(
+                        $"Archetype '{Plans[a].Name}' has no position and a profile's observer names it. An observer reaches entities by where they are; one "
+                        + "with no position is reached through a group set it is a member of (subs.Groups(...).Member<T>()), or declare a Position or Motion.");
+                }
+            }
+
             // An archetype with owner fields has replication state whether or not a profile observes it (11 § 2.4, Q5): owner data follows Control, not
             // geometry, and a controlled entity with no state would have nowhere to be compared. No session's archetype set names it, so it sends no record.
             for (var a = 0; a < Plans.Length; a++)
@@ -218,7 +229,19 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 foreach (var member in set.Members)
                 {
                     observed[member.Plan] = true;
-                    ClusterStateOf(engine, Plans[member.Plan]).AddGroupKeySlot(member.ComponentSlot);
+                    var clusters = ClusterStateOf(engine, Plans[member.Plan]);
+                    clusters.AddGroupKeySlot(member.ComponentSlot);
+
+                    // A positionless member's Versioned key is the one an off-DAG commit may move between the projection and the gather (EW-02): its
+                    // archetype logs the moves for the fill (14 § 5). A positioned member's archetype is spatial, which no off-DAG thread may write.
+                    if (member.Positionless && member.Versioned)
+                    {
+                        clusters.GroupKeyMoves ??= new GroupKeyMoveLog();
+                        member.Moves = clusters.GroupKeyMoves;
+                        member.MoveWatch = member.Moves.Watch(member.ComponentSlot, member.FieldOffsetInComponent, member.FieldSize);
+                    }
+
+                    _replicationStates[member.Plan].Lazy = member.Positionless;
                 }
             }
 
@@ -241,6 +264,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
                 // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
                 Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions) { Logger = logger, ArchetypeNames = PlanNames(Plans) };
+                Hub.ConfigureGroups(Plans, GroupSets);
 
                 // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
                 // from the same grid; they must agree to the bit.
@@ -278,6 +302,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     {
                         state.References = References;
                     }
+
+                    Hub.References = References;
                 }
 
                 _frames.Push = Push;

@@ -92,7 +92,10 @@ sealed unsafe class FrameHarness : IDisposable
         return sessions;
     }
 
-    /// <summary>The netId replication gave <paramref name="entity"/>, located as a frame locates a controlled entity; 0 when it has none.</summary>
+    /// <summary>
+    /// The netId replication gave <paramref name="entity"/>, located as a frame locates a controlled entity — or through its EntityMap when it has no
+    /// position (14 § 5); 0 when it has none.
+    /// </summary>
     /// <param name="entity">The entity.</param>
     /// <returns>The netId.</returns>
     public uint NetIdOf(EntityId entity)
@@ -101,12 +104,28 @@ sealed unsafe class FrameHarness : IDisposable
         var locator = new BoundViewpoint(Engine) { Push = Subscriptions.Push };
         try
         {
-            return locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
-                && Subscriptions.Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var netId) ? netId : 0u;
+            if (locator.TryLocate(entity, out var clusters, out var chunk, out var slot))
+            {
+                return Subscriptions.Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var netId) ? netId : 0u;
+            }
         }
         finally
         {
             locator.Dispose();
+        }
+
+        var any = new EntityLocator(Engine);
+        try
+        {
+            var states = Engine._stateByRouting;
+            return any.TryLocate(entity, out var chunk, out var slot) && entity.ArchetypeId < states.Length
+                && Subscriptions.Push.TryReplicaAt(states[entity.ArchetypeId].ClusterState, chunk, slot, entity, out _, out _, out var netId)
+                ? netId
+                : 0u;
+        }
+        finally
+        {
+            any.Dispose();
         }
     }
 

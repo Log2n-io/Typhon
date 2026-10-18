@@ -120,6 +120,30 @@ internal sealed unsafe class ReferenceResolver
         _locators = new EntityLocator[index.RoutingCount];
     }
 
+    // The block being projected: its cluster's entity ids, and the slot whose reference is resolved now — the referrer a positionless target with no block
+    // yet is waiting for (14 § 5). Cluster memory, read during the block's projection.
+    private long* _referrers;
+
+    /// <summary>The slot of the block being projected whose references are resolved next.</summary>
+    internal int ReferrerSlot;
+
+    // References that named a positionless entity with no block, as (target, referrer): drained by the next blocks step into the hub.
+    private readonly List<(ulong Target, ulong Referrer)> _lazyMisses = [];
+
+    /// <summary>Binds the block about to be projected: <paramref name="entityIds"/> is its cluster's entity id column.</summary>
+    internal void BindReferrers(long* entityIds) => _referrers = entityIds;
+
+    /// <summary>Hands the references that named a lazy entity with no block to <paramref name="hub"/>, and forgets them. Serial, at the blocks step.</summary>
+    internal void DrainLazyMisses(PushHub hub)
+    {
+        foreach (var (target, referrer) in _lazyMisses)
+        {
+            hub.WaitForBlock(target, referrer);
+        }
+
+        _lazyMisses.Clear();
+    }
+
     /// <summary>Opens the worker's locators for its share of one archetype's blocks.</summary>
     public void Open()
     {
@@ -166,6 +190,12 @@ internal sealed unsafe class ReferenceResolver
         var block = (uint)chunk < (uint)table.Length ? (byte*)table[chunk] : null;
         if (block == null || (uint)slot >= (uint)state.Layout.SlotCount)
         {
+            // A positionless member has a block only while a held key needs it (14 § 5): 0 now, and the referrer is pushed again when the block attaches.
+            if (block == null && state.Lazy && _referrers != null)
+            {
+                _lazyMisses.Add((target.RawValue, (ulong)_referrers[ReferrerSlot]));
+            }
+
             return NetIdAllocator.NoNetId;
         }
 
@@ -397,6 +427,15 @@ internal sealed unsafe class ReferenceIndex : IDisposable
         lock (_sharedLock)
         {
             _shared.Add(new Delta { Referrer = referrer, NetId = netId, Sign = sign });
+        }
+    }
+
+    /// <summary>Every worker's references to a lazy entity with no block, to <paramref name="hub"/>. Serial, at the blocks step.</summary>
+    internal void DrainLazyMisses(PushHub hub)
+    {
+        foreach (var resolver in _resolvers)
+        {
+            resolver?.DrainLazyMisses(hub);
         }
     }
 

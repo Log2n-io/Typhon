@@ -7,7 +7,7 @@ description: 'A session holds a whole set of entities that share a key — a tow
 # Groups
 > A session holds a whole set of entities that share a key — a town and its buildings — while its observer meets the town, and is told when it holds all of it.
 
-**Status:** 🚧 Partial — region sets on Sphere observers, positioned members · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Subscriptions](./README.md)
+**Status:** 🚧 Partial — region sets on Sphere observers, positioned and positionless members · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Subscriptions](./README.md)
 
 ## 🎯 What it solves
 
@@ -29,6 +29,10 @@ town while it is in or near it, with a completion signal a client can act on: on
 - **Union with geometry.** A member the Sphere also holds is one entity in the store; a member moving between two held towns is an update.
 - **Key changes need no push.** Writing a member's key component marks it like a position write, so the projection sees the new key the
   same tick.
+- **Members need no position.** An archetype with none (a structure's shards, a joint record) is a member like any other, reached through its
+  keys alone. It is in no realm and in no cell, and it has replication state only while some session holds a key it carries: a cluster of it gets
+  a block when a held key needs one, and gives it back once unneeded for 64 ticks. A key completes only once every member has that state and has
+  entered. A Versioned key on such a member may be written off the tick; the fill reads the commits' moves beside the index, so none is lost.
 
 ## 💻 Usage
 
@@ -47,6 +51,13 @@ subs.Groups("town", g => g
 subs.Profile("player", p => p.Sphere(192).Of<Creature>().Groups("town", reachM: 50));
 
 var options = new SubscriptionsOptions { MaxGroupsPerSession = 8 /* required with any set */ };
+
+// A member with no position: no Position or Motion, a member of the set, named by no observer.
+subs.Archetype<Shard>(a => a.Field(Shard.Data, d => d.Material, Codec.U8, name: "material"));
+subs.Groups("structure", g => g
+    .Region<StructureGroup>(r => r.Key(StructureGroup.Bounds, b => b.Id).Extent(StructureGroup.Bounds, b => b.Box))
+    .Member<Structure>(m => m.Key(Structure.Group, s => s.Id))
+    .Member<Shard>(m => m.Key(Shard.Group, s => s.Id)));
 ```
 
 On the client: `store.IsGroupComplete(set, key)`, `store.CompleteGroups` and the frame's `store.Groups` (.NET);
@@ -56,18 +67,21 @@ in the catalog's `groupSets`, in name order.
 ## ⚠️ Guarantees & limits
 
 - Refused at `Start`: a set with no region, groups on a `World` or `ClientRegion` observer, a key that is not an integer, not sparse and
-  multi-value, on a `Transient` component (#1162), or of another signedness than its region key, a member with no position or no
-  projection, more than four sets per archetype or 256 per runtime, an extent of another type, and a declaration without `MaxGroupsPerSession` (at
-  most 1 024).
+  multi-value, on a `Transient` component (#1162), or of another signedness than its region key, a member with no projection, an observer
+  naming an archetype with no position, more than four sets per archetype or 256 per runtime, an extent of another type, and a declaration
+  without `MaxGroupsPerSession` (at most 1 024).
+- A region in a realm other than 0 needs a positioned region archetype: one with no spatial field has no realm, and its regions are realm 0's.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
 - Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
-- Not built yet: explicit and shared sets (a session asking for a key), positionless members, visibility tags.
+- Not built yet: explicit and shared sets (a session asking for a key), visibility tags.
 - Measured (`GroupRegionBench`, 14 § 3.6): a 456 m town on a 192 m Sphere costs no measurable gather time (within 1 µs over 128 sessions) and no steady-state bytes; widening
   the Sphere to 456 m instead sends 2.8× the bytes.
 
 ## 🧪 Tests
 
 - [PushGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupTests.cs) — the oracle (towns, members and walking sessions under churn and skips), hysteresis and re-entry, budgeted fill, moves between towns, a destroyed town, the refusals, the tap's mutant
+- [PushGroupShardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupShardTests.cs) — positionless members: state only while held, the budget, a reference resolved once its target has state, #1389's split and merge, an off-DAG key move between the projection and the gather
+- [RealmGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Realms/RealmGroupTests.cs) — a positionless member held by the sessions of the realm its region is in
 - [FrameApplierTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/FrameApplierTests.cs) — the client's complete set, release and `RESET`, a duplicate completion counted
 - The `stream-kitchen-sink`, `tick-blocks` and `catalog-refusals` vectors, replayed by the .NET, C and TypeScript SDKs
 

@@ -877,7 +877,16 @@ public partial class DatabaseEngine
         var pending = _archetypeStates[meta.ArchetypeId]?.ClusterState;
         if (pending != null)
         {
-            FinishArchetypeFencePrep(pending, hasWork, tickNumber, changeSet);        }
+            FinishArchetypeFencePrep(pending, hasWork, tickNumber, changeSet);
+
+            // An archetype with no fence work still has a membership signal to publish: a spawn writes no dirty bit, so a tick whose only change to a
+            // non-spatial archetype is a spawn would otherwise never reach Finalize, and replication would not hear of the entity until some later write
+            // (14 § 5: a positionless member spawned into a held group). With releases to reclaim, the head publishes it, after the reclamation.
+            if (!hasWork && pending.TrackStructureChanges && !pending.HasPendingClusterFinalizations)
+            {
+                pending.PublishStructureChanges(tickNumber);
+            }
+        }
 
         return hasWork;
     }

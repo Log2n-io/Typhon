@@ -10,8 +10,9 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 
 /// <summary>
-/// The group oracle (14 § 3.8, step 4.1's acceptance): towns, their buildings and citizens under seeded churn — key changes, spawns, destroys, teleports,
-/// towns appearing, vanishing and moving — and walking sessions that skip frames, each compared with what it is entitled to hold.
+/// The group oracle (14 § 3.8 and § 5, the acceptance of steps 4.1 and 4.2): towns, their buildings, citizens and shards — about half the members have no
+/// position — under seeded churn — key changes, spawns, destroys, teleports, towns appearing, vanishing and moving — and walking sessions that skip frames,
+/// each compared with what it is entitled to hold.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -51,10 +52,12 @@ internal sealed unsafe class GroupOracle : IDisposable
     private readonly double _anchorSlack;
     private readonly int _buildingPlan;
     private readonly int _citizenPlan;
+    private readonly int _shardPlan;
 
     private readonly List<EntityId> _towns = [];
     private readonly List<EntityId> _buildings = [];
     private readonly List<EntityId> _citizens = [];
+    private readonly List<EntityId> _shards = [];
     private int _nextTownKey = 100;
     private int _nextTemplate = 1;
     private long _tick;
@@ -70,6 +73,7 @@ internal sealed unsafe class GroupOracle : IDisposable
         _anchorSlack = Math.Min(Radius / 48d, harness.Subscriptions.Push.CellSize / 2d);
         _buildingPlan = harness.PlanIndex(nameof(GroupBuilding));
         _citizenPlan = harness.PlanIndex(nameof(GroupCitizen));
+        _shardPlan = harness.PlanIndex(nameof(GroupPositionless));
         for (var i = 0; i < _sessions.Length; i++)
         {
             _delivery[i] = new Random(seed + (7919 * (i + 1)));
@@ -112,7 +116,7 @@ internal sealed unsafe class GroupOracle : IDisposable
     /// </summary>
     public void RemoveTheTapForTest()
     {
-        foreach (var plan in new[] { _buildingPlan, _citizenPlan })
+        foreach (var plan in new[] { _buildingPlan, _citizenPlan, _shardPlan })
         {
             _harness.Subscriptions.ReplicationStates[plan].ClusterState.ClearGroupKeySlotsForTest();
         }
@@ -120,7 +124,7 @@ internal sealed unsafe class GroupOracle : IDisposable
 
     public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget)
     {
-        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin), name, new SubscriptionsOptions
+        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true), name, new SubscriptionsOptions
         {
             IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 16,
@@ -172,11 +176,17 @@ internal sealed unsafe class GroupOracle : IDisposable
                 {
                     SpawnBuilding(tx, zone.Key, In(zone.Extent));
                 }
+
+                for (var s = 10 + _random.Next(30); s > 0; s--)
+                {
+                    SpawnShard(tx, zone.Key);
+                }
             }
 
             for (var b = 0; b < 30; b++)
             {
                 SpawnBuilding(tx, b % 3 == 0 ? OrphanKey : 0, Anywhere());
+                SpawnShard(tx, b % 3 == 0 ? OrphanKey : 0);
             }
 
             for (var c = 0; c < 150; c++)
@@ -203,6 +213,12 @@ internal sealed unsafe class GroupOracle : IDisposable
         var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
         _buildings.Add(tx.Spawn<GroupBuilding>(GroupBuilding.Bounds.Set(in bounds), GroupBuilding.Ai.Set(in ai),
             GroupBuilding.Key.Set(new GroupKey { Town = key })));
+    }
+
+    private void SpawnShard(Transaction tx, int key)
+    {
+        var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
+        _shards.Add(tx.Spawn<GroupPositionless>(GroupPositionless.Ai.Set(in ai), GroupPositionless.Key.Set(new GroupKey { Town = key })));
     }
 
     private void SpawnCitizen(Transaction tx, int key, (float X, float Y) at)
@@ -285,8 +301,28 @@ internal sealed unsafe class GroupOracle : IDisposable
 
     private void Churn()
     {
-        var roll = _random.Next(100);
         using var tx = _harness.Engine.CreateQuickTransaction();
+
+        // The shards' own churn, beside the rest: their key changes reach a cluster with no block, or attach one, or leave one idle.
+        var shardRoll = _random.Next(100);
+        if (shardRoll < 20)
+        {
+            ChangeKeys(tx, _shards, GroupPositionless.Key, 1 + _random.Next(4));
+        }
+        else if (shardRoll < 28 && _towns.Count > 0)
+        {
+            var zone = tx.Open(_towns[_random.Next(_towns.Count)]).Read(GroupTown.Zone);
+            for (var s = 1 + _random.Next(4); s > 0; s--)
+            {
+                SpawnShard(tx, zone.Key);
+            }
+        }
+        else if (shardRoll < 34)
+        {
+            Destroy(tx, _shards);
+        }
+
+        var roll = _random.Next(100);
         if (roll < 15)
         {
             ChangeKeys(tx, _buildings, GroupBuilding.Key, 1 + _random.Next(3));
@@ -504,7 +540,11 @@ internal sealed unsafe class GroupOracle : IDisposable
         CompletionsChecked++;
         var missing = new List<string>();
         using var tx = _harness.Engine.CreateQuickTransaction();
-        foreach (var (list, comp, name) in new[] { (_buildings, GroupBuilding.Key, nameof(GroupBuilding)), (_citizens, GroupCitizen.Key, nameof(GroupCitizen)) })
+        foreach (var (list, comp, name) in new[]
+                 {
+                     (_buildings, GroupBuilding.Key, nameof(GroupBuilding)), (_citizens, GroupCitizen.Key, nameof(GroupCitizen)),
+                     (_shards, GroupPositionless.Key, nameof(GroupPositionless)),
+                 })
         {
             foreach (var entity in list)
             {
@@ -630,6 +670,53 @@ internal sealed unsafe class GroupOracle : IDisposable
         var margin = _anchorSlack + visibility + OracleHarness.MotionToleranceM + 0.01;
         CompareMembers(tx, session, replica, _buildingPlan, nameof(GroupBuilding), truth[_buildingPlan], complete, double.NaN, divergences);
         CompareMembers(tx, session, replica, _citizenPlan, nameof(GroupCitizen), truth[_citizenPlan], complete, margin, divergences);
+        CompareShards(tx, session, replica, truth[_shardPlan], complete, divergences);
+    }
+
+    /// <summary>
+    /// The shards, from the world's side: a positionless member has an identity only while a held town needs it (14 § 5), so the truth the blocks give is
+    /// not every shard. Every shard of a complete town is held, with its own state; no other is.
+    /// </summary>
+    private void CompareShards(Transaction tx, int session, SessionReplica replica, Dictionary<uint, EntityId> identified, HashSet<int> complete,
+        List<string> divergences)
+    {
+        var held = new HashSet<uint>(replica.NetIds(_shardPlan));
+        foreach (var netId in held)
+        {
+            if (!identified.ContainsKey(netId))
+            {
+                divergences.Add($"session {session}: shard netId {netId} is in the client's world and holds no identity on the server");
+            }
+        }
+
+        foreach (var entity in _shards)
+        {
+            var reference = tx.Open(entity);
+            var key = reference.Read(GroupPositionless.Key).Town;
+            var netId = _harness.NetIdOf(entity);
+            var holds = netId != 0 && held.Contains(netId);
+            if (complete.Contains(key))
+            {
+                RequiredMembers++;
+                if (!holds)
+                {
+                    divergences.Add($"session {session}: shard entity {entity.RawValue} (netId {netId}, town {key}) must be held, its town is complete, and is not");
+                    continue;
+                }
+
+                Compared++;
+                var template = reference.Read(GroupPositionless.Ai).Template;
+                var actual = replica.Value(_shardPlan, netId, "kind");
+                if (actual != template)
+                {
+                    divergences.Add($"session {session}: shard netId {netId} carries template {actual} and the entity has {template}: another entity's state");
+                }
+            }
+            else if (holds)
+            {
+                divergences.Add($"session {session}: shard netId {netId} (entity {entity.RawValue}, town {key}) is held and no town of the client's holds it");
+            }
+        }
     }
 
     /// <param name="discMargin">The geometric band's half-width for a member the Sphere observes; NaN for one it does not.</param>
@@ -704,7 +791,7 @@ internal sealed unsafe class GroupOracle : IDisposable
     private Dictionary<int, Dictionary<uint, EntityId>> ServerTruth(List<string> divergences)
     {
         var truth = new Dictionary<int, Dictionary<uint, EntityId>>();
-        foreach (var plan in new[] { _buildingPlan, _citizenPlan })
+        foreach (var plan in new[] { _buildingPlan, _citizenPlan, _shardPlan })
         {
             var byNetId = new Dictionary<uint, EntityId>();
             var state = _harness.Subscriptions.ReplicationStates[plan];

@@ -190,6 +190,23 @@ internal sealed class GroupSessionState
         return false;
     }
 
+    /// <summary>Every committed and pending key, to the hub's held set: the client's keys and the ones this frame moves to, whatever a RESET reads.</summary>
+    public void CollectKeys(PushHub hub)
+    {
+        for (var s = 0; s < _cCount.Length; s++)
+        {
+            for (var i = 0; i < _cCount[s]; i++)
+            {
+                hub.AddWanted(s, CKeys[(s * Max) + i]);
+            }
+
+            for (var i = 0; i < PCount[s]; i++)
+            {
+                hub.AddWanted(s, PKeys[(s * Max) + i]);
+            }
+        }
+    }
+
     public void Commit()
     {
         Array.Copy(PKeys, CKeys, PKeys.Length);
@@ -264,6 +281,23 @@ internal sealed class CompiledGroupMember
 
     /// <summary>The key field's B+Tree, resolved from the archetype's index slots on first use.</summary>
     public BTreeBase<PersistentStore> Tree;
+
+    /// <summary>The member has no position (14 § 5): served through its keys alone, its replication state only while a held key needs it.</summary>
+    public bool Positionless;
+
+    /// <summary>The key's bytes in the component.</summary>
+    public int FieldSize;
+
+    /// <summary>The key is on a Versioned component, which an off-DAG commit may write (EW-02).</summary>
+    public bool Versioned;
+
+    /// <summary>
+    /// The archetype's log of key moves, and this field's watch in it: a positionless member with a Versioned key only, whose index an off-DAG commit can
+    /// move between the projection and the gather. Null otherwise.
+    /// </summary>
+    public GroupKeyMoveLog Moves;
+
+    public int MoveWatch = -1;
 }
 
 /// <summary>A compiled region selector: the region archetype and where its key and extent are.</summary>
@@ -345,12 +379,6 @@ internal static class GroupSetCompiler
                         + "entity, so declare it with subs.Archetype<" + member.Archetype.Name + ">(...).");
                 }
 
-                if (plans[plan].Position == null)
-                {
-                    throw new NotSupportedException(
-                        $"Group set '{d.Name}' names member '{member.Archetype.Name}', which has no position. Positionless members are not built yet (step 4.2).");
-                }
-
                 var meta = Resolve(member.Archetype);
                 var (slot, field, reader) = ResolveField(meta, engine, member.KeyComponent, member.KeyField, $"group set '{d.Name}' member key");
                 if (!ClusterFieldReader.IsIntegerKey(field.Type))
@@ -377,9 +405,9 @@ internal static class GroupSetCompiler
                 }
 
                 // A Versioned key is admitted: its commit copies the HEAD into the cluster slot, marks it (the tap) and moves the index entry, all before the
-                // fence. An off-DAG commit (EW-02) could move the index between the projection and the gather, but a positioned member's archetype has a
-                // spatial field, and EW-02 forbids an off-DAG thread to write any of its components. A positionless member (refused above) has no such
-                // guard: step 4.2 admits it with the fill reading the off-DAG moves it would otherwise miss.
+                // fence. An off-DAG commit (EW-02) could move the index between the projection and the gather. A positioned member's archetype has a
+                // spatial field, which EW-02 forbids an off-DAG thread to write; a positionless member has no such guard, and the runtime gives its
+                // archetype a log of key moves that the fill reads beside the index (14 § 5).
 
                 if (!field.HasIndex || !field.IndexAllowMultiple || !field.IndexSparse)
                 {
@@ -399,6 +427,9 @@ internal static class GroupSetCompiler
                     ComponentSlot = slot,
                     FieldOffsetInComponent = field.OffsetInComponentStorage,
                     Field = reader,
+                    Positionless = plans[plan].Position == null,
+                    FieldSize = KeySize(field.Type),
+                    Versioned = table?.StorageMode == StorageMode.Versioned,
                 };
             }
 
@@ -450,6 +481,42 @@ internal static class GroupSetCompiler
         }
 
         return new CompiledRegion { Archetype = meta, Key = key, Extent = extent, ExtentType = extentType };
+    }
+
+    private static int KeySize(FieldType type) => type switch
+    {
+        FieldType.Byte or FieldType.UByte => 1,
+        FieldType.Short or FieldType.UShort or FieldType.Char => 2,
+        FieldType.Int or FieldType.UInt => 4,
+        _ => 8,
+    };
+
+    /// <summary>The B+Tree of a member's key field, from its archetype's index slots; null when the archetype has none yet.</summary>
+    internal static BTreeBase<PersistentStore> TreeOf(CompiledGroupMember member, ArchetypeReplicationState state)
+    {
+        var slots = state.ClusterState?.IndexSlots;
+        if (slots == null)
+        {
+            return null;
+        }
+
+        foreach (var s in slots)
+        {
+            if (s.Slot != member.ComponentSlot || s.Fields == null)
+            {
+                continue;
+            }
+
+            foreach (var f in s.Fields)
+            {
+                if (f.FieldOffset == member.FieldOffsetInComponent)
+                {
+                    return f.Index;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static double MaxReachOf(SubscriptionsRegistry registry, string set)

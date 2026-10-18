@@ -2175,6 +2175,9 @@ public unsafe partial class Transaction
         // increment is a store other cores may be watching.
         var mutations = 0;
 
+        // A destroyed member leaves its group keys (14 § 5): logged before its entries go, for a replication gather that misses them in the tree.
+        var keyMoves = engineState.ClusterState?.GroupKeyMoves;
+
         for (int s = 0; s < ixSlots.Length; s++)
         {
             ref var ixSlot = ref ixSlots[s];
@@ -2199,6 +2202,7 @@ public unsafe partial class Transaction
                 // Regression test: ClusterIndex_NonUniqueField_DestroyOneEntity_PreservesSiblingsInIndex.
                 var useS64 = s64Segment != null && ReferenceEquals(field.Index.Segment, s64Segment);
                 mutations++;   // (#665)
+                keyMoves?.Note(ixSlot.Slot, field.FieldOffset, destroyClusterLocation, fieldPtr);
                 if (field.AllowMultiple)
                 {
                     int elementId = *(int*)(primaryBase + layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex));

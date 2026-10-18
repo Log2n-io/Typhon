@@ -274,6 +274,7 @@ internal static unsafe class ProjectionPass
         var ownerFields = plan.OwnerFields;
         var codeRows = fields.Length + ownerFields.Length;
         var codes = arena.Codes(Math.Max(1, codeRows) * MaxSlots);
+        references?.BindReferrers(entityIds);
         var unresolved = Quantize(state, fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes, references);
         unresolved |= Quantize(state, ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes, references);
 
@@ -503,6 +504,11 @@ internal static unsafe class ProjectionPass
                 pushOldZ = pushNewZ;
                 pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
             }
+            else if (push != null && position == null)
+            {
+                // A positionless member (14 § 5) is nowhere, and alive: described from now on, and before this push too unless it is new.
+                pushFlags |= initialize ? PushEvent.HasNew : (byte)(PushEvent.HasOld | PushEvent.HasNew);
+            }
 
             // ── Headings: the deadband, before the groups compare (09 § 15) ────────────────────────────────────────────────────────────────────────────────
             if (layout.HeadingBytes > 0)
@@ -511,6 +517,11 @@ internal static unsafe class ProjectionPass
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+            if (references != null)
+            {
+                references.ReferrerSlot = slot;   // a collection's elements resolve while its entity is encoded
+            }
+
             var text = new TextSource(state, clusterLayout, clusterBase, transientBase, slot, collections, references);
             var wideFailed = false;
             var named = new CollectionNames(collectionIndex, worker, hot->Entity.RawValue);
@@ -640,7 +651,7 @@ internal static unsafe class ProjectionPass
                     {
                         *stored = kn;
                         pushFlags |= PushEvent.KeyChanged;
-                        push.NoteKeyChange(worker, hot->NetId, gk.Set, ko, kn);
+                        push.NoteKeyChange(worker, pushIndex, hot->NetId, gk.Set, ko, kn);
                     }
                 }
 
@@ -725,6 +736,11 @@ internal static unsafe class ProjectionPass
             slots &= slots - 1;
             var target = EntityId.FromRaw(Unsafe.ReadUnaligned<long>(column + (slot * field.ComponentSize)));
             var pending = false;
+            if (references != null)
+            {
+                references.ReferrerSlot = slot;
+            }
+
             row[slot] = references?.Resolve(target, out pending) ?? NetIdAllocator.NoNetId;
             if (pending)
             {
@@ -1385,7 +1401,11 @@ internal static unsafe class ProjectionPass
         byte* blockBytes, in ReplicationBlockLayout layout, int slot, uint netId, NetIdLeaseSet leases, EntityId entity)
     {
         var cold = blockBytes + layout.ColdOffset + (slot * layout.ColdStride);
-        push.Decode(archetype, cold + push.PositionOffset(archetype), out var x, out var y, out var z);
+        float x = 0f, y = 0f, z = 0f;
+        if (plan.Position != null)
+        {
+            push.Decode(archetype, cold + push.PositionOffset(archetype), out x, out y, out z);
+        }
 
         // The entity leaves its groups with its identity (14 § 3.8): its keys go to 0 here, read before the entry is cleared, so a session that holds it
         // only through a key — far outside its sphere — still hears the leave.
@@ -1397,7 +1417,7 @@ internal static unsafe class ProjectionPass
             if (ko != 0)
             {
                 flags |= PushEvent.KeyChanged;
-                push.NoteKeyChange(worker, netId, groupKeys[k].Set, ko, 0);
+                push.NoteKeyChange(worker, archetype, netId, groupKeys[k].Set, ko, 0);
             }
         }
 

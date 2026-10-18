@@ -427,6 +427,8 @@ internal sealed unsafe partial class PushReplication<TEvent>
     // Sized with the session slots, serially (GrowSessions); a slot's state is made and touched by the one worker gathering that session.
     private GroupSessionState[] _groupSessions = new GroupSessionState[InitialSessionSlots];
 
+    private protected override GroupSessionState GroupStateAtOrNull(int local) => (uint)local < (uint)_groupSessions.Length ? _groupSessions[local] : null;
+
     private GroupSessionState GroupStateOf(int local, ushort generation)
     {
         Debug.Assert((uint)local < (uint)_groupSessions.Length, "the group sessions are sized with the session slots");
@@ -590,10 +592,16 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     continue;
                 }
 
-                var members = ReadMembers(set, gs.PKeys[at], gs.PCursor[at], uint.MaxValue, scratch, sort: true);
+                var from = gs.PCursor[at];
+                var members = ReadMembers(set, gs.PKeys[at], from, uint.MaxValue, scratch, sort: true, out var pending);
                 var take = Math.Min(members, budget - spent);
                 spent += take;
-                gs.PCursor[at] = take == members ? GroupSessionState.Complete : scratch.FillMembers[take].NetId;
+
+                // A member with no replication state yet — a positionless one whose block a held key is about to attach, or one the pool could not give a
+                // block — cannot be sent, so the key is not complete while one is pending (14 § 5): the cursor passes what was taken and waits.
+                gs.PCursor[at] = take < members ? scratch.FillMembers[take].NetId
+                    : pending > 0 ? (members > 0 ? scratch.FillMembers[members - 1].NetId + 1 : from)
+                    : GroupSessionState.Complete;
             }
         }
 
@@ -612,6 +620,23 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 var set = group.Set;
                 FoldKeys(slot, t, set, gs.CKeys, set * max, gs.CCount[set], scratch);
                 FoldKeys(slot, t, set, gs.PKeys, set * max, gs.PCount[set], scratch);
+            }
+        }
+
+        // The positionless members' events, in the hub's log: realm-free, filed under their keys alone (14 § 5).
+        for (var t = first; Hub != null && Hub.IsAnyLazy && t != tick + 1; t++)
+        {
+            var unplaced = Hub.UnplacedAt(t);
+            if (unplaced == null)
+            {
+                continue;
+            }
+
+            foreach (var group in groups)
+            {
+                var set = group.Set;
+                FoldUnplacedKeys(unplaced, t, set, gs.CKeys, set * max, gs.CCount[set], scratch);
+                FoldUnplacedKeys(unplaced, t, set, gs.PKeys, set * max, gs.PCount[set], scratch);
             }
         }
 
@@ -685,7 +710,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     continue;
                 }
 
-                var members = ReadMembers(set, key, before, after, scratch, sort: false);
+                var members = ReadMembers(set, key, before, after, scratch, sort: false, out _);
                 for (var m = 0; m < members; m++)
                 {
                     ref var member = ref scratch.FillMembers[m];
@@ -721,7 +746,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 }
 
                 var cursor = gs.CCursor[at];
-                var members = ReadMembers(set, key, 0u, cursor, scratch, sort: false);
+                var members = ReadMembers(set, key, 0u, cursor, scratch, sort: false, out _);
                 for (var m = 0; m < members; m++)
                 {
                     ref var member = ref scratch.FillMembers[m];
@@ -888,69 +913,57 @@ internal sealed unsafe partial class PushReplication<TEvent>
     }
 
     /// <summary>
-    /// Reads a key's members from every member archetype's index into <see cref="FrameWorkerScratch.FillMembers"/>, those of this realm with a netId in
-    /// [<paramref name="from"/>, <paramref name="until"/>), sorted by netId when <paramref name="sort"/> asks. A member whose entry holds no identity yet,
-    /// or whose projected key is not <paramref name="key"/> yet, is skipped: its projection is its event, and the fill agrees with the events.
+    /// Reads a key's members from every member archetype's index into <see cref="FrameWorkerScratch.FillMembers"/>, those this realm's sessions can hold -
+    /// a positioned member of this realm, a positionless one of any (14 § 5) — with a netId in [<paramref name="from"/>, <paramref name="until"/>), sorted
+    /// by netId when <paramref name="sort"/> asks. A member whose projected key is not <paramref name="key"/> yet is skipped: its projection is its event,
+    /// and the fill agrees with the events. One with no replication state yet — no block, no identity, not projected — is <paramref name="pending"/>.
     /// </summary>
-    /// <remarks>The tree is keyed by the field's own type: the 64-bit key is passed by address, read little-endian at the field's width (x64, arm64).</remarks>
-    private int ReadMembers(int set, long key, uint from, uint until, FrameWorkerScratch scratch, bool sort)
+    /// <remarks>
+    /// <para>The tree is keyed by the field's own type: the 64-bit key is passed by address, read little-endian at the field's width (x64, arm64).</para>
+    /// <para>
+    /// <b>Off-DAG moves.</b> A positionless member's Versioned key can be moved by a commit off the DAG (EW-02) after the projection read it: the tree no
+    /// longer lists it under the key its events still file it under. Such a commit logs the move before it touches the tree, so the log is read after the
+    /// tree and its moves out of <paramref name="key"/> are members too; the projected-key test keeps only those the projection still filed there.
+    /// </para>
+    /// </remarks>
+    private int ReadMembers(int set, long key, uint from, uint until, FrameWorkerScratch scratch, bool sort, out int pending)
     {
         var count = 0;
+        pending = 0;
         var compiled = GroupSets[set];
         foreach (var member in compiled.Members)
         {
-            var tree = member.Tree ??= ResolveTree(member);
+            var tree = member.Tree ??= GroupSetCompiler.TreeOf(member, _states[member.Plan]);
             if (tree == null)
             {
                 continue;
             }
 
-            var layout = _states[member.Plan].Layout;
             var k = key;
             var accessor = tree.Segment.CreateChunkAccessor();
             try
             {
                 using var buffer = tree.TryGetMultiple(&k, ref accessor);
-                if (!buffer.IsValid)
+                if (buffer.IsValid)
                 {
-                    continue;
-                }
-
-                do
-                {
-                    foreach (var location in buffer.ReadOnlyElements)
+                    do
                     {
-                        var block = BlockOf(member.Plan, location >> 6);
-                        if (block == null || block->Realm != ServedRealm)
+                        foreach (var location in buffer.ReadOnlyElements)
                         {
-                            continue;
+                            AddMember(member, location, key, from, until, scratch, ref count, ref pending);
                         }
-
-                        var slot = location & 63;
-                        var hot = (ReplicationHotEntry*)((byte*)block + layout.HotOffset + (slot * layout.HotStride));
-                        var netId = hot->NetId;
-                        if (netId == NetIdAllocator.NoNetId || netId < from || netId >= until || (block->ProjectedOccupancy & (1UL << slot)) == 0
-                            || CurrentKey((ushort)member.Plan, (nint)block, (byte)slot, netId, member.KeySlot) != key)
-                        {
-                            continue;
-                        }
-
-                        if (count == scratch.FillMembers.Length)
-                        {
-                            Array.Resize(ref scratch.FillMembers, count * 2);
-                        }
-
-                        scratch.FillMembers[count++] = new GroupFillMember
-                        {
-                            NetId = netId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)member.Plan,
-                        };
                     }
+                    while (buffer.NextChunk());
                 }
-                while (buffer.NextChunk());
             }
             finally
             {
                 accessor.Dispose();
+            }
+
+            if (member.Moves != null)
+            {
+                count = AddMoves(member, key, from, until, scratch, count);
             }
         }
 
@@ -962,32 +975,99 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return count;
     }
 
-    private BTreeBase<PersistentStore> ResolveTree(CompiledGroupMember member)
+    // One index location: a member to read, one still pending, or none — another realm's, or one whose projected key is another.
+    private void AddMember(CompiledGroupMember member, int location, long key, uint from, uint until, FrameWorkerScratch scratch, ref int count,
+        ref int pending)
     {
-        var slots = _states[member.Plan].ClusterState?.IndexSlots;
-        if (slots == null)
+        var state = _states[member.Plan];
+        var chunk = location >> 6;
+        var block = BlockOf(member.Plan, chunk);
+        if (block == null)
         {
-            return null;
+            // No block yet: a positionless member a held key is about to attach, or a cluster the pool deferred (SUB-32). Another realm's is not ours.
+            if (member.Positionless || state.RealmOfCluster(chunk) == ServedRealm)
+            {
+                pending++;
+            }
+
+            return;
         }
 
-        foreach (var s in slots)
+        if (!member.Positionless && block->Realm != ServedRealm)
         {
-            if (s.Slot != member.ComponentSlot || s.Fields == null)
+            return;
+        }
+
+        var layout = state.Layout;
+        var slot = location & 63;
+        var hot = (ReplicationHotEntry*)((byte*)block + layout.HotOffset + (slot * layout.HotStride));
+        var netId = hot->NetId;
+        if (netId == NetIdAllocator.NoNetId || (block->ProjectedOccupancy & (1UL << slot)) == 0)
+        {
+            pending++;
+            return;
+        }
+
+        if (netId < from || netId >= until || CurrentKey((ushort)member.Plan, (nint)block, (byte)slot, netId, member.KeySlot) != key)
+        {
+            return;
+        }
+
+        if (count == scratch.FillMembers.Length)
+        {
+            Array.Resize(ref scratch.FillMembers, count * 2);
+        }
+
+        scratch.FillMembers[count++] = new GroupFillMember { NetId = netId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)member.Plan };
+    }
+
+    // The off-DAG moves out of a key since the blocks step (see ReadMembers): each a member when the projection still filed it there, once. A logged entity
+    // with no state is not pending here: it left the key, and the tree read already counted what the key still holds.
+    private int AddMoves(CompiledGroupMember member, long key, uint from, uint until, FrameWorkerScratch scratch, int count)
+    {
+        // The tree was read first; a move the read missed was logged before the tree changed, and is visible past this fence (arm64 as x64).
+        Interlocked.MemoryBarrier();
+        var moves = member.Moves.Read();
+        var ignored = 0;
+        foreach (ref readonly var move in moves)
+        {
+            if (move.Watch != member.MoveWatch || DecodeKey(move.Raw, member.Field.Type) != key)
             {
                 continue;
             }
 
-            foreach (var f in s.Fields)
+            var before = count;
+            AddMember(member, move.Location, key, from, until, scratch, ref count, ref ignored);
+            if (count == before)
             {
-                if (f.FieldOffset == member.FieldOffsetInComponent)
+                continue;
+            }
+
+            // Moved out and back, or moved twice: in the tree or in the log already — once.
+            for (var i = 0; i < count - 1; i++)
+            {
+                if (scratch.FillMembers[i].NetId == scratch.FillMembers[count - 1].NetId)
                 {
-                    return f.Index;
+                    count--;
+                    break;
                 }
             }
         }
 
-        return null;
+        return count;
     }
+
+    // A logged key's bytes as the field's integer type reads them, sign- or zero-extended to 64 bits like ClusterFieldReader.ReadKey.
+    private static long DecodeKey(ulong raw, FieldType type) => type switch
+    {
+        FieldType.Byte => (sbyte)raw,
+        FieldType.UByte => (byte)raw,
+        FieldType.Short => (short)raw,
+        FieldType.UShort or FieldType.Char => (ushort)raw,
+        FieldType.Int => (int)raw,
+        FieldType.UInt => (uint)raw,
+        _ => (long)raw,
+    };
 
     /// <summary>Folds one tick's member entries of the held keys into the session's per-identity fold.</summary>
     private void FoldKeys(TickLog slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)
@@ -1040,6 +1120,69 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 fold.LastTick = t;
             }
         }
+    }
+
+    /// <summary>Folds one tick's positionless member entries of the held keys into the session's per-identity fold: no position, no cell.</summary>
+    private void FoldUnplacedKeys(UnplacedTick slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            var key = keys[at + i];
+            var lo = UnplacedLowerBound(slot, set, key);
+            for (var m = lo; m < slot.MemberCount && slot.Members[m].Set == set && slot.Members[m].Key == key; m++)
+            {
+                ref var entry = ref slot.Members[m];
+                ref var e = ref slot.Events[entry.Event];
+                var keySlot = KeySlotOf(e.Archetype, set);
+                ref var fold = ref CollectionsMarshalHelper.GetOrAdd(scratch.GroupFolds, e.NetId, out var existed);
+                if (!existed)
+                {
+                    fold = default;
+                    fold.FirstFlags = e.Flags;
+                    InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
+                }
+
+                if ((fold.SeenSlots & (1 << keySlot)) == 0)
+                {
+                    fold.Before[keySlot] = entry.Old;
+                    fold.SeenSlots |= (byte)(1 << keySlot);
+                }
+
+                fold.After[keySlot] = entry.New;
+                if (existed && fold.LastTick == t)
+                {
+                    continue;
+                }
+
+                fold.LastFlags = e.Flags;
+                fold.Block = e.Block;
+                fold.Slot = e.Slot;
+                fold.Archetype = e.Archetype;
+                fold.Groups |= e.Groups;
+                fold.LastTick = t;
+            }
+        }
+    }
+
+    private static int UnplacedLowerBound(UnplacedTick slot, int set, long key)
+    {
+        var lo = 0;
+        var hi = slot.MemberCount;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >>> 1;
+            ref var m = ref slot.Members[mid];
+            if (m.Set < set || (m.Set == set && m.Key < key))
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     /// <summary>A fold's other sets' keys, which no held key of theirs filed: unchanged since, so the entry's current keys, on both sides.</summary>

@@ -943,6 +943,18 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         // Pushed, re-encoded, and nothing moved or changed: no session can learn anything from it. Dropped here, in parallel, rather than filtered by
         // every session that reaches its cell. A change of group key is a change (14 § 3.8).
         const byte both = PushEvent.HasOld | PushEvent.HasNew;
+
+        // A positionless member has no cell: its event goes to the hub's log, which every realm's group gather reads (14 § 5).
+        if (_unplaced[archetype])
+        {
+            if ((flags & (both | PushEvent.KeyChanged)) != both || groups != 0)
+            {
+                Hub.AddUnplaced(worker, archetype, block, slot, netId, (byte)(flags & (both | PushEvent.KeyChanged)), groups);
+            }
+
+            return;
+        }
+
         var arrived = (flags & PushEvent.Arrived) != 0;
         flags &= unchecked((byte)~PushEvent.Arrived);
         if (!arrived && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
@@ -992,6 +1004,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     public override void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause)
     {
+        if (_unplaced[archetype])
+        {
+            Hub.OrphanUnplaced(archetype, block, cold, in layout, netId);
+            return;
+        }
+
         DecodeAt(archetype, cold + _positionOffset[archetype], out var x, out var y, out var z);
         lock (_orphanLock)
         {

@@ -46,6 +46,36 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Whether any session's committed keys include one still filling; a test's quiet point waits for none.</summary>
     internal virtual bool AnyGroupFillingForTest() => false;
 
+    /// <summary>
+    /// Every key a session here holds or is moving to, to <paramref name="hub"/> (14 § 5): what decides which positionless members need replication state.
+    /// Serial, at the blocks step.
+    /// </summary>
+    internal void CollectHeldKeys(PushHub hub)
+    {
+        if (!HasGroups)
+        {
+            return;
+        }
+
+        for (var local = 1; local < _slotHigh; local++)
+        {
+            var owner = _slotOwners[local];
+            if (!owner.IsValid)
+            {
+                continue;
+            }
+
+            var gs = GroupStateAtOrNull(local);
+            if (gs != null && gs.Generation == owner.Generation)
+            {
+                gs.CollectKeys(hub);
+            }
+        }
+    }
+
+    // A slot's group state, or null when it has none; the geometry owns the array.
+    private protected virtual GroupSessionState GroupStateAtOrNull(int local) => null;
+
     /// <summary>Sizes and empties the per-worker key-change lists for this tick's projection.</summary>
     private protected void ResetKeyChanges(int workers)
     {
@@ -68,8 +98,14 @@ internal abstract unsafe partial class PushReplication
     }
 
     /// <summary>Records a member's key change. Called by the worker projecting the member, so the list is the worker's own.</summary>
-    internal void NoteKeyChange(int worker, uint netId, int set, long oldKey, long newKey)
+    internal void NoteKeyChange(int worker, int archetype, uint netId, int set, long oldKey, long newKey)
     {
+        if (_unplaced[archetype])
+        {
+            Hub.NoteUnplacedKeyChange(worker, netId, set, oldKey, newKey);
+            return;
+        }
+
         var list = _keyChanges[worker];
         var n = _keyChangeCount[worker * KeyCountStride];
         if (n == list.Length)
