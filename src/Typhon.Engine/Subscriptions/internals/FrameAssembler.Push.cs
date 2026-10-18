@@ -29,6 +29,9 @@ internal sealed unsafe partial class FrameAssembler
     // u8 bits, f64 cell, six f64 bounds.
     private const int RealmBlockBound = 1 + 5 + 2 + 2 + 1 + 5 + 4 + 1 + 8 + (6 * 8);
 
+    /// <summary>One <c>GROUP_COMPLETE</c> / <c>GROUP_RELEASED</c> record at its widest: kind, varu set, vari64 key.</summary>
+    private const int GroupRecordBound = 1 + 5 + 10;
+
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
 
@@ -1248,7 +1251,7 @@ internal sealed unsafe partial class FrameAssembler
                     ref updates, out complete)
                 : push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
                     state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(push.TargetLevelOf(session)), ref enters,
-                    ref leaves, ref updates, out complete);
+                    ref leaves, ref updates, out complete, Profiles.GroupsOf(_pushProfiles[index]));
         }
 
         if (timing)
@@ -1356,7 +1359,9 @@ internal sealed unsafe partial class FrameAssembler
         // The first-frame RESET (below) decided before SELF, which sends every owner group on a RESET.
         var first = !reset && Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
-        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write && self.Acks == 0)
+        var groupRecords = scratch.GroupRecords.Count;
+        if (records == 0 && groupRecords == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write
+            && self.Acks == 0)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -1386,7 +1391,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
             + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
-            + SelfBound(in self) + RealmBlockBound;
+            + SelfBound(in self) + RealmBlockBound + (groupRecords > 0 ? 1 + 5 + 5 + (groupRecords * GroupRecordBound) : 0);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm != null, state.PendingFrame);
@@ -1400,6 +1405,19 @@ internal sealed unsafe partial class FrameAssembler
 
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+        }
+
+        // SOURCES (14 § 3.5): applied after ENTITIES, so a GROUP_COMPLETE lands once the enters it completes are in the store.
+        if (groupRecords > 0)
+        {
+            var sourcesMark = TickWriter.BeginBlock(ref writer, BlockTypes.Sources);
+            writer.WriteVaru((uint)groupRecords);
+            foreach (var g in scratch.GroupRecords)
+            {
+                TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
+            }
+
+            TickWriter.EndBlock(ref writer, sourcesMark);
         }
 
         WriteSelf(ref writer, in self, scratch);

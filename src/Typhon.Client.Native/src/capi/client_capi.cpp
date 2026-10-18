@@ -1,6 +1,7 @@
 // The C ABI over Client: every entry point catches, so no exception crosses into C, and maps the exception to a status and a message.
 
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <new>
 #include <stdexcept>
@@ -609,6 +610,62 @@ typhon_status typhon_field_bytes(const typhon_client* client, uint32_t archetype
 uint32_t typhon_locate(const typhon_client* client, uint32_t net_id)
 {
     return client == nullptr || client->client->Applier() == nullptr ? TYPHON_NOT_FOUND : client->client->Applier()->World().Locate(net_id);
+}
+
+static_assert(sizeof(GroupEntry) == sizeof(typhon_group_record) && offsetof(GroupEntry, kind) == offsetof(typhon_group_record, kind)
+              && offsetof(GroupEntry, set) == offsetof(typhon_group_record, set) && offsetof(GroupEntry, key) == offsetof(typhon_group_record, key));
+
+typhon_status typhon_groups_get(const typhon_client* client, const typhon_group_record** records, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(records);
+                     capi::RequireOut(count);
+                     const auto groups = capi::ApplierOf(client)->Groups();
+                     *records = reinterpret_cast<const typhon_group_record*>(groups.data());
+                     *count = groups.size();
+                     return TYPHON_OK;
+                 });
+}
+
+static_assert(sizeof(std::pair<std::uint32_t, std::int64_t>) == sizeof(typhon_complete_group)
+              && offsetof(typhon_complete_group, key) == sizeof(std::int64_t));
+
+typhon_status typhon_complete_groups_get(const typhon_client* client, const typhon_complete_group** groups, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(groups);
+                     capi::RequireOut(count);
+                     const auto complete = capi::ApplierOf(client)->CompleteGroups();
+                     *groups = reinterpret_cast<const typhon_complete_group*>(complete.data());
+                     *count = complete.size();
+                     return TYPHON_OK;
+                 });
+}
+
+int32_t typhon_group_is_complete(const typhon_client* client, uint32_t set, int64_t key)
+{
+    return client != nullptr && client->client->Applier() != nullptr && client->client->Applier()->IsGroupComplete(set, key) ? 1 : 0;
+}
+
+typhon_status typhon_group_set_index(const typhon_client* client, const char* name, uint32_t* out)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(out);
+                     const int idx = capi::ApplierOf(client)->Plan().GroupSetIndex(name != nullptr ? name : "");
+                     if (idx < 0)
+                     {
+                         throw std::invalid_argument(std::string("no group set '") + (name != nullptr ? name : "") + "'");
+                     }
+
+                     *out = static_cast<uint32_t>(idx);
+                     return TYPHON_OK;
+                 });
 }
 
 double typhon_client_now_ms(const typhon_client* client) { return client == nullptr ? 0 : client->client->NowMs(); }

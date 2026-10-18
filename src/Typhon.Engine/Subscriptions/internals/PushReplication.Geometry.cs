@@ -129,6 +129,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     private protected override void GrowSessions(int length)
     {
         base.GrowSessions(length);
+
+        // Serial (Join, in the frame prologue): sessions gather in parallel, each touching only its own slot of an array that never moves under them.
+        Array.Resize(ref _groupSessions, length);
         if (TEvent.Deep)
         {
             Array.Resize(ref _slab, length * 2 * _windowRows);
@@ -567,6 +570,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     public override void Commit(SessionId session)
     {
         CommitRegion(session);
+        if (HasGroups)
+        {
+            CommitGroups(L(session), session.Generation);
+        }
+
         ref var st = ref _sessions[L(session)];
         st.AnchorX = st.PAnchorX;
         st.AnchorY = st.PAnchorY;
@@ -611,6 +619,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         private ulong[] _unitKeys = new ulong[16];
         private int[] _unitFirst = new int[16];
         private int _unitMask = 15;
+
+        // Group sets (14 § 3.8): this tick's member events by (set, key) — under the new key, and under the old one when it changed — ascending, with the
+        // index of the event in Events. What a session holding a key reads, and what a skipped one replays.
+        public MemberEntry[] Members = [];
+        public int MemberCount;
 
         // Distance LOD: this tick's far flushes for entities whose latest event is an earlier tick, by cell (compact, ascending). An entity whose latest
         // event IS this tick carries its flush on that event instead.
@@ -928,11 +941,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
 
         // Pushed, re-encoded, and nothing moved or changed: no session can learn anything from it. Dropped here, in parallel, rather than filtered by
-        // every session that reaches its cell.
+        // every session that reaches its cell. A change of group key is a change (14 § 3.8).
         const byte both = PushEvent.HasOld | PushEvent.HasNew;
         var arrived = (flags & PushEvent.Arrived) != 0;
         flags &= unchecked((byte)~PushEvent.Arrived);
-        if (!arrived && (flags & (both | PushEvent.Segment)) == both && groups == 0 && ox == nx && oy == ny && (!TEvent.Deep || oz == nz))
+        if (!arrived && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
+            && (!TEvent.Deep || oz == nz))
         {
             // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
             return;
@@ -981,6 +995,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         DecodeAt(archetype, cold + _positionOffset[archetype], out var x, out var y, out var z);
         lock (_orphanLock)
         {
+            var keyChanged = HasGroups && _plans[archetype].GroupKeys.Length > 0;
+            if (keyChanged)
+            {
+                NoteOrphanKeys(archetype, cold, in layout, netId);
+            }
+
             if (_orphanCount == _orphans.Length)
             {
                 Array.Resize(ref _orphans, _orphanCount * 2);
@@ -991,7 +1011,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             e.Block = (nint)block;
             e.NetId = netId;
             e.Archetype = (ushort)archetype;
-            e.Flags = PushEvent.HasOld;
+            e.Flags = keyChanged ? (byte)(PushEvent.HasOld | PushEvent.KeyChanged) : PushEvent.HasOld;
             e.OldX = x;
             e.OldY = y;
             e.OldZ = z;
@@ -1209,6 +1229,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         slot.Valid = true;
         slot.FlushCellCount = 0;
         _indexed = slot.Events;
+        if (HasGroups)
+        {
+            MergeKeyChanges();
+            BuildMemberLog(slot);
+        }
+
         IndexCells = cells;
         _indexedTick = _tick;
         IndexTicks += Stopwatch.GetTimestamp() - from;
@@ -1977,7 +2003,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, in LodBands bands, bool forceReset,
         in ArchetypeSet archetypes, FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves,
-        ref long updates, out bool complete)
+        ref long updates, out bool complete, ProfileGroup[] groups = null)
     {
         complete = true;
         var from = Stopwatch.GetTimestamp();
@@ -2060,6 +2086,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             st.PRadius = st.Radius;
             st.PLevel = st.Level;
             Committed(ref st, slotIndex).CopyTo(Pending(ref st, slotIndex));
+            if (HasGroups)
+            {
+                HoldGroups(slotIndex, session.Generation, reset);
+            }
+
             return reset && st.Anchored;
         }
 
@@ -2276,7 +2307,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
                     else if (was)
                     {
-                        scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
+                        scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
                         leaves++;
                     }
                 }
@@ -2361,6 +2392,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         {
             Interlocked.Add(ref UpdatesDeferred, scratch.Deferred);
             scratch.Deferred = 0;
+        }
+
+        // ── 5. Groups (14 § 3.8): the keys the anchor meets, their fill under what the cells left of the enter budget, the union with geometry ─────────
+        if (groups is { Length: > 0 } && HasGroups)
+        {
+            enters += GatherGroups(slotIndex, session, groups, reset, gap, tick, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY,
+                nOriginZ, d, in archetypes, scratch, enterBudget - entered, ref leaves, ref updates);
         }
 
         FoldEmptyCells(scratch);
@@ -2604,6 +2642,33 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 Array.Clear(Keys);
                 Count = 0;
+            }
+        }
+
+        /// <summary>The entry of <paramref name="netId"/>, or -1 when the window's events never met it. Never inserts.</summary>
+        public int IndexOf(uint netId)
+        {
+            if (Count == 0)
+            {
+                return -1;
+            }
+
+            var mask = Keys.Length - 1;
+            var h = (int)((netId * 0x9E3779B1u) >> 8) & mask;
+            while (true)
+            {
+                var k = Keys[h];
+                if (k == 0)
+                {
+                    return -1;
+                }
+
+                if (k == netId + 1)
+                {
+                    return Index[h];
+                }
+
+                h = (h + 1) & mask;
             }
         }
 
@@ -2877,7 +2942,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             }
             else if (was)
             {
-                scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
+                scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
                 leaves++;
             }
         }
@@ -3680,7 +3745,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
                     else if (was && !isIn)
                     {
-                        scratch.Add(arch, FrameListKind.Leave, new FrameRecord { NetId = hot->NetId, Archetype = (ushort)arch });
+                        scratch.Add(arch, FrameListKind.Leave,
+                            new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)arch });
                         leaves++;
                     }
                 }

@@ -107,6 +107,27 @@ typedef struct typhon_realm
     double max[3];
 } typhon_realm;
 
+/* SOURCES group record kinds (14 § 3.5). */
+#define TYPHON_GROUP_COMPLETE 2u
+#define TYPHON_GROUP_RELEASED 3u
+
+/* A group lifecycle record: TYPHON_GROUP_COMPLETE (every current member has entered, with the enters it completes) or
+ * TYPHON_GROUP_RELEASED (no longer held; its members' leaves are in the same frame), the set's wire index and the key. */
+typedef struct typhon_group_record
+{
+    uint32_t kind;
+    uint32_t set;
+    int64_t key;
+} typhon_group_record;
+
+/* A group held complete. */
+typedef struct typhon_complete_group
+{
+    uint32_t set;
+    uint32_t reserved;
+    int64_t key;
+} typhon_complete_group;
+
 /* Process-wide allocator hooks for every buffer the replica, the arenas and the queue grow. Set before the first client is created:
  * while one is alive, typhon_set_allocator returns TYPHON_ERROR_STATE. */
 typedef struct typhon_allocator
@@ -226,6 +247,7 @@ TYPHON_API uint64_t typhon_client_anomalies(const typhon_client* client);
 TYPHON_API typhon_status typhon_archetype_index(const typhon_client* client, const char* name, uint32_t* out);
 TYPHON_API typhon_status typhon_field_index(const typhon_client* client, uint32_t archetype, const char* name, uint32_t* out);
 TYPHON_API typhon_status typhon_command_index(const typhon_client* client, const char* name, uint32_t* out);
+TYPHON_API typhon_status typhon_group_set_index(const typhon_client* client, const char* name, uint32_t* out);
 
 /* The replica. */
 TYPHON_API typhon_status typhon_archetype_view_get(const typhon_client* client, uint32_t archetype, typhon_archetype_view* out);
@@ -236,6 +258,13 @@ TYPHON_API typhon_status typhon_field_bytes(const typhon_client* client, uint32_
                                             const uint8_t** data, size_t* length);
 /* `archetype << 24 | slot` of a held netId, or TYPHON_NOT_FOUND. */
 TYPHON_API uint32_t typhon_locate(const typhon_client* client, uint32_t net_id);
+/* The latest frame's group records, in stream order. A poll may apply several frames, and each one replaces the list: read it from on_frame,
+ * where the pointer is valid until the next frame applies. */
+TYPHON_API typhon_status typhon_groups_get(const typhon_client* client, const typhon_group_record** records, size_t* count);
+/* Non-zero when the group is held complete: its GROUP_COMPLETE arrived, and neither its GROUP_RELEASED nor a RESET since. */
+TYPHON_API int32_t typhon_group_is_complete(const typhon_client* client, uint32_t set, int64_t key);
+/* Every group held complete, ascending by set then key; valid until the next frame applies. */
+TYPHON_API typhon_status typhon_complete_groups_get(const typhon_client* client, const typhon_complete_group** groups, size_t* count);
 
 /* Render time: local monotonic ms, advancing the clock, and the time motion is evaluated at. */
 TYPHON_API double typhon_client_now_ms(const typhon_client* client);

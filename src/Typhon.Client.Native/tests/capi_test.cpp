@@ -27,6 +27,8 @@ struct Observed {
     int resets = 0;
     int realms = 0;
     std::uint32_t realmId = 0;
+    typhon_client* client = nullptr;
+    std::vector<typhon_group_record> groups;
 };
 
 struct CapiHarness {
@@ -43,7 +45,19 @@ struct CapiHarness {
         config.user = &seen;
         config.on_welcome = [](void* user, std::uint32_t, std::int32_t) { static_cast<Observed*>(user)->welcomes++; };
         config.on_reset = [](void* user) { static_cast<Observed*>(user)->resets++; };
-        config.on_frame = [](void* user, std::uint32_t tick) { static_cast<Observed*>(user)->frames.push_back(tick); };
+        config.on_frame = [](void* user, std::uint32_t tick)
+        {
+            auto* o = static_cast<Observed*>(user);
+            o->frames.push_back(tick);
+
+            // A frame's group records are read in its own on_frame: the next frame of the same poll replaces them.
+            const typhon_group_record* records = nullptr;
+            std::size_t count = 0;
+            if (o->client != nullptr && typhon_groups_get(o->client, &records, &count) == TYPHON_OK)
+            {
+                o->groups.insert(o->groups.end(), records, records + count);
+            }
+        };
         config.on_realm_changed = [](void* user, const typhon_realm*, const typhon_realm* current)
         {
             auto* o = static_cast<Observed*>(user);
@@ -91,6 +105,7 @@ struct CapiHarness {
             },
             [this] { return now; }, &client);
         CHECK_EQ(static_cast<int>(status), static_cast<int>(TYPHON_OK));
+        seen.client = client;
     }
 
     ~CapiHarness() { typhon_client_destroy(client); }
@@ -215,6 +230,35 @@ TEST(CApi_ReadsTheReplicaTheStreamLeft)
     CHECK_EQ(static_cast<int>(typhon_client_realm(h.client, &realm)), static_cast<int>(TYPHON_OK));
     CHECK(h.seen.realms >= 1);
     CHECK_EQ(realm.realm_id, h.seen.realmId);
+}
+
+// 14 § 3.5 through the C surface: each frame's records from on_frame, the complete set, and a set by name — crew is set 0, zone set 1.
+TEST(CApi_ReadsGroupsFrameByFrameAndTheCompleteSet)
+{
+    CapiHarness h;
+    h.OpenAndStream();
+    CHECK_EQ(h.seen.groups.size(), 4u);
+    CHECK_EQ(h.seen.groups[0].kind, TYPHON_GROUP_COMPLETE);
+    CHECK_EQ(h.seen.groups[0].set, 1u);
+    CHECK_EQ(h.seen.groups[0].key, static_cast<std::int64_t>(-7));
+    CHECK_EQ(h.seen.groups[3].kind, TYPHON_GROUP_RELEASED);
+    CHECK_EQ(h.seen.groups[3].key, static_cast<std::int64_t>(-7));
+
+    CHECK_EQ(typhon_group_is_complete(h.client, 0, 3), 1);
+    CHECK_EQ(typhon_group_is_complete(h.client, 1, -7), 0);
+    const typhon_complete_group* complete = nullptr;
+    std::size_t count = 0;
+    CHECK_EQ(static_cast<int>(typhon_complete_groups_get(h.client, &complete, &count)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(count, 1u);
+    CHECK_EQ(complete[0].set, 0u);
+    CHECK_EQ(complete[0].key, static_cast<std::int64_t>(3));
+
+    std::uint32_t set = 99;
+    CHECK_EQ(static_cast<int>(typhon_group_set_index(h.client, "zone", &set)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(set, 1u);
+    CHECK_EQ(static_cast<int>(typhon_group_set_index(h.client, "nowhere", &set)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
+    CHECK(typhon_groups_get(h.client, nullptr, &count) != TYPHON_OK);
+    CHECK_EQ(typhon_group_is_complete(nullptr, 0, 3), 0);
 }
 
 TEST(CApi_DeliversEventsThroughItsCallback)

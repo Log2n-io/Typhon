@@ -56,6 +56,7 @@ public sealed class SubscriptionsRegistry
     private readonly List<EventDeclaration> _events = [];
     private readonly List<MetricDeclaration> _metrics = [];
     private readonly List<SourceDeclaration> _sources = [];
+    private readonly List<GroupSetDeclaration> _groupSets = [];
 
     /// <summary>
     /// Creates a registry over the given options.
@@ -93,6 +94,9 @@ public sealed class SubscriptionsRegistry
 
     /// <summary>The shared sources, in declaration order.</summary>
     public IReadOnlyList<SourceDeclaration> Sources => _sources;
+
+    /// <summary>The group sets declared with <see cref="Groups"/>, in ordinal name order — the catalog's: a set's index is its number on the wire.</summary>
+    public IReadOnlyList<GroupSetDeclaration> GroupSets => _groupSets;
 
     /// <summary>
     /// Declares what clients may see of an archetype.
@@ -213,6 +217,49 @@ public sealed class SubscriptionsRegistry
         var profile = new ProfileDeclaration(name);
         configure(new ProfileBuilder(profile));
         _profiles.Add(profile);
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a group set (14 § 3): a family of groups, each a key its members carry in an indexed field, held by a session while its selector names the
+    /// key — for a region set, while the session's observer meets the region's extent (<see cref="ObserverBuilder.Groups"/>).
+    /// </summary>
+    /// <param name="name">The set's name, as profiles and the catalog name it.</param>
+    /// <param name="configure">Declares the selector and the members.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry Groups(string name, Action<GroupSetBuilder> configure)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(configure);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("A group set needs a name.", nameof(name));
+        }
+
+        foreach (var existing in _groupSets)
+        {
+            if (string.Equals(existing.Name, name, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Group set '{name}' is already declared.");
+            }
+        }
+
+        if (_groupSets.Count == MaxGroupSets)
+        {
+            throw new NotSupportedException($"Group set '{name}' would be the {MaxGroupSets + 1}th: a runtime declares at most {MaxGroupSets}.");
+        }
+
+        var set = new GroupSetDeclaration(name);
+        configure(new GroupSetBuilder(set));
+
+        // Ordinal name order, the catalog's: a set's index here is the one its SOURCES records carry.
+        var at = 0;
+        while (at < _groupSets.Count && string.CompareOrdinal(_groupSets[at].Name, name) < 0)
+        {
+            at++;
+        }
+
+        _groupSets.Insert(at, set);
         return this;
     }
 
@@ -638,6 +685,96 @@ public sealed class SubscriptionsRegistry
                 $"Source '{_sources[0].Name}' is declared, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
                 "travels as owner fields on the entity that owns it.");
         }
+
+        RefuseUnbuiltGroups();
+    }
+
+    /// <summary>The most group sets a runtime declares: a key change is identified by (netId, set) in 40 bits.</summary>
+    internal const int MaxGroupSets = 256;
+
+    /// <summary>The most keys a session holds per set.</summary>
+    internal const int MaxGroupsPerSessionLimit = 1024;
+
+    /// <summary>
+    /// The group refusals that need no schema (14 § 3.8): a set with no selector, an explicit or shared one (step 4.3), a set no member joins, an interest
+    /// in a set nobody declared, groups on an observer that is not a Sphere, and a declaration without its per-session bound.
+    /// </summary>
+    private void RefuseUnbuiltGroups()
+    {
+        foreach (var set in _groupSets)
+        {
+            if (set.Region == null)
+            {
+                throw new NotSupportedException(
+                    $"Group set '{set.Name}' declares no Region. Region sets are built; explicit and shared sets (SubscribeRequest, SetSources) are not yet.");
+            }
+
+            if (set.Members.Count == 0)
+            {
+                throw new InvalidOperationException($"Group set '{set.Name}' names no member archetype: declare one with .Member<T>(m => m.Key(...)).");
+            }
+        }
+
+        var interests = 0;
+        foreach (var profile in _profiles)
+        {
+            interests += CountGroupInterests(profile.Name, profile.Observers);
+            foreach (var variant in profile.Variants.Values)
+            {
+                interests += CountGroupInterests(profile.Name, variant.Observers);
+            }
+        }
+
+        if (_groupSets.Count > 0 && Options.MaxGroupsPerSession > MaxGroupsPerSessionLimit)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.MaxGroupsPerSession = {Options.MaxGroupsPerSession}: at most {MaxGroupsPerSessionLimit}. Each session holds "
+                + "sets × MaxGroupsPerSession keys and cursors, committed and pending, whether it uses them or not.");
+        }
+
+        if (_groupSets.Count > 0 && Options.MaxGroupsPerSession <= 0)
+        {
+            throw new InvalidOperationException(
+                $"Group set '{_groupSets[0].Name}' is declared and SubscriptionsOptions.MaxGroupsPerSession is not set. It bounds the one per-session cost a "
+                + "group set has — the keys a session holds and their fill cursors — and there is no default that suits every application.");
+        }
+
+        if (interests > 0 && _groupSets.Count == 0)
+        {
+            throw new InvalidOperationException("A profile names a group set, and none is declared: declare it with subs.Groups(name, ...).");
+        }
+    }
+
+    private int CountGroupInterests(string profile, IReadOnlyList<ObserverDeclaration> observers)
+    {
+        var count = 0;
+        foreach (var observer in observers)
+        {
+            foreach (var interest in observer.GroupInterests)
+            {
+                if (observer.Kind != ObserverKind.Sphere)
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile}' names group set '{interest.Set}' on a {observer.Kind} observer. Groups are built for Sphere observers; a World "
+                        + "session already holds everything, and the ClientRegion's hull test is not built yet.");
+                }
+
+                var found = false;
+                foreach (var set in _groupSets)
+                {
+                    found |= string.Equals(set.Name, interest.Set, StringComparison.Ordinal);
+                }
+
+                if (!found)
+                {
+                    throw new InvalidOperationException($"Profile '{profile}' names group set '{interest.Set}', which is not declared.");
+                }
+
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private void ThrowIfFrozen()

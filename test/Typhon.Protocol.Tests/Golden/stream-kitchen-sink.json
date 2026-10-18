@@ -262,6 +262,8 @@
       },
       "acks": [],
       "sources": [],
+      "groups": [],
+      "completeGroups": [],
       "aggregates": [
         {
           "grid": 0,
@@ -530,6 +532,33 @@
           "requestId": 9,
           "status": 0,
           "code": 0
+        }
+      ],
+      "groups": [
+        {
+          "kind": 2,
+          "set": 1,
+          "key": "-7"
+        },
+        {
+          "kind": 2,
+          "set": 0,
+          "key": "3"
+        },
+        {
+          "kind": 3,
+          "set": 0,
+          "key": "99"
+        }
+      ],
+      "completeGroups": [
+        {
+          "set": 0,
+          "key": "3"
+        },
+        {
+          "set": 1,
+          "key": "-7"
         }
       ],
       "aggregates": [
@@ -869,6 +898,19 @@
       },
       "acks": [],
       "sources": [],
+      "groups": [
+        {
+          "kind": 3,
+          "set": 1,
+          "key": "-7"
+        }
+      ],
+      "completeGroups": [
+        {
+          "set": 0,
+          "key": "3"
+        }
+      ],
       "aggregates": [
         {
           "grid": 0,
@@ -973,6 +1015,19 @@
       "self": null,
       "acks": [],
       "sources": [],
+      "groups": [
+        {
+          "kind": 2,
+          "set": 1,
+          "key": "5"
+        }
+      ],
+      "completeGroups": [
+        {
+          "set": 1,
+          "key": "5"
+        }
+      ],
       "aggregates": [
         {
           "grid": 0,

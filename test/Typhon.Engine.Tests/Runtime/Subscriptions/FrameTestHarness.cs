@@ -478,6 +478,14 @@ sealed unsafe class FrameHarness : IDisposable
             Mix(code);
         }
 
+        public void Group(byte kind, uint set, long key)
+        {
+            Mix(12);
+            Mix(kind);
+            Mix(set);
+            Mix((ulong)key);
+        }
+
         public void BeginAggregate(CatalogGrid grid, bool reset)
         {
             Mix(9);
@@ -1060,6 +1068,17 @@ sealed class FrameLog : ITickSink
     /// <inheritdoc />
     public void Source(ushort requestId, byte status, ushort code) => Calls.Add($"source {requestId}");
 
+    /// <summary>Every group record decoded so far, in stream order: kind, set and key.</summary>
+    public List<(byte Kind, uint Set, long Key)> Groups { get; } = [];
+
+    /// <inheritdoc />
+    public void Group(byte kind, uint set, long key)
+    {
+        _inSelf = false;
+        Groups.Add((kind, set, key));
+        Calls.Add($"group {kind} {set} {key}");
+    }
+
     /// <inheritdoc />
     public void BeginAggregate(CatalogGrid grid, bool reset) => Calls.Add($"beginAggregate {grid.Idx}");
 
@@ -1142,6 +1161,8 @@ sealed class FrameLog : ITickSink
         public void Ack(ushort seq, byte reason) => _log.Ack(seq, reason);
 
         public void Source(ushort requestId, byte status, ushort code) => _log.Source(requestId, status, code);
+
+        public void Group(byte kind, uint set, long key) => _log.Group(kind, set, key);
 
         public void BeginAggregate(CatalogGrid grid, bool reset) => _log.BeginAggregate(grid, reset);
 

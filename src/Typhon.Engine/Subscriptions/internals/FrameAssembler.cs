@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -123,6 +124,18 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
     internal long EmptyCellsSkipped;
 
+    /// <summary>Group sets (14 § 3.8): the current session's member events since its last frame, folded per identity, for the keys it holds.</summary>
+    internal readonly Dictionary<uint, GroupFold> GroupFolds = [];
+
+    /// <summary>Group sets: the current session's <c>GROUP_COMPLETE</c> and <c>GROUP_RELEASED</c> records for its next frame, in the order they were decided.</summary>
+    internal readonly List<GroupRecord> GroupRecords = [];
+
+    /// <summary>Group sets: the regions the current session meets in one set this frame — the worker's own, as sessions gather in parallel.</summary>
+    internal GroupMet[] GroupMet = new GroupMet[16];
+
+    /// <summary>Group sets: one fill's members, gathered and sorted by netId.</summary>
+    internal GroupFillMember[] FillMembers = new GroupFillMember[64];
+
     private struct RecordList
     {
         public FrameRecord* Items;
@@ -170,6 +183,54 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         {
             _lists[i].Count = 0;
         }
+
+        GroupFolds.Clear();
+        GroupRecords.Clear();
+    }
+
+    /// <summary>One archetype's sub-list, writable in place: what the group post-pass compacts (14 § 3.8).</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="kind">The sub-list.</param>
+    /// <returns>The records.</returns>
+    public Span<FrameRecord> MutableList(int archetype, FrameListKind kind)
+    {
+        ref var list = ref _lists[(archetype * 4) + (int)kind];
+        return new Span<FrameRecord>(list.Items, list.Count);
+    }
+
+    /// <summary>Shortens one archetype's sub-list to its first <paramref name="count"/> records.</summary>
+    public void Truncate(int archetype, FrameListKind kind, int count)
+    {
+        ref var list = ref _lists[(archetype * 4) + (int)kind];
+        list.Count = Math.Min(list.Count, count);
+    }
+
+    /// <summary>
+    /// Removes adjacent records of one netId from a sorted sub-list, keeping the first — the duplicate a geometric and a group path both decided, identically,
+    /// for one entity (14 § 3.8). A state record's change groups are OR-ed into the one kept.
+    /// </summary>
+    public void DedupeSorted(int archetype, FrameListKind kind)
+    {
+        ref var list = ref _lists[(archetype * 4) + (int)kind];
+        if (list.Count < 2)
+        {
+            return;
+        }
+
+        var items = list.Items;
+        var write = 0;
+        for (var read = 1; read < list.Count; read++)
+        {
+            if (items[read].NetId == items[write].NetId)
+            {
+                items[write].GroupMask |= items[read].GroupMask;
+                continue;
+            }
+
+            items[++write] = items[read];
+        }
+
+        list.Count = write + 1;
     }
 
     /// <summary>How many records one archetype's sub-list holds.</summary>
@@ -1394,6 +1455,14 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 }
 
                 scratch.SortByNetId(a, kind);
+
+                // Only a group member can be decided by both a geometric and a group path: no other archetype's list holds a duplicate.
+                if (HasGroups && _plans[a].GroupKeys.Length > 0)
+                {
+                    scratch.DedupeSorted(a, kind);
+                    count = scratch.Count(a, kind);
+                }
+
                 records += count;
             }
         }

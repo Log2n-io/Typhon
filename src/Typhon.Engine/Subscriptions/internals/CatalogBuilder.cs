@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using Typhon.Protocol;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -57,10 +58,11 @@ internal static class CatalogBuilder
     /// The scheduled systems' names, in schedule order: the labels of the built-in <c>typhon.system.mean</c>. Empty omits that metric, which would otherwise
     /// be a vector metric carrying no values.
     /// </param>
+    /// <param name="groupSets">The compiled group sets (14 § 3.5), by set index; <see langword="null"/> or empty lists none.</param>
     /// <returns>The canonical catalog, its UTF-8 bytes and their digest.</returns>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public static CatalogExport Build(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, string appName, int appRevision, int tickPeriodUs,
-        IReadOnlyList<string> systemNames)
+        IReadOnlyList<string> systemNames, CompiledGroupSet[] groupSets = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         plans ??= [];
@@ -98,6 +100,7 @@ internal static class CatalogBuilder
 
             // The aggregate tiers' grids (09 § 8): one per distinct tile edge and archetype set, over the spatial world. None without an aggregate.
             Grids = BuildGrids(registry, plans),
+            GroupSets = BuildGroupSets(groupSets),
             Metrics = BuildMetrics(registry, archetypes, systemNames),
         };
 
@@ -225,6 +228,46 @@ internal static class CatalogBuilder
     }
 
     // ── Aggregate grids ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static CatalogGroupSet[] BuildGroupSets(CompiledGroupSet[] sets)
+    {
+        if (sets is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        var result = new CatalogGroupSet[sets.Length];
+        for (var s = 0; s < sets.Length; s++)
+        {
+            var set = sets[s];
+            var members = new int[set.Members.Length];
+            for (var m = 0; m < members.Length; m++)
+            {
+                members[m] = set.Members[m].Plan;
+            }
+
+            result[s] = new CatalogGroupSet
+            {
+                Name = set.Name, Selector = CatalogGroupSet.RegionSelector, Key = KeyCodecOf(set.Region.Key.Type), Members = members,
+            };
+        }
+
+        return result;
+    }
+
+    // The region key is the set's: a member key of another integer type is compared with it as a 64-bit value.
+    private static string KeyCodecOf(FieldType type) => type switch
+    {
+        FieldType.Byte => "i8",
+        FieldType.UByte => "u8",
+        FieldType.Short => "i16",
+        FieldType.UShort or FieldType.Char => "u16",
+        FieldType.Int => "i32",
+        FieldType.UInt => "u32",
+        FieldType.Long => "i64",
+        FieldType.ULong => "u64",
+        _ => throw new InvalidOperationException($"A group key of type {type} reached the catalog; the compiler admits integers only."),
+    };
 
     private static CatalogGrid[] BuildGrids(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans)
     {

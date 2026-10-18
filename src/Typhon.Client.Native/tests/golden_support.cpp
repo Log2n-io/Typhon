@@ -254,6 +254,11 @@ void RecordingSink::Source(std::uint32_t requestId, std::uint8_t status, std::ui
     log.push_back(Entry("source", {{"requestId", Num(requestId)}, {"status", Num(status)}, {"code", Num(code)}}));
 }
 
+void RecordingSink::Group(std::uint8_t kind, std::uint32_t set, std::int64_t key)
+{
+    log.push_back(Entry("group", {{"kind", Num(kind)}, {"set", Num(set)}, {"key", Str(std::to_string(key))}}));
+}
+
 void RecordingSink::BeginAggregate(const client::GridPlan& grid, bool reset)
 {
     log.push_back(Entry("beginAggregate", {{"grid", Num(grid.idx)}, {"reset", Value::MakeBool(reset)}}));

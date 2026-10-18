@@ -106,6 +106,12 @@ internal struct PushEvent : IPushEvent<PushEvent>
     /// <summary>Distance LOD: the far flush carries the motion segment.</summary>
     public const byte FlushSegment = 32;
 
+    /// <summary>
+    /// A member's group key changed this tick (14 § 3.8) — its old and new keys are in the tick's key-change list. Never dropped as a no-op: a session holding
+    /// either key has to hear of it.
+    /// </summary>
+    public const byte KeyChanged = 64;
+
     // Laid out to 48 bytes, a key's 42 bits in eight and six bytes: the struct is copied into the index and read by every session that reaches its cell.
     private nint _block;
 

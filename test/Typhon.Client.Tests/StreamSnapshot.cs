@@ -253,11 +253,17 @@ internal static class StreamSnapshot
             {
                 ["requestId"] = x.RequestId, ["status"] = x.Status, ["code"] = x.Code,
             })]),
+            ["groups"] = new JsonArray([.. store.Groups.Select(x => (JsonNode)new JsonObject { ["kind"] = x.Kind, ["set"] = x.Set, ["key"] = Key(x.Key) })]),
+            ["completeGroups"] = new JsonArray([.. store.CompleteGroups.OrderBy(x => x.Set).ThenBy(x => x.Key)
+                .Select(x => (JsonNode)new JsonObject { ["set"] = x.Set, ["key"] = Key(x.Key) })]),
             ["aggregates"] = aggregates,
             ["metrics"] = metrics,
             ["anomalies"] = store.Anomalies,
         };
     }
+
+    // A group key as decimal text, as every SDK's snapshot writes it: never through a double.
+    private static string Key(long key) => key.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private static JsonNode FieldJson(ArchetypeStore a, FieldPlan f, int slot) => f.ValueKind switch
     {

@@ -147,6 +147,35 @@ public class GoldenCatalogRefusalTests
             }
         }));
 
+        // Group sets (14 § 3.5): two, so their order is a rule; each refused text breaks one.
+        var withGroups = Canonical(Base(groupSets:
+        [
+            new CatalogGroupSet { Name = "zone", Selector = CatalogGroupSet.RegionSelector, Key = "i32", Members = [1, 0] },
+            new CatalogGroupSet { Name = "crew", Selector = CatalogGroupSet.RegionSelector, Key = "u16", Members = [1] },
+        ]));
+        Accept(cases, "group-sets", withGroups);
+        Refuse(cases, "group-set-unknown-selector", "selector", Mutate(withGroups, c => c["groupSets"]![0]!["selector"] = "explicit"));
+        Refuse(cases, "group-set-float-key", "not an integer codec", Mutate(withGroups, c => c["groupSets"]![0]!["key"] = "f32"));
+        Refuse(cases, "group-set-member-out-of-range", "does not exist or is listed twice",
+            Mutate(withGroups, c => c["groupSets"]![0]!["members"]![0] = 2));
+        Refuse(cases, "group-set-member-twice", "does not exist or is listed twice", Mutate(withGroups, c => c["groupSets"]![1]!["members"] = new JsonArray(0, 0)));
+        Refuse(cases, "group-set-no-member", "has no member", Mutate(withGroups, c => c["groupSets"]![0]!["members"] = new JsonArray()));
+        Refuse(cases, "group-set-members-descending", canonical, Mutate(withGroups, c => c["groupSets"]![1]!["members"] = new JsonArray(1, 0)));
+        Accept(cases, "group-sets-null", Mutate(baseText, c => c["groupSets"] = null));
+        Refuse(cases, "group-sets-empty-list", canonical, Mutate(baseText, c => c["groupSets"] = new JsonArray()));
+        Refuse(cases, "group-set-idx-not-its-position", canonical, Mutate(withGroups, c => c["groupSets"]![1]!["idx"] = 0));
+        Refuse(cases, "group-set-empty-name", "name is empty", Mutate(withGroups, c => c["groupSets"]![0]!["name"] = ""));
+        Refuse(cases, "group-set-no-selector", "selector", Mutate(withGroups, c => c["groupSets"]![0]!.AsObject().Remove("selector")));
+        Refuse(cases, "group-sets-out-of-order", canonical, Mutate(withGroups, c =>
+        {
+            var sets = c["groupSets"]!.AsArray();
+            var first = sets[0]!.DeepClone();
+            sets[0] = sets[1]!.DeepClone();
+            sets[1] = first;
+            sets[0]!["idx"] = 0;
+            sets[1]!["idx"] = 1;
+        }));
+
         Golden.Assert("catalog-refusals", [], new JsonObject
         {
             ["description"] = "Raw catalog JSON texts a client must accept or refuse at WELCOME; each refused text breaks exactly the rule its name says. "
@@ -155,7 +184,8 @@ public class GoldenCatalogRefusalTests
         });
     }
 
-    private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null, CatalogField[] extras = null) => new()
+    private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null, CatalogField[] extras = null,
+        CatalogGroupSet[] groupSets = null) => new()
     {
         Protocol = new CatalogProtocolVersion { Major = 3 },
         App = new CatalogApp { Name = "Refusals", Revision = 1 },
@@ -195,6 +225,7 @@ public class GoldenCatalogRefusalTests
             },
         ],
         Grids = [new CatalogGrid { TileCells = 2, Archetypes = [0] }],
+        GroupSets = groupSets,
         RealmKinds = [""],
         Metrics =
         [

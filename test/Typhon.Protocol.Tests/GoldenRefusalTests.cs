@@ -61,7 +61,12 @@ public class GoldenRefusalTests
         Tick(cases, "block-content-shorter-than-declared", Block(BlockTypes.Acks, 0x00, 0xEE));
         Tick(cases, "block-length-beyond-message", [MessageTypes.Tick, 0, 0, 0, 0, 0, BlockTypes.Acks, 0x0A, 0x00]);
         Tick(cases, "aggregate-cell-outside-grid", Block(BlockTypes.Agg, 0x00, 0x00, 0x01, 0x80, 0x02, 0x00, 0x00));
-        Tick(cases, "sources-unknown-status", Block(BlockTypes.Sources, 0x01, 0x01, 0x00, 0x02));
+        Tick(cases, "sources-unknown-status", Block(BlockTypes.Sources, 0x01, 0x04, 0x01, 0x00));
+        Tick(cases, "sources-error-truncated", Block(BlockTypes.Sources, 0x01, SourceStatus.Error, 0x01, 0x00));
+        // The kitchen sink declares two group sets: index 2 names none.
+        Tick(cases, "sources-group-set-unknown", Block(BlockTypes.Sources, 0x01, SourceStatus.GroupComplete, 0x02, 0x00));
+        Tick(cases, "sources-group-key-truncated", Block(BlockTypes.Sources, 0x01, SourceStatus.GroupReleased, 0x00));
+        Tick(cases, "sources-group-set-past-32-bits", Block(BlockTypes.Sources, 0x01, SourceStatus.GroupComplete, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00));
         Tick(cases, "netid-gap-overflows-32-bits", Block(BlockTypes.Entities, ledger, 0x00, 0x00, 0x00, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x00));
         Tick(cases, "not-a-tick", [MessageTypes.Welcome, 0, 0, 0, 0, 0], CloseCodes.ProtocolError);
         var drone = (byte)Kitchen.ArchetypeByName("Drone").Idx;

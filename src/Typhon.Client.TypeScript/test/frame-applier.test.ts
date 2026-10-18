@@ -16,6 +16,7 @@ import {
   parseCatalog,
   segmentHistoryFor,
   slotOf,
+  SourceStatus,
   TickFlags,
   WireFormatError,
   WireWriter,
@@ -170,6 +171,60 @@ describe('FrameApplier on the exact wire (W32, W33)', () => {
 });
 
 describe('FrameApplier', () => {
+  it('holds a group complete until its release or a RESET, and counts a second completion as an anomaly (14 § 3.5)', () => {
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
+    const groups = (
+      tick: number,
+      flags: number,
+      records: { kind: number; set: number; key: bigint | number }[],
+    ): Uint8Array =>
+      frame({
+        tick,
+        flags,
+        write: (w) => {
+          writeSourcesBlock(w, [], records);
+        },
+      });
+    applier.apply(
+      groups(1, 0, [
+        { kind: SourceStatus.GroupComplete, set: 1, key: -7 },
+        { kind: SourceStatus.GroupReleased, set: 0, key: 3 },
+      ]),
+    );
+    expect(applier.groups.isComplete(1, -7)).toBe(true);
+    expect(applier.groups.isComplete(0, 3)).toBe(false);
+    expect(applier.groups.count).toBe(2);
+    expect(applier.world.anomalies).toBe(0);
+
+    applier.apply(groups(2, 0, [{ kind: SourceStatus.GroupComplete, set: 1, key: -7n }]));
+    expect(applier.world.anomalies).toBe(1);
+    expect(applier.groups.isComplete(1, -7)).toBe(true);
+
+    applier.apply(groups(3, 0, []));
+    expect(applier.groups.count).toBe(0);
+
+    applier.apply(groups(4, TickFlags.Reset, [{ kind: SourceStatus.GroupComplete, set: 0, key: 5 }]));
+    expect(applier.groups.isComplete(1, -7)).toBe(false);
+    expect(applier.groups.isComplete(0, 5)).toBe(true);
+    expect(applier.groups.completeGroupCount).toBe(1);
+
+    applier.apply(groups(5, 0, [{ kind: SourceStatus.GroupReleased, set: 0, key: 5 }]));
+    expect(applier.groups.completeGroupCount).toBe(0);
+  });
+
+  it('refuses a group record naming a set the catalog does not declare', () => {
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
+    const message = frame({
+      tick: 1,
+      write: (w) => {
+        writeSourcesBlock(w, [], [{ kind: SourceStatus.GroupComplete, set: plan.groupSets.length, key: 1 }]);
+      },
+    });
+    expect(() => {
+      applier.apply(message);
+    }).toThrow(WireFormatError);
+  });
+
   it('keeps slots stable: a slot freed in a frame is reused only in a later one', () => {
     const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [1, 2]));

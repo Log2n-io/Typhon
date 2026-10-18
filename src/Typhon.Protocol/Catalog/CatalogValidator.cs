@@ -168,6 +168,49 @@ public static class CatalogValidator
         }
 
         CheckGrids(c.Grids ?? [], archetypes.Length, problems);
+        CheckGroupSets(c.GroupSets ?? [], archetypes.Length, problems);
+    }
+
+    private static void CheckGroupSets(CatalogGroupSet[] sets, int archetypeCount, List<string> problems)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var s in sets)
+        {
+            if (s == null)
+            {
+                problems.Add("a group set is null");
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(s.Name) || !names.Add(s.Name))
+            {
+                problems.Add($"group set '{s.Name}': the name is empty or listed twice");
+            }
+
+            if (s.Selector != CatalogGroupSet.RegionSelector)
+            {
+                problems.Add($"group set '{s.Name}': selector '{s.Selector}' is unknown");
+            }
+
+            if (s.Key == null || !CatalogGroupSet.KeyCodecs.Contains(s.Key))
+            {
+                problems.Add($"group set '{s.Name}': key '{s.Key}' is not an integer codec");
+            }
+
+            var seen = new HashSet<int>();
+            if (s.Members is not { Length: > 0 })
+            {
+                problems.Add($"group set '{s.Name}' has no member");
+            }
+
+            foreach (var idx in s.Members ?? [])
+            {
+                if (idx < 0 || idx >= archetypeCount || !seen.Add(idx))
+                {
+                    problems.Add($"group set '{s.Name}': member archetype index {idx} does not exist or is listed twice");
+                }
+            }
+        }
     }
 
     private static void CheckCommand(CatalogCommand cmd, Dictionary<string, string[]> enums, int maxBytes, List<string> problems)

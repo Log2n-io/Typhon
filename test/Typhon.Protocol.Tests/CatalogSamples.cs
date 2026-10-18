@@ -269,6 +269,13 @@ internal static class CatalogSamples
             },
         ],
         Grids = [new CatalogGrid { TileCells = 4, Archetypes = [0, 2] }],
+
+        // Declared out of name order, members out of index order: canonicalization sorts both (crew is set 0, zone set 1).
+        GroupSets =
+        [
+            new CatalogGroupSet { Name = "zone", Selector = CatalogGroupSet.RegionSelector, Key = "i32", Members = [2, 0] },
+            new CatalogGroupSet { Name = "crew", Selector = CatalogGroupSet.RegionSelector, Key = "u16", Members = [1] },
+        ],
         Metrics =
         [
             BuiltInMetrics.Create(BuiltInMetrics.ReservedIdx("typhon.tick.p50")),

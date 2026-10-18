@@ -165,6 +165,8 @@ public class EngineStreamGoldenTests
 
         public void Source(ushort requestId, byte status, ushort code) => _calls.Add($"source {requestId}");
 
+        public void Group(byte kind, uint set, long key) => _calls.Add($"group {kind} {set} {key}");
+
         public void BeginAggregate(CatalogGrid grid, bool reset) => _calls.Add($"beginAggregate {grid.Idx}");
 
         public void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts) => _calls.Add($"aggregateCell {cell}");

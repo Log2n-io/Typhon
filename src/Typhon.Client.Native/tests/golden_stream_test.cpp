@@ -12,6 +12,8 @@
 #include "snapshot.hpp"
 #include "test_framework.hpp"
 #include "wire/messages.hpp"
+#include "wire/errors.hpp"
+#include "wire/writer.hpp"
 
 using namespace typhon::client;
 using namespace typhon::test;
@@ -60,6 +62,10 @@ public:
     void Self(const ArchetypePlan*, std::uint32_t netId, std::uint32_t, std::uint8_t) override { calls_.push_back("self " + std::to_string(netId)); }
     void Ack(std::uint32_t seq, std::uint8_t) override { calls_.push_back("ack " + std::to_string(seq)); }
     void Source(std::uint32_t requestId, std::uint8_t, std::uint32_t) override { calls_.push_back("source " + std::to_string(requestId)); }
+    void Group(std::uint8_t kind, std::uint32_t set, std::int64_t key) override
+    {
+        calls_.push_back("group " + std::to_string(kind) + " " + std::to_string(set) + " " + std::to_string(key));
+    }
     void BeginAggregate(const GridPlan& grid, bool) override { calls_.push_back("beginAggregate " + std::to_string(grid.idx)); }
     void AggregateCell(std::uint32_t cell, std::span<const std::uint32_t>) override { calls_.push_back("aggregateCell " + std::to_string(cell)); }
     void Metric(const MetricPlan& metric, int, double) override { calls_.push_back("metric " + metric.name); }
@@ -311,4 +317,68 @@ TEST(GoldenMotion_EvaluationMatchesTheReferenceBitForBit)
             CheckEntities(batch, *testCase.Find("entities"), context + " in batch");
         }
     }
+}
+
+namespace {
+
+struct GroupRecordInput {
+    std::uint8_t kind;
+    std::uint32_t set;
+    std::int64_t key;
+};
+
+std::vector<std::uint8_t> GroupsFrame(std::uint32_t tick, std::uint8_t flags, std::initializer_list<GroupRecordInput> records)
+{
+    WireWriter w;
+    w.U8(MessageType::Tick);
+    w.U32(tick);
+    w.U8(flags);
+    w.U8(BlockType::Sources);
+    const std::size_t mark = w.BeginLengthPrefixed();
+    w.Varu(static_cast<std::uint32_t>(records.size()));
+    for (const GroupRecordInput& r : records)
+    {
+        w.U8(r.kind);
+        w.Varu(r.set);
+        w.Vari64(static_cast<std::uint64_t>(r.key));
+    }
+
+    w.EndLengthPrefixed(mark);
+    return {w.Written().begin(), w.Written().end()};
+}
+
+}  // namespace
+
+// 14 § 3.5: complete from GROUP_COMPLETE to GROUP_RELEASED or a RESET; a release never completed is a release mid-fill; a second completion is an anomaly.
+TEST(Groups_AGroupIsCompleteUntilReleasedOrResetAndASecondCompletionIsAnAnomaly)
+{
+    FrameApplier applier(PlanOf("catalog-kitchen-sink"));
+    applier.Apply(GroupsFrame(1, 0, {{SourceStatus::GroupComplete, 1, -7}, {SourceStatus::GroupReleased, 0, 3}}));
+    CHECK(applier.IsGroupComplete(1, -7));
+    CHECK(!applier.IsGroupComplete(0, 3));
+    CHECK_EQ(applier.Groups().size(), 2u);
+    CHECK_EQ(applier.World().anomalies, 0u);
+
+    applier.Apply(GroupsFrame(2, 0, {{SourceStatus::GroupComplete, 1, -7}}));
+    CHECK_EQ(applier.World().anomalies, 1u);
+    CHECK(applier.IsGroupComplete(1, -7));
+
+    applier.Apply(GroupsFrame(3, 0, {}));
+    CHECK_EQ(applier.Groups().size(), 0u);
+
+    applier.Apply(GroupsFrame(4, TickFlags::Reset, {{SourceStatus::GroupComplete, 0, 5}}));
+    CHECK(!applier.IsGroupComplete(1, -7));
+    CHECK(applier.IsGroupComplete(0, 5));
+    CHECK_EQ(applier.CompleteGroups().size(), 1u);
+
+    applier.Apply(GroupsFrame(5, 0, {{SourceStatus::GroupReleased, 0, 5}}));
+    CHECK_EQ(applier.CompleteGroups().size(), 0u);
+}
+
+TEST(Groups_ARecordNamingAnUndeclaredSetIsMalformed)
+{
+    const auto plan = PlanOf("catalog-kitchen-sink");
+    FrameApplier applier(plan);
+    const auto message = GroupsFrame(1, 0, {{SourceStatus::GroupComplete, static_cast<std::uint32_t>(plan->GroupSets().size()), 1}});
+    CHECK_THROWS(WireFormatError, applier.Apply(message));
 }

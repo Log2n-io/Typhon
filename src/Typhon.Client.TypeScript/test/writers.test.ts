@@ -283,6 +283,7 @@ describe('a released reader', () => {
       self: noop,
       ack: noop,
       source: noop,
+      group: noop,
       beginAggregate: noop,
       aggregateCell: noop,
       metric: noop,

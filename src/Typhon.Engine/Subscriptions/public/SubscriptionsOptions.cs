@@ -216,6 +216,16 @@ public sealed class SubscriptionsOptions
     public int EnterBudgetPerFrame { get; init; } = 500;
 
     /// <summary>
+    /// The most groups one session holds in each group set at once (14 § 3, P2): the bound on a group set's only per-session cost, the held keys and their
+    /// fill cursors. Required when a group set is declared — 0, the default, refuses to start then.
+    /// </summary>
+    /// <remarks>
+    /// A region the session meets past this many is not held, and counted. A session's group state costs about 24 B a key, twice (committed and
+    /// pending), per declared set.
+    /// </remarks>
+    public int MaxGroupsPerSession { get; init; }
+
+    /// <summary>
     /// The most observers one session may hold at once. Default: 4.
     /// </summary>
     /// <remarks>

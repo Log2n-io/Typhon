@@ -3038,6 +3038,33 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Whether membership-changing writes are recorded. See the block above.</summary>
     public bool TrackStructureChanges;
 
+    /// <summary>
+    /// The component slots holding a group set's key field (Subscriptions 14 § 3.8): a write to one can change which groups hold the entity, so the dirty
+    /// path marks it like a position write — the projection then reads the key the same tick. 0 when no set declares a field of this archetype.
+    /// </summary>
+    public int GroupKeySlotMask { get; private set; }
+
+    /// <summary>
+    /// The component slots a dirty write marks as a structure change: the spatial slot when the archetype is spatially indexed, and every group key slot.
+    /// One test in <see cref="SetDirty(int, int, int)"/> for both.
+    /// </summary>
+    private int _structureSlotMask;
+
+    /// <summary>Marks a component slot as holding a group key field: a write to it is a structure change from now on.</summary>
+    /// <param name="slot">The component slot.</param>
+    internal void AddGroupKeySlot(int slot)
+    {
+        GroupKeySlotMask |= 1 << slot;
+        _structureSlotMask |= 1 << slot;
+    }
+
+    /// <summary>Forgets every group key slot — the mutant a test makes to show the tap is load-bearing.</summary>
+    internal void ClearGroupKeySlotsForTest()
+    {
+        GroupKeySlotMask = 0;
+        _structureSlotMask = SpatialSlot.HasSpatialIndex ? 1 << SpatialSlot.Slot : 0;
+    }
+
     /// <summary>Per-entity structure marks, index <c>chunkId * 64 + slot</c> — one bitmap word per cluster.</summary>
     public DirtyBitmap ClusterStructureChanges;
 
@@ -3865,8 +3892,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         // A position written through this path can move the entity across a view's boundary, so it is a STRUCTURE change and is marked here, where the
-        // exact slot is known — see PublishStructureChanges.
-        if (componentSlot == SpatialSlot.Slot && SpatialSlot.HasSpatialIndex)
+        // exact slot is known — see PublishStructureChanges. A group key, the same: it moves the entity between groups.
+        if ((_structureSlotMask & bit) != 0)
         {
             NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
         }
@@ -3892,7 +3919,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             Interlocked.Or(ref WrittenSlotUnion, bit);
         }
 
-        if (componentSlot == SpatialSlot.Slot && SpatialSlot.HasSpatialIndex)
+        if ((_structureSlotMask & bit) != 0)
         {
             NoteStructureSlots(clusterChunkId, slots);
         }
@@ -3925,8 +3952,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             Interlocked.Exchange(ref WrittenSlotUnion, AllSlotsWritten);
         }
 
-        // The component is unknown, so it may have been the spatial one: marked, for the same reason the column mask is poisoned.
-        if (SpatialSlot.HasSpatialIndex)
+        // The component is unknown, so it may have been the spatial one or a group key: marked, for the same reason the column mask is poisoned.
+        if (_structureSlotMask != 0)
         {
             NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
         }
@@ -10789,6 +10816,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 Descriptor = descriptor,
             };
             ResolveRealmKey(slotToTable, ref SpatialSlot);
+            _structureSlotMask |= 1 << slot;
 
             // Realm 0's state eagerly only for an UNKEYED archetype, which lives nowhere else: a keyed one gets it on its first cluster there, like any
             // realm — an eager realm-0 state it never uses would make every second realm take the multi-realm reach pass and allocate a pool for

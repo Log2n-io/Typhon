@@ -108,6 +108,7 @@ public:
     void Self(const ArchetypePlan*, std::uint32_t, std::uint32_t, std::uint8_t) override {}
     void Ack(std::uint32_t, std::uint8_t) override {}
     void Source(std::uint32_t, std::uint8_t, std::uint32_t) override {}
+    void Group(std::uint8_t, std::uint32_t, std::int64_t) override {}
     void BeginAggregate(const GridPlan&, bool) override {}
     void AggregateCell(std::uint32_t, std::span<const std::uint32_t>) override {}
     void Metric(const MetricPlan&, int, double) override {}
@@ -219,6 +220,7 @@ void FrameApplier::BeginTick(std::uint32_t tick, std::uint8_t flags, std::uint32
     leaveArchetypes_.clear();
     acks_.clear();
     sources_.clear();
+    groups_.clear();
     stats_.received = false;
     self_.BeginFrame();
     const bool reset = (flags & TickFlags::Reset) != 0;
@@ -237,6 +239,7 @@ void FrameApplier::BeginTick(std::uint32_t tick, std::uint8_t flags, std::uint32
         }
 
         self_.Clear();
+        completeGroups_.clear();
 
         // After the clear and before any record applies, so a consumer that drops its netIds here is never handed one from the refill.
         if (options_.onReset)
@@ -340,6 +343,31 @@ void FrameApplier::Self(const ArchetypePlan* archetype, std::uint32_t netId, std
 void FrameApplier::Ack(std::uint32_t seq, std::uint8_t reason) { acks_.push_back({seq, reason}); }
 
 void FrameApplier::Source(std::uint32_t requestId, std::uint8_t status, std::uint32_t code) { sources_.push_back({requestId, status, code}); }
+
+void FrameApplier::Group(std::uint8_t kind, std::uint32_t set, std::int64_t key)
+{
+    groups_.push_back({kind, set, key});
+    const std::pair<std::uint32_t, std::int64_t> group{set, key};
+    const auto at = std::lower_bound(completeGroups_.begin(), completeGroups_.end(), group);
+    const bool held = at != completeGroups_.end() && *at == group;
+    if (kind == SourceStatus::GroupComplete)
+    {
+        // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
+        if (held)
+        {
+            world_.anomalies++;
+        }
+        else
+        {
+            completeGroups_.insert(at, group);
+        }
+    }
+    else if (held)
+    {
+        // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
+        completeGroups_.erase(at);
+    }
+}
 
 void FrameApplier::BeginAggregate(const GridPlan& grid, bool reset)
 {

@@ -218,6 +218,10 @@ export class RecordingSink implements TickSink, CommandSink {
     this.log.push({ call: 'source', requestId, status, code });
   }
 
+  group(kind: number, set: number, key: bigint): void {
+    this.log.push({ call: 'group', kind, set, key: key.toString() });
+  }
+
   beginAggregate(grid: GridPlan, reset: boolean): void {
     this.log.push({ call: 'beginAggregate', grid: grid.idx, reset });
   }

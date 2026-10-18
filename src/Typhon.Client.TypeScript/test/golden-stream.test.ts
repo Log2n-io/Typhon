@@ -172,6 +172,12 @@ function render(applier: FrameApplier, events: LogEntry[]): LogEntry {
       status: sources.status[i],
       code: sources.code[i],
     })),
+    groups: Array.from({ length: applier.groups.count }, (_, i) => ({
+      kind: applier.groups.kind[i],
+      set: applier.groups.set[i],
+      key: applier.groups.key[i]!.toString(),
+    })),
+    completeGroups: applier.groups.completeGroups().map((g) => ({ set: g.set, key: g.key.toString() })),
     aggregates: applier.grids.map((g) => {
       const cells: LogEntry[] = [];
       for (let cell = 0; cell < g.cellCount; cell++) {

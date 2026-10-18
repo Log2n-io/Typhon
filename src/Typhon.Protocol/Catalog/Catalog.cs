@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using System.Collections.Generic;
 
 namespace Typhon.Protocol;
@@ -105,6 +106,13 @@ public sealed class Catalog
 
     /// <summary>The spatial grids.</summary>
     public CatalogGrid[] Grids { get; init; }
+
+    /// <summary>
+    /// The group sets (14 § 3.5), in canonical order: a <c>GROUP_COMPLETE</c> or <c>GROUP_RELEASED</c> record names its set by index here. Absent when none
+    /// is declared, so a catalog without groups hashes as it did before them.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CatalogGroupSet[] GroupSets { get; init; }
 
     /// <summary>The metrics the server publishes, in index order.</summary>
     public CatalogMetric[] Metrics { get; init; }

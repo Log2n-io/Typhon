@@ -156,6 +156,42 @@
       "code": 404
     },
     {
+      "call": "group",
+      "kind": 2,
+      "set": 1,
+      "key": "-70000"
+    },
+    {
+      "call": "group",
+      "kind": 3,
+      "set": 0,
+      "key": "65535"
+    },
+    {
+      "call": "group",
+      "kind": 2,
+      "set": 0,
+      "key": "0"
+    },
+    {
+      "call": "group",
+      "kind": 2,
+      "set": 1,
+      "key": "-9223372036854775808"
+    },
+    {
+      "call": "group",
+      "kind": 2,
+      "set": 1,
+      "key": "9223372036854775807"
+    },
+    {
+      "call": "group",
+      "kind": 3,
+      "set": 0,
+      "key": "9007199254740993"
+    },
+    {
       "call": "beginAggregate",
       "grid": 0,
       "reset": true

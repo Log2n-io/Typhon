@@ -192,14 +192,33 @@ void TickReader::ReadMessage(std::span<const std::uint8_t> message, TickSink& si
             case BlockType::Sources:
                 for (std::uint32_t n = r.Varu(); n > 0; n--)
                 {
-                    const std::uint32_t requestId = r.U16();
-                    const std::uint8_t status = r.U8();
-                    if (status > SourceStatus::Error)
+                    const std::uint8_t kind = r.U8();
+                    switch (kind)
                     {
-                        throw Malformed("SOURCES status " + std::to_string(status) + " is unknown");
-                    }
+                        case SourceStatus::Applied:
+                            sink.Source(r.U16(), kind, 0);
+                            break;
+                        case SourceStatus::Error:
+                        {
+                            const std::uint32_t requestId = r.U16();
+                            sink.Source(requestId, kind, r.U16());
+                            break;
+                        }
+                        case SourceStatus::GroupComplete:
+                        case SourceStatus::GroupReleased:
+                        {
+                            const std::uint32_t set = r.Varu();
+                            if (set >= plan_->GroupSets().size())
+                            {
+                                throw Malformed("SOURCES group set " + std::to_string(set) + " is not in the catalog");
+                            }
 
-                    sink.Source(requestId, status, status == SourceStatus::Error ? r.U16() : 0);
+                            sink.Group(kind, set, static_cast<std::int64_t>(r.Vari64()));
+                            break;
+                        }
+                        default:
+                            throw Malformed("SOURCES record kind " + std::to_string(kind) + " is unknown");
+                    }
                 }
 
                 break;

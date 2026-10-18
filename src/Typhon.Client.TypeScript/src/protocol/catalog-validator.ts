@@ -5,6 +5,7 @@ import type {
   CatalogCommand,
   CatalogField,
   CatalogGrid,
+  CatalogGroupSet,
   CatalogMetric,
   CatalogPosition,
 } from './catalog.js';
@@ -141,6 +142,7 @@ export function validateCatalog(c: Catalog, problems: string[]): void {
   }
 
   checkGrids(c.grids, c.archetypes.length, problems);
+  checkGroupSets(c.groupSets ?? [], c.archetypes.length, problems);
 }
 
 /**
@@ -210,6 +212,18 @@ export function checkCanonical(c: Catalog, problems: string[]): void {
     // Canonical order is total, so comparing neighbours finds a duplicate too: it compares equal to the grid before it.
     if (g.idx !== i || (i > 0 && compareGrids(c.grids[i - 1]!, g) >= 0)) {
       fail(`grid ${g.idx} is not at its sorted position, or duplicates the grid before it`);
+    }
+  });
+
+  const sets = c.groupSets ?? [];
+  if (c.groupSets !== undefined && sets.length === 0) {
+    fail('groupSets is listed and empty: a catalog with no group set omits it');
+  }
+
+  sets.forEach((s, i) => {
+    const sorted = s.members.every((m, j) => j === 0 || s.members[j - 1]! <= m);
+    if (s.idx !== i || (i > 0 && !(sets[i - 1]!.name < s.name)) || !sorted) {
+      fail(`group set '${s.name}' is not at its ordinal position, or its members are not ascending`);
     }
   });
 }
@@ -581,6 +595,40 @@ function checkGrids(grids: readonly CatalogGrid[], archetypeCount: number, probl
       shapes.set(key, i);
     }
   });
+}
+
+const GROUP_KEY_CODECS: readonly string[] = ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'u64', 'i64'];
+
+function checkGroupSets(sets: readonly CatalogGroupSet[], archetypeCount: number, problems: string[]): void {
+  const names = new Set<string>();
+  for (const s of sets) {
+    const where = `group set '${s.name}'`;
+    if (s.name === '' || names.has(s.name)) {
+      problems.push(`${where}: the name is empty or listed twice`);
+    }
+
+    names.add(s.name);
+    if (s.selector !== 'region') {
+      problems.push(`${where}: selector '${s.selector}' is unknown`);
+    }
+
+    if (!GROUP_KEY_CODECS.includes(s.key)) {
+      problems.push(`${where}: key '${s.key}' is not an integer codec`);
+    }
+
+    if (s.members.length === 0) {
+      problems.push(`${where} has no member`);
+    }
+
+    const seen = new Set<number>();
+    for (const idx of s.members) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= archetypeCount || seen.has(idx)) {
+        problems.push(`${where}: member archetype index ${idx} does not exist or is listed twice`);
+      }
+
+      seen.add(idx);
+    }
+  }
 }
 
 /** Each realm kind once (typhon.3): a `REALM` block names its kind by index. Absent means the default `""` alone. */

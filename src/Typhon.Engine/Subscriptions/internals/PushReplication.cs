@@ -1326,6 +1326,7 @@ internal abstract unsafe partial class PushReplication
             // The orphans queued across the gap are leaves nobody needs: a session connected before it misses a tick the log never held, so it resets, and
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
+            _orphanKeyChangeCount = 0;
         }
     }
 
@@ -1370,6 +1371,7 @@ internal abstract unsafe partial class PushReplication
         _validating = Hub.ValidateClustersPerTick > 0;
         _indexedTick = uint.MaxValue;
         ResetWorkers(workers);
+        ResetKeyChanges(workers);
     }
 
     /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>
@@ -1508,7 +1510,7 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, in LodBands bands, bool forceReset,
         in ArchetypeSet archetypes, FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves,
-        ref long updates, out bool complete);
+        ref long updates, out bool complete, ProfileGroup[] groups = null);
 
     /// <summary>
     /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one

@@ -166,7 +166,11 @@ public class GoldenTickTests
             ["manifest"] = FieldValue.Of([1, 2, 3]), ["fuel"] = FieldValue.Of(0.1), ["pin"] = FieldValue.Of(4321), ["vault"] = FieldValue.Of(1),
         }, Frame);
         TickWriter.WriteAcks(ref w, [(65534, AckReasons.RegionInvalid), (3, (byte)200)]);
-        TickWriter.WriteSources(ref w, [(1, SourceStatus.Applied, 0), (2, SourceStatus.Error, 404)]);
+        TickWriter.WriteSources(ref w, [(1, SourceStatus.Applied, 0), (2, SourceStatus.Error, 404)],
+            [
+                (SourceStatus.GroupComplete, 1, -70_000), (SourceStatus.GroupReleased, 0, 65_535), (SourceStatus.GroupComplete, 0, 0),
+                (SourceStatus.GroupComplete, 1, long.MinValue), (SourceStatus.GroupComplete, 1, long.MaxValue), (SourceStatus.GroupReleased, 0, (1L << 53) + 1),
+            ]);
         TickWriter.WriteAggregate(ref w, Plan.Grids[0], reset: true, [(0u, [1u, 0u]), (17u, [3u, 400u]), (255u, [0u, 9u])]);
         TickWriter.WriteStats(ref w, Plan, new Dictionary<string, double[]>
         {

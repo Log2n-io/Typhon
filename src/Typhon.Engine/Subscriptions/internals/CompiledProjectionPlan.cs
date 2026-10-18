@@ -465,7 +465,13 @@ internal sealed class CompiledProjectionPlan
     /// The block layout: the hot, cold and owner entry offsets a block of this archetype is carved into — with v̂'s bytes in the cold entry when the
     /// archetype's visibility slack is above zero (<see cref="VisibilitySlackM"/>).
     /// </summary>
-    public ReplicationBlockLayout BlockLayout { get; init; }
+    public ReplicationBlockLayout BlockLayout { get; internal set; }
+
+    /// <summary>
+    /// The group keys a push of this archetype reads (14 § 3.8): one per group set it is a member of, in cold-entry order. Empty for an archetype no set
+    /// names, which then costs nothing.
+    /// </summary>
+    public CompiledGroupKey[] GroupKeys { get; internal set; } = [];
 
     /// <summary>
     /// The archetype's visibility slack <c>h_A</c> in metres (09 § 2): v̂ moves to the entity's position only when that position is more than this far

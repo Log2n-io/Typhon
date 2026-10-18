@@ -1,3 +1,4 @@
+using System;
 using System.Text.Json.Serialization;
 
 namespace Typhon.Protocol;
@@ -83,6 +84,33 @@ public sealed class CatalogGrid
 
     /// <summary>The archetype indices counted on this grid, in the order an <c>AGG</c> cell lists their counts.</summary>
     public int[] Archetypes { get; init; }
+}
+
+/// <summary>
+/// A group set (14 § 3.5): entities sharing a key, held whole — a session that holds a group holds every current member, and is told when it does.
+/// </summary>
+public sealed class CatalogGroupSet
+{
+    /// <summary>The <see cref="Selector"/> of a set whose groups a session holds while its observer meets a region's extent.</summary>
+    public const string RegionSelector = "region";
+
+    /// <summary>The codecs a key may be declared with: the integer the key field holds. On the wire every key is a <c>vari</c>.</summary>
+    public static System.Collections.ObjectModel.ReadOnlyCollection<string> KeyCodecs { get; } = Array.AsReadOnly<string>(["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"]);
+
+    /// <summary>The wire index, the set's position in ordinal name order.</summary>
+    public int Idx { get; init; }
+
+    /// <summary>The set's declared name, unique among sets.</summary>
+    public string Name { get; init; }
+
+    /// <summary>What decides which groups a session holds; <see cref="RegionSelector"/> is the only one.</summary>
+    public string Selector { get; init; }
+
+    /// <summary>The key's integer type, one of <see cref="KeyCodecs"/>.</summary>
+    public string Key { get; init; }
+
+    /// <summary>The member archetypes' indices, ascending.</summary>
+    public int[] Members { get; init; }
 }
 
 /// <summary>

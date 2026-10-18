@@ -157,6 +157,10 @@ public:
     int MetricValueCount() const { return metricValueCount_; }
     std::vector<std::unique_ptr<GridPlan>>& Grids() const { return grids_; }
     const std::vector<std::string>& RealmKinds() const { return realmKinds_; }
+    // The group sets, by index: what a SOURCES group record's set names.
+    const std::vector<CatalogGroupSet>& GroupSets() const { return catalog_->groupSets; }
+    // The index of the group set named `name`, or -1.
+    int GroupSetIndex(std::string_view name) const;
 
     // The plan at a wire index read from a peer; throws 1007 when there is none.
     const ArchetypePlan& Archetype(std::uint32_t idx) const;

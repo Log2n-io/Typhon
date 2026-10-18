@@ -133,7 +133,18 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
                 Options.VisibilitySlackMForTest);
 
-            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+            // Group sets (14 § 3.8): resolved against the schema, and each member plan's cold entry widened by its keys — before the replication state is
+            // carved to that layout below.
+            GroupSets = GroupSetCompiler.Compile(registry, engine, Plans);
+            foreach (var set in GroupSets)
+            {
+                set.Region.ClusterState = engine._archetypeStates[set.Region.Archetype.ArchetypeId]?.ClusterState
+                    ?? throw new InvalidOperationException(
+                        $"Group set '{set.Name}' reads its regions from archetype '{set.Region.Archetype.Name}', which this engine holds no cluster state for. "
+                        + "Call DatabaseEngine.InitializeArchetypes before TyphonRuntime.Start().");
+            }
+
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames, GroupSets);
 
             // The served realm's frame (typhon.3): what every position a session of it receives, and every position it sends, is quantized over.
             // Every registered realm's kind must be declared (12-realms § 2.7): a kind nobody declared picks no variant.
@@ -199,6 +210,19 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
 
             _frames.Self = Self;
+
+            // A group member has replication state whether or not a profile's geometry observes it: a session reaches it through its key (14 § 3.8). A
+            // write to its key component is marked as a structure change (the tap), so the projection reads the new key the tick it is written.
+            foreach (var set in GroupSets)
+            {
+                foreach (var member in set.Members)
+                {
+                    observed[member.Plan] = true;
+                    ClusterStateOf(engine, Plans[member.Plan]).AddGroupKeySlot(member.ComponentSlot);
+                }
+            }
+
+            _frames.HasGroups = GroupSets.Length > 0;
             if (Array.IndexOf(automatic, true) >= 0 && !Options.AllowAutomaticPushDetection)
             {
                 throw new NotSupportedException(
@@ -472,6 +496,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     // What every realm's replication is built from (R4.4): the engine, the plans' push flags and encode plans, and the near budgets' archetype sets.
     private DatabaseEngine _engine;
     private bool[] _observed;
+
+    /// <summary>The compiled group sets (14 § 3.8), by set index; empty when none is declared.</summary>
+    internal CompiledGroupSet[] GroupSets { get; private set; } = [];
     private bool[] _automatic;
     private ArchetypeEncodePlan[] _encodePlans;
     private ArchetypeSet[] _nearSets;
@@ -485,6 +512,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     {
         var (farPhase, farWindow) = Profiles.FarFold;
         push.ConfigureFar(farPhase, farWindow);
+        push.GroupSets = GroupSets;
+        push.MaxGroupsPerSession = Options.MaxGroupsPerSession;
         push.AttachEncodePlans(_encodePlans);
         ConfigureAggregates(push, frame, first);
         ConfigureRegions(push, grid, kind);

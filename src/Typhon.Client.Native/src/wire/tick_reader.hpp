@@ -50,6 +50,8 @@ public:
 
     virtual void Ack(std::uint32_t seq, std::uint8_t reason) = 0;
     virtual void Source(std::uint32_t requestId, std::uint8_t status, std::uint32_t code) = 0;
+    // A group lifecycle record (14 § 3.5): SourceStatus::GroupComplete or GroupReleased, the set's catalog index, the key.
+    virtual void Group(std::uint8_t kind, std::uint32_t set, std::int64_t key) = 0;
     virtual void BeginAggregate(const GridPlan& grid, bool reset) = 0;
     virtual void AggregateCell(std::uint32_t cell, std::span<const std::uint32_t> counts) = 0;
     virtual void Metric(const MetricPlan& metric, int valueIndex, double value) = 0;

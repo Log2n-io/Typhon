@@ -514,6 +514,8 @@
       href: Subscriptions/client-sdks.md
     - name: 'Wire Protocol & Catalog'
       href: Subscriptions/wire-protocol.md
+    - name: 'Groups'
+      href: Subscriptions/groups.md
     - name: 'Sessions in Realms'
       href: Subscriptions/realms.md
     - name: 'Replication Diagnostics'

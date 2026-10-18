@@ -904,6 +904,44 @@ void CheckGrids(const std::vector<CatalogGrid>& grids, std::size_t archetypeCoun
     }
 }
 
+void CheckGroupSets(const std::vector<CatalogGroupSet>& sets, std::size_t archetypeCount, Problems& p)
+{
+    static const char* const keyCodecs[] = {"u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"};
+    std::set<std::string> names;
+    for (const CatalogGroupSet& s : sets)
+    {
+        const std::string where = "group set '" + s.name + "'";
+        if (s.name.empty() || !names.insert(s.name).second)
+        {
+            p.push_back(where + ": the name is empty or listed twice");
+        }
+
+        if (s.selector != "region")
+        {
+            p.push_back(where + ": selector '" + s.selector + "' is unknown");
+        }
+
+        if (std::none_of(std::begin(keyCodecs), std::end(keyCodecs), [&](const char* k) { return s.key == k; }))
+        {
+            p.push_back(where + ": key '" + s.key + "' is not an integer codec");
+        }
+
+        if (s.members.empty())
+        {
+            p.push_back(where + " has no member");
+        }
+
+        std::set<int> seen;
+        for (const int idx : s.members)
+        {
+            if (idx < 0 || static_cast<std::size_t>(idx) >= archetypeCount || !seen.insert(idx).second)
+            {
+                p.push_back(where + ": member archetype index " + std::to_string(idx) + " does not exist or is listed twice");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 void ValidateCatalog(const Catalog& c, Problems& p)
@@ -988,6 +1026,7 @@ void ValidateCatalog(const Catalog& c, Problems& p)
     }
 
     CheckGrids(c.grids, c.archetypes.size(), p);
+    CheckGroupSets(c.groupSets, c.archetypes.size(), p);
 }
 
 void CheckCanonical(const Catalog& c, Problems& p)
@@ -1076,6 +1115,20 @@ void CheckCanonical(const Catalog& c, Problems& p)
         if (g.idx != static_cast<int>(i) || (i > 0 && CompareGrids(c.grids[i - 1], g) >= 0))
         {
             fail("grid " + std::to_string(g.idx) + " is not at its sorted position, or duplicates the grid before it");
+        }
+    }
+
+    if (c.groupSetsListed && c.groupSets.empty())
+    {
+        fail("groupSets is listed and empty: a catalog with no group set omits it");
+    }
+
+    for (std::size_t i = 0; i < c.groupSets.size(); i++)
+    {
+        const CatalogGroupSet& s = c.groupSets[i];
+        if (s.idx != static_cast<int>(i) || (i > 0 && !Less(c.groupSets[i - 1].name, s.name)) || !std::is_sorted(s.members.begin(), s.members.end()))
+        {
+            fail("group set '" + s.name + "' is not at its ordinal position, or its members are not ascending");
         }
     }
 }

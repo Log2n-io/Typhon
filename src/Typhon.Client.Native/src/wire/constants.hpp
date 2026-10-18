@@ -80,9 +80,12 @@ inline constexpr std::uint32_t Stats = 1;
 inline constexpr std::uint32_t Debug = 2;
 }  // namespace Capabilities
 
+// A SOURCES record's kind (14 § 3.5): every record leads with it. The first two are a request's outcome, the last two a group's lifecycle.
 namespace SourceStatus {
 inline constexpr std::uint8_t Applied = 0;
 inline constexpr std::uint8_t Error = 1;
+inline constexpr std::uint8_t GroupComplete = 2;
+inline constexpr std::uint8_t GroupReleased = 3;
 }  // namespace SourceStatus
 
 namespace CloseCode {

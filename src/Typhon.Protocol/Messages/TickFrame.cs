@@ -57,14 +57,23 @@ public static class BlockTypes
     public const byte Ext = 0x7F;
 }
 
-/// <summary>A <c>SOURCES</c> entry's status.</summary>
+/// <summary>
+/// A <c>SOURCES</c> record's kind (03 § 3, amended by Phase 4's 14 § 3.5): every record leads with it. The first two are a request's outcome — and keep the
+/// names they had as a status — the last two a group's lifecycle.
+/// </summary>
 public static class SourceStatus
 {
-    /// <summary>Every source the request added has delivered its initial enters.</summary>
+    /// <summary><c>SOURCE_APPLIED { u16 requestId }</c>: every source the request added has delivered its initial enters.</summary>
     public const byte Applied = 0;
 
-    /// <summary>The request failed; the previous source set is kept, and a <c>u16</c> code follows.</summary>
+    /// <summary><c>SOURCE_ERROR { u16 requestId | u16 code }</c>: the request failed; the previous source set is kept.</summary>
     public const byte Error = 1;
+
+    /// <summary><c>GROUP_COMPLETE { varu set | vari key }</c>: every current member of the group has entered, with the enters it completes before it.</summary>
+    public const byte GroupComplete = 2;
+
+    /// <summary><c>GROUP_RELEASED { varu set | vari key }</c>: the group is no longer held; its members' leaves are in the same frame.</summary>
+    public const byte GroupReleased = 3;
 }
 
 /// <summary>Which blocks of a <c>TICK</c> a <see cref="TickReader"/> hands to its sink.</summary>
@@ -155,6 +164,16 @@ public interface ITickSink : IFieldSink
     /// <param name="status"><see cref="SourceStatus.Applied"/> or <see cref="SourceStatus.Error"/>.</param>
     /// <param name="code">The error code, 0 when applied.</param>
     void Source(ushort requestId, byte status, ushort code);
+
+    /// <summary>
+    /// A group lifecycle record (14 § 3.5). A default method, so a class or struct sink written before groups — an application's own — keeps compiling
+    /// and ignores them; a struct that does not implement it is boxed once per group record to reach it. A <c>ref struct</c> sink cannot use a default
+    /// method and implements it.
+    /// </summary>
+    /// <param name="kind"><see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>.</param>
+    /// <param name="set">The group set's index in the catalog.</param>
+    /// <param name="key">The group's key.</param>
+    void Group(byte kind, uint set, long key) { }
 
     /// <summary>An <c>AGG</c> block begins.</summary>
     /// <param name="grid">The grid.</param>
@@ -318,14 +337,29 @@ public static class TickReader
                 case BlockTypes.Sources:
                     for (var n = block.ReadVaru(); n > 0; n--)
                     {
-                        var requestId = block.ReadU16();
-                        var status = block.ReadU8();
-                        if (status > SourceStatus.Error)
+                        var kind = block.ReadU8();
+                        switch (kind)
                         {
-                            throw WireFormatException.Malformed($"SOURCES status {status} is unknown");
-                        }
+                            case SourceStatus.Applied:
+                                sink.Source(block.ReadU16(), kind, 0);
+                                break;
+                            case SourceStatus.Error:
+                                var requestId = block.ReadU16();
+                                sink.Source(requestId, kind, block.ReadU16());
+                                break;
+                            case SourceStatus.GroupComplete:
+                            case SourceStatus.GroupReleased:
+                                var set = block.ReadVaru();
+                                if (set >= (uint)plan.GroupSets.Length)
+                                {
+                                    throw WireFormatException.Malformed($"SOURCES group set {set} is not in the catalog");
+                                }
 
-                        sink.Source(requestId, status, status == SourceStatus.Error ? block.ReadU16() : (ushort)0);
+                                sink.Group(kind, set, block.ReadVari64());
+                                break;
+                            default:
+                                throw WireFormatException.Malformed($"SOURCES record kind {kind} is unknown");
+                        }
                     }
 
                     break;
@@ -972,21 +1006,46 @@ public static class TickWriter
     /// <summary>Writes a <c>SOURCES</c> block.</summary>
     /// <param name="w">The writer.</param>
     /// <param name="entries">Each entry's request id, status and error code.</param>
-    public static void WriteSources(ref WireWriter w, IReadOnlyList<(ushort RequestId, byte Status, ushort Code)> entries)
+    public static void WriteSources(ref WireWriter w, IReadOnlyList<(ushort RequestId, byte Status, ushort Code)> entries) =>
+        WriteSources(ref w, entries, []);
+
+    /// <summary>Writes a <c>SOURCES</c> block: the requests' outcomes, then the groups' lifecycle records, each led by its kind.</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="entries">Each request's id, status and error code.</param>
+    /// <param name="groups">Each group record's kind, set and key.</param>
+    public static void WriteSources(ref WireWriter w, IReadOnlyList<(ushort RequestId, byte Status, ushort Code)> entries,
+        IReadOnlyList<(byte Kind, uint Set, long Key)> groups)
     {
         var mark = BeginBlock(ref w, BlockTypes.Sources);
-        w.WriteVaru((uint)entries.Count);
+        w.WriteVaru((uint)(entries.Count + groups.Count));
         foreach (var (requestId, status, code) in entries)
         {
-            w.WriteU16(requestId);
             w.WriteU8(status);
+            w.WriteU16(requestId);
             if (status == SourceStatus.Error)
             {
                 w.WriteU16(code);
             }
         }
 
+        foreach (var (kind, set, key) in groups)
+        {
+            WriteGroupRecord(ref w, kind, set, key);
+        }
+
         EndBlock(ref w, mark);
+    }
+
+    /// <summary>Writes one group lifecycle record inside an open <c>SOURCES</c> block.</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="kind"><see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>.</param>
+    /// <param name="set">The group set's index.</param>
+    /// <param name="key">The group's key.</param>
+    public static void WriteGroupRecord(ref WireWriter w, byte kind, uint set, long key)
+    {
+        w.WriteU8(kind);
+        w.WriteVaru(set);
+        w.WriteVari64(key);
     }
 
     /// <summary>Writes an <c>AGG</c> block. Cells must be in ascending order.</summary>

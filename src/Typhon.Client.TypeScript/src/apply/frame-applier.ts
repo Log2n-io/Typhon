@@ -24,7 +24,7 @@ import type { ArchetypeStore } from '../store/archetype-store.js';
 import type { CollectionValue } from '../store/collection-value.js';
 import type { FieldArray, NumericFieldKind } from '../store/schema.js';
 import { archetypeOf, NOT_FOUND, slotOf, WorldStore } from '../store/world-store.js';
-import { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './frame-state.js';
+import { AckList, EventRecord, GroupState, retainBytes, SelfState, SourceList, StatsState } from './frame-state.js';
 import { gridSchemaFromCatalog, worldSchemaFromCatalog } from './schema-from-catalog.js';
 
 export interface FrameApplierOptions {
@@ -127,6 +127,8 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   readonly selfState = new SelfState();
   readonly acks = new AckList();
   readonly sources = new SourceList();
+  /** This frame's group records, and the groups held complete (14 § 3.5). */
+  readonly groups = new GroupState();
   readonly stats: StatsState;
 
   /** The current frame's tick; −1 before the first. */
@@ -278,6 +280,7 @@ export class FrameApplier implements TickSink, EntitiesTarget {
     this.leaveCount = 0;
     this.acks.count = 0;
     this.sources.count = 0;
+    this.groups.count = 0;
     this.stats.received = false;
     this.selfState.beginFrame();
     this.world.beginFrame(tick, (flags & TickFlags.Reset) !== 0);
@@ -293,6 +296,7 @@ export class FrameApplier implements TickSink, EntitiesTarget {
       }
 
       this.selfState.clear();
+      this.groups.clear();
 
       // After the clear and before any record applies, so a consumer that drops its netIds here cannot be handed one
       // from the refilled store first. A crossing also raises onRealmChanged, later in the same frame, once the REALM
@@ -402,6 +406,13 @@ export class FrameApplier implements TickSink, EntitiesTarget {
 
   source(requestId: number, status: number, code: number): void {
     this.sources.push(requestId, status, code);
+  }
+
+  group(kind: number, set: number, key: bigint): void {
+    // Once per hold (SUB-33): a second completion with no release between is absorbed, and counted.
+    if (!this.groups.push(kind, set, key)) {
+      this.world.anomalies++;
+    }
   }
 
   beginAggregate(grid: GridPlan, reset: boolean): void {
@@ -650,6 +661,7 @@ class EventPass implements TickSink {
   self(): void {}
   ack(): void {}
   source(): void {}
+  group(): void {}
   beginAggregate(): void {}
   aggregateCell(): void {}
   metric(): void {}

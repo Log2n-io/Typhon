@@ -193,7 +193,7 @@ internal static unsafe class ProjectionPass
             {
                 if (push != null)
                 {
-                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
+                    EmitPushLeave(push, plan, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                 }
 
                 // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
@@ -234,7 +234,7 @@ internal static unsafe class ProjectionPass
                 {
                     if (push != null)
                     {
-                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
+                        EmitPushLeave(push, plan, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                     }
 
                     // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
@@ -624,6 +624,24 @@ internal static unsafe class ProjectionPass
                 if ((pushArrived & (1UL << slot)) != 0)
                 {
                     pushFlags |= PushEvent.Arrived;
+                }
+
+                // A member's group keys (14 § 3.8): read on every push, compared with what the last one stored. A change is an event even when nothing else
+                // changed — a session holding the old key or the new one must hear of it — and its old key is kept for the tick's member log. A new entry
+                // starts from 0, "no group", so its first key is a change from nothing.
+                var groupKeys = plan.GroupKeys;
+                for (var k = 0; k < groupKeys.Length; k++)
+                {
+                    ref readonly var gk = ref groupKeys[k];
+                    var stored = (long*)(coldBytes + layout.GroupKeyOffsetInColdEntry + (8 * gk.Slot));
+                    var kn = gk.Field.ReadKey(clusterBase, slot);
+                    var ko = initialize ? 0L : *stored;
+                    if (kn != ko || (initialize && kn != 0))
+                    {
+                        *stored = kn;
+                        pushFlags |= PushEvent.KeyChanged;
+                        push.NoteKeyChange(worker, hot->NetId, gk.Set, ko, kn);
+                    }
                 }
 
                 push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
@@ -1363,12 +1381,27 @@ internal static unsafe class ProjectionPass
     /// A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it; its identity and last position are kept
     /// for the tick's events, which may still name it (09 § 11: "X killed Y").
     /// </summary>
-    private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
-        in ReplicationBlockLayout layout, int slot, uint netId, NetIdLeaseSet leases, EntityId entity)
+    private static void EmitPushLeave(PushReplication push, CompiledProjectionPlan plan, int archetype, int worker, ReplicationBlockHeader* block,
+        byte* blockBytes, in ReplicationBlockLayout layout, int slot, uint netId, NetIdLeaseSet leases, EntityId entity)
     {
-        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
-            out var z);
-        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
+        var cold = blockBytes + layout.ColdOffset + (slot * layout.ColdStride);
+        push.Decode(archetype, cold + push.PositionOffset(archetype), out var x, out var y, out var z);
+
+        // The entity leaves its groups with its identity (14 § 3.8): its keys go to 0 here, read before the entry is cleared, so a session that holds it
+        // only through a key — far outside its sphere — still hears the leave.
+        var flags = PushEvent.HasOld;
+        var groupKeys = plan.GroupKeys;
+        for (var k = 0; k < groupKeys.Length; k++)
+        {
+            var ko = *(long*)(cold + layout.GroupKeyOffsetInColdEntry + (8 * groupKeys[k].Slot));
+            if (ko != 0)
+            {
+                flags |= PushEvent.KeyChanged;
+                push.NoteKeyChange(worker, netId, groupKeys[k].Set, ko, 0);
+            }
+        }
+
+        push.AddEvent(worker, archetype, block, slot, null, netId, flags, x, y, z, 0f, 0f, 0f);
         leases.Depart(worker, entity, netId, x, y, z, push.ServedRealm);
     }
 

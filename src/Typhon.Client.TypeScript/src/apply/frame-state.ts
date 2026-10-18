@@ -7,6 +7,7 @@ import {
   type MetricPlan,
 } from '../protocol/catalog.js';
 import { isSigned64 } from '../protocol/codec-kinds.js';
+import { SourceStatus } from '../protocol/constants.js';
 import { CollectionValue } from '../store/collection-value.js';
 import { bigintOf } from '../protocol/int64.js';
 
@@ -372,6 +373,76 @@ export class SourceList {
     this.requestId[this.count] = requestId;
     this.status[this.count] = status;
     this.code[this.count++] = code;
+  }
+}
+
+/**
+ * The groups (14 § 3.5): this frame's lifecycle records — `kind[i]`, `set[i]`, `key[i]` for i in `[0, count)` — and the
+ * groups held complete, from a `GROUP_COMPLETE` until its `GROUP_RELEASED` or a `RESET`.
+ */
+export class GroupState {
+  kind: number[] = [];
+  set: number[] = [];
+  key: bigint[] = [];
+  count = 0;
+  private readonly complete = new Map<number, Set<bigint>>();
+  private completeCount = 0;
+
+  /** Whether a group is held complete: every current member is in the store. */
+  isComplete(set: number, key: bigint | number): boolean {
+    if (typeof key === 'number' && !Number.isInteger(key)) {
+      return false;
+    }
+
+    return this.complete.get(set)?.has(BigInt(key)) ?? false;
+  }
+
+  /** The groups held complete. */
+  get completeGroupCount(): number {
+    return this.completeCount;
+  }
+
+  /** Every group held complete, ascending by set then key. */
+  completeGroups(): { set: number; key: bigint }[] {
+    const out: { set: number; key: bigint }[] = [];
+    for (const set of [...this.complete.keys()].sort((a, b) => a - b)) {
+      for (const key of [...this.complete.get(set)!].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+        out.push({ set, key });
+      }
+    }
+
+    return out;
+  }
+
+  /** @returns `false` for a second completion with no release between: the server's inconsistency. */
+  push(kind: number, set: number, key: bigint): boolean {
+    this.kind[this.count] = kind;
+    this.set[this.count] = set;
+    this.key[this.count++] = key;
+    let keys = this.complete.get(set);
+    if (kind === SourceStatus.GroupComplete) {
+      if (keys === undefined) {
+        keys = new Set<bigint>();
+        this.complete.set(set, keys);
+      }
+
+      if (keys.has(key)) {
+        return false;
+      }
+
+      keys.add(key);
+      this.completeCount++;
+    } else if (keys?.delete(key) === true) {
+      // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
+      this.completeCount--;
+    }
+
+    return true;
+  }
+
+  clear(): void {
+    this.complete.clear();
+    this.completeCount = 0;
   }
 }
 

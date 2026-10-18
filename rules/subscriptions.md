@@ -105,6 +105,13 @@
     buffer segment is the only place they can be read. The exception is narrow: the handle still comes from the layout, nothing else is
     reached through a segment, and the read is unlocked only because the replication track runs in the tick's exclusive window (EW-01),
     where nothing writes a collection. Every other caller reads a buffer through the locked ReadAllElementsRaw.
+  note amended for group sets (14 § 3.2 P5, § 3.8): a member's KEY is a projected value like any other — read through the cluster layout on every
+    push (ClusterFieldReader.ReadKey), and kept in its cold entry — and so is a region's key and extent. The second route is a set's MEMBERSHIP:
+    the members of a key are read from the engine's own sparse multi-value index on that field (TryGetMultiple), the only structure that holds the
+    relation, and each location it returns is resolved to its replication block by chunk (BlockOf), never through an entity map. The read is after
+    the fence, inside the chunk's EpochGuard, with the gather worker's own accessor; SingleVersion trees are quiescent there and a Versioned one is
+    read OLC-consistent — in this phase only SingleVersion keys are admitted (SUB-33). Nothing else is reached through an index. Verified by
+    PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet, whose every completion is checked against the database in the frame it arrives.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
     ClusterRef.GetSpan — the path that sets no dirty bit — projects to exactly what ClusterRef.GetReadOnlySpan reports, field by field
@@ -409,6 +416,9 @@
     committed anchor AND v̂'s cell is in s's delivered window — no entity outside that is held, and none inside it is left out. The distance is 3D;
     its z terms are 0 in a grid one cell deep and for a 2D-position archetype, which lies on the plane z = 0 (the spatial grid's convention), so
     a flat world's known-set is the 2D one bit for bit whichever implementation serves it
+  invariant ∀ session s whose Sphere observer names group sets (14 § 3.8): s holds e iff the clause above holds e OR one of e's keys is held by s
+    (SUB-33) — the union, held once: an entity both name is one entity in the store, entered by whichever reaches it first and left only when neither
+    holds it after the frame
   invariant ∀ session s with a World observer: s holds every live entity of its archetypes whose cell the delivery cursor has passed
   invariant ∀ session s with a ClientRegion observer (09 § 7): s holds entity e iff e's v̂ lies in s's committed hull — the convex region it last sent,
     clamped to its profile's maxEdgeM, as half-spaces — AND v̂'s cell is in s's delivered region window. The hull is the anchor: a new one sweeps the
@@ -472,7 +482,55 @@
     PushRegionTests.ASessionThatSentNoRegionHoldsNothing, PushRegionTests.ARegionWiderThanTheWindowBoundIsRefusedAtStart,
     SubscriptionsRegistryTests.WhatAShapeDoesNotHaveIsRefusedAtStart; in 3D, PushOracle3DTests.AClientsWorldIsItsPolyhedronInADeepGrid (frustums over
     3D flyers and 2D walkers in a volumetric world, skip 0–90 %, face by face and by the shadow oracle — red when the per-entity test or the cell
-    classification drops z); ClientRegionObserverTests.ASwitchBetweenARegionAndASphereResets, both ways.
+    classification drops z); ClientRegionObserverTests.ASwitchBetweenARegionAndASphereResets, both ways. The union clause:
+    PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (citizens are both geometric and town members; red without the post-pass) and
+    PushGroupTests.AMemberMovingBetweenHeldTownsStaysAndLeavesForATownNotHeld.
+
+### SUB-33: A session holds the groups its observer meets, each whole, and is told once per hold `[fatal][silent]`
+  invariant ∀ session s whose Sphere observer names set S with reach r, ∀ region g of S in s's realm with key k: s comes to hold k when the distance
+    from s's committed anchor to g's extent (its nearest point, 0 inside) is at most r, keeps it while that distance is at most r + S's leave margin,
+    and releases it beyond — at most MaxGroupsPerSession keys per set, the kept ones first, then the nearest (the rest counted, GroupsOverLimit)
+  invariant ∀ held key k, ∀ tick T: s holds { e : key_S(e) = k ∧ netId(e) < cursor(k) } — the members in ascending netId order the fill has reached
+    under the enter budget — and every member once cursor(k) is Complete; the cursor is fixed before the frame's member events are decided, so an
+    event and the fill agree on every member
+  invariant GROUP_COMPLETE{S, k} is published in the frame whose enters complete k, after them (SOURCES follows ENTITIES), exactly once per hold: a
+    key released and met again is filled and completed again, and a RESET (a realm crossing, a teleport, a log gap) re-fills and re-completes every
+    key; GROUP_RELEASED{S, k} is published with the leaves of k's members no other key and no geometry still holds
+  invariant a member whose key changes is projected the tick it is written (the tap: a write to a component holding a declared key field marks the
+    slot's structure word), and moving between two keys s holds is an update, never a leave and an enter
+  never keep a copy of the relation: membership is the engine's sparse multi-value index on the key field (SUB-01's amendment); 0 is "no group" and
+    is never indexed
+  invariant a profile whose Sphere names group sets and no archetype is served: it holds its keys' members and nothing by geometry
+  invariant a catch-up frame decides each member's geometric side from the push log's own per-identity fold — the same entry the geometric catch-up
+    emitted from — never from the events the held keys' buckets happened to file; a fill reads a member only when its projected key is the key filled
+  never accept at Start what is not built: a set with no Region, groups on a World or ClientRegion observer, a key that is not an integer, not
+    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), on a Versioned component (its index may change between the
+    projection and the gather), of another signedness than its region key, or on a positionless member; more than four sets per archetype or 256
+    per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 024
+  scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,
+    PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
+    GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
+    TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups
+  on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
+    walks to a terminal that is not there; a duplicate or a missing release leaves a client holding a town it left; a key change the projection never
+    reads leaves a member in its old town on every client.
+  rationale: a set anchored on something other than the observer cannot be expressed by any radius (14 § 3.6), and its completion edge is only
+    meaningful because the set has a definition; the engine already maintains the relation on every path, so replication reads it and keeps nothing.
+  verified: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet (towns, buildings and citizens under seeded churn — key changes through the tap alone,
+    spawns, destroys, teleports, towns appearing, vanishing and moving — walking sessions skipping 0–90 %, gathered on four workers: at every quiet
+    point, once no key is filling, each session holds exactly the members of the towns it holds complete and of its disc, and holds complete every town
+    its observer meets and none beyond reach and margin; on the session that skips nothing, every GROUP_COMPLETE is checked against the world in the
+    frame it arrives, and every record against the geometry — a completion within reach and margin, a release beyond them. Red when the tap is not set, when completion is sent one cursor early, when a release sends no
+    leaves, when the post-pass is skipped, when the fill enters nothing),
+    PushGroupTests.ATownIsKeptInsideTheMarginReleasedBeyondItAndCompletedAgainOnReturn (red without hysteresis),
+    PushGroupTests.ATownLargerThanTheBudgetFillsOverFramesAndCompletesWithItsLastMember,
+    PushGroupTests.ADestroyedTownIsReleasedWithItsBuildings, PushGroupTests.ASessionMeetingATownHoldsEveryBuildingOfItAndIsToldOnce,
+    PushGroupTests.AResetInTheMiddleOfAFillFillsTheTownAgainAndCompletesItOnce, PushGroupTests.PastTheBoundTheHeldTownsAreKeptAndTheNearestAdded,
+    PushGroupTests.ACatchUpKeepsAMemberThatLeftItsTownForTheSphereInTheWindow (red when the group path decides a catch-up's geometry from its own
+    fold), PushGroupTests.AMemberOfTwoSetsIsHeldWhileEitherHoldsIt (a groups-only profile, two sets), PushGroupTests.TwoRegionsWithOneKeyAreOneGroup,
+    PushGroupTests.ADeepGridSessionAboveATwoDimensionalTownMeetsIt, PushGroupTests.TwoSetsDeclaredOutOfNameOrderCarryTheCatalogsIndices, and a
+    refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
+    requires the oracle to reject the run.
 
 ### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
   invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push
@@ -628,6 +686,9 @@
     with a published frame, like its geometry: a skipped frame leaves all three as they were, so its next frame carries the union of the owner groups
     changed meanwhile and every rejection the acknowledgement history still holds. They record WHICH groups and WHICH ticks, never values — the values
     are read, current, from the owner entry when SELF is written — so they are not the per-session value memory the next line forbids
+  invariant a session's held group keys and their fill cursors (SUB-33) are geometry: pending until the frame is published, committed with it, left as
+    they were by a skip; a skipped session's next frame folds the member log's entries for every key it held before or holds now, like the cells, and a
+    RESET reads the committed keys as empty so every key is filled and completed again
   never commit a session's geometry before the frame describing it is published — the commit is the LAST step of assembling a frame, after the encode and
     after the hand-off's release
   never encode a delta, a run-length against a previous frame, or a "changed since you last acked" set: a session that missed K frames must converge on
@@ -654,6 +715,7 @@
     `CommitOnSkipForTest` — the one move this rule forbids, applied to the production path — and requires the verifier's assertion to reject it.
     The owner-state clause: SelfBlockTests.OwnerGroupsChangedWhileSkippedArriveAsTheirUnion (groups changed on skipped ticks arrive together, current;
     red when a skip clears the pending mask) and SelfBlockTests.LastSeqAndRejectionsReachTheClient (a rejection on a skipped tick still arrives).
+    The group clause: PushGroupTests.SessionsHoldExactlyTheTownsTheyMeet at skip rates of 0, 30, 70 and 90 %, teleports resetting sessions mid-fill.
 
 ### SUB-11: Owner state reaches its controlling session only, every group after a Control change, and the union after a skip `[fatal][silent]`
   invariant ∀ session s controlling entity e (Control): s's next published frame after a Control change, a RESET or its first frame naming e carries a
