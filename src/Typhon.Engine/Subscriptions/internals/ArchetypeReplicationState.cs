@@ -1317,8 +1317,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </summary>
     /// <remarks>
     /// <para>
-    /// It is called from the fence's cluster reclamation (<c>DrainPendingClusterFinalizations</c>, the only site since #582): an exception raised here skips
-    /// the <c>FreeChunk</c> that follows — orphaning a chunk id permanently, since the cluster is already off the active list and detached from its cell.
+    /// It is called from the fence's cluster reclamation (<c>DrainPendingClusterFinalizations</c>, the drain's only site since #582): an exception raised here
+    /// skips the <c>FreeChunk</c> that follows — orphaning a chunk id permanently, since the cluster is already off the active list and detached from its cell.
+    /// The blocks step's lazy sweep (14 § 5.1) is the second caller, for a positionless member's live cluster no held key needs any more: the same orphan
+    /// path, so its entities leave and their identities go back through the quarantine.
     /// </para>
     /// <para>
     /// Swallowing is therefore the lesser failure, but it must not be silent: a refusal is counted in <see cref="DrainFaults"/> and the exception kept in

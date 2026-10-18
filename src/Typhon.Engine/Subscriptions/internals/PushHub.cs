@@ -678,20 +678,14 @@ internal sealed unsafe partial class PushHub
         }
 
         // Positionless members (14 § 5): the keys every session holds decide which of them have state, and the referrers the last projection left waiting
-        // on one with no block are recorded for when it gets one. The key moves logged so far are older than the projection about to run, which reads them.
+        // on one with no block are recorded for when it gets one. The key moves the projection has caught up on are pruned.
         _tick = tick;
         if (_anyLazy)
         {
             CollectWanted();
             References?.DrainLazyMisses(this);
             PurgeWaitingReferrers();
-            foreach (var a in _pushIndices)
-            {
-                if (_lazy[a])
-                {
-                    _states[a].ClusterState?.GroupKeyMoves?.Clear();
-                }
-            }
+            PruneKeyMoves();
         }
 
         foreach (var a in _pushIndices)

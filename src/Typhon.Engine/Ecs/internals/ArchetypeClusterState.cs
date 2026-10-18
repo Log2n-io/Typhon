@@ -3105,7 +3105,19 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         bitmap.OrWord(clusterChunkId, (long)slots);
+
+        // After the word, so a publish that sees the flag drains the word; tested first, so a write path that marks often stores only once per tick.
+        if (Volatile.Read(ref _structureMarked) == 0)
+        {
+            Volatile.Write(ref _structureMarked, 1);
+        }
     }
+
+    // Set by a mark, cleared by the publish that drains it: what lets a fence with no work for this archetype skip a publish that would find nothing.
+    private int _structureMarked;
+
+    // A second publish of the same tick drains here and is OR-ed into the first's words.
+    private long[] _structureMergeScratch = [];
 
     /// <summary>The slots of a cluster whose membership may have changed on <see cref="StructureTick"/>; zero when none did.</summary>
     /// <param name="chunkId">The cluster.</param>
@@ -3130,14 +3142,48 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// The count is established before the tick stamp is written, so a reader that sees the stamp sees a count already correct.
     /// </para>
     /// </remarks>
-    public void PublishStructureChanges(long tickNumber)
+    /// <param name="onlyIfMarked">
+    /// Publish only when a mark was made since the last publish: the fence's path for an archetype with no work this tick, which otherwise would drain a
+    /// quiet bitmap every tick for nothing.
+    /// </param>
+    /// <remarks>
+    /// <b>Twice in one tick, the words add up.</b> An archetype with no fence work publishes from the fence's prep; a cluster an off-DAG destroy drains
+    /// before the fence's finalize publishes again from the head. The second drain is OR-ed into the first's words, so a mark the first published is not
+    /// lost to the second.
+    /// </remarks>
+    public void PublishStructureChanges(long tickNumber, bool onlyIfMarked = false)
     {
         if (!TrackStructureChanges)
         {
             return;
         }
 
+        if (onlyIfMarked && Volatile.Read(ref _structureMarked) == 0)
+        {
+            return;
+        }
+
+        // Cleared BEFORE the drain: a mark between the two is drained now and sets the flag again for nothing, never the other way round.
+        Volatile.Write(ref _structureMarked, 0);
         var bitmap = ClusterStructureChanges;
+        if (bitmap != null && Volatile.Read(ref StructureTick) == tickNumber)
+        {
+            var count = bitmap.DrainInto(ref _structureMergeScratch);
+            // The bitmap only grows, and every drain writes each word below its count: past the first publish's count the buffer is still zero.
+            if (_structureWords.Length < count)
+            {
+                Array.Resize(ref _structureWords, count);
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                _structureWords[i] |= _structureMergeScratch[i];
+            }
+
+            _structureWordCount = Math.Max(_structureWordCount, count);
+            return;
+        }
+
         _structureWordCount = bitmap == null ? 0 : bitmap.DrainInto(ref _structureWords);
         StructureCoversAll = bitmap == null;
         Volatile.Write(ref StructureTick, tickNumber);

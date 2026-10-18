@@ -405,6 +405,186 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
         });
     }
 
+    /// <summary>
+    /// What the application gets wrong is refused, never answered APPLIED: a handler that throws and one that returns default(GroupDecision) — code 0, the
+    /// wire's APPLIED — are Denied; a set with no handler is one only the server fills, so UnknownSet; a key no member's field can hold is InvalidKey.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void TheApplicationsFaultsAreRefusedNeverApplied()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Shards(dbe, 3, 1);
+        using var harness = FrameHarness.Create(dbe, s =>
+        {
+            s.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+            s.Groups(Lists, g => g.Explicit(Admit).Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Groups("faulty", g => g.Explicit((in GroupRequest _) => throw new InvalidOperationException("the application's bug"))
+                .Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Groups("silent", g => g.Explicit((in GroupRequest _) => default).Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Groups("server", g => g.Explicit().Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Profile(Profile, p => p.Sphere(20).Groups(Lists).Groups("faulty").Groups("silent").Groups("server"));
+        }, nameof(TheApplicationsFaultsAreRefusedNeverApplied), Options());
+        harness.RunFence = true;
+        harness.RunIngress = true;
+        harness.DrainNetIds = true;
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        var seen = new Seen();
+        Run(harness, session, 1, seen);
+        Send(harness, session, 1, 3, set: (uint)harness.CatalogPlan.GroupSetIndex("faulty"));
+        Send(harness, session, 2, 3, set: (uint)harness.CatalogPlan.GroupSetIndex("silent"));
+        Send(harness, session, 3, 3, set: (uint)harness.CatalogPlan.GroupSetIndex("server"));
+        Send(harness, session, 4, 1L << 40);
+        Run(harness, session, 3, seen);
+
+        (byte, ushort) AnswerOf(ushort id) => seen.Answers.Where(a => a.RequestId == id).Select(a => (a.Status, a.Code)).Single();
+        Assert.Multiple(() =>
+        {
+            Assert.That(AnswerOf(1), Is.EqualTo((SourceStatus.Error, SourceErrorCodes.Denied)), "the handler threw");
+            Assert.That(AnswerOf(2), Is.EqualTo((SourceStatus.Error, SourceErrorCodes.Denied)), "default(GroupDecision)");
+            Assert.That(AnswerOf(3), Is.EqualTo((SourceStatus.Error, SourceErrorCodes.UnknownSet)), "no handler: the server's set");
+            Assert.That(AnswerOf(4), Is.EqualTo((SourceStatus.Error, SourceErrorCodes.InvalidKey)), "2^40 in an i32 key");
+            Assert.That(harness.Subscriptions.GroupRequests.AdmitFaults, Is.EqualTo(1));
+            Assert.That(ShardsHeld(harness, session), Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A session owed <see cref="GroupRequests.MaxOwedAnswers"/> answers — its frames not published, its client still asking — has its next request ACKed
+    /// RateLimited at the drain rather than grow them; the owed ones are all said by the next published frame.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ARequestPastTheOwedAnswersIsAckedRateLimited()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        using var harness = Harness(dbe, nameof(ARequestPastTheOwedAnswersIsAckedRateLimited));
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        Run(harness, session, 1, new Seen());
+
+        // Owed straight into the state, as frames not published would leave them: each an InvalidOp refusal, due at once.
+        var requests = harness.Subscriptions.GroupRequests;
+        var set = (uint)harness.CatalogPlan.GroupSetIndex(Lists);
+        for (var i = 0; i < GroupRequests.MaxOwedAnswers; i++)
+        {
+            Assert.That(requests.Request(session, Profile, (ushort)(100 + i), set, 3, 0), Is.True);
+        }
+
+        Assert.That(requests.Request(session, Profile, 999, set, 3, 0), Is.False, "the cap");
+        Send(harness, session, 7, 4);
+        var command = _seq;
+        harness.RunTick(harness.Tick + 1);
+        var logs = harness.DeliverLogged(session);
+        var answers = harness.Replica(session).Store.Sources;
+        Assert.Multiple(() =>
+        {
+            Assert.That(logs.SelectMany(l => l.Acks), Does.Contain((command, AckReasons.RateLimited)), "refused at the drain");
+            Assert.That(answers.Select(a => a.RequestId), Does.Not.Contain((ushort)7), "never taken, so never answered");
+            Assert.That(answers, Has.Count.EqualTo(GroupRequests.MaxOwedAnswers), "the owed ones said in the published frame");
+            Assert.That(requests.KeysOf(session, (int)set).Length, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A subscription still filling when its session's profile stops naming the set — switched to another, or unbound (an events-only session) — is
+    /// answered NotInProfile and its key dropped, rather than wait for ever on a fill that will not come. A session with no profile is answered too.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ASubscriptionPendingWhenItsProfileStopsNamingTheSetIsAnsweredNotInProfile()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Shards(dbe, 7, 6);
+        using var harness = Harness(dbe, nameof(ASubscriptionPendingWhenItsProfileStopsNamingTheSetIsAnsweredNotInProfile), enterBudget: 2, more: s =>
+        {
+            s.Static<GroupBuilding>(a => a.Position(GroupBuilding.Bounds));
+            s.Groups("board", g => g.Shared(5).Member<GroupBuilding>(m => m.Key(GroupBuilding.Key, k => k.Town)));
+            s.Profile("other", p => p.Sphere(20).Of<GroupBuilding>().Groups("board"));
+        });
+        var switched = harness.OpenSessions(1, Profile)[0];
+        var unbound = harness.OpenSessions(1, Profile)[0];
+        var never = harness.OpenSessions(1, Profile)[0];
+        var all = new[] { switched, unbound, never };
+        var seen = all.ToDictionary(s => s, _ => new Seen());
+        foreach (var session in all)
+        {
+            harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        }
+
+        void Tick(int ticks)
+        {
+            for (var t = 0; t < ticks; t++)
+            {
+                harness.RunTick(harness.Tick + 1);
+                foreach (var session in all)
+                {
+                    if (harness.Deliver(session) > 0)
+                    {
+                        foreach (var (requestId, status, code) in harness.Replica(session).Store.Sources)
+                        {
+                            seen[session].Answers.Add((harness.Tick, requestId, status, code));
+                        }
+                    }
+                }
+            }
+        }
+
+        Tick(1);
+        Assert.That(harness.Sessions.SetProfile(never, null), Is.True);
+        Send(harness, switched, 1, 7);
+        Send(harness, unbound, 2, 7);
+        Send(harness, never, 3, 7);
+        Tick(1);
+        Assert.That(seen[switched].Answers.Concat(seen[unbound].Answers), Is.Empty, "2 of 6 members a frame: still filling");
+
+        Assert.That(harness.Sessions.SetProfile(switched, "other") && harness.Sessions.SetProfile(unbound, null), Is.True);
+        Tick(3);
+        var set = harness.CatalogPlan.GroupSetIndex(Lists);
+        Assert.Multiple(() =>
+        {
+            Assert.That(seen[switched].Answers.Select(a => (a.RequestId, a.Status, a.Code)),
+                Is.EqualTo(new[] { ((ushort)1, SourceStatus.Error, SourceErrorCodes.NotInProfile) }), "switched to a profile not naming the set");
+            Assert.That(seen[unbound].Answers.Select(a => (a.RequestId, a.Status, a.Code)),
+                Is.EqualTo(new[] { ((ushort)2, SourceStatus.Error, SourceErrorCodes.NotInProfile) }), "unbound: an events-only frame says it");
+            Assert.That(seen[never].Answers.Select(a => (a.RequestId, a.Status, a.Code)),
+                Is.EqualTo(new[] { ((ushort)3, SourceStatus.Error, SourceErrorCodes.NotInProfile) }), "asked with no profile");
+            Assert.That(harness.Subscriptions.GroupRequests.KeysOf(switched, set).Length, Is.Zero, "the key dropped with its answer");
+            Assert.That(harness.Subscriptions.GroupRequests.KeysOf(unbound, set).Length, Is.Zero);
+        });
+    }
+
+    /// <summary>A realm-kind variant names the same explicit sets as its profile: a session's keys outlive the realm switch that changes its variant.</summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void AVariantNamingOtherExplicitSetsIsRefused()
+    {
+        var registry = new SubscriptionsRegistry(Options());
+        registry.Groups(Lists, g => g.Explicit(Admit).Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+        registry.Profile(Profile, p =>
+        {
+            p.Sphere(20).Groups(Lists);
+            p.In("", v => v.Sphere(5));
+        });
+        Assert.That(Assert.Catch(registry.Freeze).Message, Does.Contain("variant names the explicit sets []"));
+    }
+
+    /// <summary>A shared key no member's field can hold is refused at start: no session would ever see a member under it.</summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ASharedKeyOutOfItsMembersRangeIsRefused()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        var thrown = Assert.Catch(() => FrameHarness.Create(dbe, s =>
+        {
+            s.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+            s.Groups("board", g => g.Shared(1L << 40).Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Profile(Profile, p => p.Sphere(20).Groups("board"));
+        }, nameof(ASharedKeyOutOfItsMembersRangeIsRefused), Options()).Dispose());
+        Assert.That(thrown.ToString(), Does.Contain("out of range"));
+    }
+
     /// <summary>The catalog lists SubscribeRequest at its reserved index when an explicit set takes requests, and the set as 'explicit'.</summary>
     [Test]
     public void TheCatalogListsSubscribeRequestAndTheExplicitSet()

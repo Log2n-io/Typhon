@@ -125,8 +125,8 @@ internal sealed class SessionGroupRequests
 /// and answers while gathering that session, and a published frame retires the answers it said — again on the thread assembling that session.
 /// </para>
 /// <para>
-/// <b>Bounded.</b> A session holds at most <c>MaxGroupsPerSession</c> keys per explicit set, client and server keys together; the answers it is owed are
-/// bounded by the requests the command's rate admits between two published frames.
+/// <b>Bounded.</b> A session holds at most <c>MaxGroupsPerSession</c> keys per explicit set, client and server keys together, and is owed at most
+/// <see cref="MaxOwedAnswers"/> answers: a request past that is not taken, and the drain ACKs it <c>RateLimited</c> like one the command's rate refused.
 /// </para>
 /// </remarks>
 internal sealed class GroupRequests
@@ -149,6 +149,15 @@ internal sealed class GroupRequests
 
     /// <summary>Server keys a <c>SetSources</c> could not add because the set was full, cumulative.</summary>
     public long ServerKeysOverLimit;
+
+    /// <summary>Requests whose application handler threw, refused <see cref="SourceErrorCodes.Denied"/>, cumulative. Diagnostic: a handler must not throw.</summary>
+    public long AdmitFaults;
+
+    /// <summary>
+    /// The most answers a session is owed at once. A frame not published — the link congested, the session degraded — keeps its answers owed; a client
+    /// that goes on asking meanwhile is refused at the drain rather than grow them.
+    /// </summary>
+    public const int MaxOwedAnswers = 64;
 
     public GroupRequests(CompiledGroupSet[] sets, int maxGroupsPerSession, int maxSessions, SubscriptionsRegistry registry)
     {
@@ -265,15 +274,27 @@ internal sealed class GroupRequests
     /// Takes one client request (P13): validated against the set and the session's profile and limit, then decided by the application. Its answer is owed
     /// from now on — an error at once, an applied one once the key is complete, or released. Called by the ingress drain, on the session's own chunk.
     /// </summary>
-    public void Request(SessionId session, string profileName, ushort requestId, uint set, long key, byte op)
+    /// <returns>False when the request was not taken because the session is owed <see cref="MaxOwedAnswers"/> answers: the drain ACKs it.</returns>
+    public bool Request(SessionId session, string profileName, ushort requestId, uint set, long key, byte op)
     {
         var state = Ensure(session);
         if (state == null)
         {
-            return;
+            return true;
+        }
+
+        if (state.Answers.Count >= MaxOwedAnswers)
+        {
+            return false;
         }
 
         System.Threading.Interlocked.Increment(ref Requested);
+        Decide(state, session, profileName, requestId, set, key, op);
+        return true;
+    }
+
+    private void Decide(SessionGroupRequests state, SessionId session, string profileName, ushort requestId, uint set, long key, byte op)
+    {
         var s = (int)set;
         if (op is not (BuiltInCommands.SubscribeOp or BuiltInCommands.UnsubscribeOp))
         {
@@ -293,8 +314,9 @@ internal sealed class GroupRequests
             return;
         }
 
-        if (key == 0)
+        if (key == 0 || !ClusterFieldReader.Fits(key, _sets[s].KeyType))
         {
+            // 0 names no group; a key no member's field can hold names one nothing is ever in.
             Refuse(state, requestId, s, key, SourceErrorCodes.InvalidKey);
             return;
         }
@@ -321,10 +343,29 @@ internal sealed class GroupRequests
         }
 
         var admit = _sets[s].Admit;
-        var decision = admit == null ? GroupDecision.Deny() : admit(new GroupRequest(session, _sets[s].Name, key));
+        if (admit == null)
+        {
+            // A set the server alone fills (SetSources): not one a client may ask for, so not one it knows as such.
+            Refuse(state, requestId, s, key, SourceErrorCodes.UnknownSet);
+            return;
+        }
+
+        GroupDecision decision;
+        try
+        {
+            decision = admit(new GroupRequest(session, _sets[s].Name, key));
+        }
+        catch (Exception)
+        {
+            // An application's handler runs on the ingress drain: its fault refuses the one request, never the tick.
+            System.Threading.Interlocked.Increment(ref AdmitFaults);
+            decision = GroupDecision.Deny();
+        }
+
         if (!decision.Allowed)
         {
-            Refuse(state, requestId, s, key, decision.Code);
+            // default(GroupDecision) carries code 0, which the wire reads as APPLIED: refused as Denied.
+            Refuse(state, requestId, s, key, decision.Code == 0 ? SourceErrorCodes.Denied : decision.Code);
             return;
         }
 
@@ -355,11 +396,12 @@ internal sealed class GroupRequests
             return false;
         }
 
-        // Off every key the server no longer names, then on every one it does.
+        // Off every key the server no longer names, then on every one it does. The caller's copy is sorted, so each test is a binary search.
+        Array.Sort(keys);
         for (var i = state.Count[set] - 1; i >= 0; i--)
         {
             var key = state.Keys[set][i];
-            if ((state.Origin[set][i] & SessionGroupRequests.FromServer) != 0 && Array.IndexOf(keys, key) < 0)
+            if ((state.Origin[set][i] & SessionGroupRequests.FromServer) != 0 && Array.BinarySearch(keys, key) < 0)
             {
                 state.Remove(set, key, SessionGroupRequests.FromServer);
             }
@@ -381,7 +423,16 @@ internal sealed class GroupRequests
     /// complete (or no longer asked for), each unsubscription whose key is no longer held. Appended to the frame's group records — after the gather's own, so
     /// an answer follows the completion it reports — and noted, so a published frame retires them.
     /// </summary>
-    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch)
+    /// <param name="session">The session.</param>
+    /// <param name="push">Its track, or null for a session bound to no profile: no key of its is held.</param>
+    /// <param name="scratch">The worker's scratch.</param>
+    /// <param name="profileName">The profile the session is bound to now, or null.</param>
+    /// <remarks>
+    /// A subscription still waiting on its key when the session's profile stops naming the set — switched to another, or unbound — would wait for ever,
+    /// since nothing fills it: it is answered <see cref="SourceErrorCodes.NotInProfile"/> and the client's key dropped, as if asked under the new profile.
+    /// A subscription already answered stays: the session keeps its keys across profiles like across realms, and they fill again under one naming the set.
+    /// </remarks>
+    public void Emit(SessionId session, PushReplication push, FrameWorkerScratch scratch, string profileName)
     {
         scratch.Answered.Clear();
         var state = Of(session);
@@ -390,8 +441,11 @@ internal sealed class GroupRequests
             return;
         }
 
-        foreach (var answer in state.Answers)
+        var named = profileName != null && _named.TryGetValue(profileName, out var n) ? n : null;
+        var answers = state.Answers;
+        for (var i = 0; i < answers.Count; i++)
         {
+            var answer = answers[i];
             bool due;
             switch (answer.Due)
             {
@@ -399,10 +453,20 @@ internal sealed class GroupRequests
                     due = true;
                     break;
                 case GroupAnswer.WhenComplete:
-                    due = state.Find(answer.Set, answer.Key) < 0 || push.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete;
+                    if (state.Find(answer.Set, answer.Key) >= 0 && (named == null || !named[answer.Set]))
+                    {
+                        state.Remove(answer.Set, answer.Key, SessionGroupRequests.FromClient);
+                        answer.Code = SourceErrorCodes.NotInProfile;
+                        answers[i] = answer;
+                        due = true;
+                        break;
+                    }
+
+                    due = state.Find(answer.Set, answer.Key) < 0 || push?.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.Complete;
                     break;
                 default:
-                    due = state.Find(answer.Set, answer.Key) >= 0 || push.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.NotHeld;
+                    due = state.Find(answer.Set, answer.Key) >= 0 || push == null
+                        || push.GroupKeyStateOf(session, answer.Set, answer.Key) == GroupKeyState.NotHeld;
                     break;
             }
 

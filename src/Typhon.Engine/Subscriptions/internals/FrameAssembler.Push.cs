@@ -935,7 +935,11 @@ internal sealed unsafe partial class FrameAssembler
         // SELF, which sends every owner group on a RESET.
         var first = Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref locator, out var self);
-        if (count == 0 && !reset && !self.Write && self.Acks == 0)
+
+        // The SubscribeRequest answers it is owed (14 § 4): no profile names a set, so each is an error, a pending subscription's NotInProfile.
+        scratch.GroupRecords.Clear();
+        Requests?.Emit(session, null, scratch, _sessions.ProfileName(session));
+        if (count == 0 && !reset && !self.Write && self.Acks == 0 && scratch.GroupRecords.Count == 0)
         {
             state.EventsCursor = (uint)_tick;
             CommitSelf(session, state, in self, -1, ref counters);
@@ -954,9 +958,10 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self));
+        var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self) + SourcesBound(scratch));
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None, Realm != null, state.PendingFrame);
+        WriteSources(ref writer, scratch);
         WriteSelf(ref writer, in self, scratch);
         if (count > 0)
         {
@@ -978,6 +983,7 @@ internal sealed unsafe partial class FrameAssembler
         PublishRealmView(session, state, reset);
         send.PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
+        Requests?.Retire(session, scratch.Answered);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
         state.PendingReset = false;
@@ -992,6 +998,43 @@ internal sealed unsafe partial class FrameAssembler
         scratch.AddReady(session);
         counters.FramesProduced++;
         counters.BytesEncoded += length;
+    }
+
+    // Upper bound of the SOURCES block for the worker's group records; 0 when it has none.
+    private static int SourcesBound(FrameWorkerScratch scratch) =>
+        scratch.GroupRecords.Count > 0 ? 1 + 5 + 5 + (scratch.GroupRecords.Count * GroupRecordBound) : 0;
+
+    // The SOURCES block of the worker's group records (14 § 3.5): the gather's, then the SubscribeRequest answers. Nothing when there are none.
+    private static void WriteSources(ref WireWriter writer, FrameWorkerScratch scratch)
+    {
+        if (scratch.GroupRecords.Count == 0)
+        {
+            return;
+        }
+
+        var sourcesMark = TickWriter.BeginBlock(ref writer, BlockTypes.Sources);
+        writer.WriteVaru((uint)scratch.GroupRecords.Count);
+        foreach (var g in scratch.GroupRecords)
+        {
+            if (g.Kind == SourceStatus.Applied)
+            {
+                writer.WriteU8(g.Kind);
+                writer.WriteU16((ushort)g.Key);
+            }
+            else if (g.Kind == SourceStatus.Error)
+            {
+                // An answer's request id in the key's low 16 bits, its code in the next 16.
+                writer.WriteU8(g.Kind);
+                writer.WriteU16((ushort)g.Key);
+                writer.WriteU16((ushort)(g.Key >> 16));
+            }
+            else
+            {
+                TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
+            }
+        }
+
+        TickWriter.EndBlock(ref writer, sourcesMark);
     }
 
     /// <summary>
@@ -1364,7 +1407,7 @@ internal sealed unsafe partial class FrameAssembler
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
 
         // The SubscribeRequest answers due in this frame (14 § 4), after the gather's own records: an APPLIED follows the GROUP_COMPLETE it reports.
-        Requests?.Emit(session, push, scratch);
+        Requests?.Emit(session, push, scratch, _sessions.ProfileName(session));
         var groupRecords = scratch.GroupRecords.Count;
         if (records == 0 && groupRecords == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write
             && self.Acks == 0)
@@ -1397,7 +1440,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
             + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
-            + SelfBound(in self) + RealmBlockBound + (groupRecords > 0 ? 1 + 5 + 5 + (groupRecords * GroupRecordBound) : 0);
+            + SelfBound(in self) + RealmBlockBound + SourcesBound(scratch);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm != null, state.PendingFrame);
@@ -1414,32 +1457,7 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         // SOURCES (14 § 3.5): applied after ENTITIES, so a GROUP_COMPLETE lands once the enters it completes are in the store.
-        if (groupRecords > 0)
-        {
-            var sourcesMark = TickWriter.BeginBlock(ref writer, BlockTypes.Sources);
-            writer.WriteVaru((uint)groupRecords);
-            foreach (var g in scratch.GroupRecords)
-            {
-                if (g.Kind == SourceStatus.Applied)
-                {
-                    writer.WriteU8(g.Kind);
-                    writer.WriteU16((ushort)g.Key);
-                }
-                else if (g.Kind == SourceStatus.Error)
-                {
-                    // An answer's request id in the key's low 16 bits, its code in the next 16.
-                    writer.WriteU8(g.Kind);
-                    writer.WriteU16((ushort)g.Key);
-                    writer.WriteU16((ushort)(g.Key >> 16));
-                }
-                else
-                {
-                    TickWriter.WriteGroupRecord(ref writer, g.Kind, (uint)g.Set, g.Key);
-                }
-            }
-
-            TickWriter.EndBlock(ref writer, sourcesMark);
-        }
+        WriteSources(ref writer, scratch);
 
         WriteSelf(ref writer, in self, scratch);
         if (eventCount > 0)

@@ -327,6 +327,66 @@ class PushGroupShardTests : TestBase<PushGroupShardTests>
     }
 
     /// <summary>
+    /// A referrer destroyed while it waits for its lazy target's block leaves no wait behind: the purge drops it although the target still exists and is
+    /// still unheld — under churning referrers the waits would otherwise grow for as long as the target stays unheld.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-31")]
+    public void AWaitingReferrerDestroyedIsPurged()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Town(dbe, 7, 0f, 0f, 60f);
+        Town(dbe, 9, 3000f, 0f, 60f);
+        var shard = Shards(dbe, 9, 1)[0];
+        EntityId anchor;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            anchor = tx.Spawn<GroupAnchor>(GroupAnchor.Bounds.Set(GroupTestSchema.At(10f, 0f)),
+                GroupAnchor.Link.Set(new GroupShardLink { Shard = new EntityLink<GroupPositionless>(shard) }));
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, s =>
+        {
+            s.Archetype<GroupAnchor>(a => a.Position(GroupAnchor.Bounds).Field(GroupAnchor.Link, l => l.Shard, Codec.Exact, name: "shard", group: "link"));
+            s.Archetype<GroupPositionless>(a => a.Field(GroupPositionless.Ai, x => x.Template, Codec.U8, name: "kind"));
+            s.Groups("town", g => g.Region<GroupTown>(r => r.Key(GroupTown.Zone, z => z.Key).Extent(GroupTown.Zone, z => z.Extent))
+                .Member<GroupPositionless>(m => m.Key(GroupPositionless.Key, k => k.Town)));
+            s.Profile("p", p => p.Sphere(Radius).Of<GroupAnchor>().Groups("town", Reach));
+        }, nameof(AWaitingReferrerDestroyedIsPurged), Options());
+        harness.RunFence = true;
+        harness.DrainNetIds = true;
+        var session = harness.OpenSessions(1, "p")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        var tick = 0L;
+        void Run(int ticks)
+        {
+            for (var t = 0; t < ticks; t++)
+            {
+                harness.RunTick(++tick);
+                harness.Deliver(session);
+            }
+        }
+
+        Run(4);
+        Assert.That(harness.Subscriptions.Hub.WaitingReferrers, Is.EqualTo(1), "the anchor waits for the shard's block");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(anchor);
+            tx.Commit();
+        }
+
+        Run((int)PushHub.LazyIdleTicks + 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Subscriptions.Hub.WaitingReferrers, Is.Zero, "the dead referrer's wait purged");
+            Assert.That(harness.NetIdOf(shard), Is.Zero, "the shard still exists, still unheld");
+            Assert.That(harness.Replica(session).Store.Anomalies, Is.Zero);
+        });
+    }
+
+    /// <summary>
     /// #1389's scenario (14 § 2): a group of two jointed structures, A and B, their composition shards and the joint record. The session's sphere reaches
     /// neither structure; the group's box enters its reach, and all of it is delivered under the enter budget, a RESET in the middle of the fill filling it
     /// again and completing it once. The joint breaks — the group splits, B and its shards in a group of their own the session does not meet — and they
@@ -480,13 +540,23 @@ class PushGroupShardTests : TestBase<PushGroupShardTests>
     [VerifiesRule("SUB-33")]
     public void AnOffDagMoveOutOfAFillingTownIsSentThenLeaves() => OffDagMoveOutOfAFillingTown(withLog: true, nameof(AnOffDagMoveOutOfAFillingTownIsSentThenLeaves));
 
+    /// <summary>
+    /// The same race one step earlier: the commit lands after the fence drained the marks and before the blocks step. Its mark is the next tick's, so this
+    /// tick's projection still files the shard under the town, and the gather needs the move as much as above. The blocks step prunes the log — keeps a
+    /// move whose entity the projection still files under the key it left — rather than clears it, or the move would be gone before the gather read it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void AnOffDagMoveBetweenTheFenceAndTheBlocksStepIsSentThenLeaves() =>
+        OffDagMoveOutOfAFillingTown(withLog: true, nameof(AnOffDagMoveBetweenTheFenceAndTheBlocksStepIsSentThenLeaves), afterFence: true);
+
     /// <summary>The same scenario with the move log taken away: the fill passes the moved shard unsent, and the leave that follows must be caught.</summary>
     [Test]
     [RuleMutant("SUB-33")]
     public void WithoutTheMoveLogAnOffDagMoveIsCaught() =>
         RuleMutants.AssertDetects("SUB-33", OffDagMarker, () => OffDagMoveOutOfAFillingTown(withLog: false, nameof(WithoutTheMoveLogAnOffDagMoveIsCaught)));
 
-    private void OffDagMoveOutOfAFillingTown(bool withLog, string name)
+    private void OffDagMoveOutOfAFillingTown(bool withLog, string name, bool afterFence = false)
     {
         var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
         Town(dbe, 7, 0f, 0f, 60f);
@@ -541,21 +611,31 @@ class PushGroupShardTests : TestBase<PushGroupShardTests>
         });
 
         var moveAt = (uint)(tick + 1);
-        harness.Subscriptions.Hub.AfterIndexForTest = t =>
+        void Move(long t)
         {
             if (t != moveAt)
             {
                 return;
             }
 
-            // Another thread: a commit off the DAG, between the projection that read the key and the gather that fills by it.
+            // Another thread: a commit off the DAG, between the projection that read the key and the gather that fills by it — or, after the fence, before
+            // the projection that does not yet see it.
             System.Threading.Tasks.Task.Run(() =>
             {
                 using var tx = dbe.CreateQuickTransaction();
                 tx.OpenMut(target).Set(GroupVersionedShard.Key, new GroupVersionedKey { Town = 9 });
                 tx.Commit();
             }).Wait();
-        };
+        }
+
+        if (afterFence)
+        {
+            harness.AfterFence = Move;
+        }
+        else
+        {
+            harness.Subscriptions.Hub.AfterIndexForTest = t => Move(t);
+        }
 
         for (var t = 0; t < 6; t++)
         {

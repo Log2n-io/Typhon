@@ -42,6 +42,30 @@ internal readonly struct ClusterFieldReader
         };
     }
 
+    /// <summary>A key logged as raw bytes (<see cref="GroupKeyMove.Raw"/>), read as <paramref name="type"/> reads it: sign- or zero-extended like <see cref="ReadKey"/>.</summary>
+    public static long DecodeRaw(ulong raw, FieldType type) => type switch
+    {
+        FieldType.Byte => (sbyte)raw,
+        FieldType.UByte => (byte)raw,
+        FieldType.Short => (short)raw,
+        FieldType.UShort or FieldType.Char => (ushort)raw,
+        FieldType.Int => (int)raw,
+        FieldType.UInt => (uint)raw,
+        _ => (long)raw,
+    };
+
+    /// <summary>Whether <paramref name="key"/> is a value a field of <paramref name="type"/> can hold: what a requested or a shared key must be.</summary>
+    public static bool Fits(long key, FieldType type) => type switch
+    {
+        FieldType.Byte => key is >= sbyte.MinValue and <= sbyte.MaxValue,
+        FieldType.UByte => key is >= 0 and <= byte.MaxValue,
+        FieldType.Short => key is >= short.MinValue and <= short.MaxValue,
+        FieldType.UShort or FieldType.Char => key is >= 0 and <= ushort.MaxValue,
+        FieldType.Int => key is >= int.MinValue and <= int.MaxValue,
+        FieldType.UInt => key is >= 0 and <= uint.MaxValue,
+        _ => true,
+    };
+
     /// <summary>Whether <paramref name="type"/> is an integer key type a group key may be.</summary>
     public static bool IsIntegerKey(FieldType type) =>
         type is FieldType.Byte or FieldType.UByte or FieldType.Short or FieldType.UShort or FieldType.Char or FieldType.Int or FieldType.UInt
@@ -405,8 +429,9 @@ internal static class GroupSetCompiler
                         $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is a {field.Type}. A group key is an integer field (I8 … U64), 0 for no group.");
                 }
 
-                // The set's key type: its region's, or for an explicit or shared set its first member's.
-                if (set.KeyType == FieldType.None)
+                // The set's key type: its region's, or for an explicit or shared set its widest member's — the range a requested or a shared key must fit.
+                if (set.KeyType == FieldType.None || (set.Region == null && KeySize(field.Type) > KeySize(set.KeyType)
+                    && ClusterFieldReader.IsSignedKey(field.Type) == ClusterFieldReader.IsSignedKey(set.KeyType)))
                 {
                     set.KeyType = field.Type;
                 }
@@ -455,6 +480,12 @@ internal static class GroupSetCompiler
                     FieldSize = KeySize(field.Type),
                     Versioned = table?.StorageMode == StorageMode.Versioned,
                 };
+            }
+
+            if (set.Selector == GroupSelector.Shared && !ClusterFieldReader.Fits(set.SharedKey, set.KeyType))
+            {
+                throw new InvalidOperationException(
+                    $"Group set '{d.Name}': the shared key {set.SharedKey} is out of range for its members' {set.KeyType} key: no member could hold it.");
             }
 
             set.Members = members;

@@ -17,20 +17,32 @@ internal struct GroupKeyMove
     public ulong Raw;
 }
 
+/// <summary>Decides which logged moves a prune keeps (<see cref="GroupKeyMoveLog.Retain{TFilter}"/>).</summary>
+internal interface IGroupKeyMoveFilter
+{
+    bool Keep(in GroupKeyMove move);
+}
+
 /// <summary>
 /// The group key moves the replication track cannot see in the index (14 § 5): a Versioned commit off the DAG (EW-02) may move a positionless member's
-/// index entry between the projection and the gather, and the gather would then fill a key without a member the projection still filed under it. Each
-/// commit that removes an entry from a watched field's index appends it here first; the gather reads the moves out of a key alongside the index, and the
-/// blocks step clears the log.
+/// index entry after the projection last read its key, and the gather would then fill that key without a member the projection still files under it.
+/// Each commit that removes an entry from a watched field's index appends it here first; the gather reads the moves out of a key alongside the index.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Appended before the index changes.</b> A gather that reads the index and then this log, and finds an entry gone from the first, finds its move in the
-/// second: the append's lock release orders it before the index write, and the reader fences between its two reads.
+/// second. The append's stores precede, in program order, the tree's own read-modify-writes that publish the move (its latch and buffer lock acquires,
+/// full fences on both architectures), and the reader fences between its tree read and its log read.
+/// </para>
+/// <para>
+/// <b>Kept until the projection has caught up, never cleared by time.</b> A move made after the fence drained the structure words is marked for the next
+/// tick, so the projection that runs now does not see it; a commit can also stall between its append and its mark. So the blocks step prunes
+/// (<see cref="Retain{TFilter}"/>) rather than clears: an entry stays while the entity's projected key is still the one it left, and goes once the projection
+/// has read the move, the entity is gone, or the entry repeats another.
 /// </para>
 /// <para>
 /// <b>Read without the lock.</b> A writer publishes the array before the count that covers it, so a reader that loads the count and then the array sees at
-/// least that many complete entries. The only reset is the blocks step's, which runs while no gather does.
+/// least that many complete entries. The only rewrite is the blocks step's prune, which runs while no gather does.
 /// </para>
 /// <para>
 /// Zero cost where nothing watches: an archetype whose fields no group set reads has no log, and the commit path tests one null.
@@ -119,12 +131,24 @@ internal sealed unsafe class GroupKeyMoveLog
         return new ReadOnlySpan<GroupKeyMove>(moves, 0, Math.Min(count, moves.Length));
     }
 
-    /// <summary>Forgets every move. Serial, at the blocks step: a move logged before the coming projection is one the projection reads.</summary>
-    public void Clear()
+    /// <summary>Keeps the moves <paramref name="filter"/> keeps, in order. Serial, at the blocks step: no gather reads the log meanwhile.</summary>
+    public void Retain<TFilter>(ref TFilter filter) where TFilter : struct, IGroupKeyMoveFilter
     {
         lock (_lock)
         {
-            Volatile.Write(ref _count, 0);
+            var kept = 0;
+            for (var i = 0; i < _count; i++)
+            {
+                if (filter.Keep(in _moves[i]))
+                {
+                    _moves[kept++] = _moves[i];
+                }
+            }
+
+            Volatile.Write(ref _count, kept);
         }
     }
+
+    /// <summary>Moves held now.</summary>
+    public int Count => Volatile.Read(ref _count);
 }

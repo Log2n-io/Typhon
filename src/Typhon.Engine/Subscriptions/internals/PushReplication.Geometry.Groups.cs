@@ -1076,7 +1076,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
         var ignored = 0;
         foreach (ref readonly var move in moves)
         {
-            if (move.Watch != member.MoveWatch || DecodeKey(move.Raw, member.Field.Type) != key)
+            if (move.Watch != member.MoveWatch || ClusterFieldReader.DecodeRaw(move.Raw, member.Field.Type) != key)
             {
                 continue;
             }
@@ -1102,17 +1102,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
         return count;
     }
 
-    // A logged key's bytes as the field's integer type reads them, sign- or zero-extended to 64 bits like ClusterFieldReader.ReadKey.
-    private static long DecodeKey(ulong raw, FieldType type) => type switch
-    {
-        FieldType.Byte => (sbyte)raw,
-        FieldType.UByte => (byte)raw,
-        FieldType.Short => (short)raw,
-        FieldType.UShort or FieldType.Char => (ushort)raw,
-        FieldType.Int => (int)raw,
-        FieldType.UInt => (uint)raw,
-        _ => (long)raw,
-    };
 
     /// <summary>Folds one tick's member entries of the held keys into the session's per-identity fold.</summary>
     private void FoldKeys(TickLog slot, uint t, int set, long[] keys, int at, int count, FrameWorkerScratch scratch)

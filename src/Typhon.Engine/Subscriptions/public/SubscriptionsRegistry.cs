@@ -672,9 +672,20 @@ public sealed class SubscriptionsRegistry
         foreach (var profile in _profiles)
         {
             interests += CountGroupInterests(profile.Name, profile.Observers);
-            foreach (var variant in profile.Variants.Values)
+            foreach (var (kind, variant) in profile.Variants)
             {
                 interests += CountGroupInterests(profile.Name, variant.Observers);
+
+                // A session's explicit keys outlive a realm switch (14 § 4); the variant it switches into must name the same explicit sets, or a key it
+                // holds would stop filling, and its answer stop being owed, on a switch the client never asked for.
+                var based = RequestedSetsOf(profile.Observers);
+                var varied = RequestedSetsOf(variant.Observers);
+                if (!based.SetEquals(varied))
+                {
+                    throw new InvalidOperationException(
+                        $"Profile '{profile.Name}': its '{kind}' variant names the explicit sets [{string.Join(", ", varied)}], the base "
+                        + $"[{string.Join(", ", based)}]. A variant names the same ones: the keys a session holds in them outlive a realm switch.");
+                }
             }
         }
 
@@ -696,6 +707,27 @@ public sealed class SubscriptionsRegistry
         {
             throw new InvalidOperationException("A profile names a group set, and none is declared: declare it with subs.Groups(name, ...).");
         }
+    }
+
+    // The explicit sets the observers name, ordered for the message.
+    private SortedSet<string> RequestedSetsOf(IReadOnlyList<ObserverDeclaration> observers)
+    {
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var observer in observers)
+        {
+            foreach (var interest in observer.GroupInterests)
+            {
+                foreach (var set in _groupSets)
+                {
+                    if (set.Selector == GroupSelector.Explicit && string.Equals(set.Name, interest.Set, StringComparison.Ordinal))
+                    {
+                        names.Add(set.Name);
+                    }
+                }
+            }
+        }
+
+        return names;
     }
 
     private int CountGroupInterests(string profile, IReadOnlyList<ObserverDeclaration> observers)

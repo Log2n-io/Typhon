@@ -88,7 +88,9 @@ in the catalog's `groupSets`, in name order.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
 - Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
 - Explicit and shared sets: a profile names them with `Groups(set)`, no reach; at most `MaxGroupsPerSession` keys per set, a client's and the server's
-  together; `SubscribeRequest` is rate-limited to 5 a second, and a request past it is an `ACK`, not an answer.
+  together; `SubscribeRequest` is rate-limited to 5 a second, and a request past it — or past 64 answers owed to the session — is an `ACK`, not an
+  answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
+  naming the set is answered `NotInProfile`. A realm-kind variant names the same explicit sets as its profile.
 - Not built yet: visibility tags.
 - Measured (`GroupRegionBench`, 14 § 3.6): a 456 m town on a 192 m Sphere costs no measurable gather time (within 1 µs over 128 sessions) and no steady-state bytes; widening
   the Sphere to 456 m instead sends 2.8× the bytes.

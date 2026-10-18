@@ -183,6 +183,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>Called after the ingress drain of each tick, where an application system would apply (or reject) the tick's commands.</summary>
     public Action<long> AfterIngress { get; set; }
 
+    /// <summary>Runs after the tick fence and before the blocks step, when <see cref="RunFence"/> is set: where an off-DAG commit lands on the next tick's marks.</summary>
+    public Action<long> AfterFence { get; set; }
+
     private readonly SubscriptionsContext _ingressContext = new();
 
     /// <summary>Runs one tick's ingress drain, exactly as the Engine-Pre system dispatches it.</summary>
@@ -234,6 +237,7 @@ sealed unsafe class FrameHarness : IDisposable
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
+            AfterFence?.Invoke(tick);
         }
 
         // The shadow oracle's checks queued by the previous tick, where the ingress drain runs them: before this tick's projection moves a block.

@@ -81,12 +81,12 @@ internal sealed unsafe partial class PushHub
             _wantedBefore[s] = new long[16];
         }
 
-        _lazySeen = new uint[plans.Length][];
+        _lazySeen = new Dictionary<int, uint>[plans.Length];
         for (var a = 0; a < plans.Length; a++)
         {
             if (_lazy[a])
             {
-                _lazySeen[a] = new uint[64];
+                _lazySeen[a] = [];
             }
         }
 
@@ -168,8 +168,10 @@ internal sealed unsafe partial class PushHub
 
     // ══ Lazy blocks (P5′) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    // Per lazy plan, by chunk: the last blocks step at which a held key needed the cluster's block.
-    private uint[][] _lazySeen = [];
+    // Per lazy plan: each attached block's chunk and the last blocks step a held key needed it. A map of the attached blocks only — never an array over the
+    // chunk-id space (SUB-13): a lazy archetype's attached blocks are few by design, and the sweep visits exactly them.
+    private Dictionary<int, uint>[] _lazySeen = [];
+    private readonly List<int> _lazyIdle = [];
     private readonly HashSet<int> _lazyChunks = [];
 
     /// <summary>Lazy blocks attached because a held key needed them, and released after <see cref="LazyIdleTicks"/> unneeded — cumulative.</summary>
@@ -281,6 +283,8 @@ internal sealed unsafe partial class PushHub
         var segment = cs.ClusterSegment;
         if (segment == null)
         {
+            // No pushes reach here without a segment; the blocks are still written, so the mark that follows never reads last tick's.
+            Array.Clear(_pushBlocks[a], 0, _pushCount[a]);
             return 0;
         }
 
@@ -330,13 +334,7 @@ internal sealed unsafe partial class PushHub
     /// <summary>A lazy block just attached: needed now, and the referrers waiting for its entities are pushed again so their references resolve.</summary>
     private void NoteLazyAttached(int a, int chunk, ref ChunkAccessor<PersistentStore> accessor)
     {
-        ref var seen = ref _lazySeen[a];
-        if (chunk >= seen.Length)
-        {
-            Array.Resize(ref seen, Math.Max(chunk + 1, seen.Length * 2));
-        }
-
-        seen[chunk] = _tick;
+        _lazySeen[a][chunk] = _tick;
         LazyAttached++;
         if (_waitingReferrers.Count == 0)
         {
@@ -370,30 +368,35 @@ internal sealed unsafe partial class PushHub
         var keys = _plans[a].GroupKeys;
         var table = state.BlockByChunk;
         var seen = _lazySeen[a];
-        for (var chunk = 0; chunk < table.Length; chunk++)
+        _lazyIdle.Clear();
+        foreach (var (chunk, last) in seen)
         {
-            var block = (ReplicationBlockHeader*)table[chunk];
+            // A cluster the fence drained took its block with it: its entry goes too.
+            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+            if (block == null || Needed(block, layout, keys) || _tick - last >= LazyIdleTicks)
+            {
+                _lazyIdle.Add(chunk);
+            }
+        }
+
+        foreach (var chunk in _lazyIdle)
+        {
+            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
             if (block == null)
             {
-                continue;
+                seen.Remove(chunk);
             }
-
-            if (Needed(block, layout, keys))
+            else if (Needed(block, layout, keys))
             {
-                if (chunk >= seen.Length)
-                {
-                    Array.Resize(ref _lazySeen[a], Math.Max(chunk + 1, seen.Length * 2));
-                    seen = _lazySeen[a];
-                }
-
                 seen[chunk] = _tick;
-                continue;
             }
-
-            var last = chunk < seen.Length ? seen[chunk] : 0u;
-            if (_tick - last >= LazyIdleTicks && state.ReleaseBlockForDrain(chunk))
+            else
             {
-                LazyReleased++;
+                seen.Remove(chunk);
+                if (state.ReleaseBlockForDrain(chunk))
+                {
+                    LazyReleased++;
+                }
             }
         }
     }
@@ -420,6 +423,75 @@ internal sealed unsafe partial class PushHub
         return false;
     }
 
+    // ══ The off-DAG key moves (14 § 5) ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    private readonly HashSet<(int Location, int Watch, ulong Raw)> _seenMoves = [];
+
+    /// <summary>
+    /// Prunes each positionless archetype's log of key moves (GroupKeyMoveLog): a move stays while the entity's projected key is still the one it left —
+    /// the gather needs it — and goes once the projection has read the move, the entity has no state, or it repeats another. Serial, at the blocks step.
+    /// </summary>
+    private void PruneKeyMoves()
+    {
+        foreach (var set in GroupSets)
+        {
+            foreach (var member in set.Members)
+            {
+                if (member.Moves == null)
+                {
+                    continue;
+                }
+
+                _seenMoves.Clear();
+                var filter = new MoveFilter(_states[member.Plan], member, _seenMoves);
+                member.Moves.Retain(ref filter);
+            }
+        }
+    }
+
+    // One member's watch: the other watches of the log pass through untouched — their own member prunes them.
+    private readonly struct MoveFilter : IGroupKeyMoveFilter
+    {
+        private readonly ArchetypeReplicationState _state;
+        private readonly CompiledGroupMember _member;
+        private readonly HashSet<(int, int, ulong)> _seen;
+
+        public MoveFilter(ArchetypeReplicationState state, CompiledGroupMember member, HashSet<(int, int, ulong)> seen)
+        {
+            _state = state;
+            _member = member;
+            _seen = seen;
+        }
+
+        public bool Keep(in GroupKeyMove move)
+        {
+            if (move.Watch != _member.MoveWatch)
+            {
+                return true;
+            }
+
+            var table = _state.BlockByChunk;
+            var chunk = move.Location >> 6;
+            var block = (uint)chunk < (uint)table.Length ? (ReplicationBlockHeader*)table[chunk] : null;
+            if (block == null)
+            {
+                return false;   // no state, so no projected key: nothing a fill could pass unsent
+            }
+
+            var layout = _state.Layout;
+            var slot = move.Location & 63;
+            var bytes = (byte*)block;
+            var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
+            if (hot->NetId == NetIdAllocator.NoNetId || (block->ProjectedOccupancy & (1UL << slot)) == 0)
+            {
+                return false;
+            }
+
+            var projected = *(long*)(bytes + layout.ColdOffset + (slot * layout.ColdStride) + layout.GroupKeyOffsetInColdEntry + (8 * _member.KeySlot));
+            return projected == ClusterFieldReader.DecodeRaw(move.Raw, _member.Field.Type) && _seen.Add((move.Location, move.Watch, move.Raw));
+        }
+    }
+
     // ══ Referrers of an entity with no block yet (SUB-31) ══════════════════════════════════════════════════════════════════════════════════════════
 
     // A referrer whose reference named a lazy entity with no block resolved it to 0 and was not pushed again; it is, when the entity's block attaches. Keyed
@@ -435,8 +507,8 @@ internal sealed unsafe partial class PushHub
     internal int WaitingReferrers => _waitingPairs.Count;
 
     /// <summary>
-    /// Every <see cref="LazyIdleTicks"/> ticks: the waits on an entity that no longer exists are dropped. A target that never gets a block would otherwise
-    /// keep its referrers for ever; one destroyed keeps them for nothing. A wait whose referrer is gone is dropped when its target wakes it. Serial.
+    /// Every <see cref="LazyIdleTicks"/> ticks: the waits on an entity that no longer exists, and the waits of a referrer that no longer exists, are dropped.
+    /// Either would otherwise be kept for as long as the target goes unheld — for ever, under churning referrers. Serial.
     /// </summary>
     private void PurgeWaitingReferrers()
     {
@@ -450,9 +522,24 @@ internal sealed unsafe partial class PushHub
         var locator = new EntityLocator(References.Engine);
         try
         {
-            foreach (var target in _waitingReferrers.Keys)
+            foreach (var (target, list) in _waitingReferrers)
             {
                 if (!locator.TryLocate(EntityId.FromRaw((long)target), out _, out _))
+                {
+                    _purgeScratch.Add(target);
+                    continue;
+                }
+
+                for (var i = list.Count - 1; i >= 0; i--)
+                {
+                    if (!locator.TryLocate(EntityId.FromRaw((long)list[i]), out _, out _))
+                    {
+                        _waitingPairs.Remove((target, list[i]));
+                        list.RemoveAt(i);
+                    }
+                }
+
+                if (list.Count == 0)
                 {
                     _purgeScratch.Add(target);
                 }
@@ -561,7 +648,8 @@ internal sealed unsafe partial class PushHub
     private int _unplacedOrphanKeyCount;
 
     private readonly Dictionary<ulong, GroupKeyChange> _unplacedKeyMap = [];
-    private uint _unplacedFinished;
+    // No tick yet: the first tick the track finishes is never mistaken for one already finished.
+    private uint _unplacedFinished = uint.MaxValue;
 
     /// <summary>Positionless member events filed, cumulative.</summary>
     public long UnplacedEvents;

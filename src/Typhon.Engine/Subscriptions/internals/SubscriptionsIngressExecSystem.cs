@@ -735,9 +735,11 @@ internal sealed class SubscriptionsIngress : IDisposable
         if (info.IsSubscribeRequest)
         {
             // An explicit group set's request (14 § 4): validated, decided by the application and answered in SOURCES — never an ACK, never a buffer.
-            if (GroupRequests != null && SubscribeRequestRecord.TryRead(body, out var requestId, out var set, out var key, out var op))
+            if (GroupRequests != null && SubscribeRequestRecord.TryRead(body, out var requestId, out var set, out var key, out var op)
+                && !GroupRequests.Request(row.Session, _sessions.ProfileName(row.Session), requestId, set, key, op))
             {
-                GroupRequests.Request(row.Session, _sessions.ProfileName(row.Session), requestId, set, key, op);
+                // Its session is owed as many answers as it may be: refused like a request past the command's rate.
+                Buffers.Acks.Add(row.Session, seq, AckReasons.RateLimited);
             }
 
             return;
