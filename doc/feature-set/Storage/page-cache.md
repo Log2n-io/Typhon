@@ -44,7 +44,8 @@ catch (PageCacheBackpressureTimeoutException ex)
 | Option | Default | Effect |
 |---|---|---|
 | `PagedMMFOptions.DatabaseCacheSize` (via `AddManagedPagedMMF`, or the fluent `TyphonOptions.PageCacheSize`) | **256 MiB** default | Total cache capacity; must be a multiple of 8 KiB and at least 8 MiB; no ceiling beyond 2³¹ − 1 pages (about 16 TiB): past what the host grants, the allocation is refused at startup with a `StorageException` (`PageCacheAllocationFailed`). Below the 64 MiB recommended floor logs a warning (unless the internal `TestMode` is set) |
-| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | How long to wait for a page to free up before `PageCacheBackpressureTimeoutException`. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, the wait can exceed it by up to one lap |
+| `TimeoutOptions.PageCacheBackpressureTimeout` | 5 s | Per-round budget for a back-pressure wait. If at least one page was served since the previous round, a fresh round starts instead of throwing — up to `PageCacheOverloadWaitCeiling` in total. Honoured at the end of a sweep lap, so a page that stays evictable is always found first: above 4 GiB of cache, one round can exceed it by up to one lap |
+| `TimeoutOptions.PageCacheOverloadWaitCeiling` | 60 s | Overall ceiling for all back-pressure rounds combined. Once reached, `PageCacheBackpressureTimeoutException` propagates even if the cache is still serving pages |
 | `TimeoutOptions.PageCacheLockTimeout` | 5 s | Max wait on a page state-transition lock |
 
 ## ⚠️ Guarantees & limits
@@ -53,7 +54,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 - Eviction is O(1) amortized: clock-sweep finds a candidate within a couple of sweeps at most, no per-access list maintenance.
 - The second-chance counter (cap 5) gives hot pages (e.g. B+Tree roots) natural protection without manual pinning or priority tuning — a page can survive up to 5 sweeps before becoming evictable.
 - Sequential file-page access tends to land in contiguous cache memory, batching what would otherwise be many small I/Os into one.
-- Hard constraint: a single transaction's *working set* (distinct pages touched) must fit within the configured cache. If it doesn't, every resident page ends up pinned by that one transaction and allocation deadlocks until `PageCacheBackpressureTimeout` fires. Size the cache to the largest expected transaction, not the average.
+- Hard constraint: a single transaction's *working set* (distinct pages touched) must fit within the configured cache. If it doesn't, every resident page ends up pinned by that one transaction and allocation stalls; each back-pressure round that sees at least one page freed goes on, bounded by `PageCacheOverloadWaitCeiling` (default 60 s) before the exception. Size the cache to the largest expected transaction, not the average.
 - Cache size is fixed for the life of the open database (at least 8 MiB, a multiple of 8 KiB, up to what the host grants) — no dynamic resizing while running.
 
 ## 🧪 Tests

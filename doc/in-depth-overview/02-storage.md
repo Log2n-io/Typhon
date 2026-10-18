@@ -332,7 +332,7 @@ internal interface IPageCacheBackpressureStrategy : IDisposable
 }
 ```
 
-[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — a `ManualResetEventSlim` waited up to 50 ms per iteration, signalled when a page is left with no marks and no writeback debt — by `PagedMMF.MarkCaptured` after a checkpoint write, or by `DecrementDirtyByDelta` (`ChangeSet.ReleaseDirtyMarks`) releasing a page's last mark. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if it expires, a `PageCacheBackpressureTimeoutException` propagates.
+[`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) is the default — waits up to 50 ms per round under a **generation counter** (`_counters.Generation`) with `Monitor.Wait`, signalled when a page is left with no marks and no writeback debt — by `PagedMMF.MarkCaptured` after a checkpoint write, or by `DecrementDirtyByDelta` (`ChangeSet.ReleaseDirtyMarks`) releasing a page's last mark. A generation counter avoids the signal-swallowing race a `ManualResetEventSlim` had (#1382): the generation increments on every signal, and each waiter exits its round on the first increment after it began. Each retry re-checks `BackpressureContext.ShouldGiveUp` (see [01-foundation §2](01-foundation.md)) against `TimeoutOptions.Current.PageCacheBackpressureTimeout`; if the timeout expires and no page was served, a `PageCacheBackpressureTimeoutException` propagates — but if pages were served since the last round, a fresh round starts (up to `TimeoutOptions.Current.PageCacheOverloadWaitCeiling` in total).
 
 The factory hook on `PagedMMFOptions`:
 
@@ -345,7 +345,7 @@ It's `internal` — meant to be set by the engine's test harness, not by applica
 
 ### `OnBackpressure → ForceCheckpoint`
 
-Independent of the strategy, the moment the allocator decides backpressure is needed, it invokes `OnBackpressure?.Invoke()` — set by `DatabaseEngine` to `CheckpointManager.ForceCheckpoint`. This wakes the checkpoint thread immediately instead of waiting for the timer (default `CheckpointIntervalMs = 30 000`). The pipeline writes the owed pages in batches and, after each batch's fsync, publishes their captures (`MarkCaptured`), which calls `SignalPageAvailable` for every page left with no marks and no debt, which wakes the strategy's `ManualResetEventSlim`. End-to-end the worst case is one write batch — up to 8 192 pages or 100 ms ([CK-15](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)) — + the strategy's wait granularity.
+Independent of the strategy, the moment the allocator decides backpressure is needed, it invokes `OnBackpressure?.Invoke()` — set by `DatabaseEngine` to `CheckpointManager.ForceCheckpoint`. This wakes the checkpoint thread immediately instead of waiting for the timer (default `CheckpointIntervalMs = 30 000`). The pipeline writes the owed pages in batches and, after each batch's fsync, publishes their captures (`MarkCaptured`), which calls `SignalPageAvailable` for every page left with no marks and no debt, which increments the strategy's generation counter and wakes every round in flight. End-to-end the worst case is one write batch — up to 8 192 pages or 100 ms ([CK-15](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)) — + the strategy's wait granularity.
 
 ### `PageCacheGaugeSnapshot` — what the profiler sees
 
