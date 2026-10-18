@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using SwgTatooine.Accounts;
@@ -515,6 +516,22 @@ internal sealed class SessionHarness
             TimeSpan.FromSeconds(10)), Is.True, "the runtime stopped ticking");
     }
 
+    /// <summary>How long one link waits between PINGs: the engine's default ping period, <c>1000 / SubscriptionsOptions.PingHz</c>.</summary>
+    /// <remarks>
+    /// <b>A keepalive that pings as fast as the wait spins is a flood, and the engine closes one.</b> It answers at most <c>4 x PingHz</c> PINGs a second
+    /// and counts the refused ones towards SUB-27's abuse rule (#1025), so pinging on every <c>SpinWait.SpinUntil</c> predicate — which evaluates orders of
+    /// magnitude faster than that — ends with 1008, the player handed back to the simulation, and the case failing on state <c>PlayerThink</c> has resumed
+    /// writing. Exactly the failure the keepalive exists to prevent, arrived at from the other side.
+    /// <para>
+    /// One ping per this period is 4 a second against an answer cap of 16, and three inside the silence bound of <c>3 s / PingHz</c> = 750 ms, which is the
+    /// deadline the ping is actually for. Both bounds move with <c>PingHz</c>, which the demo leaves at the engine's default of 4.
+    /// </para>
+    /// </remarks>
+    private const long KeepalivePeriodMs = 250;
+
+    private readonly Stopwatch _sinceStart = Stopwatch.StartNew();
+    private long _nextKeepaliveMs;
+
     /// <summary>
     /// Sends a <c>PING</c> on every connected link, which is what stops the server closing them.
     /// </summary>
@@ -527,6 +544,16 @@ internal sealed class SessionHarness
     /// </remarks>
     public void Keepalive()
     {
+        // Rate-limited, not sent on every call: see KeepalivePeriodMs. Wall clock rather than the tick number, because the cap the engine applies is per
+        // second of real time and a paused or slow-ticking runtime is exactly when a case waits longest.
+        var nowMs = _sinceStart.ElapsedMilliseconds;
+        if (nowMs < _nextKeepaliveMs)
+        {
+            return;
+        }
+
+        _nextKeepaliveMs = nowMs + KeepalivePeriodMs;
+
         var tick = (uint)Math.Max(0, _sim.Runtime.CurrentTickNumber);
         for (var i = 0; i < _links.Count; i++)
         {
