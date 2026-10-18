@@ -79,7 +79,7 @@ Serving engine state to game clients, browsers and bots — and taking their com
 | **[Replication profile](xref:concept-replication-profile)** | A named kind of view: one World / Sphere / ClientRegion observer, plus optional per-tile counts. |
 | **[Replication session](xref:concept-replication-session)** | One connected client — admitted, bound to a profile, placed, possibly controlling an entity. |
 | **[Client command](xref:concept-client-command)** | A typed intent from a client, checked, drained into the next tick, always answered. |
-| **[Replication event](xref:concept-replication-event)** | A one-off fact routed to the sessions it concerns — best effort, state stays authoritative. |
+| **[Replication event](xref:concept-replication-event)** | A one-off fact routed to the sessions it concerns — best effort or reliable, state stays authoritative. |
 | **[Replication catalog](xref:concept-replication-catalog)** | The self-describing wire contract sent at connection, so clients decode without the server's types. |
 
 ## Reliability & operations

@@ -1,7 +1,7 @@
 ---
 uid: overview-subscriptions
 title: '15 — Subscriptions'
-description: 'How the engine replicates state to remote clients: the push set, projection and encode-once, the cell algorithm (sparse push index, geometric known-set, delivery and crescent sweep) and why it scales, frames and send pumps, owner state, ingress and hardening, events, and the wire.'
+description: 'How the engine replicates state to remote clients: the push set, projection and encode-once, the cell algorithm (sparse push index, geometric known-set, delivery and crescent sweep) and why it scales, groups and visibility, frames and send pumps, owner state, ingress and hardening, events (best effort and reliable), and the wire.'
 ---
 
 # 15 — Subscriptions
@@ -24,7 +24,9 @@ Two decisions shape everything below:
   structure and spatial changes. Per-tick work follows what changed, never the archetype.
 - **What a session holds is geometry.** Nothing is stored per (session, entity). A session's view is recomputed from its anchor, the cells
   delivered to it, and each entity's last visible position. A session costs a few hundred bytes plus its frames, whatever it holds.
-  [§3](#3-the-cell-algorithm-who-receives-what) explains the algorithm and why it scales.
+  [§3](#3-the-cell-algorithm-who-receives-what) explains the algorithm and why it scales. Beyond geometry, a session also holds whole
+  **groups** — entities sharing a key — and never what its **visibility mask** excludes; neither adds per-(session, entity) state
+  ([§3.7](#37-beyond-geometry-groups-and-visibility)).
 
 This chapter is the mechanism. For usage see [Guide ch.7](../guide/07-subscriptions.md); for per-feature guarantees, the
 [feature catalog](../feature-set/Subscriptions/README.md).
@@ -91,7 +93,7 @@ could not describe — every live entity.
 | Part | Holds | Size (2D mover, short state) |
 |---|---|---|
 | Hot entry | `EntityId`, netId, generation, flags; one change tick per group + the segment tick; the encoded segment (`p0`, `v`, `t0`, epoch); the packed group bodies | 64 B |
-| Cold entry | previous position, the visibility position v̂, the run start of the current segment, the tick of the last event (SUB-19) | 32 B |
+| Cold entry | previous position, the visibility position v̂, the run start of the current segment, the tick of the last event (SUB-19); per group set, the member's key (8 B); the visibility mask when declared (4 B) | 32 B |
 
 Strides are sized per archetype by the plan and rounded to cache lines. Entries move with their entity through migration and repair and
 never survive slot reuse (SUB-09).
@@ -259,6 +261,40 @@ occupancy map's occupied cells only. A **`ClientRegion`** session replaces the s
 
 What binds next is the network link, not the CPU, and the levers there are payload levers: segments, distance bands, radii and cadence.
 
+### 3.7 Beyond geometry: groups and visibility
+
+```text
+held(s, e)  =  [ known(s, e)  ∨  key(e) ∈ keys(s) ]  ∧  visible(s, e)
+visible(s, e) = vis(e) = 0  ∨  (vis(e) & mask(s)) ≠ 0
+```
+
+**Groups** (SUB-33). A group set names member archetypes and a key field on each, carrying `[Index(AllowMultiple = true, Sparse = true)]`
+(0 = no group, never filed — IX-09). Membership is **the engine's own index**, not a copy: the fill reads it, and a write to a key field marks the
+entity's slot in the cluster's structure word beside the spatial slot, so the projection reads the new key the tick it is written and files the
+event under the old and the new key — the **member log**, kept `LogDepth` ticks like the cell index. What selects a session's keys:
+
+| Selector | Keys held |
+|---|---|
+| region | the keys whose extent (a region entity's box or sphere) is within `reach` of the session's anchor — one cell lookup in a region index built on the replication grid, left at `reach + margin` |
+| explicit | the keys the client asked for (`SubscribeRequest`, answered `SOURCE_APPLIED` / `SOURCE_ERROR`) and the application allowed, plus those a system set (`SetSources`) |
+| shared | the set's one key, for every session whose profile names it |
+
+A key that becomes held **fills** under what the cells left of the enter budget, in ascending netId behind a cursor — `netId < cursor` is the
+group's analogue of a delivered cell, so "held" stays exact while a fill spans frames — and is announced `GROUP_COMPLETE` once no current member
+is missing; a key let go sends `GROUP_RELEASED` with its members' leaves. A post-pass keeps the union honest: a geometric leave of a member its
+key still holds is dropped, a member moving between two held keys is an update. Per session, the cost is its held keys and their cursors
+(`MaxGroupsPerSession`), never its members.
+
+**Positionless members** have no cell, so they are reachable only through groups. Their events go to one engine-wide unplaced log instead of the
+cell index; their blocks and identities are **lazy** — attached when a held key reaches their cluster, released 64 ticks after none does — so a
+world of structures nobody looks at costs no replication memory.
+
+**Visibility** (SUB-34). A projection may name a `uint` mask field, stored in the cold entry and compared like a projected field. The test sits
+beside every enter decision of every path — the push step, the log's replay, delivery, the sweeps, the far tier, World, ClientRegion, the
+group fill and post-pass — and in `TryResolve`. A mask flip is an event with was/is: hidden → visible is an enter, the reverse a leave. To keep
+the common case free, every recorded event of an entity hidden on either side is flagged and listed with its old and new masks; an unflagged
+event is public on both sides and reads no cold entry. A session's mask change is a `RESET`.
+
 ## 4. Frames
 
 `Frames`' prologue runs the skip policy ([§6](#6-hand-off-send-pumps-and-backpressure)) and the per-profile work; its chunks claim sessions one at a time (`FrameAssembler`). For each
@@ -338,8 +374,16 @@ ASP.NET Core adapter differ only in framing.
 `EventHub`: systems emit into per-worker buffers; after the projection the Events stage resolves each event's `EntityId` fields to netIds
 (including entities destroyed this tick) and encodes it **once** through the catalog's field plans. Routing is per event: `Near` and
 `ToKnown` file one entry per point by cell and let each session search only its cell box against its own geometry; `ToOwner` and
-`ToSession` are sorted lists each session binary-searches; `Broadcast` is everyone. A log of `LogDepth` ticks serves skipped sessions; past
-it, a 256-tick summary counts what a session missed, delivered as the built-in `EventsLost`.
+`ToSession` are sorted lists each session binary-searches; `Broadcast` is everyone. A `ToKnown` event naming a group member is also filed
+under the member's keys, so a member held only through a group is reached. A log of `LogDepth` ticks serves skipped sessions; past it, a
+256-tick summary counts what a session missed, delivered as the built-in `EventsLost`. A frame gives events at most half its bytes; the
+best-effort ones past it are counted lost.
+
+**Reliable events** (`.Reliable()`, SUB-35) are encoded into a ring of their own, deep enough to cover the close bound, so a session past
+`LogDepth` still finds them. Each is judged **once**, at the first frame built after its tick, against the view the session had; what the frame
+cannot carry joins the session's owed queue and is delivered in order ahead of newer events, never re-judged and never cut. A session whose
+oldest owed event outlives the close bound is closed with `1013`. Emission reserves the event's largest encoding against
+`ReliableEventBytes`; an emit past it is refused — `Emit` returns `false` — rather than dropped downstream.
 
 ## 9. The catalog and the wire
 
@@ -347,7 +391,7 @@ At `Start`, `CatalogBuilder` compiles the plans, profiles' grids, commands, even
 collection sorted, indices assigned in canonical order, built-ins at reserved indices — and hashes it. It travels in `WELCOME` and is served
 by `MapTyphonCatalog`. The wire (`typhon.3`, [`Typhon.Protocol`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Protocol)):
 messages `HELLO`, `WELCOME`, `TICK`, `COMMANDS`, `PING`/`PONG`, `KICK`, `BYE`; a `TICK` carries typed, length-prefixed blocks — `ENTITIES`,
-`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `EXT` — each skippable by a client that does not know it. Records are absolute: a frame
+`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `SOURCES`, `EXT` — each skippable by a client that does not know it. Records are absolute: a frame
 never depends on one the client might have missed. Codec arithmetic (quantization, packing, varints, half floats, positions, velocities) is
 specified bit-exactly and pinned by golden vectors shared by the engine, `Typhon.Client` and the TypeScript SDK.
 
@@ -368,7 +412,8 @@ absolute, skips are unions), SUB-04 (release/acquire hand-offs), SUB-05 (one wri
 steady-state allocation), SUB-08 (commands visible for exactly their tick), SUB-09 (state follows migration), SUB-10 (the push set, compared
 quantized), SUB-11 (owner groups after control changes), SUB-13 (cost follows the push set), SUB-14 (told before closed), SUB-15 (skips count
 back-pressure only), SUB-16 (held = geometry), SUB-19 (the event stamp), SUB-26 (`TryResolve`), SUB-27 (refusals answered, abuse closed),
-and the Phase 2 rules on v̂, windows, counts and events.
+the Phase 2 rules on v̂, windows, counts and events, and Phase 4's SUB-33 (groups held whole, completed once), SUB-34 (visibility on every
+path) and SUB-35 (reliable events once and in order, or closed).
 
 ## See also
 

@@ -33,12 +33,12 @@ a slow client hold up the tick.
 | [Sessions & admission](sessions-admission.md) | Declared kinds, an admission hook with roles and limits, session events, staged requests: profile, control, budget, kick | ✅ Implemented | 🔵 Core |
 | [Owner state (`SELF`)](owner-state.md) | Fields only the controlling session receives, plus the last applied command sequence | ✅ Implemented | 🔵 Core |
 | [Commands & acknowledgements](commands.md) | Typed intents, rate/role/pre-check on the transport thread, `TryResolve` scoped to what the session holds, every refusal answered | ✅ Implemented | 🔵 Core |
-| [Events](events.md) | One-off facts routed near a point, to the sessions that hold an entity, to an owner, to one session, or to all; best effort with a loss count | ✅ Implemented | 🟣 Advanced |
+| [Events](events.md) | One-off facts routed near a point, to the sessions that hold an entity, to an owner, to one session, or to all; best effort with a loss count, or reliable (`.Reliable()`: once, in order, or the session is closed) | ✅ Implemented | 🟣 Advanced |
 | [Backpressure & budgets](backpressure-budgets.md) | Skip never queue, catch-up from an 8-tick log, rate classes, per-session byte budgets, the inbound budget and the abuse close | ✅ Implemented | 🟣 Advanced |
 | [Transports & hosting](transports-hosting.md) | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint | ✅ Implemented | 🔵 Core |
 | [Client SDKs](client-sdks.md) | TypeScript (browser) and .NET (bots, tools) clients: stores, motion extrapolation, commands, reconnection, code generation | ✅ Implemented | 🔵 Core |
 | [Wire protocol & catalog](wire-protocol.md) | `typhon.3`: the handshake, the canonical catalog, frames and blocks, close codes | ✅ Implemented | 🟣 Advanced |
-| [Groups](groups.md) | A session holds every member of a town while its Sphere meets it, filled under the enter budget and completed with `GROUP_COMPLETE` | 🚧 Partial | 🟣 Advanced |
+| [Groups](groups.md) | Entities sharing a key, held whole — the towns a Sphere meets, the keys a client asked for, a shared board — positioned or not, filled under the enter budget and completed with `GROUP_COMPLETE` | 🚧 Partial | 🟣 Advanced |
 | [Sessions in realms](realms.md) | A session in one realm at a time, each realm served at its own scale, a switch as one `RESET` + `REALM` frame; kinds and profile variants; realm-scoped events | 🚧 Partial | 🟣 Advanced |
 | [Diagnostics](diagnostics.md) | `STATS` metrics (built-in and your own), the `DEBUG` capability, the push validator, runtime counters | ✅ Implemented | 🟣 Advanced |
 
@@ -56,7 +56,7 @@ Refused at `Start` or at the call — never silently ignored:
   [Replication catalog](xref:concept-replication-catalog)
 - Related feature: [Overload Management](../Runtime/overload-management.md) — replication degrades sessions before the tick does
 - Related feature: [Spatial](../Spatial/README.md) — a replicated archetype is spatially indexed; views are found through the grid
-- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-33)
+- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-35)
 
 <!-- Deep dive: claude/design/Subscriptions/README.md -->
 <!-- Deep dive: claude/adr/067-push-replication.md -->

@@ -188,6 +188,42 @@ holds is kept, so a session's cost follows what changed near it, never the size 
 players over 270 k entities cost the demo about 2 ms a tick. The full algorithm, with diagrams, is in
 [Technical overview ch.15 § 3](../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what).
 
+### Groups: a set delivered whole
+
+A sphere answers *"what is near me"*. Some questions are about a set anchored elsewhere — *"the buildings of this town"*, *"the parts of
+this ship"*, *"my mail"* — and no radius expresses them. A **group set** names entities that share a key, held in a field you already have,
+and delivers each group whole, then says so:
+
+```csharp
+// Members carry the key in an indexed field; 0 means "in no group".
+//   [Index(AllowMultiple = true, Sparse = true)] public int Town;
+subs.Groups("town", g => g
+    .Region<TownRegion>(r => r.Key(TownRegion.Zone, z => z.Key).Extent(TownRegion.Zone, z => z.Circle))   // a BSphere2F
+    .Member<Building>(m => m.Key(Building.Place, b => b.Town))
+    .Leave(marginM: 32));
+
+subs.Profile("player", p => p
+    .Sphere(150, leave: 165).AroundControlled().Of<Character>()
+    .Groups("town", reachM: 250));                 // the towns within 250 m: every building, however far
+```
+
+- **Three ways to select keys.** A **region** set holds the keys whose extent the session's anchor is within `reachM` of. An **explicit**
+  set (`.Explicit(admit)`) holds the keys a client asked for with `SubscribeRequest` and your handler allowed, plus those a system chose
+  with `Session(id).SetSources(set, keys)` — a player's own lists by account id. A **shared** set (`.Shared(key)`) holds its one key for
+  every session whose profile names it — a market board.
+- **Whole, then complete.** A group fills under the enter budget; the client is told `GROUP_COMPLETE` once every current member has
+  arrived, and `GROUP_RELEASED` when it lets go. An entity reached by the sphere and by a group is held once.
+- **Members need no position.** An archetype with no spatial field can be a member — a structure's shards, a listing — and is reached only
+  through its groups; its replication state exists only while some session holds one of its keys.
+- `SubscriptionsOptions.MaxGroupsPerSession` is required once a set is declared.
+
+### Visibility: what a session may not see
+
+`.Visibility(Comp, c => c.Mask)` on a projection names a `uint` field: 0 is public, any other value is a set of bits. A session sees an
+entity when the entity is public or shares a bit with the session's mask, set with `Session(id).SetVisibility(mask)` (default 0). A hidden
+entity is never sent, on any path — sphere, group, far tier — and a command naming it does not resolve. Flipping an entity's mask is a leave
+or an enter for the sessions it concerns; changing a session's mask re-sends its view.
+
 ---
 
 ## 3. Who may connect: sessions
@@ -416,8 +452,21 @@ subs.Emit(new Hit { Attacker = _characters[attack.Session], Target = target, Dam
 Routes: `RouteNear(point, radius)`, `RouteToKnown(entities)`, `RouteToOwner(entity)`, `RouteToSession()` with `EmitTo(session, …)`, and
 `Broadcast()`. An event is encoded once and the same bytes reach every session it matches.
 
-> 💡 **Events are best effort.** A session more than eight ticks behind loses the older ones, and is told how many (`EventsLost`). Anything that must never be lost is
-> state: a death is a mode change the client learns from its next record, the hit is the flourish.
+`RouteToKnown` also reaches a group member held only through its group. `Emit` and `EmitTo` return `false` when they refuse an event.
+
+> 💡 **Events are best effort by default.** A session more than eight ticks behind loses the older ones, and is told how many (`EventsLost`).
+> Most of what must never be lost is state: a death is a mode change the client learns from its next record, the hit is the flourish.
+
+For the rest — a trade's outcome, a loot drop — declare the event **reliable**:
+
+```csharp
+subs.Event<TradeDone>(e => e.RouteToOwner(t => t.Buyer).Reliable());
+```
+
+While a session lives it receives every reliable event routed to it, once, in order; if it cannot keep up for `CloseStalledAfter`, it is
+closed with `1013` so its client reconnects. Reliable events are never cut for size — what does not fit waits for the next frame — and are
+bounded by `SubscriptionsOptions.ReliableEventBytes`, required once one is declared: an emit past it is refused (`Emit` returns `false`).
+They do not survive a resume; the application re-sends what a resumed client must learn.
 
 ---
 
@@ -519,8 +568,8 @@ new RuntimeOptions
   its frames, all native, all under configured budgets. Steady-state replication allocates no managed memory.
 
 What is **not built yet** (refused at `Start` rather than silently ignored): several entity observers in one profile, per-session observers
-(`Observe`), shared View sources, resumable sessions, and reliable events. See the [feature catalog](xref:feature-subscriptions-index) for
-the full status.
+(`Observe`), and group sets on `World` or `ClientRegion` observers. See the [feature catalog](xref:feature-subscriptions-index) for the full
+status.
 
 ---
 
@@ -539,10 +588,11 @@ the full status.
 [Replication catalog](../key-concepts/replication-catalog.md).
 
 **Exact calls:** `TyphonRuntime.Subscriptions` (`SubscriptionsRegistry`: `Archetype<T>()` / `Archetype<T>(…)` / `Static<T>(…)` / `Profile` /
-`Command<T>` / `Event<T>` / `Sessions.Kinds` / `Sessions.Admit`) · `[Replicated]` / `[Motion]` / `[Position]` / `[Replicate]` / `[OnEnter]` /
+`Command<T>` / `Event<T>` / `Groups` / `Sessions.Kinds` / `Sessions.Admit`) · `GroupSetBuilder` (`Region` / `Explicit` / `Shared` / `Member` /
+`Leave`) · `EventBuilder` (`Route…` / `Broadcast` / `Reliable`) · `[Replicated]` / `[Motion]` / `[Position]` / `[Replicate]` / `[OnEnter]` /
 `[Owner]` / `[Fraction]` / `[Heading]` / `[ReplicatedMessage]` / `[Codec]` / `[Quant]` / `[EntityRef]` · `ProfileBuilder` (`World` / `Sphere` /
-`ClientRegion` / `Aggregate` / `Every`) · `ObserverBuilder` (`Of` / `AroundControlled` / `Bind` / `At` / `Near` / `Bands`) · `ctx.Subscriptions`
-(`SessionEvents` / `Session(…).Profile/Control/SetBudget/Kick` / `Place` / `SetRadius` / `Replicate` / `Commands<T>` / `TryResolve` / `Reject` /
+`ClientRegion` / `Aggregate` / `Every`) · `ObserverBuilder` (`Of` / `AroundControlled` / `Bind` / `At` / `Near` / `Bands` / `Groups`) · `ctx.Subscriptions`
+(`SessionEvents` / `Session(…).Profile/Control/SetBudget/Kick/SetSources/SetVisibility` / `Place` / `SetRadius` / `Replicate` / `Commands<T>` / `TryResolve` / `Reject` /
 `Emit` / `EmitTo`) · `SubscriptionsOptions` (`ReplicationCellM` / `IngressBytesPerSecond` / `MaxSessions` / `EnterBudgetPerFrame` /
-`CloseStalledAfter`) · `TcpSubscriptionTransport` / `runtime.StartSubscriptionTransport` · `AddTyphonSubscriptions` / `MapTyphonSubscriptions` /
+`CloseStalledAfter` / `MaxGroupsPerSession` / `ReliableEventBytes`) · `TcpSubscriptionTransport` / `runtime.StartSubscriptionTransport` · `AddTyphonSubscriptions` / `MapTyphonSubscriptions` /
 `MapTyphonCatalog`.

@@ -28,10 +28,11 @@ self-describing, versioned independently of the server's code, and exact across 
 | `KICK` / `BYE` | server → client / client → server | a close code and reason / a clean leave |
 
 **Blocks** inside a `TICK`, each length-prefixed so an unknown one is skipped: `ENTITIES` (one archetype's enters, updates, leaves),
-`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `EXT`.
+`EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `SOURCES` (group lifecycle — `GROUP_COMPLETE`, `GROUP_RELEASED` — and the answers to
+`SubscribeRequest`, built-in command 1), `EXT`.
 
 **The catalog** is canonical JSON — archetypes with their position and fields (codec, group, section), commands with their rate and
-roles, events, metrics, limits, the tick rate — sorted so the same declarations in any order produce the same bytes and the same hash.
+roles, events, group sets (name, selector, key type, members), metrics, limits, the tick rate — sorted so the same declarations in any order produce the same bytes and the same hash.
 Built-in commands, events and metrics sit at reserved indices, so enabling one never moves an application index.
 
 **Codecs** — integers, `varu`/`vari`, `f16`/`f32`, quantizers over a range, normalized values, angles, packed bits (≤ 24 in a section's
