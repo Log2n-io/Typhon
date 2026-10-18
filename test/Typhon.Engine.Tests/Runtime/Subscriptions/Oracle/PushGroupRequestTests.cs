@@ -451,7 +451,7 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
     }
 
     /// <summary>
-    /// A session owed <see cref="GroupRequests.MaxOwedAnswers"/> answers — its frames not published, its client still asking — has its next request ACKed
+    /// A session owed <c>GroupRequests.MaxOwedAnswers</c> answers — its frames not published, its client still asking — has its next request ACKed
     /// RateLimited at the drain rather than grow them; the owed ones are all said by the next published frame.
     /// </summary>
     [Test]
@@ -467,7 +467,7 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
         // Owed straight into the state, as frames not published would leave them: each an InvalidOp refusal, due at once.
         var requests = harness.Subscriptions.GroupRequests;
         var set = (uint)harness.CatalogPlan.GroupSetIndex(Lists);
-        for (var i = 0; i < GroupRequests.MaxOwedAnswers; i++)
+        for (var i = 0; i < requests.MaxOwedAnswers; i++)
         {
             Assert.That(requests.Request(session, Profile, (ushort)(100 + i), set, 3, 0), Is.True);
         }
@@ -482,7 +482,7 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
         {
             Assert.That(logs.SelectMany(l => l.Acks), Does.Contain((command, AckReasons.RateLimited)), "refused at the drain");
             Assert.That(answers.Select(a => a.RequestId), Does.Not.Contain((ushort)7), "never taken, so never answered");
-            Assert.That(answers, Has.Count.EqualTo(GroupRequests.MaxOwedAnswers), "the owed ones said in the published frame");
+            Assert.That(answers, Has.Count.EqualTo(requests.MaxOwedAnswers), "the owed ones said in the published frame");
             Assert.That(requests.KeysOf(session, (int)set).Length, Is.Zero);
         });
     }
@@ -583,6 +583,88 @@ class PushGroupRequestTests : TestBase<PushGroupRequestTests>
             s.Profile(Profile, p => p.Sphere(20).Groups("board"));
         }, nameof(ASharedKeyOutOfItsMembersRangeIsRefused), Options()).Dispose());
         Assert.That(thrown.ToString(), Does.Contain("out of range"));
+    }
+
+    /// <summary>
+    /// SubscribeRequest's burst is MaxGroupsPerSession, said in the catalog: a client subscribing every key it may hold in one tick — a login — is taken
+    /// whole, none ACKed, each answered once its key completes.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ALoginSubscribingEveryKeyItMayHoldIsTakenInOneTick()
+    {
+        const int keys = 12;   // 21 to 32: past 9, the key the fixture's Admit refuses
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        for (var k = 1; k <= keys; k++)
+        {
+            Shards(dbe, 20 + k, 1, template: k);
+        }
+
+        using var harness = Harness(dbe, nameof(ALoginSubscribingEveryKeyItMayHoldIsTakenInOneTick), maxGroups: keys);
+        var command = harness.Subscriptions.Catalog.Canonical.Commands.Single(c => c.Name == BuiltInCommands.SubscribeRequest);
+        Assert.That(command.Rate.Burst, Is.EqualTo(keys), "the burst is MaxGroupsPerSession");
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        Run(harness, session, 1, new Seen());
+        for (var k = 1; k <= keys; k++)
+        {
+            Send(harness, session, (ushort)k, 20 + k);
+        }
+
+        var acks = new List<(ushort, byte)>();
+        var applied = new List<ushort>();
+        for (var t = 0; t < 4; t++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            var logs = harness.DeliverLogged(session);
+            foreach (var log in logs)
+            {
+                acks.AddRange(log.Acks);
+            }
+
+            // The store's SOURCES are the last applied frame's: read once per delivered frame.
+            if (logs.Count > 0)
+            {
+                applied.AddRange(harness.Replica(session).Store.Sources.Where(a => a.Status == SourceStatus.Applied).Select(a => a.RequestId));
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(acks.Where(a => a.Item2 == AckReasons.RateLimited), Is.Empty, "none past the burst");
+            Assert.That(applied.Order(), Is.EqualTo(Enumerable.Range(1, keys).Select(k => (ushort)k)), "each answered once");
+            Assert.That(ShardsHeld(harness, session), Is.EqualTo(keys));
+        });
+    }
+
+    /// <summary>
+    /// A client that subscribes the moment it is welcomed: its request is drained in the tick whose systems bind its profile — after the drain — and is
+    /// decided the next tick, under that profile, never refused NotInProfile for having been quick. The race LiveGroupSubscriptionTests met, staged.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    public void ARequestDrainedBeforeItsSessionsProfileIsBoundIsDecidedUnderIt()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Shards(dbe, 7, 2);
+        using var harness = Harness(dbe, nameof(ARequestDrainedBeforeItsSessionsProfileIsBoundIsDecidedUnderIt));
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Sessions.SetProfile(session, null), Is.True, "PREMISE: no profile yet, as at Opened");
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+        Send(harness, session, 5, 7);
+
+        // The application's Opened handler, which runs after the drain of the tick that publishes Opened.
+        var bound = false;
+        harness.AfterIngress = _ => bound = bound || harness.Sessions.SetProfile(session, Profile);
+        var seen = new Seen();
+        Run(harness, session, 4, seen);
+        Assert.Multiple(() =>
+        {
+            Assert.That(bound, Is.True);
+            Assert.That(seen.Answers.Select(a => (a.RequestId, a.Status, a.Code)), Is.EqualTo(new[] { ((ushort)5, SourceStatus.Applied, (ushort)0) }));
+            Assert.That(ShardsHeld(harness, session), Is.EqualTo(2));
+        });
     }
 
     /// <summary>The catalog lists SubscribeRequest at its reserved index when an explicit set takes requests, and the set as 'explicit'.</summary>

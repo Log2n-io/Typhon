@@ -39,6 +39,9 @@ internal sealed class SessionGroupRequests
     public readonly List<GroupAnswer> Answers = [];
     public ulong NextSeq;
 
+    // Requests the drain took this tick, decided by the next tick's: (requestId, set, key, op).
+    public readonly List<(ushort RequestId, uint Set, long Key, byte Op)> Parked = [];
+
     public SessionGroupRequests(CompiledGroupSet[] sets, int max)
     {
         Keys = new long[sets.Length][];
@@ -58,6 +61,7 @@ internal sealed class SessionGroupRequests
     {
         Array.Clear(Count);
         Answers.Clear();
+        Parked.Clear();
     }
 
     /// <summary>The key's position among the set's keys, or its insertion point's complement.</summary>
@@ -127,6 +131,7 @@ internal sealed class SessionGroupRequests
 /// <para>
 /// <b>Bounded.</b> A session holds at most <c>MaxGroupsPerSession</c> keys per explicit set, client and server keys together, and is owed at most
 /// <see cref="MaxOwedAnswers"/> answers: a request past that is not taken, and the drain ACKs it <c>RateLimited</c> like one the command's rate refused.
+/// The command's burst is <c>MaxGroupsPerSession</c> (the catalog says so), so a login subscribing every key it may hold is admitted at once.
 /// </para>
 /// </remarks>
 internal sealed class GroupRequests
@@ -154,15 +159,17 @@ internal sealed class GroupRequests
     public long AdmitFaults;
 
     /// <summary>
-    /// The most answers a session is owed at once. A frame not published — the link congested, the session degraded — keeps its answers owed; a client
-    /// that goes on asking meanwhile is refused at the drain rather than grow them.
+    /// The most answers a session is owed at once: twice the keys it may hold of a set, and at least 64 — room for a login that subscribes all of them in
+    /// one burst while the first ones fill. A frame not published — the link congested, the session degraded — keeps its answers owed; a client that goes
+    /// on asking meanwhile is refused at the drain rather than grow them.
     /// </summary>
-    public const int MaxOwedAnswers = 64;
+    public int MaxOwedAnswers { get; }
 
     public GroupRequests(CompiledGroupSet[] sets, int maxGroupsPerSession, int maxSessions, SubscriptionsRegistry registry)
     {
         _sets = sets;
         _max = Math.Max(1, maxGroupsPerSession);
+        MaxOwedAnswers = Math.Max(64, 2 * _max);
         _bySlot = new SessionGroupRequests[Math.Max(1, maxSessions) + 1];
         foreach (var profile in registry.Profiles)
         {
@@ -275,6 +282,7 @@ internal sealed class GroupRequests
     /// from now on — an error at once, an applied one once the key is complete, or released. Called by the ingress drain, on the session's own chunk.
     /// </summary>
     /// <returns>False when the request was not taken because the session is owed <see cref="MaxOwedAnswers"/> answers: the drain ACKs it.</returns>
+    /// <remarks>Decided at once. The drain parks a request instead (<see cref="Park"/>) and decides it the next tick.</remarks>
     public bool Request(SessionId session, string profileName, ushort requestId, uint set, long key, byte op)
     {
         var state = Ensure(session);
@@ -291,6 +299,47 @@ internal sealed class GroupRequests
         System.Threading.Interlocked.Increment(ref Requested);
         Decide(state, session, profileName, requestId, set, key, op);
         return true;
+    }
+
+    /// <summary>
+    /// Takes one client request from the ingress drain, to be decided by the next tick's (<see cref="DecideParked"/>). A request sent right after
+    /// <c>WELCOME</c> is drained in the tick that publishes its session's <c>Opened</c>, before the application's handler binds the profile, which only
+    /// applies at the next tick's start: decided then, it is decided under that profile — never refused <c>NotInProfile</c> for having been quick.
+    /// </summary>
+    /// <returns>False when the session is owed, or has parked, <see cref="MaxOwedAnswers"/> answers: the drain ACKs it.</returns>
+    public bool Park(SessionId session, ushort requestId, uint set, long key, byte op)
+    {
+        var state = Ensure(session);
+        if (state == null)
+        {
+            return true;
+        }
+
+        if (state.Answers.Count + state.Parked.Count >= MaxOwedAnswers)
+        {
+            return false;
+        }
+
+        state.Parked.Add((requestId, set, key, op));
+        return true;
+    }
+
+    /// <summary>Decides the requests the last tick's drain parked for <paramref name="session"/>, in order. Called by the drain, on the session's chunk.</summary>
+    public void DecideParked(SessionId session, string profileName)
+    {
+        var state = Of(session);
+        if (state == null || state.Parked.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (requestId, set, key, op) in state.Parked)
+        {
+            System.Threading.Interlocked.Increment(ref Requested);
+            Decide(state, session, profileName, requestId, set, key, op);
+        }
+
+        state.Parked.Clear();
     }
 
     private void Decide(SessionGroupRequests state, SessionId session, string profileName, ushort requestId, uint set, long key, byte op)

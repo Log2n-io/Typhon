@@ -389,3 +389,103 @@ TEST(CApi_CarriesExact64BitValuesBothWays)
     wrong[1].integer_count = 1;
     CHECK(typhon_command_enqueue(h.client, transfer, wrong, 5, &seq) != TYPHON_OK);
 }
+
+namespace {
+
+struct AnswerError {
+    std::uint16_t requestId;
+    std::uint16_t code;
+};
+
+// A TICK carrying only SOURCES answers: SOURCE_APPLIED {u16 requestId} for each id, then SOURCE_ERROR {u16 requestId, u16 code}.
+std::vector<std::uint8_t> AnswersFrame(std::uint32_t tick, std::uint8_t flags, std::initializer_list<std::uint16_t> applied,
+                                       std::initializer_list<AnswerError> errors)
+{
+    typhon::client::WireWriter w;
+    w.U8(typhon::client::MessageType::Tick);
+    w.U32(tick);
+    w.U8(flags);
+    w.U8(typhon::client::BlockType::Sources);
+    const std::size_t mark = w.BeginLengthPrefixed();
+    w.Varu(static_cast<std::uint32_t>(applied.size() + errors.size()));
+    for (const std::uint16_t id : applied)
+    {
+        w.U8(typhon::client::SourceStatus::Applied);
+        w.U16(id);
+    }
+
+    for (const AnswerError& e : errors)
+    {
+        w.U8(typhon::client::SourceStatus::Error);
+        w.U16(e.requestId);
+        w.U16(e.code);
+    }
+
+    w.EndLengthPrefixed(mark);
+    return {w.Written().begin(), w.Written().end()};
+}
+
+}  // namespace
+
+// 14 § 4, P13 through the C surface: a subscribe queued, sent by the flush as a SubscribeRequest, answered by the next poll's frame; a close
+// drops what is still waiting.
+TEST(CApi_SubscribesAndReadsTheAnswer)
+{
+    CapiHarness h;
+    std::uint16_t id = 0;
+    CHECK_EQ(static_cast<int>(typhon_group_subscribe(h.client, 0, 7, &id)), static_cast<int>(TYPHON_ERROR_STATE));
+
+    CHECK_EQ(static_cast<int>(typhon_client_start(h.client)), static_cast<int>(TYPHON_OK));
+    h.links.back()->Open();
+    h.links.back()->Deliver(Welcome(WelcomeParts().CatalogJson(GoldenBin("subscribe-requests"))));
+    h.Pump();
+
+    std::uint32_t lists = 99;
+    CHECK_EQ(static_cast<int>(typhon_group_set_index(h.client, "lists", &lists)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(static_cast<int>(typhon_group_subscribe(h.client, lists, 7, &id)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(id, 1);
+    std::uint16_t refused = 0;
+    CHECK_EQ(static_cast<int>(typhon_group_subscribe(h.client, lists, 9, &refused)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(static_cast<int>(typhon_group_subscribe(h.client, lists, 0, &id)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
+    CHECK_EQ(static_cast<int>(typhon_group_subscribe(h.client, lists + 1, 7, &id)), static_cast<int>(TYPHON_ERROR_INVALID_ARGUMENT));
+    CHECK(typhon_group_subscribe(h.client, lists, 7, nullptr) != TYPHON_OK);
+
+    const std::size_t before = h.links.back()->sent.size();
+    std::int32_t messages = 0;
+    CHECK_EQ(static_cast<int>(typhon_commands_flush(h.client, &messages)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(messages, 1);
+    CHECK_EQ(h.links.back()->sent.size(), before + 1);
+    DecodedCommand decoded;
+    typhon::client::ReadCommands(h.links.back()->sent.back(), *PlanOf("subscribe-requests"), decoded);
+    CHECK_EQ(decoded.numbers["requestId"].size(), 1u);
+    CHECK_EQ(decoded.integers["key"].size(), 1u);
+    CHECK_EQ(decoded.integers["key"][0], 9u);
+
+    h.links.back()->Deliver(AnswersFrame(1, typhon::client::TickFlags::Reset, {1}, {{2, 150}}));
+    h.Pump();
+    const typhon_subscribe_result* results = nullptr;
+    std::size_t count = 0;
+    CHECK_EQ(static_cast<int>(typhon_subscribe_results_get(h.client, &results, &count)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(count, 2u);
+    CHECK_EQ(results[0].request_id, 1);
+    CHECK_EQ(static_cast<unsigned>(results[0].outcome), TYPHON_SUBSCRIBE_APPLIED);
+    CHECK_EQ(results[0].key, static_cast<std::int64_t>(7));
+    CHECK_EQ(results[1].request_id, 2);
+    CHECK_EQ(static_cast<unsigned>(results[1].outcome), TYPHON_SUBSCRIBE_REFUSED);
+    CHECK_EQ(results[1].code, 150);
+
+    // The next poll hands out only its own: none.
+    h.links.back()->Deliver(AnswersFrame(2, 0, {}, {}));
+    h.Pump();
+    CHECK_EQ(static_cast<int>(typhon_subscribe_results_get(h.client, &results, &count)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(count, 0u);
+
+    // Queued, never flushed, then the session stops: dropped, and visible after the next poll.
+    CHECK_EQ(static_cast<int>(typhon_group_unsubscribe(h.client, lists, 7, &id)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(static_cast<int>(typhon_client_stop(h.client, 1000)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(static_cast<int>(typhon_client_poll(h.client, 0, nullptr)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(static_cast<int>(typhon_subscribe_results_get(h.client, &results, &count)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(count, 1u);
+    CHECK_EQ(static_cast<unsigned>(results[0].outcome), TYPHON_SUBSCRIBE_DROPPED);
+    CHECK_EQ(static_cast<int>(results[0].op), 2);
+}

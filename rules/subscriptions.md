@@ -530,6 +530,9 @@
   invariant ∀ explicit set S (14 § 4): s holds the keys its client asked for with SubscribeRequest and the application allowed, and the keys a system
     chose for it with SetSources — at most MaxGroupsPerSession, both together, kept engine-wide across a realm switch and a RESET; ∀ shared set S, s
     holds S's one key from its first frame. Both are filled, completed and released like a region's keys
+  invariant a SubscribeRequest is decided by the drain of the tick after the one that took it, once that tick's start has applied the session
+    requests systems made — so a request sent right after WELCOME is decided under the profile the application's Opened handler bound, never
+    refused NotInProfile for having arrived first
   invariant every SubscribeRequest a session's ingress takes is answered exactly once, in SOURCES — a profile's frame or an events-only one:
     SOURCE_APPLIED{requestId} in the frame whose state holds its key complete (after the GROUP_COMPLETE that completes it), or no longer asks for it (a
     subscription given back before it completed: the request was carried out, then undone) — or, for an unsubscribe, no longer holds it (with its
@@ -537,7 +540,8 @@
     handler, a set the profile does not name, key 0 or one no member's field can hold, an unknown op, the limit, Denied for a handler that throws or
     returns default), the application's from 100. A subscription still filling when the session's profile stops naming its set is answered
     NotInProfile and its key dropped. An answer is retired only by the frame that publishes it; a request past the command's rate, or past
-    GroupRequests.MaxOwedAnswers owed, is an ACK RateLimited (SUB-27), never an answer
+    GroupRequests.MaxOwedAnswers owed (twice MaxGroupsPerSession, at least 64), is an ACK RateLimited (SUB-27), never an answer; the command's rate
+    is 5 a second past a burst of MaxGroupsPerSession (5 to 1 024), so a client subscribing every key it may hold at once is taken whole
   never accept at Start what is not built: a set with no selector, or with two; groups on a World or ClientRegion observer; a region set named with no
     reach, or an explicit or shared one named with one; a realm-kind variant naming other explicit sets than its profile; a shared key no member's
     field can hold; a key that is not an integer, not
@@ -547,7 +551,7 @@
     PushReplication.PostPass, PushReplication.CommitGroups, PushReplication.HoldGroups, PushReplication.MergeKeyChanges, GroupSessionState,
     GroupSetCompiler.Compile, ProjectionPass, ArchetypeClusterState.GroupKeySlotMask, ArchetypeClusterState.SetDirty, FrameAssembler.AssemblePush,
     TickWriter.WriteGroupRecord, SubscriptionsRegistry.Groups, ObserverBuilder.Groups, PushReplication.AddMember, PushReplication.AddMoves,
-    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request,
+    PushReplication.FoldUnplacedKeys, GroupKeyMoveLog.Note, PushHub.AddUnplaced, PushHub.OrphanUnplaced, GroupRequests.Request, GroupRequests.Park, GroupRequests.DecideParked,
     GroupRequests.SetServerKeys, GroupRequests.Emit, GroupRequests.Retire, SessionRequest.SetSources, BuiltInCommands.CreateSubscribeRequest,
     PushHub.PruneKeyMoves, GroupKeyMoveLog.Retain, FrameAssembler.AssembleEventsOnly
   on_violation: silent on both sides. A completion sent before the last member arrives makes a client act on a town missing buildings — SWG's bot
@@ -582,7 +586,11 @@
     PushGroupRequestTests.AReachOnAnExplicitSetAndNoneOnARegionSetAreRefused, PushGroupRequestTests.TheApplicationsFaultsAreRefusedNeverApplied,
     PushGroupRequestTests.ARequestPastTheOwedAnswersIsAckedRateLimited,
     PushGroupRequestTests.ASubscriptionPendingWhenItsProfileStopsNamingTheSetIsAnsweredNotInProfile (switched, unbound and never bound),
-    PushGroupRequestTests.AVariantNamingOtherExplicitSetsIsRefused, PushGroupRequestTests.ASharedKeyOutOfItsMembersRangeIsRefused (each red
+    PushGroupRequestTests.AVariantNamingOtherExplicitSetsIsRefused, PushGroupRequestTests.ALoginSubscribingEveryKeyItMayHoldIsTakenInOneTick,
+    LiveGroupSubscriptionTests.SubscribeAsyncSettlesWithTheServersAnswer (the .NET helper over TCP: APPLIED after the completion it reports, a
+    refusal's code, a login burst taken whole, a release, a request dropped by the close — it first caught the request decided before its profile
+    was bound), PushGroupRequestTests.ARequestDrainedBeforeItsSessionsProfileIsBoundIsDecidedUnderIt (that race staged; red when the drain
+    decides at once), PushGroupRequestTests.ASharedKeyOutOfItsMembersRangeIsRefused (each red
     against its clause removed), and a
     refusal test for each clause of the never-accept line. Falsifiability: PushGroupTests.AKeyChangeTheProjectionNeverReadsIsDetected removes the tap from the test side and
     requires the oracle to reject the run; PushGroupShardTests.WithoutTheMoveLogAnOffDagMoveIsCaught takes the move log away and requires the leave of
@@ -880,7 +888,9 @@
   invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
     the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
   invariant a positionless group member (14 § 5) is in no realm: it has no position, so no cluster realm map; its events go to one engine-wide log
-    that every served realm's group gather reads, and a session holds it only through a key it holds — which its own realm's regions decided
+    that every served realm's group gather reads, and a session holds it only through a key it holds — which its own realm's regions decided, or it
+    asked for. Group keys are engine-wide: one key held in two realms is one group in both (decided, Loïc 2026-10-18 — sharing data across realms is
+    a use; isolating instances is the application's, by giving them distinct keys)
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.FinishUnplaced, PushHub.UnplacedAt, PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
     ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,

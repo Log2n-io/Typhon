@@ -88,6 +88,16 @@ inline constexpr std::uint8_t GroupComplete = 2;
 inline constexpr std::uint8_t GroupReleased = 3;
 }  // namespace SourceStatus
 
+// Reason codes of an ACKS rejection record; 128-255 belong to the application.
+namespace AckReason {
+inline constexpr std::uint8_t RateLimited = 1;
+inline constexpr std::uint8_t Rejected = 2;
+inline constexpr std::uint8_t RegionInvalid = 3;
+inline constexpr std::uint8_t Forbidden = 4;
+inline constexpr std::uint8_t RealmChanged = 5;
+inline constexpr std::uint8_t FirstApplicationReason = 128;
+}  // namespace AckReason
+
 namespace CloseCode {
 inline constexpr int Normal = 1000;
 inline constexpr int GoingAway = 1001;

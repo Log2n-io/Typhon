@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,6 +41,16 @@ public sealed class TyphonClient : IAsyncDisposable
     private FrameApplier _applier;
     private ushort _commandSeq;
 
+    // One command on the wire at a time, its seq taken inside: two callers on two threads would otherwise send their seqs out of order.
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+
+    // SubscribeRequest (14 § 4): the requests, their bucket and their callers, under one lock — called from the application, pumped from the receive and
+    // ping loops.
+    private readonly Lock _subscribeLock = new();
+    private readonly Dictionary<ushort, TaskCompletionSource<SubscribeResult>> _subscribeWaiters = [];
+    private GroupSubscriptions _subscriptions;
+    private CommandBucket _subscribeBucket;
+
     /// <summary>
     /// The code of the last <c>KICK</c> this connection received, or zero.
     /// </summary>
@@ -52,6 +63,7 @@ public sealed class TyphonClient : IAsyncDisposable
     private ushort _kickCode;
     private Task _receiveLoop;
     private Task _pingLoop;
+    private int _disposed;
 
     /// <summary>The managed id of the thread the receive loop is running a handler on, or zero when it is not running one.</summary>
     /// <remarks>
@@ -216,6 +228,151 @@ public sealed class TyphonClient : IAsyncDisposable
         if (transport is { IsConnected: true })
         {
             await transport.SendAsync(Encode(new PingMessage((uint)Environment.TickCount, LastAppliedTick).Write), ct).ConfigureAwait(false);
+            await PumpSubscriptionsAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Asks the server for one key of an explicit group set (14 § 4, P13): its members are delivered, then the request is answered.</summary>
+    /// <param name="set">The explicit set's catalog name.</param>
+    /// <param name="key">The key, never 0.</param>
+    /// <param name="ct">Stops waiting for the answer; the request itself goes on.</param>
+    /// <returns>
+    /// The answer: <see cref="SubscribeOutcome.Applied"/> once the key is complete, <see cref="SubscribeOutcome.Refused"/> with the server's code,
+    /// <see cref="SubscribeOutcome.Rejected"/> with an <c>ACK</c> reason, or <see cref="SubscribeOutcome.Dropped"/> when the session ended first.
+    /// </returns>
+    /// <remarks>
+    /// Requests leave in call order, paced by the command's catalog rate — 5 a second past a burst of the server's <c>MaxGroupsPerSession</c> — and one
+    /// the server still refuses for its rate is sent again by itself. Waiting continues across frames; nothing is sent while no session is open.
+    /// </remarks>
+    public Task<SubscribeResult> SubscribeAsync(string set, long key, CancellationToken ct = default) =>
+        RequestGroupAsync(set, key, BuiltInCommands.SubscribeOp, ct);
+
+    /// <summary>Gives back one key of an explicit group set: its members leave, then the request is answered.</summary>
+    /// <param name="set">The explicit set's catalog name.</param>
+    /// <param name="key">The key, never 0.</param>
+    /// <param name="ct">Stops waiting for the answer; the request itself goes on.</param>
+    /// <returns>The answer, as <see cref="SubscribeAsync"/>'s.</returns>
+    public Task<SubscribeResult> UnsubscribeAsync(string set, long key, CancellationToken ct = default) =>
+        RequestGroupAsync(set, key, BuiltInCommands.UnsubscribeOp, ct);
+
+    private async Task<SubscribeResult> RequestGroupAsync(string set, long key, byte op, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(set);
+        var waiter = new TaskCompletionSource<SubscribeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_subscribeLock)
+        {
+            var plan = Plan ?? throw new InvalidOperationException("no catalog yet: connect first");
+            var index = plan.GroupSetIndex(set);
+            if (index < 0)
+            {
+                throw new ArgumentException($"the catalog this session negotiated declares no group set named '{set}'", nameof(set));
+            }
+
+            var id = _subscriptions.Request((uint)index, key, op);
+            _subscribeWaiters[id] = waiter;
+        }
+
+        await PumpSubscriptionsAsync().ConfigureAwait(false);
+        using (ct.Register(() => waiter.TrySetCanceled(ct)))
+        {
+            return await waiter.Task.ConfigureAwait(false);
+        }
+    }
+
+    // Sends what the bucket allows, one command a message, in order; nothing while no session is open.
+    private async Task PumpSubscriptionsAsync()
+    {
+        await _sendGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            while (true)
+            {
+                var transport = _transport;
+                byte[] message = null;
+                lock (_subscribeLock)
+                {
+                    if (_subscriptions == null || _subscriptions.QueuedCount == 0 || transport is not { IsConnected: true })
+                    {
+                        return;
+                    }
+
+                    _subscriptions.Pump((command, values) =>
+                    {
+                        if (!_subscribeBucket.Take(Environment.TickCount64))
+                        {
+                            return -1;
+                        }
+
+                        var seq = unchecked((ushort)(_commandSeq + 1));
+                        var tick = LastAppliedTick;
+                        message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(command, seq, values)], null));
+                        _commandSeq = seq;
+                        return seq;
+                    }, max: 1);
+                }
+
+                if (message == null)
+                {
+                    return;
+                }
+
+                await transport.SendAsync(message, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            // The transport is going; the receive loop notices and the close drops what is still waiting.
+            Fault?.Invoke(exception);
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
+    }
+
+    // After an applied frame: its ACKS and SOURCES answer what was sent, and a request refused for the rate goes again.
+    private void ObserveSubscriptions()
+    {
+        bool queued;
+        lock (_subscribeLock)
+        {
+            if (_subscriptions == null || (_subscriptions.SentCount == 0 && _subscriptions.QueuedCount == 0))
+            {
+                return;
+            }
+
+            _subscriptions.Observe(Store.Acks, Store.Sources);
+            queued = _subscriptions.QueuedCount > 0;
+        }
+
+        if (queued)
+        {
+            _ = PumpSubscriptionsAsync();
+        }
+    }
+
+    // The session is over: every request still waiting ends Dropped. A new catalog starts a fresh set of requests.
+    private void ResetSubscriptions(CatalogPlan plan)
+    {
+        lock (_subscribeLock)
+        {
+            _subscriptions?.Reset();
+            if (plan != null)
+            {
+                _subscriptions = new GroupSubscriptions(plan);
+                _subscriptions.Answered += OnSubscribeAnswered;
+                var rate = Array.Find(plan.Catalog.Commands ?? [], c => c.Name == BuiltInCommands.SubscribeRequest)?.Rate;
+                _subscribeBucket = new CommandBucket(rate);
+            }
+        }
+    }
+
+    // Under _subscribeLock; the waiter's continuations run elsewhere (RunContinuationsAsynchronously).
+    private void OnSubscribeAnswered(SubscribeResult result)
+    {
+        if (_subscribeWaiters.Remove(result.RequestId, out var waiter))
+        {
+            waiter.TrySetResult(result);
         }
     }
 
@@ -244,14 +401,22 @@ public sealed class TyphonClient : IAsyncDisposable
             return 0;
         }
 
-        // The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
-        var seq = unchecked((ushort)(_commandSeq + 1));
-        var tick = LastAppliedTick;
-        var frame = Store?.Realm;
-        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
-        _commandSeq = seq;
-        await transport.SendAsync(message, ct).ConfigureAwait(false);
-        return seq;
+        await _sendGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
+            var seq = unchecked((ushort)(_commandSeq + 1));
+            var tick = LastAppliedTick;
+            var frame = Store?.Realm;
+            var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
+            _commandSeq = seq;
+            await transport.SendAsync(message, ct).ConfigureAwait(false);
+            return seq;
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
     }
 
     /// <summary>Sends a <c>BYE</c> and closes.</summary>
@@ -276,8 +441,14 @@ public sealed class TyphonClient : IAsyncDisposable
     }
 
     /// <inheritdoc />
+    /// <remarks>Idempotent: a second call returns at once.</remarks>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         await _stopping.CancelAsync().ConfigureAwait(false);
 
         // Awaited rather than abandoned: the loops touch the transport, and disposing it under them turns an orderly shutdown into an ObjectDisposedException
@@ -306,6 +477,7 @@ public sealed class TyphonClient : IAsyncDisposable
             _transport = null;
         }
 
+        ResetSubscriptions(null);
         _stopping.Dispose();
     }
 
@@ -397,6 +569,7 @@ public sealed class TyphonClient : IAsyncDisposable
             Plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(welcome.CatalogJson));
             Store = new WorldStore(Plan, _options.SegmentHistory);
             _applier = new FrameApplier(Store, _options.Events);
+            ResetSubscriptions(Plan);
             return;
         }
 
@@ -578,6 +751,11 @@ public sealed class TyphonClient : IAsyncDisposable
                 if (_applier != null)
                 {
                     _applier.Apply(message);
+                    if (live)
+                    {
+                        ObserveSubscriptions();
+                    }
+
                     RaiseFrameApplied(live);
                 }
 
@@ -621,6 +799,8 @@ public sealed class TyphonClient : IAsyncDisposable
 
     private async Task<bool> HandleCloseAsync(ushort code, CancellationToken ct)
     {
+        // Whatever the policy decides, this session is over: what it was asked is unanswered, and a new one holds none of it.
+        ResetSubscriptions(null);
         var decision = _policy.Decide(code);
         RaiseOnLoop(Disconnected, code, decision == ReconnectDecision.Retry);
 
@@ -728,6 +908,9 @@ public sealed class TyphonClient : IAsyncDisposable
                 {
                     var ping = new PingMessage((uint)Environment.TickCount, LastAppliedTick);
                     await transport.SendAsync(Encode(ping.Write), ct).ConfigureAwait(false);
+
+                    // A request the bucket held back, with no frame arriving to pump it: the ping's cadence sends it once a token is back.
+                    await PumpSubscriptionsAsync().ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)

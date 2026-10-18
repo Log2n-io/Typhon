@@ -221,7 +221,8 @@ public sealed class SubscriptionsOptions
     /// </summary>
     /// <remarks>
     /// A region the session meets past this many is not held, and counted. A session's group state costs about 24 B a key, twice (committed and
-    /// pending), per declared set.
+    /// pending), per declared set. It is also <c>SubscribeRequest</c>'s burst (clamped to 5–1 024), so a client subscribing every key it may hold at
+    /// once is taken in one tick.
     /// </remarks>
     public int MaxGroupsPerSession { get; init; }
 

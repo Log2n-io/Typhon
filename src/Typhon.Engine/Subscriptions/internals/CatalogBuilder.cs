@@ -379,7 +379,9 @@ internal static class CatalogBuilder
         {
             if (set.Selector == GroupSelector.Explicit && set.Admit != null)
             {
-                commands.Add(BuiltInCommands.CreateSubscribeRequest());
+                // Its burst is the keys a session may hold of a set: a client subscribing all of them at once is admitted in one tick.
+                commands.Add(BuiltInCommands.CreateSubscribeRequest(Math.Clamp(registry.Options.MaxGroupsPerSession, BuiltInCommands.MinSubscribeBurst,
+                    BuiltInCommands.MaxSubscribeBurst)));
                 break;
             }
         }

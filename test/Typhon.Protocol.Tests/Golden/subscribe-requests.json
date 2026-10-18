@@ -1,0 +1,339 @@
+{
+  "description": "GroupSubscriptions (14 \u00A7 4, P13) over the catalog in the .bin: each step\u0027s inputs and what it produced. request: set index, key (a decimal string), op (1 subscribe, 2 unsubscribe) -\u003E the requestId, or throws for a set that is not explicit, key 0 or another op. pump: at atMs, send the queued requests oldest first while the command\u0027s token bucket (its catalog rate, full at the first pump, refilled continuously) has one, sequences from 1 -\u003E sent, in order. observe: one applied frame\u0027s ACKS, then its SOURCES -\u003E the answers, in order: an ACK RateLimited (1) puts its request back at the head of the queue and answers nothing, any other ACK answers rejected with its reason, a SOURCE_APPLIED (0) applied, a SOURCE_ERROR (1) refused with its code; an ACK or a SOURCE naming nothing sent is ignored. reset: the session ended -\u003E every request still sent (by requestId) then queued (in order) answers dropped. Request ids run from 1, never 0, never one still waiting.",
+  "steps": [
+    {
+      "do": "request",
+      "set": 0,
+      "key": "7",
+      "op": 1,
+      "requestId": 1
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "8",
+      "op": 1,
+      "requestId": 2
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "9",
+      "op": 1,
+      "requestId": 3
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "10",
+      "op": 1,
+      "requestId": 4
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "11",
+      "op": 1,
+      "requestId": 5
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "12",
+      "op": 1,
+      "requestId": 6
+    },
+    {
+      "do": "request",
+      "set": 1,
+      "key": "1",
+      "op": 1,
+      "throws": true
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "0",
+      "op": 1,
+      "throws": true
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "7",
+      "op": 3,
+      "throws": true
+    },
+    {
+      "do": "pump",
+      "atMs": 0,
+      "sent": [
+        {
+          "seq": 1,
+          "requestId": 1,
+          "set": 0,
+          "key": "7",
+          "op": 1
+        },
+        {
+          "seq": 2,
+          "requestId": 2,
+          "set": 0,
+          "key": "8",
+          "op": 1
+        },
+        {
+          "seq": 3,
+          "requestId": 3,
+          "set": 0,
+          "key": "9",
+          "op": 1
+        },
+        {
+          "seq": 4,
+          "requestId": 4,
+          "set": 0,
+          "key": "10",
+          "op": 1
+        },
+        {
+          "seq": 5,
+          "requestId": 5,
+          "set": 0,
+          "key": "11",
+          "op": 1
+        }
+      ]
+    },
+    {
+      "do": "observe",
+      "acks": [
+        {
+          "seq": 3,
+          "reason": 1
+        },
+        {
+          "seq": 4,
+          "reason": 4
+        },
+        {
+          "seq": 40,
+          "reason": 1
+        }
+      ],
+      "sources": [
+        {
+          "requestId": 1,
+          "status": 0,
+          "code": 0
+        },
+        {
+          "requestId": 2,
+          "status": 1,
+          "code": 150
+        },
+        {
+          "requestId": 99,
+          "status": 0,
+          "code": 0
+        }
+      ],
+      "answers": [
+        {
+          "requestId": 4,
+          "set": 0,
+          "key": "10",
+          "op": 1,
+          "outcome": "rejected",
+          "code": 0,
+          "ackReason": 4
+        },
+        {
+          "requestId": 1,
+          "set": 0,
+          "key": "7",
+          "op": 1,
+          "outcome": "applied",
+          "code": 0,
+          "ackReason": 0
+        },
+        {
+          "requestId": 2,
+          "set": 0,
+          "key": "8",
+          "op": 1,
+          "outcome": "refused",
+          "code": 150,
+          "ackReason": 0
+        }
+      ]
+    },
+    {
+      "do": "pump",
+      "atMs": 100,
+      "sent": []
+    },
+    {
+      "do": "pump",
+      "atMs": 400,
+      "sent": [
+        {
+          "seq": 6,
+          "requestId": 3,
+          "set": 0,
+          "key": "9",
+          "op": 1
+        },
+        {
+          "seq": 7,
+          "requestId": 6,
+          "set": 0,
+          "key": "12",
+          "op": 1
+        }
+      ]
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "7",
+      "op": 2,
+      "requestId": 7
+    },
+    {
+      "do": "pump",
+      "atMs": 400,
+      "sent": []
+    },
+    {
+      "do": "observe",
+      "acks": [],
+      "sources": [
+        {
+          "requestId": 3,
+          "status": 0,
+          "code": 0
+        },
+        {
+          "requestId": 6,
+          "status": 0,
+          "code": 0
+        }
+      ],
+      "answers": [
+        {
+          "requestId": 3,
+          "set": 0,
+          "key": "9",
+          "op": 1,
+          "outcome": "applied",
+          "code": 0,
+          "ackReason": 0
+        },
+        {
+          "requestId": 6,
+          "set": 0,
+          "key": "12",
+          "op": 1,
+          "outcome": "applied",
+          "code": 0,
+          "ackReason": 0
+        }
+      ]
+    },
+    {
+      "do": "pump",
+      "atMs": 1000,
+      "sent": [
+        {
+          "seq": 8,
+          "requestId": 7,
+          "set": 0,
+          "key": "7",
+          "op": 2
+        }
+      ]
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "13",
+      "op": 1,
+      "requestId": 8
+    },
+    {
+      "do": "reset",
+      "answers": [
+        {
+          "requestId": 5,
+          "set": 0,
+          "key": "11",
+          "op": 1,
+          "outcome": "dropped",
+          "code": 0,
+          "ackReason": 0
+        },
+        {
+          "requestId": 7,
+          "set": 0,
+          "key": "7",
+          "op": 2,
+          "outcome": "dropped",
+          "code": 0,
+          "ackReason": 0
+        },
+        {
+          "requestId": 8,
+          "set": 0,
+          "key": "13",
+          "op": 1,
+          "outcome": "dropped",
+          "code": 0,
+          "ackReason": 0
+        }
+      ]
+    },
+    {
+      "do": "request",
+      "set": 0,
+      "key": "13",
+      "op": 1,
+      "requestId": 9
+    },
+    {
+      "do": "pump",
+      "atMs": 5000,
+      "sent": [
+        {
+          "seq": 9,
+          "requestId": 9,
+          "set": 0,
+          "key": "13",
+          "op": 1
+        }
+      ]
+    },
+    {
+      "do": "observe",
+      "acks": [],
+      "sources": [
+        {
+          "requestId": 9,
+          "status": 0,
+          "code": 0
+        }
+      ],
+      "answers": [
+        {
+          "requestId": 9,
+          "set": 0,
+          "key": "13",
+          "op": 1,
+          "outcome": "applied",
+          "code": 0,
+          "ackReason": 0
+        }
+      ]
+    }
+  ]
+}

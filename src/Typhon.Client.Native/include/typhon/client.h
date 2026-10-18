@@ -120,6 +120,28 @@ typedef struct typhon_group_record
     int64_t key;
 } typhon_group_record;
 
+/* How a SubscribeRequest ended (14 § 4, P13): SOURCE_APPLIED (the key is held and complete, or released), SOURCE_ERROR (`code`), an ACK
+ * other than RateLimited (`ack_reason`), or the session ended first - whether the server took it is unknown. */
+#define TYPHON_SUBSCRIBE_APPLIED 1u
+#define TYPHON_SUBSCRIBE_REFUSED 2u
+#define TYPHON_SUBSCRIBE_REJECTED 3u
+#define TYPHON_SUBSCRIBE_DROPPED 4u
+
+/* One SubscribeRequest's answer: its id, the explicit set's index, the key, the op (1 subscribe, 2 unsubscribe), the outcome, the
+ * SOURCE_ERROR code when refused and the ACK reason when rejected. */
+typedef struct typhon_subscribe_result
+{
+    uint16_t request_id;
+    uint8_t op;
+    uint8_t outcome;
+    uint16_t code;
+    uint8_t ack_reason;
+    uint8_t reserved;
+    uint32_t set;
+    uint32_t reserved2;
+    int64_t key;
+} typhon_subscribe_result;
+
 /* A group held complete. */
 typedef struct typhon_complete_group
 {
@@ -278,6 +300,16 @@ TYPHON_API typhon_status typhon_motion_evaluate_slot(const typhon_client* client
 TYPHON_API typhon_status typhon_motion_evaluate_live(const typhon_client* client, uint32_t archetype, double* out, size_t out_len);
 
 /* Commands: queued (copied), then sent in one batch per rendered frame. */
+/* Asks for one key of an explicit group set, or gives it back (14 § 4, P13); *request_id names its answer. It goes with the next
+ * typhon_commands_flush the command's catalog rate allows - one the server still refuses for its rate goes again by itself - and its
+ * answer is among typhon_subscribe_results_get after the poll that brought it. TYPHON_ERROR_STATE before the first WELCOME or when the
+ * catalog lists no SubscribeRequest; TYPHON_ERROR_INVALID_ARGUMENT for a set that is not explicit, or key 0. */
+TYPHON_API typhon_status typhon_group_subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id);
+TYPHON_API typhon_status typhon_group_unsubscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id);
+/* The requests that ended during the last typhon_client_poll - answered, rejected, or dropped by a close - and any typhon_client_stop
+ * ended since. Valid until the next typhon_client_poll. */
+TYPHON_API typhon_status typhon_subscribe_results_get(const typhon_client* client, const typhon_subscribe_result** results, size_t* count);
+
 TYPHON_API typhon_status typhon_command_enqueue(typhon_client* client, uint32_t command, const typhon_value* values, size_t count,
                                                 int32_t* seq);
 TYPHON_API typhon_status typhon_commands_flush(typhon_client* client, int32_t* messages);

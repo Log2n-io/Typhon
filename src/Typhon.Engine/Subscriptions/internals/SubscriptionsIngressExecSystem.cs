@@ -660,6 +660,9 @@ internal sealed class SubscriptionsIngress : IDisposable
 
     private void DrainSession(SessionIngress row, int segment)
     {
+        // Last tick's SubscribeRequests, now that last tick's session requests — a profile bound on Opened among them — are in force (14 § 4).
+        GroupRequests?.DecideParked(row.Session, _sessions.ProfileName(row.Session));
+
         var scratch = _scratch[segment];
         for (var pass = 0; pass < MaxDrainPassesPerTick; pass++)
         {
@@ -734,9 +737,10 @@ internal sealed class SubscriptionsIngress : IDisposable
         var built = RealmAt(row.Session, clientTick);
         if (info.IsSubscribeRequest)
         {
-            // An explicit group set's request (14 § 4): validated, decided by the application and answered in SOURCES — never an ACK, never a buffer.
+            // An explicit group set's request (14 § 4): parked for the next tick's drain, then validated, decided by the application and answered in
+            // SOURCES — never a buffer, and an ACK only when it cannot be taken.
             if (GroupRequests != null && SubscribeRequestRecord.TryRead(body, out var requestId, out var set, out var key, out var op)
-                && !GroupRequests.Request(row.Session, _sessions.ProfileName(row.Session), requestId, set, key, op))
+                && !GroupRequests.Park(row.Session, requestId, set, key, op))
             {
                 // Its session is owed as many answers as it may be: refused like a request past the command's rate.
                 Buffers.Acks.Add(row.Session, seq, AckReasons.RateLimited);

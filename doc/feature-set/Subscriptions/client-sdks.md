@@ -25,6 +25,8 @@ and send commands in the server's encoding — without being regenerated every t
 - `Clock` + `evaluateLive(store, renderTick, frac, out)` — render time and motion-segment extrapolation, including tick-period changes under
   overload.
 - `CommandQueue` (one batch per rendered frame) and `RegionSender` (`ClientRegion` footprints, ≤ 5 Hz).
+- `GroupSubscriptions` — `subscribe(set, key)` / `unsubscribe(set, key)` for an explicit group set, each a promise of its answer: `pump(queue)`
+  before each flush, `observe(applier)` after each frame, `reset()` on close ([groups](./groups.md)).
 - `StreamRecorder` / `replayStream` — record and replay a session.
 - `typhon-codegen` — compiles a specialised decoder from `/typhon/catalog.json` for the hot path.
 
@@ -32,6 +34,8 @@ and send commands in the server's encoding — without being regenerated every t
 
 - `TyphonClient` over `ws://`, `wss://` or `tcp://`: connect, reconnect policy, `SendCommandAsync(name, values)`, a `WorldStore` with
   per-archetype columns and `SelfState`, a `Recorder`. Built for bots, tools, load tests and integration tests.
+- `SubscribeAsync(set, key)` / `UnsubscribeAsync(set, key)` — a key of an explicit group set, settling with the server's answer
+  (`SubscribeResult`); paced by the command's rate, sent again when the server still refuses it for the rate, dropped when the session ends.
 - `FrameApplied` — raised on the receive thread after each `TICK` is applied whole (events and leaves included) and before the next: the window
   to copy the frame's change lists and columns out to a game or render thread, since the next frame clears and rewrites them.
 

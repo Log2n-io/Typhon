@@ -60,6 +60,7 @@ set(TYPHON_SOURCES
   src/net/connection.cpp
   src/net/reconnect.cpp
   src/commands/command_queue.cpp
+  src/commands/group_subscriptions.cpp
   src/client/client.cpp
   src/capi/client_capi.cpp
 )
@@ -93,6 +94,7 @@ if(TYPHON_NATIVE_TESTS)
     tests/lifecycle_test.cpp
     tests/corruption_test.cpp
     tests/json_test.cpp
+    tests/golden_subscribe_requests_test.cpp
   )
   target_include_directories(typhon_client_tests PRIVATE src tests)
   target_compile_options(typhon_client_tests PRIVATE ${TYPHON_WARNINGS})

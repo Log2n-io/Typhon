@@ -20,6 +20,8 @@ struct typhon_client {
     std::string lastError;
     // A destroy asked for from one of this client's callbacks: carried out once the poll that runs them has returned.
     bool destroyPending = false;
+    // typhon_subscribe_results_get's view of the client's results, rebuilt by each call.
+    std::vector<typhon_subscribe_result> subscribeResults;
 };
 
 namespace typhon::client::capi {
@@ -727,6 +729,61 @@ typhon_status typhon_motion_evaluate_live(const typhon_client* client, uint32_t 
 
                      const Clock& clock = *const_cast<typhon_client*>(client)->client->RenderClock();
                      EvaluateLive(s, clock.RenderTick(), clock.RenderFrac(), {out, out_len});
+                     return TYPHON_OK;
+                 });
+}
+
+namespace {
+
+typhon_status Subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* requestId, std::uint8_t op)
+{
+    return Guard(client,
+                 [&]
+                 {
+                     capi::RequireOut(requestId);
+                     capi::ApplierOf(client);
+                     *requestId = client->client->Subscribe(set, key, op);
+                     return TYPHON_OK;
+                 });
+}
+
+}  // namespace
+
+typhon_status typhon_group_subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id)
+{
+    return Subscribe(client, set, key, request_id, typhon::client::SubscribeOp::Subscribe);
+}
+
+typhon_status typhon_group_unsubscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* request_id)
+{
+    return Subscribe(client, set, key, request_id, typhon::client::SubscribeOp::Unsubscribe);
+}
+
+typhon_status typhon_subscribe_results_get(const typhon_client* client, const typhon_subscribe_result** results, size_t* count)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(results);
+                     capi::RequireOut(count);
+                     capi::ApplierOf(client);
+                     auto& out = const_cast<typhon_client*>(client)->subscribeResults;
+                     out.clear();
+                     for (const auto& r : client->client->SubscribeResults())
+                     {
+                         typhon_subscribe_result c{};
+                         c.request_id = r.requestId;
+                         c.op = r.op;
+                         c.outcome = static_cast<uint8_t>(r.outcome);
+                         c.code = r.code;
+                         c.ack_reason = r.ackReason;
+                         c.set = r.set;
+                         c.key = r.key;
+                         out.push_back(c);
+                     }
+
+                     *results = out.data();
+                     *count = out.size();
                      return TYPHON_OK;
                  });
 }

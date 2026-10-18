@@ -176,6 +176,14 @@ public class GoldenCatalogRefusalTests
             sets[1]!["idx"] = 1;
         }));
 
+        // SubscribeRequest (14 § 4): 5 a second past a burst of 5 to 1 024 — the server's MaxGroupsPerSession — and refused outside it.
+        var subscribing = Canonical(Base(commands: [BuiltInCommands.CreateSubscribeRequest(BuiltInCommands.MaxSubscribeBurst)]));
+        Accept(cases, "subscribe-request-burst-1024", subscribing);
+        Accept(cases, "subscribe-request-burst-5", Canonical(Base(commands: [BuiltInCommands.CreateSubscribeRequest()])));
+        Refuse(cases, "subscribe-request-burst-4", "is a built-in", Mutate(subscribing, c => c["commands"]![0]!["rate"]!["burst"] = 4));
+        Refuse(cases, "subscribe-request-burst-1025", "is a built-in", Mutate(subscribing, c => c["commands"]![0]!["rate"]!["burst"] = 1025));
+        Refuse(cases, "subscribe-request-rate-6", "is a built-in", Mutate(subscribing, c => c["commands"]![0]!["rate"]!["perSec"] = 6));
+
         Golden.Assert("catalog-refusals", [], new JsonObject
         {
             ["description"] = "Raw catalog JSON texts a client must accept or refuse at WELCOME; each refused text breaks exactly the rule its name says. "
@@ -185,7 +193,7 @@ public class GoldenCatalogRefusalTests
     }
 
     private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null, CatalogField[] extras = null,
-        CatalogGroupSet[] groupSets = null) => new()
+        CatalogGroupSet[] groupSets = null, CatalogCommand[] commands = null) => new()
     {
         Protocol = new CatalogProtocolVersion { Major = 3 },
         App = new CatalogApp { Name = "Refusals", Revision = 1 },
@@ -226,6 +234,7 @@ public class GoldenCatalogRefusalTests
         ],
         Grids = [new CatalogGrid { TileCells = 2, Archetypes = [0] }],
         GroupSets = groupSets,
+        Commands = commands,
         RealmKinds = [""],
         Metrics =
         [

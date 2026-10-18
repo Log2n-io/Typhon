@@ -765,7 +765,8 @@ bool HasClientRegionShape(const CatalogCommand& cmd)
            && budget->t == "u16" && plain;
 }
 
-// SubscribeRequest is recognised by shape, not by name (14 § 4, P13): {u16 requestId, varu set, vari64 key, u8 op}, queued, 5 a second.
+// SubscribeRequest is recognised by shape, not by name (14 § 4, P13): {u16 requestId, varu set, vari64 key, u8 op}, queued, 5 a second past a
+// burst of 5 to 1024 (the server's MaxGroupsPerSession).
 bool HasSubscribeRequestShape(const CatalogCommand& cmd)
 {
     const auto kind = [&](const char* name) -> std::string
@@ -787,8 +788,8 @@ bool HasSubscribeRequestShape(const CatalogCommand& cmd)
         plain = plain && !f.group.has_value() && !f.IsOnEnter() && !f.enumName.has_value();
     }
 
-    return cmd.fields.size() == 4 && cmd.delivery == "queued" && cmd.rate.has_value() && cmd.rate->perSec == 5 && cmd.rate->burst == 5
-           && kind("requestId") == "u16" && kind("set") == "varu" && kind("key") == "vari64" && kind("op") == "u8" && plain;
+    return cmd.fields.size() == 4 && cmd.delivery == "queued" && cmd.rate.has_value() && cmd.rate->perSec == 5 && cmd.rate->burst >= 5
+           && cmd.rate->burst <= 1024 && kind("requestId") == "u16" && kind("set") == "varu" && kind("key") == "vari64" && kind("op") == "u8" && plain;
 }
 
 void CheckCommand(const CatalogCommand& cmd, const Catalog& c, long long maxBytes, Problems& p)

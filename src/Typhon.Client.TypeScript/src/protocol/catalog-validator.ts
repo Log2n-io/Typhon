@@ -324,14 +324,18 @@ function checkCommand(cmd: CatalogCommand, enums: Catalog['enums'], maxBytes: nu
   checkMessageFields(`command '${cmd.name}'`, cmd.fields, enums, maxBytes, problems);
 }
 
-/** `SubscribeRequest` is recognised by shape, not by name (14 § 4, P13): `{u16 requestId, varu set, vari64 key, u8 op}`, queued, 5 a second. */
+/**
+ * `SubscribeRequest` is recognised by shape, not by name (14 § 4, P13): `{u16 requestId, varu set, vari64 key, u8 op}`, queued, 5 a second past a
+ * burst of 5 to 1024 (the server's `MaxGroupsPerSession`).
+ */
 function hasSubscribeRequestShape(cmd: CatalogCommand): boolean {
   const kind = (name: string) => cmd.fields.find((f) => f.name === name)?.codec.t;
   return (
     cmd.fields.length === 4 &&
     cmd.delivery === 'queued' &&
     cmd.rate?.perSec === 5 &&
-    cmd.rate.burst === 5 &&
+    cmd.rate.burst >= 5 &&
+    cmd.rate.burst <= 1024 &&
     kind('requestId') === 'u16' &&
     kind('set') === 'varu' &&
     kind('key') === 'vari64' &&

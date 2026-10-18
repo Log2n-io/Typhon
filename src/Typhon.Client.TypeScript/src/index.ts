@@ -250,6 +250,14 @@ export {
 export { forEachMessage, replayStream, StreamRecorder, type FrameConsumer } from './net/recorder.js';
 export { CommandQueue, CommandRefused, type CommandQueueOptions } from './commands/queue.js';
 export {
+  GroupSubscriptions,
+  SubscribeOp,
+  type GroupSubscriptionsOptions,
+  type SubscribeOutcome,
+  type SubscribeResult,
+  type TrySend,
+} from './commands/group-subscriptions.js';
+export {
   createClientRegion,
   REGION_MAX_VERTICES,
   REGION_MIN_VERTICES,

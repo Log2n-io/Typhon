@@ -36,6 +36,9 @@ town while it is in or near it, with a completion signal a client can act on: on
   keys alone. It is in no realm and in no cell, and it has replication state only while some session holds a key it carries: a cluster of it gets
   a block when a held key needs one, and gives it back once unneeded for 64 ticks. A key completes only once every member has that state and has
   entered. A Versioned key on such a member may be written off the tick; the fill reads the commits' moves beside the index, so none is lost.
+- **Group keys are engine-wide, not per realm.** A positionless member belongs to no realm, so a key is one group wherever it is held: two realms
+  whose regions use key 7 — or whose sessions subscribe to it — see the same members. That is how data is shared across realms (a guild roster seen
+  from every instance); an application that wants instances isolated gives each its own keys, and an explicit set's `admit` decides who may ask.
 
 ## 💻 Usage
 
@@ -78,6 +81,27 @@ On the client: `store.IsGroupComplete(set, key)`, `store.CompleteGroups` and the
 `applier.groups.isComplete(set, key)` (TypeScript); `typhon_group_is_complete` and `typhon_groups_get` (C). The set's index is its position
 in the catalog's `groupSets`, in name order.
 
+Asking for a key, in each SDK — the answer arrives once the key's members are in the store:
+
+```csharp
+var answer = await client.SubscribeAsync("myLists", accountId);          // .NET: Applied, Refused (answer.Code), Rejected or Dropped
+await client.UnsubscribeAsync("myLists", accountId);
+```
+
+```typescript
+const subs = new GroupSubscriptions(session.plan);                        // TypeScript: pump before each flush, observe after each frame
+const answer = await subs.subscribe('myLists', accountId);               // { outcome: 'applied' | 'refused' | 'rejected' | 'dropped', code, … }
+```
+
+```c
+uint16_t id;                                                             /* C: sent by the next typhon_commands_flush */
+typhon_group_subscribe(client, set, account_id, &id);
+/* after a poll: typhon_subscribe_results_get(client, &results, &count) — outcome TYPHON_SUBSCRIBE_APPLIED, _REFUSED, _REJECTED or _DROPPED */
+```
+
+Requests leave in call order, paced by the command's rate; one the server still refuses for its rate goes again by itself; a session that ends
+drops what is still waiting — a new session holds none of it.
+
 ## ⚠️ Guarantees & limits
 
 - Refused at `Start`: a set with no region, groups on a `World` or `ClientRegion` observer, a key that is not an integer, not sparse and
@@ -88,8 +112,9 @@ in the catalog's `groupSets`, in name order.
 - A profile may name groups and no archetype: its Sphere then holds the towns' members and nothing by geometry.
 - Past `MaxGroupsPerSession` towns met at once, the kept ones and then the nearest are held and the rest counted.
 - Explicit and shared sets: a profile names them with `Groups(set)`, no reach; at most `MaxGroupsPerSession` keys per set, a client's and the server's
-  together; `SubscribeRequest` is rate-limited to 5 a second, and a request past it — or past 64 answers owed to the session — is an `ACK`, not an
-  answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
+  together; `SubscribeRequest` is rate-limited to 5 a second past a burst of `MaxGroupsPerSession` (the catalog says so: a login may subscribe every
+  key it may hold at once), and a request past it — or past the answers a session may be owed, twice `MaxGroupsPerSession` and at least 64 — is an
+  `ACK`, not an answer. A handler that throws or returns `default` refuses the request `Denied`; a subscription still filling when the session's profile stops
   naming the set is answered `NotInProfile`. A realm-kind variant names the same explicit sets as its profile.
 - Not built yet: visibility tags.
 - Measured (`GroupRegionBench`, 14 § 3.6): a 456 m town on a 192 m Sphere costs no measurable gather time (within 1 µs over 128 sessions) and no steady-state bytes; widening
@@ -99,6 +124,8 @@ in the catalog's `groupSets`, in name order.
 
 - [PushGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupTests.cs) — the oracle (towns, members and walking sessions under churn and skips), hysteresis and re-entry, budgeted fill, moves between towns, a destroyed town, the refusals, the tap's mutant
 - [PushGroupShardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupShardTests.cs) — positionless members: state only while held, the budget, a reference resolved once its target has state, #1389's split and merge, an off-DAG key move between the projection and the gather
+- [LiveGroupSubscriptionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/LiveGroupSubscriptionTests.cs) — `SubscribeAsync` over TCP to a live engine: applied after the completion, the application's code, a login burst, a release, dropped on close
+- The `subscribe-requests` vector — one script of requests, pumps, frames and a close, replayed by the .NET, TypeScript and native helpers
 - [PushGroupRequestTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupRequestTests.cs) — explicit and shared sets: answers, codes, the server's keys, a RESET
 - [RealmGroupTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Realms/RealmGroupTests.cs) — a positionless member held by the sessions of the realm its region is in
 - [FrameApplierTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Client.Tests/FrameApplierTests.cs) — the client's complete set, release and `RESET`, a duplicate completion counted
