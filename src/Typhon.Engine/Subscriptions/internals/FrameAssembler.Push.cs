@@ -900,6 +900,16 @@ internal sealed unsafe partial class FrameAssembler
 
     // published: the bytes the session's frame published, or zero when it had nothing to say; left as it was when no frame was made — not its tick, or a
     // frame refused (degraded, lagging, no slot, oversize, no pool): the budget loop reads the link's rate, and a refusal is congestion, not quiet.
+    // A cursor older than the reliable ring: what the session is owed is gone, so it cannot be kept reliable (SUB-35). The skip sweep closes such a session
+    // first; this is the backstop, reached only by a bound the sweep does not see.
+    private void CloseIfUnreliable(SessionId session, bool lagging)
+    {
+        if (lagging && _sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater))
+        {
+            Interlocked.Increment(ref _sessionsClosedReliable);
+        }
+    }
+
     /// <summary>
     /// A session bound to no profile: a frame of the events routed to it — broadcasts and its own <c>EmitTo</c> — since its last one, and nothing else
     /// (09 § 11). No frame when none is owed; a frame not sent leaves the events owed, caught up from the log.
@@ -923,10 +933,16 @@ internal sealed unsafe partial class FrameAssembler
             var nowhere = new NoEventGeometry(state.PendingRealm is >= 0 and < RealmId.NoneValue ? (ushort)state.PendingRealm : RealmId.NoneValue,
                 Engine?.RealmTable);
             events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
-            if (bytes > _maxFrameBytes / 2)
+            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, EntityId.Null, session, ref nowhere, _maxFrameBytes / 2, out var reliable,
+                out var reliableBytes, out var lagging);
+            CloseIfUnreliable(session, lagging);
+            if (bytes + reliableBytes > _maxFrameBytes / 2)
             {
-                EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
+                events.ShedTo(scratch.EventPicks, (_maxFrameBytes / 2) - reliableBytes, ref count, ref bytes, ref lost);
             }
+
+            count += reliable;
+            bytes += reliableBytes;
         }
 
         var reset = state.PendingReset;
@@ -942,6 +958,7 @@ internal sealed unsafe partial class FrameAssembler
         if (count == 0 && !reset && !self.Write && self.Acks == 0 && scratch.GroupRecords.Count == 0)
         {
             state.EventsCursor = (uint)_tick;
+            events?.CommitReliable(state, scratch.EventPicks);
             CommitSelf(session, state, in self, -1, ref counters);
             return;
         }
@@ -986,6 +1003,7 @@ internal sealed unsafe partial class FrameAssembler
         Requests?.Retire(session, scratch.Answered);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
+        events?.CommitReliable(state, scratch.EventPicks);
         state.PendingReset = false;
         if (reset)
         {
@@ -1245,8 +1263,11 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // A rate-classed session's degrade class runs on the same staggered tick as its rate class: on the bare tick, a divisor-2 session of odd slot at
+        // degrade level 1 would pass one gate only on the ticks the other refuses, and never produce a frame — never closed either, since neither gate is a
+        // skip of its run. An undivided session keeps the bare tick, so every session at one level lands on the same ticks.
         ref var send = ref SendStateOf(session.Slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, divisor > 1 ? _tick + session.Slot : _tick))
         {
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1345,11 +1366,20 @@ internal sealed unsafe partial class FrameAssembler
             events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
                 out eventBytes, out eventsLost);
 
-            // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
-            if (eventBytes > _maxFrameBytes / 2)
+            // Reliable events first (14 § 7): up to half a frame but at least one, the rest carried to the next frames — never shed.
+            events.CollectReliable(scratch.EventPicks, state, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, _maxFrameBytes / 2,
+                out var reliable, out var reliableBytes, out var lagging);
+            CloseIfUnreliable(session, lagging);
+
+            // Events take at most half a frame: past it the best-effort ones are counted, not sent, so a burst cannot make every frame oversize and starve
+            // the session.
+            if (eventBytes + reliableBytes > _maxFrameBytes / 2)
             {
-                EventHub.Shed(scratch.EventPicks, ref eventCount, ref eventBytes, ref eventsLost);
+                events.ShedTo(scratch.EventPicks, (_maxFrameBytes / 2) - reliableBytes, ref eventCount, ref eventBytes, ref eventsLost);
             }
+
+            eventCount += reliable;
+            eventBytes += reliableBytes;
         }
 
         // The aggregate tier (09 § 8): on the session's aggregate tick — at most its rate, staggered by slot — the tiles of its region that changed since its
@@ -1422,6 +1452,7 @@ internal sealed unsafe partial class FrameAssembler
             NoteSkip(state, counted: false);
             push.Commit(session);
             state.EventsCursor = (uint)_tick;
+            events?.CommitReliable(state, scratch.EventPicks);
             CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
             if (aggDue)
             {
@@ -1525,6 +1556,7 @@ internal sealed unsafe partial class FrameAssembler
         push.Commit(session);
         Requests?.Retire(session, scratch.Answered);
         state.EventsCursor = (uint)_tick;
+        events?.CommitReliable(state, scratch.EventPicks);
         CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
         if (aggDue)
         {
@@ -1637,6 +1669,8 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
         World ? _push.WorldSeesPoint(_session, x, y, z) : _push.SeesPoint(_session, x, y, z, viewRadius);
 
     public bool SeesTags(uint mask) => _push.SessionSees(_session, mask);
+
+    public GroupSessionState Groups => _push.GroupsOf(_session);
 }
 
 /// <summary>No geometry: a session with no profile sees no point, so the geometric routes never match it (09 § 11).</summary>
@@ -1668,6 +1702,8 @@ internal readonly ref struct NoEventGeometry : IEventGeometry
     public bool Sees(float x, float y, float z, float viewRadius) => false;
 
     public bool SeesTags(uint mask) => mask == 0;
+
+    public GroupSessionState Groups => null;
 }
 
 /// <summary>The realm parent tree, for <see cref="EventRouting.ToRealm"/> (12-realms § 3): routing only, never visibility.</summary>

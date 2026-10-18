@@ -335,7 +335,7 @@ public sealed class ArchetypeProjection
     /// <summary>The visibility mask's field, or <see langword="null"/>.</summary>
     public string VisibilityFieldName { get; private set; }
 
-    internal int VisibilityComponentTypeId { get; private set; } = -1;
+    internal int VisibilityComponentTypeId { get; private set; }
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_fields.Count} field(s), {_ownerFields.Count} owner field(s)";

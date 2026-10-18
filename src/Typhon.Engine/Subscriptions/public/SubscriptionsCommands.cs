@@ -290,14 +290,18 @@ public sealed class SubscriptionsCommands
     /// hears broadcasts and its own <see cref="EmitTo{T}"/>, in frames of events alone; the routes that need a view never reach it.
     /// </para>
     /// </remarks>
-    public void Emit<T>(in T evt) where T : unmanaged
+    /// <returns>
+    /// <see langword="false"/> only for a reliable event refused for want of room (<see cref="SubscriptionsOptions.ReliableEventBytes"/>): it reaches nobody,
+    /// and the emitter is the one who must act on that. <see langword="true"/> otherwise.
+    /// </returns>
+    public bool Emit<T>(in T evt) where T : unmanaged
     {
         if (_events == null)
         {
             throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
         }
 
-        _events.Emit(_slot, in evt);
+        return _events.Emit(_slot, in evt);
     }
 
     /// <summary>
@@ -308,14 +312,15 @@ public sealed class SubscriptionsCommands
     /// <param name="session">The session.</param>
     /// <param name="evt">The event; copied.</param>
     /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a declared event routed to a session.</exception>
-    public void EmitTo<T>(SessionId session, in T evt) where T : unmanaged
+    /// <returns><see langword="false"/> only for a reliable event refused for want of room, as <see cref="Emit{T}"/>.</returns>
+    public bool EmitTo<T>(SessionId session, in T evt) where T : unmanaged
     {
         if (_events == null)
         {
             throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
         }
 
-        _events.EmitTo(_slot, session, in evt);
+        return _events.EmitTo(_slot, session, in evt);
     }
 
     /// <summary>

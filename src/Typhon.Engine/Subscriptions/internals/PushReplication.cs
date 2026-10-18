@@ -628,6 +628,8 @@ internal abstract unsafe partial class PushReplication
         _sessions[local] = default;
         _sessionTagsGeneration[local] = 0;
         _sessionTags[local] = 0;
+        _committedTagsGeneration[local] = 0;
+        _committedTags[local] = 0;
         if (local < _regions.Length && _regions[local] != null)
         {
             _regions[local].Generation = 0;
@@ -645,6 +647,8 @@ internal abstract unsafe partial class PushReplication
         Array.Resize(ref _sessions, length);
         Array.Resize(ref _sessionTags, length);
         Array.Resize(ref _sessionTagsGeneration, length);
+        Array.Resize(ref _committedTags, length);
+        Array.Resize(ref _committedTagsGeneration, length);
         Array.Resize(ref _slotOwners, length);
         Array.Resize(ref _slotSeen, length);
         Array.Resize(ref _freeSlots, length);
@@ -1360,6 +1364,7 @@ internal abstract unsafe partial class PushReplication
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
             _orphanKeyChangeCount = 0;
+            _orphanTagChangeCount = 0;
         }
     }
 
@@ -1455,9 +1460,12 @@ internal abstract unsafe partial class PushReplication
         y = (float)WireMath.DecodeQuantWithStep(qy, _minY[archetype], _stepY[archetype]);
     }
 
-    /// <summary>Records one projected slot. Called by the worker that owns the block, while its hot entry is still in cache.</summary>
-    public abstract void AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
-        float ox, float oy, float oz, float nx, float ny, float nz);
+    /// <summary>
+    /// Records one projected slot. Called by the worker that owns the block, while its hot entry is still in cache. Returns whether an event was recorded: a
+    /// push that changed nothing — <paramref name="maskChanged"/> false, whatever its <see cref="PushEvent.TagsChanged"/> says — is dropped.
+    /// </summary>
+    public abstract bool AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
+        float ox, float oy, float oz, float nx, float ny, float nz, bool maskChanged = false);
 
     /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
     public abstract void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause);

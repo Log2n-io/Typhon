@@ -108,7 +108,7 @@ internal sealed unsafe partial class FrameAssembler
             }
 
             // Visibility (14 § 6): a session that does not see the entity was never sent it, whatever its geometry.
-            if (!owner.SessionSees(session, owner.MaskOf(archetype, block, slot)))
+            if (!owner.CommittedSees(session, owner.MaskOf(archetype, block, slot)))
             {
                 return false;
             }

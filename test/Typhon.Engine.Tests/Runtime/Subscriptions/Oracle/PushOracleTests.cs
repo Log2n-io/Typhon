@@ -838,6 +838,9 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         World,
         BandedSphere,
         Region,
+
+        // Detection is the engine's own: a mask written and nothing told (14 § 6 — a write to the tag component alone is pushed).
+        AutomaticSphere,
     }
 
     /// <summary>
@@ -855,10 +858,13 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         int[] skips = [0, 0, 0, skipPercent, skipPercent, skipPercent];
         using var oracle = shape switch
         {
-            TaggedShape.World => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8800 + skipPercent, skips, nameof(PushOracleTests),
+            TaggedShape.World => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8800 + skipPercent, skips,
+                nameof(PushOracleTests),
                 worldObserver: true, bigWorld: true, tags: true),
             TaggedShape.BandedSphere => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8810 + skipPercent, skips,
                 nameof(PushOracleTests), walkRadius: 3000, bands: b => b.Every(2, beyond: 0.4).Every(4, beyond: 0.6).Every(8, beyond: 0.8), tags: true),
+            TaggedShape.AutomaticSphere => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8830 + skipPercent, skips,
+                nameof(PushOracleTests), PushDetection.Automatic, walkRadius: 3000, tags: true),
             _ => OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 8820 + skipPercent, skips, nameof(PushOracleTests),
                 replicationCellM: 250, regionEdgeM: 6000, tags: true),
         };
@@ -885,6 +891,8 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         {
             Assert.That(hidden, Is.GreaterThan(100), "entities were hidden from sessions, and each checked not held");
             Assert.That(oracle.Workload.MaskFlips, Is.GreaterThan(30), "masks changed under the churn");
+            Assert.That(oracle.SessionMaskChanges, Is.GreaterThan(0), "a session's own mask changed, which resets it");
+            Assert.That(oracle.EntersChecked, Is.GreaterThan(100), "enters were checked frame by frame against the receiving session's mask");
             Assert.That(oracle.Compared, Is.GreaterThan(200), "the comparison looked at entities the sessions see");
             if (shape != TaggedShape.World)
             {

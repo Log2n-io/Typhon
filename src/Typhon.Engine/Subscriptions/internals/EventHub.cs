@@ -234,6 +234,12 @@ internal interface IEventEntities
     /// naming an entity reaches only the sessions that see it).
     /// </summary>
     bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm, out uint mask);
+
+    /// <summary>
+    /// A live entity's replication entry, whatever its archetype — positionless ones included (14 § 5): its plan index, block and slot, its identity, and
+    /// the realm of its block. What a ToKnown event naming a group member is filed under its keys by (14 § 3).
+    /// </summary>
+    bool TryResolveMember(EntityId entity, out int archetype, out nint block, out int slot, out uint netId, out ushort realm);
 }
 
 /// <summary>A session's geometry for the geometric routes: the cells it spans, and whether it sees a point (09 § 11).</summary>
@@ -254,6 +260,9 @@ internal interface IEventGeometry
 
     /// <summary>Whether a <see cref="EventRouting.ToRealm"/> filing for <paramref name="realm"/> reaches the session (with its subtree, when asked).</summary>
     bool InRealm(ushort realm, bool subtree);
+
+    /// <summary>The keys the session's gather holds before and after this frame, with their fill cursors (14 § 3.8); null when it holds none.</summary>
+    GroupSessionState Groups { get; }
 }
 
 /// <summary>A worker's scratch for one session's events: the (tick slot, event) pairs it will write.</summary>
@@ -263,6 +272,34 @@ internal sealed class EventPicks
     public int Count;
     public int[] Temp = new int[64];
     public int TempCount;
+
+    // Reliable events (14 § 7), written ahead of the best-effort ones: (tick, event) pairs this frame carries — the first ReliableFromOwed of them from the
+    // session's owed queue — and the newly judged ones it could not carry, which its publish queues. Never shed.
+    public long[] Reliable = new long[16];
+    public int ReliableCount;
+    public int ReliableFromOwed;
+    public long[] ReliableNew = new long[16];
+    public int ReliableNewCount;
+
+    public void AddReliable(long pick)
+    {
+        if (ReliableCount == Reliable.Length)
+        {
+            Array.Resize(ref Reliable, ReliableCount * 2);
+        }
+
+        Reliable[ReliableCount++] = pick;
+    }
+
+    public void AddReliableNew(long pick)
+    {
+        if (ReliableNewCount == ReliableNew.Length)
+        {
+            Array.Resize(ref ReliableNew, ReliableNewCount * 2);
+        }
+
+        ReliableNew[ReliableNewCount++] = pick;
+    }
 
     public void Clear()
     {
@@ -295,8 +332,9 @@ internal sealed class EventPicks
 internal sealed class EventTypeInfo
 {
     public EventTypeInfo(string name, int index, int wireIdx, EventRouting routing, int[] entityOffsets, EventPointReader point, float nearRadius,
-        int payloadSize, SectionPlan body, EventFieldBinding[] bindings, EventRealmReader realm = null, bool subtree = false)
+        int payloadSize, SectionPlan body, EventFieldBinding[] bindings, EventRealmReader realm = null, bool subtree = false, bool reliable = false)
     {
+        Reliable = reliable;
         RealmOf = realm;
         Subtree = subtree;
         Name = name;
@@ -322,6 +360,9 @@ internal sealed class EventTypeInfo
     }
 
     public string Name { get; }
+
+    /// <summary>A reliable event (14 § 7): kept in the reliable ring, delivered once and in order, never counted lost.</summary>
+    public bool Reliable { get; }
 
     /// <summary>The declaration's position in the registry: the index an emission record carries.</summary>
     public int Index { get; }
@@ -399,6 +440,9 @@ internal sealed class EventHub
     private const int RecordHeader = sizeof(int) + sizeof(ulong);
 
     private readonly EventTypeInfo[] _types;
+
+    /// <summary>The declared events, compiled.</summary>
+    internal ReadOnlySpan<EventTypeInfo> Types => _types;
     private readonly Dictionary<Type, EventTypeInfo> _byType = [];
     private readonly Dictionary<long, NetIdLeaseSet.DepartedEntity> _departed = [];
     private Segment[] _segments = [new Segment()];
@@ -418,6 +462,9 @@ internal sealed class EventHub
     /// </summary>
     public long DiscardedBytes;
 
+    // A slot's arena past this is given back when the ring reuses the slot: a burst does not stay resident a ring later.
+    private const int LargeArenaBytes = 64 * 1024;
+
     // The last tick EncodeTick ran for: a tick that starts after one that did not encode discards what that one emitted.
     private uint _lastEncoded;
 
@@ -432,6 +479,51 @@ internal sealed class EventHub
 
     /// <summary>Time spent encoding, serial, in the frame prologue — cumulative, in Stopwatch ticks.</summary>
     public long EncodeTicks;
+
+    // ── Reliable events (14 § 7, SUB-35) ──
+
+    /// <summary>Whether any declared event is reliable.</summary>
+    public bool HasReliable { get; private set; }
+
+    // A ring of ticks deeper than the close bound: every live session's gap is inside it, since a session skipped longer is closed (SweepSkipPolicy).
+    private Tick[] _reliable = [];
+    private int _reliableMask;
+    private long _reliableBudget;
+
+    // What the ring holds (written by the encode, read by Emit on any thread) and what this tick's emits reserved (each its event's largest encoding).
+    private long _reliableRetained;
+    private long _reliablePending;
+    private uint _lastReliable;
+
+    /// <summary>Reliable emits refused for want of room under <see cref="SubscriptionsOptions.ReliableEventBytes"/>.</summary>
+    public long ReliableRefused;
+
+    /// <summary>Reliable events delivered, counted per session.</summary>
+    public long ReliableDelivered;
+
+    /// <summary>The ticks the reliable ring holds; 0 when no reliable event is declared.</summary>
+    public int ReliableDepth => _reliable.Length;
+
+    /// <summary>The bytes the reliable ring holds now.</summary>
+    public long ReliableRetained => System.Threading.Volatile.Read(ref _reliableRetained);
+
+    /// <summary>
+    /// Sizes the reliable ring from the session close bound: a power of two above it, so a session's oldest owed tick is always still held while the session
+    /// lives. Called once by the runtime, before the first tick.
+    /// </summary>
+    public void BindReliable(int closeBoundTicks, long budgetBytes)
+    {
+        if (!HasReliable)
+        {
+            return;
+        }
+
+        // A slot is made the first time a reliable event lands on its tick: the ring is as deep as the close bound, not as large as it.
+        var depth = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Clamp(closeBoundTicks + 2, 2, 1 << 24));
+        _reliable = new Tick[depth];
+        _reliableMask = depth - 1;
+        _reliableBudget = budgetBytes;
+    }
 
     private EventHub(EventTypeInfo[] types)
     {
@@ -466,6 +558,7 @@ internal sealed class EventHub
         for (var i = 0; i < types.Length; i++)
         {
             hub._byType[registry.Events[i].EventType] = types[i];
+            hub.HasReliable |= types[i].Reliable;
         }
 
         return hub;
@@ -514,7 +607,8 @@ internal sealed class EventHub
         }
 
         return new EventTypeInfo(declaration.Name, declaration.Index, message.Idx, declaration.Routing, entities, declaration.RoutingPointReader,
-            (float)declaration.RoutingRadiusM, declaration.PayloadSize, message.Body, bindings, declaration.RoutingRealmReader, declaration.RoutingSubtree);
+            (float)declaration.RoutingRadiusM, declaration.PayloadSize, message.Body, bindings, declaration.RoutingRealmReader, declaration.RoutingSubtree,
+            declaration.Reliable);
     }
 
     /// <summary>The most bytes an event's leading bit pack may take.</summary>
@@ -633,8 +727,8 @@ internal sealed class EventHub
         _segments = segments;
     }
 
-    /// <summary>Records an event from segment <paramref name="slot"/>'s worker.</summary>
-    public void Emit<T>(int slot, in T evt) where T : unmanaged
+    /// <summary>Records an event from segment <paramref name="slot"/>'s worker; <see langword="false"/> for a reliable one refused for want of room.</summary>
+    public bool Emit<T>(int slot, in T evt) where T : unmanaged
     {
         var info = InfoOf<T>();
         if (info.Routing == EventRouting.ToSession)
@@ -642,11 +736,17 @@ internal sealed class EventHub
             throw new InvalidOperationException($"'{typeof(T).Name}' routes to a session: emit it with EmitTo(session, …).");
         }
 
+        if (info.Reliable && !Admit(info, in evt))
+        {
+            return false;
+        }
+
         Record(slot, info, 0UL, in evt);
+        return true;
     }
 
-    /// <summary>Records an event addressed to one session.</summary>
-    public void EmitTo<T>(int slot, SessionId session, in T evt) where T : unmanaged
+    /// <summary>Records an event addressed to one session; <see langword="false"/> for a reliable one refused for want of room.</summary>
+    public bool EmitTo<T>(int slot, SessionId session, in T evt) where T : unmanaged
     {
         var info = InfoOf<T>();
         if (info.Routing != EventRouting.ToSession)
@@ -654,7 +754,42 @@ internal sealed class EventHub
             throw new InvalidOperationException($"'{typeof(T).Name}' does not route to a session (RouteToSession); emit it with Emit(…).");
         }
 
+        if (info.Reliable && !Admit(info, in evt))
+        {
+            return false;
+        }
+
         Record(slot, info, session.Value, in evt);
+        return true;
+    }
+
+    /// <summary>Reliable events rejected at the emitter for a value their codec cannot carry, or a realm reader that threw (SUB-35).</summary>
+    public long ReliableInvalid;
+
+    // A reliable emit is admitted only if it will encode and fits the budget: refused here, at the emitter, rather than dropped later.
+    private bool Admit<T>(EventTypeInfo info, in T evt) where T : unmanaged
+    {
+        if (!WillEncode(info, MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in evt))))
+        {
+            System.Threading.Interlocked.Increment(ref ReliableInvalid);
+            return false;
+        }
+
+        return Reserve(info);
+    }
+
+    // A reliable emit reserves its largest encoding against the budget, beside what the ring holds.
+    private bool Reserve(EventTypeInfo info)
+    {
+        var after = System.Threading.Interlocked.Add(ref _reliablePending, info.MaxBytes);
+        if (System.Threading.Volatile.Read(ref _reliableRetained) + after <= _reliableBudget)
+        {
+            return true;
+        }
+
+        System.Threading.Interlocked.Add(ref _reliablePending, -info.MaxBytes);
+        System.Threading.Interlocked.Increment(ref ReliableRefused);
+        return false;
     }
 
     private EventTypeInfo InfoOf<T>() where T : unmanaged =>
@@ -680,6 +815,11 @@ internal sealed class EventHub
             }
 
             var span = segment.Bytes.AsSpan(segment.Length, need);
+            if (info.Reliable)
+            {
+                segment.Reserved += info.MaxBytes;
+            }
+
             MemoryMarshal.Write(span, info.Index);
             MemoryMarshal.Write(span[sizeof(int)..], target);
             MemoryMarshal.Write(span[RecordHeader..], in evt);
@@ -713,12 +853,16 @@ internal sealed class EventHub
                     DiscardedBytes += segment.Length;
                     segment.Length = 0;
                 }
+
+                System.Threading.Interlocked.Add(ref _reliablePending, -segment.Reserved);
+                segment.Reserved = 0;
             }
             finally
             {
                 segment.Exit();
             }
         }
+
     }
 
     // ══ Encode (serial, frame prologue) ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -735,6 +879,21 @@ internal sealed class EventHub
         var from = System.Diagnostics.Stopwatch.GetTimestamp();
         var slot = _log[tick % PushReplication.LogDepth];
         slot.Reset(tick);
+
+        // The reliable ring's slot for this tick: what it held a ring ago leaves the budget, as does what the slots of ticks no encode reached held.
+        Tick reliable = null;
+        var ring = 0;
+        if (HasReliable)
+        {
+            for (var t = Math.Max(_lastEncoded + 1, tick - (uint)_reliable.Length + 1); t != tick && t != 0; t++)
+            {
+                ReleaseReliable((int)(t & (uint)_reliableMask));
+            }
+
+            ring = (int)(tick & (uint)_reliableMask);
+            ReleaseReliable(ring);
+        }
+
         var any = false;
         foreach (var segment in _segments)
         {
@@ -745,6 +904,7 @@ internal sealed class EventHub
         {
             _departed.Clear();
             push.Realm0.CollectDeparted(_departed);
+            _unplacedMembers = push.IsAnyLazy;
             Array.Clear(_memo);
             Span<double> one = stackalloc double[ProtocolConstants.MaxCount];
             Span<byte> pack = stackalloc byte[64];
@@ -774,9 +934,10 @@ internal sealed class EventHub
                             // A position field is framed by the event's realm (SUB-30) — its point's, its entity's or its addressee's — where its hearers are.
                             var realm = EventRealm(info, payload, ref entities);
                             _encodeFrame = realm == RealmId.Default.Value || RealmFrames == null ? Realm : RealmFrames(realm) ?? Realm;
-                            if (Encode(slot, info, payload, ref entities, one, pack))
+                            var into = info.Reliable ? reliable ??= ReliableSlot(ring, tick) : slot;
+                            if (Encode(into, info, payload, ref entities, one, pack))
                             {
-                                Route(slot, info, payload, target, ref entities, push);
+                                Route(into, info, payload, target, ref entities, push);
                             }
                         }
                         catch (Exception)
@@ -788,12 +949,25 @@ internal sealed class EventHub
                 finally
                 {
                     segment.Length = 0;
+                    System.Threading.Interlocked.Add(ref _reliablePending, -segment.Reserved);
+                    segment.Reserved = 0;
                     segment.Exit();
                 }
             }
         }
 
         _lastEncoded = tick;
+
+        if (reliable != null)
+        {
+            reliable.Finish();
+            System.Threading.Interlocked.Add(ref _reliableRetained, reliable.ArenaLength);
+            if (reliable.Count > 0)
+            {
+                _lastReliable = tick;
+                Encoded += reliable.Count;
+            }
+        }
 
         slot.Finish();
         _summaries[tick % SummaryDepth].CopyRouting(slot);
@@ -806,9 +980,38 @@ internal sealed class EventHub
         EncodeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - from;
     }
 
+    // A ring slot's previous tick leaves it: its bytes leave the budget, and a large arena is given back.
+    private void ReleaseReliable(int ring)
+    {
+        var held = _reliable[ring];
+        if (held == null)
+        {
+            return;
+        }
+
+        System.Threading.Interlocked.Add(ref _reliableRetained, -held.ArenaLength);
+        if (held.Arena.Length > LargeArenaBytes)
+        {
+            _reliable[ring] = null;
+            return;
+        }
+
+        held.Release();
+    }
+
+    private Tick ReliableSlot(int ring, uint tick)
+    {
+        var slot = _reliable[ring] ??= new Tick(256);
+        slot.Reset(tick);
+        return slot;
+    }
+
     // The last few entities resolved this tick: an event's entity fields and its routing name the same entities, and an EntityMap probe is most of an
     // event's cost. Cleared per tick — projection moves entities between ticks, not within the encode.
     private readonly Memo[] _memo = new Memo[4];
+
+    // Positionless members exist (14 § 5): an entity field the spatial resolve cannot find may still name one, by its identity alone.
+    private bool _unplacedMembers;
     private int _memoNext;
 
     private struct Memo
@@ -904,6 +1107,12 @@ internal sealed class EventHub
                             slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f, realm, mask);
                         }
                     }
+
+                    // A group member is known by the sessions holding one of its keys too (14 § 3), wherever it is and whether or not it has a position.
+                    if (!entity.IsNull && hub.Realm0.HasGroups)
+                    {
+                        FileMember(slot, e, entity, ref entities, hub);
+                    }
                 }
 
                 break;
@@ -911,6 +1120,84 @@ internal sealed class EventHub
     }
 
     // The realm an event is heard in: a Near point's or a ToRealm addressee's, a ToKnown's first entity's; realm 0 for a session-addressed route.
+    /// <summary>
+    /// Files a ToKnown event under the keys of the group member it names: its current keys, and — was ∨ is, as the cell filings — the key a change this
+    /// tick moved it from, or the keys a member that left this tick held. The filing carries the member's identity, so a session matches it only once its
+    /// fill has reached the member, and its mask (14 § 6).
+    /// </summary>
+    private void FileMember<TEntities>(Tick slot, int e, EntityId entity, ref TEntities entities, PushHub hub)
+        where TEntities : IEventEntities, allows ref struct
+    {
+        var push0 = hub.Realm0;
+        if (entities.TryResolveMember(entity, out var archetype, out var block, out var at, out var netId, out var realm))
+        {
+            var keys = push0.GroupKeysOf(archetype);
+            if (keys.Length == 0)
+            {
+                return;
+            }
+
+            var unplaced = push0.IsUnplaced(archetype);
+            var owner = unplaced ? push0 : hub.For(realm) ?? push0;
+            var mask = owner.MaskOf(archetype, block, at);
+            GroupFold.KeySlots current = default;
+            owner.ReadMemberKeys(archetype, block, at, netId, ref current);
+            for (var g = 0; g < keys.Length; g++)
+            {
+                var key = current[keys[g].Slot];
+                if (key != 0)
+                {
+                    slot.AddMember(keys[g].Set, key, e, netId, mask, realm, unplaced);
+                }
+
+                if (unplaced)
+                {
+                    if (hub.TryUnplacedOldKey(netId, keys[g].Set, out var old) && old != 0 && old != key)
+                    {
+                        slot.AddMember(keys[g].Set, old, e, netId, mask, realm, true);
+                    }
+
+                    continue;
+                }
+
+                // Every served realm's changes: a member that crossed realms this tick left its old key in the realm it left, where its sessions held it
+                // — the same key, there, is still a filing of its own.
+                foreach (var served in hub.Active)
+                {
+                    if (served.TryTickOldKey(netId, keys[g].Set, out var old) && old != 0 && (old != key || served.ServedRealm != realm))
+                    {
+                        slot.AddMember(keys[g].Set, old, e, netId, mask, served.ServedRealm, false);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        // Gone this tick ("X killed Y"): its leave set every key to 0, and the tick's key changes keep the ones it held.
+        if (!_departed.TryGetValue((long)entity.RawValue, out var gone) || gone.NetId == 0)
+        {
+            return;
+        }
+
+        for (var set = 0; set < push0.GroupSets.Length; set++)
+        {
+            if (hub.TryUnplacedOldKey(gone.NetId, set, out var old) && old != 0)
+            {
+                slot.AddMember(set, old, e, gone.NetId, gone.Mask, gone.Realm, true);
+                continue;
+            }
+
+            foreach (var served in hub.Active)
+            {
+                if (served.TryTickOldKey(gone.NetId, set, out old) && old != 0)
+                {
+                    slot.AddMember(set, old, e, gone.NetId, gone.Mask, served.ServedRealm, false);
+                }
+            }
+        }
+    }
+
     private ushort EventRealm<TEntities>(EventTypeInfo info, ReadOnlySpan<byte> payload, ref TEntities entities) where TEntities : IEventEntities, allows ref struct
     {
         switch (info.Routing)
@@ -940,10 +1227,45 @@ internal sealed class EventHub
         scoped Span<byte> pack) where TEntities : IEventEntities, allows ref struct
     {
         slot.EnsureArena(info.MaxBytes);
-        // A field is either numbers or 64-bit integers, each written before the next is loaded: the caller's buffer serves both, not zeroed per event.
-        var wide = MemoryMarshal.Cast<double, ulong>(one);
+        var bindings = info.Bindings;
+        Span<uint> netIds = stackalloc uint[bindings.Length];
+        for (var i = info.Body.PackedCount; i < bindings.Length; i++)
+        {
+            if (bindings[i].Entity)
+            {
+                var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[bindings[i].Offset..]));
+                netIds[i] = entity.IsNull ? 0u
+                    : Resolve(ref entities, entity, out var netId, out _, out _, out _, out _, out _) ? netId
+                    : _unplacedMembers && entities.TryResolveMember(entity, out _, out _, out _, out netId, out _) ? netId
+                    : 0u;
+            }
+        }
+
         var w = new WireWriter(slot.Arena.AsSpan(slot.ArenaLength, info.MaxBytes));
         try
+        {
+            WriteBody(ref w, info, payload, one, pack, netIds, _encodeFrame);
+        }
+        catch (ArgumentException)
+        {
+            Rejected++;
+            return false;
+        }
+
+        slot.Commit(w.Position);
+        return true;
+    }
+
+    /// <summary>
+    /// An event's encoding, its entity fields already resolved to <paramref name="netIds"/> (by binding index): what the encode writes into the tick's arena,
+    /// and what a reliable emit tries into a scratch buffer to refuse at the emitter a value its codec cannot carry. Throws <see cref="ArgumentException"/>
+    /// for such a value.
+    /// </summary>
+    private static void WriteBody(ref WireWriter w, EventTypeInfo info, ReadOnlySpan<byte> payload, scoped Span<double> one, scoped Span<byte> pack,
+        scoped ReadOnlySpan<uint> netIds, RealmFrame frame)
+    {
+        // A field is either numbers or 64-bit integers, each written before the next is loaded: the caller's buffer serves both, not zeroed per event.
+        var wide = MemoryMarshal.Cast<double, ulong>(one);
         {
             w.WriteVaru((uint)info.WireIdx);
             var body = info.Body;
@@ -980,25 +1302,50 @@ internal sealed class EventHub
 
                 if (f.Entity)
                 {
-                    var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[f.Offset..]));
-                    one[0] = !entity.IsNull && Resolve(ref entities, entity, out var netId, out _, out _, out _, out _, out _) ? netId : 0u;
+                    one[0] = netIds[i];
                 }
                 else
                 {
                     f.Load(payload, one);
                 }
 
-                FieldCodec.WriteNumber(ref w, f.Field, one, _encodeFrame);
+                FieldCodec.WriteNumber(ref w, f.Field, one, frame);
             }
         }
-        catch (ArgumentException)
+    }
+
+    // A reliable emit's trial encoding (14 § 7): the emitter's thread's own buffer, sized to the largest event it has tried.
+    [ThreadStatic]
+    private static byte[] _trial;
+
+    /// <summary>
+    /// Whether a reliable event will encode: its values against their codecs, entity fields as 0 (any netId fits), its realm reader called. A failure is
+    /// refused here, at the emitter, so an accepted reliable event is never dropped by the encode (SUB-35). Position fields are tried over realm 0's frame —
+    /// the only frame a reliable event with a position can have, since Start refuses one in an engine of several realms.
+    /// </summary>
+    private bool WillEncode(EventTypeInfo info, ReadOnlySpan<byte> payload)
+    {
+        var buffer = _trial;
+        if (buffer == null || buffer.Length < info.MaxBytes)
         {
-            Rejected++;
-            return false;
+            buffer = _trial = new byte[Math.Max(256, info.MaxBytes)];
         }
 
-        slot.Commit(w.Position);
-        return true;
+        Span<double> one = stackalloc double[ProtocolConstants.MaxCount];
+        Span<byte> pack = stackalloc byte[MaxPackBytes];
+        Span<uint> netIds = stackalloc uint[info.Bindings.Length];
+        netIds.Clear();
+        try
+        {
+            info.RealmOf?.Invoke(payload);
+            var w = new WireWriter(buffer.AsSpan(0, info.MaxBytes));
+            WriteBody(ref w, info, payload, one, pack, netIds, Realm);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     // ══ Frames (parallel, read-only) ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1069,15 +1416,177 @@ internal sealed class EventHub
     }
 
     /// <summary>
-    /// Folds a frame's collected events into its loss count: what a frame carries of events is bounded, so a burst can never make every frame oversize and
-    /// starve the session's replication — a refused frame would only carry more at the next.
+    /// The reliable events <paramref name="state"/>'s session is owed (14 § 7, SUB-35), in emission order, up to <paramref name="budget"/> bytes but always the
+    /// first, so a burst larger than a frame goes over the next frames rather than being cut: first the ones an earlier frame judged routed to it and could
+    /// not carry (its owed queue), then those of every tick after its cursor, each judged once, now — against its committed view, unchanged since its last
+    /// published frame and so the view it had when they were emitted, or its pending one. What this frame cannot carry is queued by its publish
+    /// (<see cref="CommitReliable"/>), never judged again.
     /// </summary>
-    public static void Shed(EventPicks picks, ref int count, ref int bytes, ref long lost)
+    /// <param name="picks">The worker's scratch: its reliable list is filled.</param>
+    /// <param name="state">The session's frame state: its committed cursor read, its pending one written.</param>
+    /// <param name="tick">The tick being assembled.</param>
+    /// <param name="controlled">The session's controlled entity, for <c>ToOwner</c>.</param>
+    /// <param name="session">The session, for <c>ToSession</c>.</param>
+    /// <param name="geometry">The session's geometry, for the geometric and key routes.</param>
+    /// <param name="budget">The bytes this frame may give them, past the first.</param>
+    /// <param name="count">Reliable events collected.</param>
+    /// <param name="bytes">Their bytes.</param>
+    /// <param name="lagging">The cursor is older than the ring: the session can no longer be kept reliable, and must be closed.</param>
+    public void CollectReliable<TGeometry>(EventPicks picks, SessionFrameState state, uint tick, EntityId controlled, SessionId session, ref TGeometry geometry,
+        int budget, out int count, out int bytes, out bool lagging) where TGeometry : IEventGeometry, allows ref struct
     {
-        lost += picks.Count;
-        picks.Clear();
-        count = lost > 0 ? 1 : 0;
-        bytes = lost > 0 ? 10 : 0;
+        picks.ReliableCount = 0;
+        picks.ReliableFromOwed = 0;
+        picks.ReliableNewCount = 0;
+        count = 0;
+        bytes = 0;
+        lagging = false;
+        state.PendingReliableCursor = tick;
+        if (!HasReliable)
+        {
+            return;
+        }
+
+        var depth = (uint)_reliable.Length;
+        var full = false;
+        for (var i = state.ReliableOwedHead; i < state.ReliableOwedCount; i++)
+        {
+            var pick = state.ReliableOwed[i];
+            var t = (uint)(pick >> 32);
+            var slot = _reliable[t & (uint)_reliableMask];
+            if (tick - t >= depth || slot == null || slot.TickNumber != t)
+            {
+                // What it is owed has left the ring: it cannot be kept reliable, and is closed (the skip sweep closes it first).
+                lagging = true;
+                state.PendingReliableCursor = state.ReliableCursor;
+                picks.ReliableCount = picks.ReliableFromOwed = count = bytes = 0;
+                return;
+            }
+
+            var size = slot.Lengths[(int)(uint)pick];
+            if (count > 0 && bytes + size > budget)
+            {
+                full = true;
+                break;
+            }
+
+            picks.AddReliable(pick);
+            picks.ReliableFromOwed++;
+            bytes += size;
+            count++;
+        }
+
+        // The first frame starts at its own tick.
+        var from = state.ReliableCursor == 0 ? tick : state.ReliableCursor + 1;
+        if (from <= tick && tick - from >= depth)
+        {
+            lagging = true;
+            state.PendingReliableCursor = state.ReliableCursor;
+            picks.ReliableCount = picks.ReliableFromOwed = count = bytes = 0;
+            return;
+        }
+
+        for (var t = from; t <= tick && t <= _lastReliable; t++)
+        {
+            var slot = _reliable[t & (uint)_reliableMask];
+            if (slot == null || !slot.Valid || slot.TickNumber != t || slot.Count == 0)
+            {
+                continue;
+            }
+
+            slot.Match(picks, controlled.RawValue, session.Value, ref geometry);
+            for (var i = 0; i < picks.TempCount; i++)
+            {
+                var e = picks.Temp[i];
+                var pick = ((long)t << 32) | (uint)e;
+                var size = slot.Lengths[e];
+                if (!full && (count == 0 || bytes + size <= budget))
+                {
+                    picks.AddReliable(pick);
+                    bytes += size;
+                    count++;
+                }
+                else
+                {
+                    full = true;
+                    picks.AddReliableNew(pick);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Commits a published (or idle) frame's reliable events: the owed ones it carried leave the queue, the newly judged ones it could not carry join it in
+    /// order, and the cursor moves past every tick judged. Never called for a frame that was not published.
+    /// </summary>
+    public void CommitReliable(SessionFrameState state, EventPicks picks)
+    {
+        if (!HasReliable)
+        {
+            return;
+        }
+
+        state.ReliableOwedHead += picks.ReliableFromOwed;
+        if (state.ReliableOwedHead == state.ReliableOwedCount)
+        {
+            state.ReliableOwedHead = 0;
+            state.ReliableOwedCount = 0;
+        }
+
+        if (picks.ReliableNewCount > 0)
+        {
+            var live = state.ReliableOwedCount - state.ReliableOwedHead;
+            var need = live + picks.ReliableNewCount;
+            if (state.ReliableOwed.Length < need)
+            {
+                var grown = new long[Math.Max(need, state.ReliableOwed.Length * 2)];
+                Array.Copy(state.ReliableOwed, state.ReliableOwedHead, grown, 0, live);
+                state.ReliableOwed = grown;
+            }
+            else if (state.ReliableOwedHead > 0)
+            {
+                Array.Copy(state.ReliableOwed, state.ReliableOwedHead, state.ReliableOwed, 0, live);
+            }
+
+            Array.Copy(picks.ReliableNew, 0, state.ReliableOwed, live, picks.ReliableNewCount);
+            state.ReliableOwedHead = 0;
+            state.ReliableOwedCount = need;
+        }
+
+        state.ReliableCursor = state.PendingReliableCursor;
+        System.Threading.Interlocked.Add(ref ReliableDelivered, picks.ReliableCount);
+    }
+
+    /// <summary>The tick of the oldest reliable event a session is still owed, or 0 when it is owed none.</summary>
+    public static uint OldestOwed(SessionFrameState state) =>
+        state.ReliableOwedHead < state.ReliableOwedCount ? (uint)(state.ReliableOwed[state.ReliableOwedHead] >> 32) : 0u;
+
+    /// <summary>
+    /// Bounds a frame's best-effort events to <paramref name="budget"/> bytes, the loss count's own included: the oldest that fit are kept and the rest are
+    /// folded into the loss count — what a frame carries of events is bounded, so a burst can never make every frame oversize and starve the session's
+    /// replication, and the best-effort events beside a reliable backlog take what is left of the frame's half.
+    /// </summary>
+    public void ShedTo(EventPicks picks, int budget, ref int count, ref int bytes, ref long lost)
+    {
+        var room = budget - 10;
+        var keep = 0;
+        var used = 0;
+        for (; keep < picks.Count; keep++)
+        {
+            var pick = picks.Items[keep];
+            var length = _log[(int)(pick >> 32)].Lengths[(int)(uint)pick];
+            if (used + length > room)
+            {
+                break;
+            }
+
+            used += length;
+        }
+
+        lost += picks.Count - keep;
+        picks.Count = keep;
+        count = keep + (lost > 0 ? 1 : 0);
+        bytes = used + (lost > 0 ? 10 : 0);
     }
 
     /// <summary>Writes the <c>EVENTS</c> block <see cref="Collect"/> described.</summary>
@@ -1089,6 +1598,15 @@ internal sealed class EventHub
         {
             w.WriteVaru(BuiltInEvents.EventsLostIdx);
             w.WriteVaru((uint)Math.Min(lost, uint.MaxValue));
+        }
+
+        // Reliable ones first: they are the older of the two whenever they carry a backlog, and in order among themselves either way.
+        for (var i = 0; i < picks.ReliableCount; i++)
+        {
+            var pick = picks.Reliable[i];
+            var slot = _reliable[(uint)(pick >> 32) & (uint)_reliableMask];
+            var e = (int)(uint)pick;
+            w.WriteBytes(slot.Arena.AsSpan(slot.Starts[e], slot.Lengths[e]));
         }
 
         for (var i = 0; i < picks.Count; i++)
@@ -1119,6 +1637,10 @@ internal sealed class EventHub
     {
         public byte[] Bytes = new byte[4096];
         public int Length;
+
+        // The bytes the reliable records in Bytes reserved (each its event's largest encoding): given back when the segment is drained or discarded, so an
+        // emit made after this tick's drain keeps its reservation for the next.
+        public long Reserved;
         private int _gate;
 #pragma warning disable CS0169, IDE0051 // padding
         private long _p0, _p1, _p2, _p3, _p4, _p5, _p6;
@@ -1150,15 +1672,31 @@ internal sealed class EventHub
         public uint Mask;
     }
 
+    /// <summary>A ToKnown event filed under a group member's key (14 § 3): the set and key, the event, the member's identity, mask and realm.</summary>
+    private struct Member
+    {
+        public long Key;
+        public int Set;
+        public int Event;
+        public uint NetId;
+        public uint Mask;
+        public ushort Realm;
+
+        // Positionless (14 § 5): held through the keys of any realm's sessions, so its block's realm does not bound who hears it.
+        public bool Unplaced;
+    }
+
     /// <summary>
     /// One tick of the event log: the encoded arena, each event's span, and its routing — the broadcast list, the owner and session lists sorted by key, the
     /// geometric entries sorted by cell. A summary slot keeps the routing and no bytes.
     /// </summary>
     private sealed class Tick
     {
+        public Tick(int arenaBytes = 4096) => Arena = new byte[arenaBytes];
+
         public uint TickNumber;
         public bool Valid;
-        public byte[] Arena = new byte[4096];
+        public byte[] Arena;
         public int ArenaLength;
         public int[] Starts = new int[64];
         public int[] Lengths = new int[64];
@@ -1173,6 +1711,10 @@ internal sealed class EventHub
         public int DirectCount;
         public Geo[] Geos = new Geo[16];
         public int GeoCount;
+
+        // ToKnown filings by group key (14 § 3), sorted by (set, key, event).
+        public Member[] Members = new Member[4];
+        public int MemberCount;
 
         // ToRealm filings (12-realms § 3): (realm << 1) | subtree, and the event.
         public ulong[] RealmKeys = new ulong[4];
@@ -1191,6 +1733,14 @@ internal sealed class EventHub
             DirectCount = 0;
             GeoCount = 0;
             RealmCount = 0;
+            MemberCount = 0;
+        }
+
+        /// <summary>Empties the slot and marks it held by no tick.</summary>
+        public void Release()
+        {
+            Reset(0);
+            Valid = false;
         }
 
         public void EnsureArena(int bytes)
@@ -1243,6 +1793,16 @@ internal sealed class EventHub
             Geos[GeoCount++] = new Geo { Key = key, Event = e, X = x, Y = y, Z = z, Radius = radius, Realm = realm, Mask = mask };
         }
 
+        public void AddMember(int set, long key, int e, uint netId, uint mask, ushort realm, bool unplaced)
+        {
+            if (MemberCount == Members.Length)
+            {
+                Array.Resize(ref Members, MemberCount * 2);
+            }
+
+            Members[MemberCount++] = new Member { Set = set, Key = key, Event = e, NetId = netId, Mask = mask, Realm = realm, Unplaced = unplaced };
+        }
+
         public void AddRealm(ushort realm, bool subtree, int e) => Append(ref RealmKeys, ref RealmEvents, ref RealmCount, ((ulong)realm << 1) | (subtree ? 1UL : 0UL), e);
 
         private static void Append(ref ulong[] keys, ref int[] events, ref int count, ulong key, int e)
@@ -1265,6 +1825,12 @@ internal sealed class EventHub
             if (GeoCount > 1)
             {
                 Geos.AsSpan(0, GeoCount).Sort(static (a, b) => a.Key != b.Key ? a.Key.CompareTo(b.Key) : a.Event.CompareTo(b.Event));
+            }
+
+            if (MemberCount > 1)
+            {
+                Members.AsSpan(0, MemberCount).Sort(static (a, b) =>
+                    a.Set != b.Set ? a.Set.CompareTo(b.Set) : a.Key != b.Key ? a.Key.CompareTo(b.Key) : a.Event.CompareTo(b.Event));
             }
         }
 
@@ -1306,6 +1872,8 @@ internal sealed class EventHub
             DirectCount = from.DirectCount;
             GeoCount = from.GeoCount;
             RealmCount = from.RealmCount;
+            MemberCount = from.MemberCount;
+            Copy(from.Members, ref Members, MemberCount);
             Copy(from.RealmKeys, ref RealmKeys, RealmCount);
             Copy(from.RealmEvents, ref RealmEvents, RealmCount);
             Copy(from.Broadcast, ref Broadcast, BroadcastCount);
@@ -1398,6 +1966,21 @@ internal sealed class EventHub
                 }
             }
 
+            // By key (14 § 3): each key the session holds before or after the frame, and of its filings those naming a member its fill has reached.
+            if (MemberCount > 0 && geometry.Groups is { } groups)
+            {
+                var max = groups.Max;
+                var committed = groups.CCount;
+                for (var set = 0; set < committed.Length; set++)
+                {
+                    MatchKeys(picks, set, groups.CKeys, groups.CCursor, set * max, committed[set], realm, ref geometry);
+                    if (!groups.PendingIsCommitted(set))
+                    {
+                        MatchKeys(picks, set, groups.PKeys, groups.PCursor, set * max, groups.PCount[set], realm, ref geometry);
+                    }
+                }
+            }
+
             // Each source's matches are in emission order but for the geometric ones (in cell order); several sources interleave, and an event with two
             // points the session sees counts once — then they are sorted and deduplicated.
             var geo = picks.TempCount > before;
@@ -1415,6 +1998,45 @@ internal sealed class EventHub
 
                 picks.TempCount = n;
             }
+        }
+
+        private void MatchKeys<TGeometry>(EventPicks picks, int set, long[] keys, uint[] cursors, int at, int count, ushort realm, ref TGeometry geometry)
+            where TGeometry : IEventGeometry, allows ref struct
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var key = keys[at + i];
+                var cursor = cursors[at + i];
+                for (var j = LowerBoundMember(set, key); j < MemberCount && Members[j].Set == set && Members[j].Key == key; j++)
+                {
+                    ref var m = ref Members[j];
+                    if (m.NetId < cursor && (m.Unplaced || m.Realm == realm) && (m.Mask == 0 || geometry.SeesTags(m.Mask)))
+                    {
+                        picks.AddTemp(m.Event);
+                    }
+                }
+            }
+        }
+
+        private int LowerBoundMember(int set, long key)
+        {
+            var lo = 0;
+            var hi = MemberCount;
+            while (lo < hi)
+            {
+                var mid = (lo + hi) >>> 1;
+                ref var m = ref Members[mid];
+                if (m.Set < set || (m.Set == set && m.Key < key))
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+
+            return lo;
         }
 
         private static void AddRun(EventPicks picks, ulong[] keys, int[] events, int count, ulong key)

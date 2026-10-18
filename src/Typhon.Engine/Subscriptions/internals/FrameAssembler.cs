@@ -425,6 +425,24 @@ internal sealed class SessionFrameState
     /// </summary>
     public uint EventsCursor { get; set; }
 
+    /// <summary>The last tick whose reliable events the session's published frames judged (14 § 7); 0 before its first frame.</summary>
+    public uint ReliableCursor { get; set; }
+
+    /// <summary>Where this frame leaves <see cref="ReliableCursor"/>, committed only when it is published.</summary>
+    public uint PendingReliableCursor { get; set; }
+
+    /// <summary>
+    /// The reliable events judged routed to the session that no frame has carried yet, oldest first, as (tick, event) pairs: from
+    /// <see cref="ReliableOwedHead"/> to <see cref="ReliableOwedCount"/>.
+    /// </summary>
+    public long[] ReliableOwed { get; set; } = [];
+
+    /// <inheritdoc cref="ReliableOwed"/>
+    public int ReliableOwedHead { get; set; }
+
+    /// <inheritdoc cref="ReliableOwed"/>
+    public int ReliableOwedCount { get; set; }
+
     /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
     public bool ViewComplete { get; set; }
 
@@ -492,6 +510,10 @@ internal sealed class SessionFrameState
         PreviousRealm = -1;
         RealmSwitchTick = 0;
         EventsCursor = 0;
+        ReliableCursor = 0;
+        PendingReliableCursor = 0;
+        ReliableOwedHead = 0;
+        ReliableOwedCount = 0;
         ViewComplete = false;
         FramesProduced = 0;
         DegradeLevel = 0;
@@ -790,6 +812,14 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// approaching the bound with no closures is a server about to start shedding clients that were doing nothing wrong.
     /// </remarks>
     public int LongestSkipRun => Volatile.Read(ref _longestSkipRun);
+
+    /// <summary>Sessions closed with 1013 because a reliable event they were owed could not reach them within the close bound (14 § 7, SUB-35).</summary>
+    public long SessionsClosedReliable => Volatile.Read(ref _sessionsClosedReliable);
+
+    private long _sessionsClosedReliable;
+
+    /// <summary>The close bound in ticks: <see cref="SubscriptionsOptions.CloseStalledAfter"/> at the nominal tick period.</summary>
+    internal int CloseBoundTicks => _closeBoundTicks;
 
     /// <summary>Sessions closed with 4001 for having stopped sending <c>PING</c>.</summary>
     public long SessionsClosedSilent => Volatile.Read(ref _sessionsClosedSilent);
@@ -1378,6 +1408,18 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             {
                 _sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater);
                 Interlocked.Increment(ref _sessionsClosedLagging);
+                continue;
+            }
+
+            // Reliable events (14 § 7, SUB-35): frames that publish but cannot carry the backlog — an owed event older than the close bound. The ring holds
+            // no more than that, so the session is closed before anything it is owed can leave it.
+            if (Events is { HasReliable: true } && EventHub.OldestOwed(state) is var oldest and not 0 && _tick - oldest > _closeBoundTicks)
+            {
+                if (_sessions.RequestClose(session, SessionCloseReason.Lagging, CloseCodes.TryAgainLater))
+                {
+                    Interlocked.Increment(ref _sessionsClosedReliable);
+                }
+
                 continue;
             }
 

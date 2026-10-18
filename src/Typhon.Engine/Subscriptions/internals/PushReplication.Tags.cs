@@ -3,7 +3,9 @@ using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>One entity's visibility tag mask before and after an event (14 § 6, P20): what a session's visibility test reads on each side of the frame.</summary>
+/// <summary>
+/// One entity's visibility tag mask before and after an event (14 § 6, P20): what a session's visibility test reads on each side of the frame.
+/// </summary>
 internal struct TagChange
 {
     public uint NetId;
@@ -22,12 +24,21 @@ internal abstract unsafe partial class PushReplication
     private protected TagChange[] _orphanTagChanges = new TagChange[16];
     private protected int _orphanTagChangeCount;
 
-    // Per archetype: where its cold entry keeps the mask, or -1 for an archetype that declares none — whose every visibility test is this one load.
+    // Per archetype: where its cold entry keeps the mask, 0 for an archetype that declares none — whose every visibility test is this one load (the mask is
+    // never at an entry's offset 0, which the fixed header holds). And where the mask of slot 0 is from a block's start, with the cold stride: a mask read
+    // from a block is two loads and a multiply-add.
     private protected int[] _tagOffset = [];
+    private int[] _tagColdBase = [];
+    private int[] _tagColdStride = [];
 
     // Per realm-local session slot: the session's mask, and the generation it belongs to.
     private protected uint[] _sessionTags = new uint[InitialSessionSlots];
     private protected ushort[] _sessionTagsGeneration = new ushort[InitialSessionSlots];
+
+    // And the mask its last published frame was built against — what its client holds by: a command's reference is judged by it (SUB-26), not by a mask
+    // whose RESET is still unpublished.
+    private protected uint[] _committedTags = new uint[InitialSessionSlots];
+    private protected ushort[] _committedTagsGeneration = new ushort[InitialSessionSlots];
 
     /// <summary>Whether any archetype here declares a visibility mask: false keeps every tag path a single test.</summary>
     internal bool HasTags { get; private set; }
@@ -42,10 +53,20 @@ internal abstract unsafe partial class PushReplication
     private protected void InitTags(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states)
     {
         _tagOffset = new int[plans.Length];
+        _tagColdBase = new int[plans.Length];
+        _tagColdStride = new int[plans.Length];
         for (var a = 0; a < plans.Length; a++)
         {
-            _tagOffset[a] = plans[a].HasTagMask && states[a] != null ? states[a].Layout.TagMaskOffsetInColdEntry : -1;
-            HasTags |= _tagOffset[a] >= 0;
+            if (!plans[a].HasTagMask || states[a] == null)
+            {
+                continue;
+            }
+
+            var layout = states[a].Layout;
+            _tagOffset[a] = layout.TagMaskOffsetInColdEntry;
+            _tagColdBase[a] = layout.ColdOffset + layout.TagMaskOffsetInColdEntry;
+            _tagColdStride[a] = layout.ColdStride;
+            HasTags = true;
         }
     }
 
@@ -94,11 +115,13 @@ internal abstract unsafe partial class PushReplication
         _tagChangeCount[worker * TagCountStride] = n + 1;
     }
 
-    /// <summary>An orphaned hidden entity leaves with its mask, read from the cold entry before the entry is lost: true when it had one. Under the orphan lock.</summary>
+    /// <summary>
+    /// An orphaned hidden entity leaves with its mask, read from the cold entry before the entry is lost: true when it had one. Under the orphan lock.
+    /// </summary>
     private protected bool NoteOrphanTags(int archetype, byte* cold, uint netId)
     {
         var offset = _tagOffset[archetype];
-        var old = offset >= 0 ? *(uint*)(cold + offset) : 0u;
+        var old = offset != 0 ? *(uint*)(cold + offset) : 0u;
         if (old == 0)
         {
             return false;
@@ -275,19 +298,20 @@ internal abstract unsafe partial class PushReplication
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected uint MaskAt(int archetype, nint block, int slot)
     {
-        var offset = _tagOffset[archetype];
-        if (offset < 0 || block == 0)
+        if (_tagOffset[archetype] == 0 || block == 0)
         {
             return 0;
         }
 
-        var layout = _states[archetype].Layout;
-        return *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + offset);
+        return *(uint*)((byte*)block + _tagColdBase[archetype] + (slot * _tagColdStride[archetype]));
     }
 
-    /// <summary>Whether the session sees the entity at (<paramref name="archetype"/>, <paramref name="block"/>, <paramref name="slot"/>) by its current mask.</summary>
+    /// <summary>
+    /// Whether the session sees the entity at (<paramref name="archetype"/>, <paramref name="block"/>, <paramref name="slot"/>) by its current mask.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private protected bool SeesNow(int local, int archetype, nint block, int slot) => _tagOffset[archetype] < 0 || Sees(local, MaskAt(archetype, block, slot));
+    private protected bool SeesNow(int local, int archetype, nint block, int slot) => _tagOffset[archetype] == 0
+        || Sees(local, MaskAt(archetype, block, slot));
 
     /// <summary>Whether <paramref name="session"/> sees an entity with <paramref name="mask"/>: the event routes' and the references' test (P19).</summary>
     internal bool SessionSees(SessionId session, uint mask)
@@ -299,6 +323,30 @@ internal abstract unsafe partial class PushReplication
 
         var local = L(session);
         return _sessionTagsGeneration[local] == session.Generation && (mask & _sessionTags[local]) != 0;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="session"/>'s last published frame saw an entity with <paramref name="mask"/>: a command reference's test (SUB-26).
+    /// </summary>
+    internal bool CommittedSees(SessionId session, uint mask)
+    {
+        if (mask == 0)
+        {
+            return true;
+        }
+
+        var local = L(session);
+        return _committedTagsGeneration[local] == session.Generation && (mask & _committedTags[local]) != 0;
+    }
+
+    /// <summary>The frame being published was built against the session's current mask: it is now the committed one.</summary>
+    private protected void CommitTags(int local)
+    {
+        if (HasTags)
+        {
+            _committedTags[local] = _sessionTags[local];
+            _committedTagsGeneration[local] = _sessionTagsGeneration[local];
+        }
     }
 
     /// <summary>An entity's current mask by its block and slot, for the frame stage's event routes and references (P19).</summary>

@@ -178,6 +178,17 @@ public sealed class SubscriptionsOptions
     public TimeSpan CloseStalledAfter { get; init; } = TimeSpan.FromSeconds(3);
 
     /// <summary>
+    /// The most bytes of reliable events (<see cref="EventBuilder{T}.Reliable"/>) the engine keeps: what every live session may still be owed, held for
+    /// <see cref="CloseStalledAfter"/>. Required — refused at <c>Start</c> when 0 — once a reliable event is declared; unused otherwise.
+    /// </summary>
+    /// <remarks>
+    /// An emit that would take the kept bytes past it is refused and counted, never dropped later: the guarantee is to every session alive when the event is
+    /// emitted, so the emitter is the one who must learn it did not go. Each emit reserves its event's largest encoding until the tick encodes it. Size it
+    /// as the reliable bytes a burst emits per tick times the ticks in <see cref="CloseStalledAfter"/>.
+    /// </remarks>
+    public long ReliableEventBytes { get; init; }
+
+    /// <summary>
     /// How often a connected client must exchange a keepalive, in hertz. Default: 4.
     /// </summary>
     /// <remarks>

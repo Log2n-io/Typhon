@@ -113,9 +113,9 @@ internal struct PushEvent : IPushEvent<PushEvent>
     public const byte KeyChanged = 64;
 
     /// <summary>
-    /// The entity's visibility tag mask before or after this event is not 0 and changed — or a hidden entity left (14 § 6): its old and new masks are in the
-    /// tick's mask-change list. Never dropped as a no-op: a session that stops or starts seeing it has to hear of it. An event without the flag has one mask
-    /// on both sides, its cold entry's — 0 for a leave.
+    /// The entity's visibility tag mask before or after this event is not 0 — it is hidden on one side, or a hidden entity left (14 § 6): its old and new
+    /// masks are in the tick's mask list. Never dropped as a no-op: a session that stops or starts seeing it has to hear of it. An event without the flag is
+    /// of a public entity on both sides, so the live step reads no cold entry for it.
     /// </summary>
     public const byte TagsChanged = 128;
 

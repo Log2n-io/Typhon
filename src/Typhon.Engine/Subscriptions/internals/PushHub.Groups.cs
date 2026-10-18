@@ -29,7 +29,9 @@ internal sealed class UnplacedTick
     public MemberEntry[] Members = [];
     public int MemberCount;
 
-    /// <summary>The tick's visibility mask changes (14 § 6) by netId, ascending: an event with <see cref="PushEvent.TagsChanged"/> finds its masks here.</summary>
+    /// <summary>
+    /// The tick's visibility mask changes (14 § 6) by netId, ascending: an event with <see cref="PushEvent.TagsChanged"/> finds its masks here.
+    /// </summary>
     public TagChange[] Tags = [];
     public int TagCount;
 }
@@ -945,6 +947,22 @@ internal sealed unsafe partial class PushHub
         slot.Tick = _tick;
         slot.Valid = true;
         UnplacedEvents += count;
+    }
+
+    /// <summary>
+    /// A positionless member's key in <paramref name="set"/> before this tick's change, when it had one: <see cref="PushReplication.TryTickOldKey"/>'s
+    /// twin.
+    /// </summary>
+    internal bool TryUnplacedOldKey(uint netId, int set, out long oldKey)
+    {
+        oldKey = 0;
+        if (!_anyLazy || _unplacedFinished != _tick || !_unplacedKeyMap.TryGetValue(KeyChangeId(netId, set), out var change))
+        {
+            return false;
+        }
+
+        oldKey = change.Old;
+        return true;
     }
 
     private void AddUnplacedKeyChange(in GroupKeyChange change)

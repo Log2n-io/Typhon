@@ -575,6 +575,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             CommitGroups(L(session), session.Generation);
         }
 
+        CommitTags(L(session));
+
         ref var st = ref _sessions[L(session)];
         st.AnchorX = st.PAnchorX;
         st.AnchorY = st.PAnchorY;
@@ -923,8 +925,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         EnsureRuns(_events.Length + 1);
     }
 
-    public override void AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
-        float ox, float oy, float oz, float nx, float ny, float nz)
+    public override bool AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
+        float ox, float oy, float oz, float nx, float ny, float nz, bool maskChanged = false)
     {
         var groups = 0;
         if (hot != null && (uint)archetype < (uint)_encodePlans.Length)
@@ -946,27 +948,28 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         }
 
         // Pushed, re-encoded, and nothing moved or changed: no session can learn anything from it. Dropped here, in parallel, rather than filtered by
-        // every session that reaches its cell. A change of group key is a change (14 § 3.8).
+        // every session that reaches its cell. A change of group key is a change (14 § 3.8), and of mask (14 § 6) — a hidden entity's flag alone is not.
         const byte both = PushEvent.HasOld | PushEvent.HasNew;
 
         // A positionless member has no cell: its event goes to the hub's log, which every realm's group gather reads (14 § 5).
         if (_unplaced[archetype])
         {
-            if ((flags & (both | PushEvent.KeyChanged | PushEvent.TagsChanged)) != both || groups != 0)
+            if ((flags & (both | PushEvent.KeyChanged)) != both || groups != 0 || maskChanged)
             {
                 Hub.AddUnplaced(worker, archetype, block, slot, netId, (byte)(flags & (both | PushEvent.KeyChanged | PushEvent.TagsChanged)), groups);
+                return true;
             }
 
-            return;
+            return false;
         }
 
         var arrived = (flags & PushEvent.Arrived) != 0;
         flags &= unchecked((byte)~PushEvent.Arrived);
-        if (!arrived && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged | PushEvent.TagsChanged)) == both && groups == 0 && ox == nx && oy == ny
+        if (!arrived && !maskChanged && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
             && (!TEvent.Deep || oz == nz))
         {
             // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
-            return;
+            return false;
         }
 
         if (_validating && hot != null)
@@ -1005,6 +1008,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         e.OldKey = CellKey(ox, oy, oz);
         e.NewKey = CellKey(nx, ny, nz);
         _eventCount[worker * CountStride] = n + 1;
+        return true;
     }
 
     public override void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause)
@@ -2301,7 +2305,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     // Visibility (P19): the masks the entity had before and after this tick, against the session's — one load for an archetype with none.
-                    var tagged = _tagOffset[e.Archetype] >= 0;
+                    var tagged = _tagOffset[e.Archetype] != 0;
                     uint tagsWas = 0, tagsIs = 0;
                     if (tagged)
                     {
@@ -2558,11 +2562,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 ref var entry = ref log.Entries[i];
                 ref var e = ref entry.Last;
-                var tagged = _tagOffset[e.Archetype] >= 0;
+                var tagged = _tagOffset[e.Archetype] != 0;
                 uint tagsWas = 0, tagsIs = 0;
                 if (tagged)
                 {
-                    EntryTags(ref entry, out tagsWas, out tagsIs);
+                    EntryTags(log, ref entry, out tagsWas, out tagsIs);
                 }
 
                 var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && entry.OldKey < oldCursor && (!tagged || Sees(local, tagsWas));
@@ -2583,7 +2587,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         continue;
                     }
 
-                    var tagged = _tagOffset[e.Archetype] >= 0;
+                    var tagged = _tagOffset[e.Archetype] != 0;
                     uint tagsWas = 0, tagsIs = 0;
                     if (tagged)
                     {
@@ -2635,6 +2639,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     /// <summary>The World form of <see cref="CollectLog"/>: every cell, primaries only (each event once per tick).</summary>
     private bool CollectLogWorld(uint first, ulong cursor, in ArchetypeSet archetypes, LogTable table)
     {
+        table.First = first;
         for (var t = first; t != _tick + 1; t++)
         {
             var slot = _log[t % LogDepth];
@@ -2663,7 +2668,6 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         entry.Replaced = true;
                     }
 
-                    FoldTags(slot, ref e, ref entry);
                     entry.Last = e;
                     entry.LastTick = t;
                     entry.Groups |= e.Groups;
@@ -2700,6 +2704,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         public int[] Index = new int[256];
         public LogEntry[] Entries = new LogEntry[128];
         public int Count;
+
+        // The window's first tick: what a catch-up entry's mask before the window is looked up from (14 § 6).
+        public uint First;
 
         public void Clear()
         {
@@ -2817,10 +2824,6 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         public bool FlushSegment;
         public bool Flushed;
         public bool Real;
-
-        // Visibility tags (14 § 6): the mask before the window's first change of it, once one was met.
-        public uint WasTags;
-        public bool TagsSeen;
     }
 
     /// <summary>Whether the log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
@@ -2844,6 +2847,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     /// </summary>
     private bool CollectLog(ref PushSessionState st, int slotIndex, Vector3D viewpoint, double rOld, double rNew, in ArchetypeSet archetypes, LogTable table)
     {
+        table.First = st.LastTick + 1;
         var ax = st.AnchorX;
         var ay = st.AnchorY;
         var az = st.AnchorZ;
@@ -2897,7 +2901,6 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         entry.Replaced = true;
                     }
 
-                    FoldTags(slot, ref e, ref entry);
                     entry.Last = e;
                     entry.LastTick = t;
                     entry.Groups |= e.Groups;
@@ -2981,11 +2984,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         {
             ref var entry = ref table.Entries[i];
             ref var e = ref entry.Last;
-            var tagged = _tagOffset[e.Archetype] >= 0;
+            var tagged = _tagOffset[e.Archetype] != 0;
             uint tagsWas = 0, tagsIs = 0;
             if (tagged)
             {
-                EntryTags(ref entry, out tagsWas, out tagsIs);
+                EntryTags(table, ref entry, out tagsWas, out tagsIs);
             }
 
             var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(a, entry.OldX, entry.OldY, entry.OldZ)
@@ -3616,8 +3619,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     // ══ Visibility tags (14 § 6) ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// An event's visibility masks before and after it (P20): from <paramref name="slot"/>'s change list when it is flagged, else its cold entry's on both
-    /// sides — 0 for a leave, whose hidden kind is always flagged.
+    /// An event's visibility masks before and after it (P20): from <paramref name="slot"/>'s mask list when it is flagged — every projected event of an entity
+    /// hidden on either side is — else 0 on both sides, public. A far flush copied from an older tick (its own flags, none of the projection's) is no mask
+    /// change: the entity's current mask on both sides.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EventTags(TickLog slot, ref TEvent e, out uint was, out uint isNow)
@@ -3627,28 +3631,57 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        isNow = (e.Flags & PushEvent.HasNew) != 0 ? MaskAt(e.Archetype, e.Block, e.Slot) : 0u;
-        was = isNow;
+        if ((e.Flags & PushEvent.FarFlush) != 0)
+        {
+            isNow = MaskAt(e.Archetype, e.Block, e.Slot);
+            was = isNow;
+            return;
+        }
+
+        was = 0;
+        isNow = 0;
     }
 
-    /// <summary>A catch-up entry's masks: the window's first change's old one (or the current), and the current one — 0 for a leave.</summary>
+    /// <summary>
+    /// A catch-up entry's masks: the mask before the window — its first change's old one, whichever cell or key it was filed under (the entry saw only its
+    /// own cells' events) — or the current one when it had none, and the current one, 0 for a leave.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void EntryTags(ref LogEntry entry, out uint was, out uint isNow)
+    private void EntryTags(LogTable table, ref LogEntry entry, out uint was, out uint isNow)
     {
         ref var e = ref entry.Last;
         isNow = (e.Flags & PushEvent.HasNew) != 0 ? MaskAt(e.Archetype, e.Block, e.Slot) : 0u;
-        was = entry.TagsSeen ? entry.WasTags : isNow;
+        was = TryWindowOldMask(e.NetId, false, table.First, out var old) ? old : isNow;
     }
 
-    /// <summary>Notes an event's old mask in its catch-up entry when it is the window's first change of it.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void FoldTags(TickLog slot, ref TEvent e, ref LogEntry entry)
+    /// <summary>
+    /// The mask <paramref name="netId"/> had before the window from <paramref name="first"/> to this tick: the old mask of its first change filed in it —
+    /// the realm's log, or the hub's for a positionless member. The one answer every catch-up path asks, so geometry, the group fold and the post-pass agree.
+    /// </summary>
+    private bool TryWindowOldMask(uint netId, bool unplaced, uint first, out uint old)
     {
-        if ((e.Flags & PushEvent.TagsChanged) != 0 && !entry.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var was, out _))
+        for (var t = first; t != _tick + 1; t++)
         {
-            entry.WasTags = was;
-            entry.TagsSeen = true;
+            if (unplaced)
+            {
+                var u = Hub?.UnplacedAt(t);
+                if (u != null && FindTagChange(u.Tags, u.TagCount, netId, out old, out _))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            var slot = _log[t % LogDepth];
+            if (slot.Valid && slot.Tick == t && FindTagChange(slot.Tags, slot.TagCount, netId, out old, out _))
+            {
+                return true;
+            }
         }
+
+        old = 0;
+        return false;
     }
 
     // ══ Records, cell delivery and sweep ════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -3749,7 +3782,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     decoded++;
                     DecodeAt(a, cold + _positionOffset[a], out var px, out var py, out var pz);
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!everywhere && !Within(n, px, py, pz))
-                        || (_tagOffset[a] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
+                        || (_tagOffset[a] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
                     {
                         continue;
                     }
@@ -3850,7 +3883,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                     // No event since the session's last frame, so its mask is the one it had then: not seen then, not seen now, never held (P19).
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz)
-                        || (_tagOffset[arch] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[arch]))))
+                        || (_tagOffset[arch] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[arch]))))
                     {
                         continue;
                     }

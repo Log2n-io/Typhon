@@ -1,10 +1,30 @@
+using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
+
+/// <summary>A visibility mask on a Transient component: kept in the archetype's transient store, at the persistent layout's offsets.</summary>
+[Component("Typhon.Test.Vis.Stealth", 1, StorageMode = StorageMode.Transient)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct VisStealth
+{
+    [Field]
+    public uint Mask;
+}
+
+/// <summary>An observed archetype whose mask is Transient (14 § 6).</summary>
+[Archetype]
+partial class VisStealthy : Archetype<VisStealthy>
+{
+    public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
+    public static readonly Comp<VisStealth> Stealth = Register<VisStealth>();
+}
 
 /// <summary>
 /// Visibility tags (14 § 6, step 4.4), on the paths the two tagged oracles do not reach: a mask flip told as a leave and an enter, a session mask change
@@ -79,6 +99,15 @@ class PushVisibilityTests : TestBase<PushVisibilityTests>
         e.Set(tag, new GroupTag { Mask = mask });
         harness.Subscriptions.Commands.Replicate(in e);
         tx.Commit();
+    }
+
+    private static EntityId Citizen(DatabaseEngine dbe, float x, uint mask)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var id = tx.Spawn<GroupCitizen>(GroupCitizen.Bounds.Set(GroupTestSchema.At(x, 0f)), GroupCitizen.Ai.Set(new ProjAi { Template = 1 }),
+            GroupCitizen.Key.Set(new GroupKey { Town = 0 }), GroupCitizen.Tag.Set(new GroupTag { Mask = mask }));
+        tx.Commit();
+        return id;
     }
 
     private static void Destroy(DatabaseEngine dbe, EntityId entity)
@@ -279,6 +308,151 @@ class PushVisibilityTests : TestBase<PushVisibilityTests>
             Assert.That(a[0].Fields["A"], Is.EqualTo(harness.NetIdOf(hidden)));
             Assert.That(b.Select(e => e.Fields["Seq"]), Is.EqualTo(new[] { 2d }), "B does not see the hidden building, so it does not know it");
             Assert.That(harness.Subscriptions.Events.Rejected, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// The cell filings carry the mask too: a hidden citizen inside both Spheres and in no town — reached by geometry alone — is heard of by A only, and an
+    /// event naming a hidden building and a public one reaches B through the public one.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-34")]
+    public void AGeometricEventAboutAHiddenEntityReachesOnlyTheSessionsThatSeeIt()
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Town(dbe);
+        var citizen = Citizen(dbe, -10f, SeenByA);
+        var hidden = Building(dbe, -20f, SeenByA);
+        var open = Building(dbe, 20f, 0u);
+        using var harness = Harness(dbe, nameof(AGeometricEventAboutAHiddenEntityReachesOnlyTheSessionsThatSeeIt));
+        var tick = 0L;
+        var sessions = Open(harness, ref tick);
+
+        var commands = harness.Subscriptions.Commands;
+        commands.Emit(new ProjDuel { A = citizen, B = citizen, Seq = 1 });
+        commands.Emit(new ProjDuel { A = hidden, B = open, Seq = 2 });
+        Run(harness, ref tick, 1, sessions);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).Events.Received.Select(e => e.Fields["Seq"]), Is.EqualTo(new[] { 1d, 2d }));
+            Assert.That(harness.Replica(sessions[1]).Events.Received.Select(e => e.Fields["Seq"]), Is.EqualTo(new[] { 2d }),
+                "B does not see the citizen; it hears of the pair through the building it does see");
+        });
+    }
+
+    /// <summary>
+    /// A catch-up's mask before its window is the window's own, wherever the change was filed: a member of the held town, hidden while it sat in a town the
+    /// session does not hold and brought back, leaves the session that skipped those ticks; one made public there enters it.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("SUB-34")]
+    public void AMaskChangedWhileTheMemberWasInAnotherTownIsJudgedByTheWindow(bool revealed)
+    {
+        var dbe = GroupTestSchema.SetupEngine(ServiceProvider);
+        Town(dbe);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<GroupTown>(GroupTown.Zone.Set(new GroupZone { Key = 9, Extent = GroupTestSchema.Square(4000f, 0f, 60f) }));
+            tx.Commit();
+        }
+
+        // Beyond the Sphere: held through the town alone. Public, to be hidden — or hidden, to be revealed.
+        var member = Building(dbe, 600f, revealed ? SeenByB : 0u);
+        using var harness = Harness(dbe, nameof(AMaskChangedWhileTheMemberWasInAnotherTownIsJudgedByTheWindow) + revealed);
+        var tick = 0L;
+        var sessions = Open(harness, ref tick);
+        var netId = harness.NetIdOf(member);
+        Assert.That(Holds(harness, sessions[0], nameof(GroupBuilding), netId), Is.EqualTo(!revealed));
+
+        // A stops draining: two frames — each carrying an event, an idle tick publishes none — fill its ring, then its frames are skipped and its next one
+        // catches up over the window.
+        var resetsBefore = harness.Subscriptions.Push.Resets;
+        var catchUpsBefore = harness.Subscriptions.Push.LogCatchUps;
+        void Step(System.Action<Transaction> change)
+        {
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                change?.Invoke(tx);
+                tx.Commit();
+            }
+
+            harness.RunTick(++tick);
+            harness.Deliver(sessions[1]);
+        }
+
+        var anchor = Building(dbe, 30f, 0u);
+        Run(harness, ref tick, 2, sessions);
+        Step(_ => harness.Subscriptions.Commands.Emit(new ProjDuel { A = anchor, B = anchor, Seq = 1 }));
+        Step(_ => harness.Subscriptions.Commands.Emit(new ProjDuel { A = anchor, B = anchor, Seq = 2 }));
+        Step(tx => tx.OpenMut(member).Set(GroupBuilding.Key, new GroupKey { Town = 9 }));
+        Step(tx =>
+        {
+            var e = tx.OpenMut(member);
+            e.Set(GroupBuilding.Tag, new GroupTag { Mask = revealed ? 0u : SeenByB });
+            harness.Subscriptions.Commands.Replicate(in e);
+        });
+        Step(tx => tx.OpenMut(member).Set(GroupBuilding.Key, new GroupKey { Town = TownKey }));
+        Run(harness, ref tick, 3, sessions);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Subscriptions.Push.LogCatchUps, Is.GreaterThan(catchUpsBefore), "A's frame caught up over the window");
+            Assert.That(harness.Subscriptions.Push.Resets, Is.EqualTo(resetsBefore), "by the log, not a RESET");
+            Assert.That(Holds(harness, sessions[0], nameof(GroupBuilding), netId), Is.EqualTo(revealed),
+                revealed ? "made public while away: A holds it once caught up" : "hidden while away: A must not keep it");
+        });
+        Clean(harness, sessions);
+    }
+
+    /// <summary>
+    /// A mask on a Transient component is read from the transient store: a hidden one stays hidden, it is not read as 0 from the persistent bytes.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-34")]
+    public void ATransientMaskIsReadFromItsStore()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ProjBounds>();
+        dbe.RegisterComponentFromAccessor<VisStealth>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(-2000f, -2000f), new Vector2(2000f, 2000f), 256f));
+        dbe.InitializeArchetypes();
+        EntityId hidden;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            hidden = tx.Spawn<VisStealthy>(VisStealthy.Bounds.Set(GroupTestSchema.At(5f, 0f)), VisStealthy.Stealth.Set(new VisStealth { Mask = SeenByA }));
+            tx.Spawn<VisStealthy>(VisStealthy.Bounds.Set(GroupTestSchema.At(-5f, 0f)), VisStealthy.Stealth.Set(new VisStealth { Mask = 0u }));
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<VisStealthy>(a => a.Position(VisStealthy.Bounds).Visibility(VisStealthy.Stealth, s => s.Mask));
+            subs.Profile("near", p => p.Sphere(Radius).Of<VisStealthy>());
+        }, nameof(ATransientMaskIsReadFromItsStore), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 16,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
+        });
+        harness.RunFence = true;
+        var sessions = harness.OpenSessions(2, "near");
+        Assert.That(harness.Sessions.SetVisibility(sessions[0], SeenByA), Is.True);
+        Assert.That(harness.Sessions.SetVisibility(sessions[1], SeenByB), Is.True);
+        foreach (var session in sessions)
+        {
+            Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        }
+
+        var tick = 0L;
+        Run(harness, ref tick, 4, sessions);
+        var plan = harness.PlanIndex(nameof(VisStealthy));
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).NetIds(plan), Has.Length.EqualTo(2), "A sees both");
+            Assert.That(harness.Replica(sessions[1]).NetIds(plan), Does.Not.Contain(harness.NetIdOf(hidden)), "B is not sent the hidden one");
+            Assert.That(harness.Replica(sessions[1]).NetIds(plan), Has.Length.EqualTo(1));
         });
     }
 

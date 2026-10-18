@@ -454,6 +454,15 @@ internal sealed unsafe partial class PushReplication<TEvent>
             : GroupKeyState.Filling;
     }
 
+    internal override void ReadMemberKeys(int archetype, nint block, int slot, uint netId, ref GroupFold.KeySlots keys)
+    {
+        var groupKeys = _plans[archetype].GroupKeys;
+        for (var g = 0; g < groupKeys.Length; g++)
+        {
+            keys[groupKeys[g].Slot] = CurrentKey((ushort)archetype, block, (byte)slot, netId, groupKeys[g].Slot);
+        }
+    }
+
     internal override bool GroupHoldsCommitted(SessionId session, int archetype, nint block, int slot, uint netId)
     {
         var gs = GroupStateAtOrNull(L(session));
@@ -463,13 +472,20 @@ internal sealed unsafe partial class PushReplication<TEvent>
             return false;
         }
 
-        GroupFold.KeySlots keys = default;
+        // The keys the last published frame held, a pending RESET or not: the client still holds them until that RESET is published.
+        var max = gs.Max;
+        var published = gs.PublishedCount;
         for (var g = 0; g < groupKeys.Length; g++)
         {
-            keys[groupKeys[g].Slot] = CurrentKey((ushort)archetype, block, (byte)slot, netId, groupKeys[g].Slot);
+            var key = CurrentKey((ushort)archetype, block, (byte)slot, netId, groupKeys[g].Slot);
+            var set = groupKeys[g].Set;
+            if (key != 0 && GroupSessionState.CursorOf(gs.CKeys, gs.CCursor, set * max, published[set], key) > netId)
+            {
+                return true;
+            }
         }
 
-        return KeysHeld(gs, true, (ushort)archetype, netId, ref keys);
+        return false;
     }
 
     private GroupSessionState GroupStateOf(int local, ushort generation)
@@ -703,6 +719,21 @@ internal sealed unsafe partial class PushReplication<TEvent>
             }
         }
 
+        // A fold holds only the events filed under held keys: a mask change made while the member sat under another key is not among them, and the first
+        // of its own may be a later tick's. Its mask before the window is the window's own answer, read here for every folded member so the emission below
+        // and the post-pass judge by the same mask the geometric catch-up does (P20).
+        if (HasTags && scratch.GroupFolds.Count > 0)
+        {
+            foreach (var netId in scratch.GroupFolds.Keys)
+            {
+                ref var fold = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(scratch.GroupFolds, netId);
+                if (_tagOffset[fold.Archetype] != 0)
+                {
+                    fold.TagsSeen = TryWindowOldMask(netId, _unplaced[fold.Archetype], first, out fold.WasTags);
+                }
+            }
+        }
+
         var entered = 0;
         var log = gap > 0 ? Log : null;
         foreach (var (netId, fold) in scratch.GroupFolds)
@@ -741,7 +772,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             }
 
             // Visibility (P19): the union is held only where the session sees the entity — before the frame by the mask it had then, after by its current one.
-            var tagged = _tagOffset[f.Archetype] >= 0;
+            var tagged = _tagOffset[f.Archetype] != 0;
             uint tagsWas = 0, tagsIs = 0;
             if (tagged)
             {
@@ -1151,7 +1182,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
         var index = log != null && inSet ? log.IndexOf(netId) : -1;
         if (index >= 0)
         {
-            EntryTags(ref log.Entries[index], out was, out isNow);
+            EntryTags(log, ref log.Entries[index], out was, out isNow);
             return;
         }
 
@@ -1181,12 +1212,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     fold.OldZ = e.OldZ;
                     fold.OldCell = e.OldKey;
                     InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
-                }
-
-                if ((e.Flags & PushEvent.TagsChanged) != 0 && !fold.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var tagsWas, out _))
-                {
-                    fold.WasTags = tagsWas;
-                    fold.TagsSeen = true;
                 }
 
                 // A set's key before the window is its first entry's old key — whichever set's bucket met the identity first, and in whichever tick — and
@@ -1236,12 +1261,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
                     fold = default;
                     fold.FirstFlags = e.Flags;
                     InitKeys(ref fold, e.Archetype, e.Block, e.Slot, e.NetId);
-                }
-
-                if ((e.Flags & PushEvent.TagsChanged) != 0 && !fold.TagsSeen && FindTagChange(slot.Tags, slot.TagCount, e.NetId, out var tagsWas, out _))
-                {
-                    fold.WasTags = tagsWas;
-                    fold.TagsSeen = true;
                 }
 
                 if ((fold.SeenSlots & (1 << keySlot)) == 0)
@@ -1392,7 +1411,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 return false;
             }
 
-            if (_tagOffset[r.Archetype] >= 0)
+            if (_tagOffset[r.Archetype] != 0)
             {
                 var tagsIs = (fold.LastFlags & PushEvent.HasNew) != 0 ? MaskAt(fold.Archetype, fold.Block, fold.Slot) : 0u;
                 if (!Sees(local, committed && fold.TagsSeen ? fold.WasTags : tagsIs))

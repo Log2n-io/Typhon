@@ -647,6 +647,14 @@ internal static unsafe class ProjectionPass
                     var stored = (long*)(coldBytes + layout.GroupKeyOffsetInColdEntry + (8 * gk.Slot));
                     var kn = gk.Field.ReadKey(clusterBase, slot);
                     var ko = initialize ? 0L : *stored;
+
+                    // Stored whenever the entry is new: a realm arrival's entry is carried over with the source realm's key in it, and an unchanged 0 must
+                    // still overwrite that.
+                    if (initialize)
+                    {
+                        *stored = kn;
+                    }
+
                     if (kn != ko || (initialize && kn != 0))
                     {
                         *stored = kn;
@@ -658,20 +666,39 @@ internal static unsafe class ProjectionPass
                 // The visibility tag mask (14 § 6): read on every push like a key, and a change is an event with its masks on both sides — a session that
                 // stops or starts seeing the entity hears of it as a leave or an enter. A new entry starts from 0, public, so a hidden one's first mask is
                 // a change from nothing.
+                var masked = false;
+                var maskChanged = false;
+                uint maskOld = 0, maskNew = 0;
                 if (plan.HasTagMask)
                 {
                     var stored = (uint*)(coldBytes + layout.TagMaskOffsetInColdEntry);
-                    var vn = plan.TagMask.ReadMask(clusterBase, slot);
+                    var vn = plan.TagMask.ReadMask(StoreFor(clusterLayout, transientBase, clusterBase, plan.TagMaskSlot), slot);
                     var vo = initialize ? 0u : *stored;
-                    if (vn != vo)
+
+                    // A new entry's mask is stored whatever it is: a realm arrival's is carried over holding the source realm's mask.
+                    if (initialize || vn != vo)
                     {
                         *stored = vn;
+                    }
+
+                    // Every event of an entity hidden on either side carries its masks, a change or not: an unflagged event is public on both, and the live
+                    // step tests it with no cold-entry load — most entities are public, and pay nothing. Only a change keeps an event that is otherwise a
+                    // no-op, and only an event recorded files its masks.
+                    if ((vn | vo) != 0)
+                    {
                         pushFlags |= PushEvent.TagsChanged;
-                        push.NoteTagChange(worker, pushIndex, hot->NetId, vo, vn);
+                        masked = true;
+                        maskChanged = vn != vo;
+                        maskOld = vo;
+                        maskNew = vn;
                     }
                 }
 
-                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
+                if (push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ,
+                        maskChanged) && masked)
+                {
+                    push.NoteTagChange(worker, pushIndex, hot->NetId, maskOld, maskNew);
+                }
             }
 
             if (initialize)

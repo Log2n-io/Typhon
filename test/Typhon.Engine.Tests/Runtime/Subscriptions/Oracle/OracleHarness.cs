@@ -185,6 +185,41 @@ internal sealed unsafe class OracleHarness : IDisposable
     private uint MaskOf(Transaction tx, int plan, EntityId entity) =>
         plan == _creatureIndex ? tx.Open(entity).Read(ProjCreature.Visibility).Mask : tx.Open(entity).Read(ProjRock.Visibility).Mask;
 
+    /// <summary>How many entered entities were checked, frame by frame, against the mask of the session that received them.</summary>
+    public int EntersChecked { get; private set; }
+
+    // Delivers, then checks SUB-34's "is sent" frame by frame: every enter of the last frame — when it was built this tick, so the world is still the one it
+    // was built from — is of an entity the session sees. The quiet-point comparison alone misses one entered and left between two points.
+    private void DeliverChecked(int session)
+    {
+        _harness.Deliver(_sessions[session]);
+        var store = _harness.Replica(_sessions[session]).Store;
+        if (!_tags || store.Tick != _tick)
+        {
+            return;
+        }
+
+        using var tx = Engine.CreateQuickTransaction();
+        foreach (var plan in new[] { _creatureIndex, _rockIndex })
+        {
+            var archetype = store.Archetypes[plan];
+            for (var i = 0; i < archetype.EnteredCount; i++)
+            {
+                var netId = archetype.NetIds[archetype.Entered[i]];
+                if (!_harness.Subscriptions.Commands.TryResolveAny(_sessions[session], netId, out var entity))
+                {
+                    continue;
+                }
+
+                EntersChecked++;
+                if (!Sees(session, MaskOf(tx, plan, entity)))
+                {
+                    Assert.Fail($"house oracle: tick {_tick}, session {session}: netId {netId} entered and the session's mask does not see it");
+                }
+            }
+        }
+    }
+
     /// <summary>How many region jumps the oracle made: each is a hull change most of whose cells leave, which resets its session.</summary>
     public int RegionJumps { get; private set; }
 
@@ -375,7 +410,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// compared against its own region.
     /// </param>
     /// <param name="nearBudget">The ClientRegion's near budget, in entities; 0 for none.</param>
-    /// <param name="tags">Visibility tags (14 § 6): the members declare masks the workload spawns and flips, and the sessions see by masks of their own.</param>
+    /// <param name="tags">
+    /// Visibility tags (14 § 6): the members declare masks the workload spawns and flips, and the sessions see by masks of their own.
+    /// </param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
         double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0,
@@ -457,7 +494,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         {
             if (_delivery[i].Next(100) >= _skipPercent[i])
             {
-                _harness.Deliver(_sessions[i]);
+                DeliverChecked(i);
             }
         }
     }

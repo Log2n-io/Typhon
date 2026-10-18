@@ -204,7 +204,8 @@ internal sealed unsafe class GroupOracle : IDisposable
 
     public static GroupOracle Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, int enterBudget, bool tags = false)
     {
-        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true, tags: tags), name, new SubscriptionsOptions
+        var harness = FrameHarness.Create(engine, s => GroupTestSchema.Declare(s, Radius, Reach, Margin, shards: true, tags: tags), name,
+            new SubscriptionsOptions
         {
             IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 16,
@@ -708,6 +709,7 @@ internal sealed unsafe class GroupOracle : IDisposable
             var held = replica.Store.CompleteGroupCount;
             replica.Apply(new ReadOnlySpan<byte>(frame.Bytes, frame.Length));
             send.CompleteSend(frame.Sequence);
+            AssertEntersVisible(session, replica);
             if ((replica.Store.Flags & TickFlags.Reset) != 0 && held > 0)
             {
                 ResetsDroppingGroups++;
@@ -731,6 +733,44 @@ internal sealed unsafe class GroupOracle : IDisposable
             }
 
             CheckAnswers(session, replica);
+        }
+    }
+
+    /// <summary>How many entered members were checked, frame by frame, against the mask of the session that received them.</summary>
+    public int EntersChecked { get; private set; }
+
+    // SUB-34's "is sent", frame by frame: every enter of a frame built this tick — the world still the one it was built from — is of a member the session
+    // sees. The quiet-point comparison alone misses one entered and left between two points.
+    private void AssertEntersVisible(int session, SessionReplica replica)
+    {
+        var store = replica.Store;
+        if (!_tags || store.Tick != _tick)
+        {
+            return;
+        }
+
+        using var tx = _harness.Engine.CreateQuickTransaction();
+        foreach (var plan in new[] { _buildingPlan, _citizenPlan, _shardPlan })
+        {
+            var archetype = store.Archetypes[plan];
+            for (var i = 0; i < archetype.EnteredCount; i++)
+            {
+                var netId = archetype.NetIds[archetype.Entered[i]];
+                if (!_harness.Subscriptions.Commands.TryResolveAny(_sessions[session], netId, out var entity))
+                {
+                    continue;
+                }
+
+                var reference = tx.Open(entity);
+                var mask = plan == _buildingPlan ? reference.Read(GroupBuilding.Tag).Mask
+                    : plan == _citizenPlan ? reference.Read(GroupCitizen.Tag).Mask
+                    : reference.Read(GroupPositionless.Tag).Mask;
+                EntersChecked++;
+                if (!Sees(session, mask))
+                {
+                    Assert.Fail($"{FailureMarker} tick {_tick}, session {session}: netId {netId} entered and the session's mask does not see it");
+                }
+            }
         }
     }
 

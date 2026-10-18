@@ -29,6 +29,10 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
     private ChunkAccessor<PersistentStore> _cluster;
     private ChunkAccessor<TransientStore> _transient;
 
+    // Any archetype's entity, positioned or not: an event naming a group member (14 § 3) — made on first use, an event encode's alone.
+    private EntityLocator _any;
+    private bool _anyOpen;
+
     // The last entity read and its centre: every session of a Bind profile follows the same one, and reads it once per worker.
     private EntityId _lastEntity;
     private Vector3D _lastCentre;
@@ -146,6 +150,36 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
     public PushReplication Push;
 
     /// <inheritdoc />
+    public bool TryResolveMember(EntityId entity, out int archetype, out nint block, out int slot, out uint netId, out ushort realm)
+    {
+        archetype = -1;
+        block = 0;
+        netId = 0;
+        realm = RealmId.Default.Value;
+        slot = 0;
+        var states = _engine?._stateByRouting;
+        if (Push == null || entity.IsNull || states == null || entity.ArchetypeId >= states.Length)
+        {
+            return false;
+        }
+
+        if (!_anyOpen)
+        {
+            _any = new EntityLocator(_engine);
+            _anyOpen = true;
+        }
+
+        if (!_any.TryLocate(entity, out var chunk, out slot)
+            || !Push.TryReplicaAt(states[entity.ArchetypeId].ClusterState, chunk, slot, entity, out archetype, out block, out netId))
+        {
+            return false;
+        }
+
+        realm = ((ReplicationBlockHeader*)block)->Realm;
+        return netId != NetIdAllocator.NoNetId;
+    }
+
+    /// <inheritdoc />
     public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm, out uint mask)
     {
         netId = 0;
@@ -165,7 +199,15 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
     }
 
     /// <summary>Releases the accessors.</summary>
-    public void Dispose() => Close();
+    public void Dispose()
+    {
+        Close();
+        if (_anyOpen)
+        {
+            _any.Dispose();
+            _anyOpen = false;
+        }
+    }
 
     private bool Open(ArchetypeEngineState state, int routing)
     {

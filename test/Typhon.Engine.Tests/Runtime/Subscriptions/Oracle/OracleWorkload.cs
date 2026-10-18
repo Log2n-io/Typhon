@@ -250,7 +250,8 @@ internal sealed class OracleWorkload
         {
             var bounds = BoundsAt(RandomCoordinate(), RandomCoordinate());
             var ai = new ProjAi { Template = (byte)(_nextTemplate++ & 0xFF) };
-            _rocks.Add(tx.Spawn<ProjRock>(ProjRock.Bounds.Set(in bounds), ProjRock.Ai.Set(in ai), ProjRock.Visibility.Set(new ProjVisibility { Mask = RandomMask() })));
+            _rocks.Add(tx.Spawn<ProjRock>(ProjRock.Bounds.Set(in bounds), ProjRock.Ai.Set(in ai),
+                ProjRock.Visibility.Set(new ProjVisibility { Mask = RandomMask() })));
             Spawned++;
         }
 

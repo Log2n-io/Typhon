@@ -192,6 +192,7 @@ class PushGroupTests : TestBase<PushGroupTests>
             Assert.That(oracle.SessionMaskChanges, Is.GreaterThan(0), "a session's own mask changed");
             Assert.That(oracle.CompletionsChecked, Is.GreaterThan(3), "completions arrived and were checked against what each session sees");
             Assert.That(oracle.Push.VisibilityResets, Is.GreaterThan(0), "a session mask change reset its view");
+            Assert.That(oracle.EntersChecked, Is.GreaterThan(100), "enters were checked frame by frame against the receiving session's mask");
         });
     }
 

@@ -38,6 +38,37 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     internal virtual bool GroupHoldsCommitted(SessionId session, int archetype, nint block, int slot, uint netId) => false;
 
+    /// <summary>A plan's group keys: which set each is in, and its slot in the cold entry; empty for an archetype that is no set's member.</summary>
+    internal CompiledGroupKey[] GroupKeysOf(int archetype) => (uint)archetype < (uint)_plans.Length ? _plans[archetype].GroupKeys : [];
+
+    /// <summary>The member at (<paramref name="block"/>, <paramref name="slot"/>)'s projected keys, by key slot; 0 where it has none.</summary>
+    internal virtual void ReadMemberKeys(int archetype, nint block, int slot, uint netId, ref GroupFold.KeySlots keys)
+    {
+    }
+
+    /// <summary>
+    /// The key <paramref name="netId"/> had in <paramref name="set"/> before this tick's change, when this tick's index recorded one — a move, a spawn's 0,
+    /// a leave's last key. Valid from this tick's index on, until the next projection.
+    /// </summary>
+    internal bool TryTickOldKey(uint netId, int set, out long oldKey)
+    {
+        oldKey = 0;
+        if (_indexedTick != _tick || !_keyChangeMap.TryGetValue(KeyChangeId(netId, set), out var change))
+        {
+            return false;
+        }
+
+        oldKey = change.Old;
+        return true;
+    }
+
+    /// <summary>The group state <paramref name="session"/>'s gather has just written — its committed and pending keys — or null when it holds none.</summary>
+    internal GroupSessionState GroupsOf(SessionId session)
+    {
+        var gs = GroupStateAtOrNull(L(session));
+        return gs != null && gs.Generation == session.Generation ? gs : null;
+    }
+
     /// <summary>Whether any group set is declared: the one test every group step starts with.</summary>
     internal bool HasGroups => GroupSets.Length > 0;
 

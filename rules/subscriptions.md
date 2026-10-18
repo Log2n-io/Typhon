@@ -604,11 +604,16 @@
     (vis(e) & mask(s)) ≠ 0; an archetype that declares none is public. s holds e iff SUB-16's shapes or SUB-33's keys hold it AND sees(s, e), on every
     path: the live push step, a catch-up from the log, the sweeps and the LOD far sweep, a Region, a World, the group fill, release and post-pass, and
     the push shadow that checks them
-  invariant vis(e) is the projected value, kept in e's cold entry (it follows e through a migration): a change is projected the tick it is written,
+  invariant vis(e) is the projected value — read from the mask component's own store, a Transient one's included — kept in e's cold entry (it follows e
+    through a migration, and a realm arrival's carried entry takes the arriving mask whatever it is): a change is projected the tick it is written,
     like any projected field (SUB-10), and is that frame's leave for a session that stops seeing e and enter for one that starts — never a RESET; a
     session that sees e before and after is told nothing of it. A destroy, an orphan (a drained cluster, a positionless member's included) or a realm
     exit of a hidden e is a leave only for a session that saw it: the leave carries e's last mask
-  invariant a catch-up judges "was" by the mask before the window's first change of e and "is" by e's current mask
+  invariant every recorded event of an e hidden on either side carries its masks (PushEvent.TagsChanged and the tick's mask list); an event without
+    them is of a public e on both sides, so the live step reads no cold entry for it. Only a mask change keeps an event that is otherwise a no-op, and
+    only a recorded event files its masks; a far flush copied from an older tick takes e's current mask on both sides
+  invariant every catch-up path — the geometric log, the group fold, the post-pass — judges "was" by one answer, the mask before the window's first
+    change of e found in the window itself (whichever cell or key it was filed under), and "is" by e's current mask
   invariant mask(s) is SessionRequest.SetVisibility's, 0 at admission (s sees only public entities); the assembler reads it at the start of s's frame,
     and a change makes that frame a RESET — the fill of what the new mask sees, every key re-completed; setting the mask s already has changes nothing
   invariant an event routed by geometry naming e (RouteToKnown) reaches only sessions that see e; a command's reference resolves e only for a session
@@ -636,7 +641,12 @@
     a hidden leave or orphan is not flagged), PushVisibilityTests.AMaskFlipIsALeaveForOneSessionAndAnEnterForTheOther,
     PushVisibilityTests.ASessionMaskChangeResetsItsStore, PushVisibilityTests.AHiddenShardOrphanedIsALeaveOnlyForTheSessionThatSawIt (red when the
     hub's orphan does not carry the mask), PushVisibilityTests.AnEventAboutAHiddenEntityReachesOnlyTheSessionsThatSeeIt (red when an event's filing
-    ignores the mask), PushVisibilityTests.ACommandNamesAGroupMemberOnlyForTheSessionsThatHoldAndSeeIt. Falsifiability:
+    ignores the mask), PushVisibilityTests.ACommandNamesAGroupMemberOnlyForTheSessionsThatHoldAndSeeIt,
+    PushVisibilityTests.AGeometricEventAboutAHiddenEntityReachesOnlyTheSessionsThatSeeIt (the cell filing's mask; one hidden and one public name),
+    PushVisibilityTests.AMaskChangedWhileTheMemberWasInAnotherTownIsJudgedByTheWindow (both ways; red without the window's own "was"),
+    PushVisibilityTests.ATransientMaskIsReadFromItsStore (red when the persistent bytes are read), RealmGroupTests.AMaskClearedAsAMemberCrossesRealmsIsTheOneItsNewRealmJudges
+    (red when a carried entry keeps its old mask). Both oracles also check, frame by frame, that every enter of a frame built that tick is of an entity
+    the receiving session sees, and the house oracle runs under Automatic detection too (a write to the mask alone is pushed). Falsifiability:
     PushGroupTests.AMaskFlipTheProjectionNeverReadsIsDetected writes masks without telling replication and requires the oracle to reject the run.
 
 ### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
@@ -856,7 +866,8 @@
     the profile s's last published frame was built against — not a profile switched to since — and its v̂ passes SUB-16's test against that frame's
     anchor, radius and delivered cells, or its committed hull and window, or its World cursor; OR one of e's current keys is a key s's committed
     frame holds, filled past e's netId (SUB-33) — a positionless member included, through the keys of the realm s is placed in) AND, unless e is the
-    controlled entity, s sees e (SUB-34)
+    controlled entity, s sees e by the mask its last published frame was built against (SUB-34) — a mask change whose RESET is unpublished, and a RESET
+    that reads the committed keys as none, judge nothing yet
   invariant an entity a client learned of only from an event (an attacker beyond its view) does not resolve: events inform, they do not grant reach
   note the committed geometry is the last PUBLISHED frame's, which the client may not have applied yet: an entity that left in a frame still in flight is
     refused while the client may still draw it. Judging each command against the frame the client last applied (COMMANDS.clientTick) would need per-session
@@ -1190,18 +1201,25 @@
     entity when the frame is built, ToSession to the session EmitTo names; Near and ToKnown to every session that sees the event's point, or a named
     entity's v̂ — its v̂ before this tick too, when this tick moved it to another cell (was ∨ is) — against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
     delivered), and Near with a radius only within it of the session's viewpoint
-  invariant an entity destroyed in the event's tick still resolves, from the projection's release, to the netId and v̂ it had
+  invariant ToKnown also reaches every session that holds a named entity through a group (14 § 3): a key of the entity's — its current one, or the one
+    this tick's change or leave moved it from (was ∨ is) — that the session holds before or after the frame, with the fill's cursor past the entity's
+    netId, so a session is told of a member only once the fill has entered it; a positioned member in the session's realm, a positionless one in any
+  invariant an entity destroyed in the event's tick still resolves, from the projection's release, to the netId and v̂ it had, and a group member to the
+    keys it held; an EntityId field naming a positionless entity is its netId
+  invariant a reliable event (SUB-35) is the exception to the next clause: kept past the log, never counted lost
   invariant an event of a tick the log no longer holds is counted, not sent: the frame opens its EVENTS block with the built-in EventsLost (index 0)
     carrying that count over the last EventHub.SummaryDepth ticks — a lower bound beyond. Broadcast and ToSession are counted exactly; ToOwner against
     the session's Control, and Near and ToKnown against its geometry, when the frame is built (a session that moved or changed Control during the gap is
-    counted as it is now). Events take at most half a frame: past it, they are counted rather than sent
+    counted as it is now). Events take at most half a frame: the oldest that fit are sent, the rest counted rather than sent
   invariant a session bound to no profile has no view: Broadcast and ToSession reach it in frames of events alone, caught up from the log like any
     session's; the other routes never do. Emissions of a tick no frame stage encoded (no session, no push replication, an aborted tick)
     are discarded at the next tick's start, not delivered later
   invariant a value its codec cannot carry drops that one event, counted in EventHub.Rejected; the tick path does not throw
   never keep per-session event state: the log and its summary are per tick
   scope: EventHub, EventHub.Emit, EventHub.EmitTo, EventHub.EncodeTick, EventHub.Collect, EventHub.Write, SubscriptionsCommands.Emit,
-    SubscriptionsCommands.EmitTo, BuiltInEvents, PushReplication.SeesPoint, PushReplication.WorldSeesPoint, NetIdLeaseSet.Depart, FrameAssembler.AssemblePush
+    SubscriptionsCommands.EmitTo, BuiltInEvents, PushReplication.SeesPoint, PushReplication.WorldSeesPoint, NetIdLeaseSet.Depart, FrameAssembler.AssemblePush,
+    EventHub.FileMember, BoundViewpoint.TryResolveMember, PushReplication.ReadMemberKeys, PushReplication.TryTickOldKey, PushHub.TryUnplacedOldKey,
+    PushReplication.GroupsOf
   on_violation: a client acts on an event that was not its own, twice, out of order, or never learns that it missed one — silently.
   rationale: events are best effort but never ambiguous: the log makes a skipped session's union exact while the log lasts, and the loss count says
     how much it missed after.
@@ -1209,8 +1227,57 @@
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
     EventDeliveryTests.EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps, EventDeliveryTests.AnEnumValueOutsideItsNamesDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
     EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
-    EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
+    EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents; by key: PushGroupEventTests.AnEventNamingAGroupMemberReachesTheSessionsHoldingItsKey
+    (a building beyond the Sphere and a positionless shard), PushGroupEventTests.AMemberThatLeftItsTownOrDiedInTheEventsTickIsStillHeardOf,
+    PushGroupEventTests.AMemberOfATownReleasedInTheEventsTickIsStillHeardOf, PushGroupEventTests.DuringAFillOnlyTheMembersAlreadyEnteredAreHeardOf,
+    RealmGroupTests.AShardIsHeldBySessionsOfTheRealmItsTownIsIn (a shard described in realm 0's block, heard from realm 1) — each red with its clause
+    removed: no key filing, the cursor, the old key, the departed keys, the committed or the pending keys, the positionless realm, the payload netId. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
     30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
+
+### SUB-35: A live session receives every reliable event routed to it, once and in order, or is closed `[fatal][silent]`
+  invariant ∀ event type declared Reliable(), ∀ session s alive from the event's emission until its delivery: s's published frames carry every such event
+    its route reaches — the route of SUB-21, judged ONCE, at the first frame built after the event's tick, against s's committed view (unchanged since
+    its last published frame, so the view it had when the event was emitted) or its pending one — exactly once, in emission order (tick, then worker
+    slot, then call order), across skipped frames, a RESET, a realm switch, and a burst larger than a frame, even if s leaves the event's view before
+    its backlog drains; none is counted in EventsLost
+  invariant reliable events are kept in their own ring, a power of two above the close bound in ticks (CloseStalledAfter at the nominal period), a slot
+    made the first time a reliable event lands on its tick, so every tick a live session may still be owed is held; s's cursor (the last tick judged)
+    and its owed queue (the judged events no frame has carried yet, oldest first) commit with its frame (SUB-03): a frame that is not published judges
+    nothing. An owed event older than the ring is a session that cannot be kept reliable, and is closed
+  invariant a frame gives reliable events up to half its bytes, and always at least the first owed; what does not fit goes in the next frames, ahead of
+    newer ones. The best-effort events of the frame take what is left of the half, and past it are counted lost (SUB-21)
+  invariant a session whose frames publish but whose oldest owed event is older than the close bound — the backlog cannot drain — is closed with 1013
+    (TryAgainLater), so an SDK reconnects; counted in SessionsClosedReliable. A session owed nothing is never behind: an idle frame moves its cursor too
+  invariant an Emit or EmitTo of a reliable event is refused — it returns false — when it would not encode (a value its codec cannot carry, a realm
+    reader that throws: tried at the emitter, counted in EventHub.ReliableInvalid) or when the ring's bytes plus the reservations not yet encoded (each
+    emit reserves its event's largest encoding, held by its worker's segment until that segment is drained or discarded) would pass ReliableEventBytes
+    (counted in EventHub.ReliableRefused); never accepted and dropped later. A slot's bytes leave the budget when the ring reuses it or a later encode
+    passes the ticks no encode reached. Start refuses a reliable event with ReliableEventBytes at 0, one whose largest encoding is above it or above
+    half a frame, and, in an engine of several realms, one with a position field (the emitter tries positions over realm 0's frame)
+  note within one frame the reliable events are written before the best-effort ones: the order between a reliable and a best-effort event is not kept
+  note not across a resume: a resumed session is a new session (01 § 3), its cursor starts at its first frame, and the application re-sends what its client
+    must learn (14 § 13 Q7). Emissions of a tick no frame stage encoded are discarded, reliable ones included: no frame stage means no session to owe
+  scope: EventBuilder.Reliable, EventDeclaration.Reliable, SubscriptionsOptions.ReliableEventBytes, EventHub.Emit, EventHub.EmitTo, EventHub.EncodeTick,
+    EventHub.BindReliable, EventHub.CollectReliable, EventHub.CommitReliable, EventHub.OldestOwed, EventHub.WillEncode, EventHub.ShedTo, EventHub.Write,
+    FrameAssembler.AssemblePush, FrameAssembler.SweepSkipPolicy, SubscriptionsCommands.Emit,
+    SubscriptionsCommands.EmitTo, SubscriptionsRuntime
+  on_violation: silent on both sides. A trade's outcome or a loot drop a client never learns is an item that vanished, or a currency that moved with no
+    receipt — the one kind of message a client cannot recover from its next record.
+  rationale: a log per tick and a cursor per session cost nothing per (event, session); the close bound already caps how long a session may be behind, so
+    the ring is bounded by it and a session past it is closed, which an SDK answers by reconnecting into a fresh view.
+  verified: ReliableEventTests.EveryReliableEventReachesEveryLiveSessionOnceInOrder (random reliable broadcast, owner, near and known events under 0–90 %
+    skips, past the log at 90 % — exactly the routed ones, once, in order, none lost, no session closed), ReliableEventTests.AResetCarriesTheReliableEventsOfTheGap,
+    ReliableEventTests.ABurstLargerThanAFrameGoesOverTheNextFramesUncut, ReliableEventTests.ACarriedBacklogLeavesTheBestEffortEventsWhatIsLeftOfHalfAFrame,
+    ReliableEventTests.ASessionThatCannotBeKeptReliableIsClosedWith1013 (by the sweep at the bound, code 1013), ReliableEventTests.ASessionOwedNothingIsNeverClosedForReliability,
+    ReliableEventTests.TheBudgetIsGivenBackAsTheRingMovesOn, ReliableEventTests.TicksNoEncodeReachedGiveTheirBytesBack,
+    ReliableEventTests.TheRingWrapsUnderASkippingSessionAndLosesNothing, ReliableEventTests.AReliableEventToOneSessionReachesItAcrossAGap,
+    ReliableEventTests.ARateClassedDegradedSessionStillProducesAndStaysReliable (red when the degrade class reads the bare tick: an odd-slot divisor-2
+    session never produced a frame), ReliableEventTests.AReliableValueItsCodecCannotCarryIsRefusedAtTheEmitter,
+    PushGroupEventTests.AReliableBacklogNamingAMemberIsDeliveredAfterTheTownIsLeft (judged once: red when the backlog is re-judged or dropped),
+    ReliableEventTests.ASessionWithNoProfileIsKeptReliableAcrossAGap, ReliableEventTests.AnEmitPastTheBudgetIsRefusedAtTheEmitter,
+    ReliableEventTests.AReliableEventWithoutItsBudgetIsRefusedAtStart — each red against its clause removed: the carry-over, the ring (reliable events in
+    the best-effort log), the mid-tick cursor, the backlog close, the budget, the shed's share, the commit at publish and on an idle frame, the events-only
+    frame's collection, the Start check, the owed queue's order and head, the trial encoding, the slot release on reuse and over skipped ticks.
 
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
   invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every

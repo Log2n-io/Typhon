@@ -178,6 +178,22 @@ internal sealed class GroupSessionState
 
     /// <summary>The committed key counts per set as this frame reads them: none on a RESET.</summary>
     public int[] CCount => Reset ? _noKeys : _cCount;
+
+    /// <summary>The committed key counts as the last published frame left them, a pending RESET or not: what a command is judged against (SUB-26).</summary>
+    public int[] PublishedCount => _cCount;
+
+    /// <summary>Whether this frame leaves <paramref name="set"/>'s keys and their cursors as the committed ones read: a steady state, the usual case.</summary>
+    public bool PendingIsCommitted(int set)
+    {
+        var count = CCount[set];
+        if (PCount[set] != count)
+        {
+            return false;
+        }
+
+        var at = set * Max;
+        return CKeys.AsSpan(at, count).SequenceEqual(PKeys.AsSpan(at, count)) && CCursor.AsSpan(at, count).SequenceEqual(PCursor.AsSpan(at, count));
+    }
     public readonly long[] PKeys;
     public readonly uint[] PCursor;
     public readonly int[] PCount;
@@ -646,7 +662,7 @@ internal static class GroupSetCompiler
                     $"Archetype '{projection.Name}' declares a visibility mask but is not cluster-backed: the mask is read through the cluster layout.");
             }
 
-            var (_, field, reader) = ResolveField(meta, engine, projection.VisibilityComponentTypeId, projection.VisibilityFieldName,
+            var (slot, field, reader) = ResolveField(meta, engine, projection.VisibilityComponentTypeId, projection.VisibilityFieldName,
                 $"visibility mask of archetype '{meta.Name}'");
             if (field.Type != FieldType.UInt)
             {
@@ -657,6 +673,7 @@ internal static class GroupSetCompiler
 
             plans[plan].HasTagMask = true;
             plans[plan].TagMask = reader;
+            plans[plan].TagMaskSlot = slot;
             plans[plan].BlockLayout = plans[plan].BlockLayout.WithTagMask();
         }
     }

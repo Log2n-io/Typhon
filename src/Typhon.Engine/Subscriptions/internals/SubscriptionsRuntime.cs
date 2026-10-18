@@ -384,6 +384,39 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Events = EventHub.Build(registry, CatalogPlan);
             if (Events != null)
             {
+                // Reliable events (14 § 7): the bytes kept for every live session are load-bearing, so declared, never defaulted.
+                if (Events.HasReliable && Options.ReliableEventBytes <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "A reliable event is declared and SubscriptionsOptions.ReliableEventBytes is not set: it bounds the reliable events kept for the "
+                        + "sessions that may still be owed them, over CloseStalledAfter. Size it as the reliable bytes a burst emits per tick times the "
+                        + "ticks in CloseStalledAfter.");
+                }
+
+                // A reliable event that can never be emitted or never fit is a declaration error, said at Start rather than by every emit refused.
+                foreach (var type in Events.Types)
+                {
+                    if (!type.Reliable)
+                    {
+                        continue;
+                    }
+
+                    if (type.MaxBytes > Options.ReliableEventBytes || type.MaxBytes > Math.Min(Options.FrameBytes, FramePool.LargestClassBytes) / 2)
+                    {
+                        throw new InvalidOperationException(
+                            $"Reliable event '{type.Name}' encodes to up to {type.MaxBytes} bytes: more than ReliableEventBytes ({Options.ReliableEventBytes}) "
+                            + $"or half a frame ({Options.FrameBytes / 2}), so it could never be accepted or carried.");
+                    }
+
+                    // Its trial encoding at the emitter (SUB-35) frames a position over realm 0: with several realms that frame is not the event's.
+                    if (engine.ConfiguredMaxRealms > 1 && Array.Exists(type.Body.Fields, f => f.Kind is CodecKind.Pos2 or CodecKind.Pos3))
+                    {
+                        throw new NotSupportedException(
+                            $"Reliable event '{type.Name}' carries a position, and this engine holds several realms: a reliable event is checked at the "
+                            + "emitter against realm 0's frame. Carry the position as plain numbers, or make the event best effort.");
+                    }
+                }
+
                 Events.Realm = Realm0Frame;
                 Events.RealmFrames = _frames.RealmFrameFor;
 
@@ -430,6 +463,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
 
             _frames!.Events = Events;
+            Events?.BindReliable(_frames.CloseBoundTicks, Options.ReliableEventBytes);
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
             Commands = new SubscriptionsCommands(_ingress, Events);

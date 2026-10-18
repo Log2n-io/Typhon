@@ -39,16 +39,24 @@ ctx.Subscriptions.Emit(new Hit { Attacker = shooter, Target = victim, Damage = 1
 
 ## ⚠️ Guarantees & limits
 
-- **Best effort by design**: past the log, events are lost and counted, never retransmitted. Anything that must not be lost is state.
+- **Best effort by default**: past the log, events are lost and counted, never retransmitted. Anything a client can learn again is state.
+- **`.Reliable()`** for what it cannot learn again (a trade's outcome, loot): every live session it is routed to — judged once, against what the
+  session held when it was emitted — receives it once and in order, across skipped frames, a `RESET` and a burst larger than a frame, which goes over
+  the next frames; a session that cannot keep up is closed with 1013 and reconnects. Bounded by `SubscriptionsOptions.ReliableEventBytes` (required
+  once one is declared): an emit past it, or with a value its codec cannot carry, is refused, `Emit` returning `false`. Within a frame reliable events
+  come before best-effort ones; not carried across a resume.
+- A frame gives events at most half its bytes: past it the oldest best-effort events that fit are sent and the rest counted lost.
 - A session bound to no profile hears only broadcasts and its own `EmitTo`.
 - An event whose value its codec cannot carry is dropped and counted — the tick path never throws.
-- `RouteToKnown` skips a session whose visibility mask does not see the named entity, and it is geometric: an entity a session holds only
-  through a [group](groups.md) — beyond its Sphere, or with no position — does not reach it.
-- **Reliable events are not built.**
+- `RouteToKnown` reaches the sessions whose view holds the named entity's position (before or after this tick) and the sessions holding it
+  through a [group](groups.md) — beyond their Sphere, or with no position at all — once their town's fill has entered it; it skips a session
+  whose visibility mask does not see the entity.
 
 ## 🧪 Tests
 
 - [EventDeliveryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/EventDeliveryTests.cs) — each event reaches exactly the sessions its route names, across skips
+- [ReliableEventTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/ReliableEventTests.cs) — reliable events: once, in order, under skips, a RESET and a burst; the 1013 close; the budget
+- [PushGroupEventTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushGroupEventTests.cs) — `RouteToKnown` through groups
 
 ## 🔗 Related
 

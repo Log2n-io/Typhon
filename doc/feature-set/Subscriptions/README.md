@@ -47,7 +47,6 @@ a slow client hold up the tick.
 Refused at `Start` or at the call — never silently ignored:
 
 - several entity observers in one profile, and per-session observers (`SessionRequest.Observe`);
-- reliable events;
 - shared tile and `Static` snapshot blobs; the WebTransport link.
 
 ## 🔗 Related

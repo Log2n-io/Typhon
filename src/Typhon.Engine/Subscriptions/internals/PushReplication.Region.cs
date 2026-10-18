@@ -652,7 +652,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         }
 
                         // Visibility (P19): the entity's masks before and after this tick against the session's.
-                        var tagged = _tagOffset[e.Archetype] >= 0;
+                        var tagged = _tagOffset[e.Archetype] != 0;
                         uint tagsWas = 0, tagsIs = 0;
                         if (tagged)
                         {
@@ -1021,7 +1021,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
                     DecodeAt(a, cold + _positionOffset[a], out var px, out var py, out var pz);
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || (!inside && !InHull(in n, px, py, pz))
-                        || (_tagOffset[a] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
+                        || (_tagOffset[a] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[a]))))
                     {
                         continue;
                     }
@@ -1112,7 +1112,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
                     // No event since the session's last frame: its mask is the one it had then, so an entity the session does not see was never held.
                     if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz)
-                        || (_tagOffset[arch] >= 0 && !Sees(local, *(uint*)(cold + _tagOffset[arch]))))
+                        || (_tagOffset[arch] != 0 && !Sees(local, *(uint*)(cold + _tagOffset[arch]))))
                     {
                         continue;
                     }
@@ -1144,6 +1144,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
     private bool CollectLogRegion(RegionSession r, in ClientRegionCommand nh, int nMinCx, int nMaxCx, int nMinCy, int nMaxCy, int nMinCz, int nMaxCz,
         uint first, in ArchetypeSet archetypes, LogTable table)
     {
+        table.First = first;
         HullCells(in r.Hull, out var oMinCx, out var oMaxCx, out var oMinCy, out var oMaxCy, out var oMinCz, out var oMaxCz, out _, out _, out _);
         var two = oMinCx != nMinCx || oMaxCx != nMaxCx || oMinCy != nMinCy || oMaxCy != nMaxCy || (TEvent.Deep && (oMinCz != nMinCz || oMaxCz != nMaxCz));
         for (var t = first; t != _tick + 1; t++)
@@ -1191,7 +1192,6 @@ internal sealed unsafe partial class PushReplication<TEvent>
                             entry.Replaced = true;
                         }
 
-                        FoldTags(slot, ref e, ref entry);
                         entry.Last = e;
                         entry.LastTick = t;
                         entry.Groups |= e.Groups;
@@ -1231,11 +1231,11 @@ internal sealed unsafe partial class PushReplication<TEvent>
         {
             ref var entry = ref table.Entries[i];
             ref var e = ref entry.Last;
-            var tagged = _tagOffset[e.Archetype] >= 0;
+            var tagged = _tagOffset[e.Archetype] != 0;
             uint tagsWas = 0, tagsIs = 0;
             if (tagged)
             {
-                EntryTags(ref entry, out tagsWas, out tagsIs);
+                EntryTags(table, ref entry, out tagsWas, out tagsIs);
             }
 
             var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && InHull(in a, entry.OldX, entry.OldY, entry.OldZ)
