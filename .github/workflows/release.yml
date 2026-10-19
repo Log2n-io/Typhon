@@ -4,7 +4,7 @@ name: Release
 #   NuGet — `Typhon` (the engine), `Typhon.Cli` (the tool), `Typhon.Protocol`, `Typhon.Client`, `Typhon.Subscriptions.AspNetCore` (+ symbols);
 #   npm   — `@typhondb/client` (the TypeScript SDK);
 #   GitHub Release — the native C SDK, prebuilt per platform (static + shared library, headers, CMake package), and the other artifacts.
-# Triggered by pushing a prerelease-shaped tag (e.g. `0.1.0-alpha.1`) or a manual dispatch. Each publish runs behind a GitHub environment
+# Triggered by pushing a prerelease-shaped tag (e.g. `1.0.0-alpha.1`) or a manual dispatch. Each publish runs behind a GitHub environment
 # approval and uses keyless OIDC trusted publishing — no stored API key. Nothing publishes until every package's smoke test passed.
 # Design + rationale: claude/scratch/distribution-packaging-plan-2026-07-06.md §3 (#430), Feature #435; claude/design/Subscriptions/07 § 5 (#1044).
 #
@@ -29,8 +29,8 @@ name: Release
 #      workflow `release.yml`, environment `npm-release`), so it cannot exist before the package does. The FIRST publish therefore uses a token:
 #      a repository secret `NPM_TOKEN` (a granular token with publish rights on @typhondb). Once the package exists, add the trusted publisher
 #      and delete the secret — the job then publishes keyless, with provenance.
-# Alpha is PRERELEASE-ONLY: the version must carry a `-<label>` (e.g. `-alpha.1`). Cutting the first STABLE
-# release later is a deliberate act — remove the "Enforce prerelease-only" guard below.
+# Until 1.0.0, PRERELEASE-ONLY: the version must carry a `-<label>` (`-alpha.N`, `-beta.N`, `-rc.N`). Cutting 1.0.0 is a deliberate act —
+# remove the "Enforce prerelease-only" guard below.
 # ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -103,7 +103,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           case "$VERSION" in
             *-*) echo "::notice::prerelease OK: $VERSION" ;;
-            *)   echo "::error::Version '$VERSION' is a STABLE release; alpha is prerelease-only. Remove this guard deliberately to cut a stable release."; exit 1 ;;
+            *)   echo "::error::Version '$VERSION' is a STABLE release; until 1.0.0 releases are prerelease-only. Remove this guard deliberately to cut a stable release."; exit 1 ;;
           esac
 
       # One version for everything (07 § 5): every .NET package carries the engine's version, or the release stops here.
@@ -182,7 +182,7 @@ jobs:
           VERSION: ${{ needs.pack.outputs.version }}
         run: |
           set -euo pipefail
-          CORE="${VERSION%%-*}"       # CMake versions are numeric: 0.1.0 of 0.1.0-alpha.1; the archive carries the full one
+          CORE="${VERSION%%-*}"       # CMake versions are numeric: 1.0.0 of 1.0.0-alpha.1; the archive carries the full one
           cmake -S src/Typhon.Client.Native -B build -DCMAKE_BUILD_TYPE=Release -DTYPHON_VERSION="$CORE" -DTYPHON_NATIVE_SHARED=ON
           cmake --build build --config Release --parallel
           ctest --test-dir build -C Release --output-on-failure
@@ -287,7 +287,10 @@ jobs:
             echo "::notice::@typhondb/client@$VERSION is already published"
             exit 0
           fi
-          npm publish "artifacts/typhondb-client-$VERSION.tgz" --access public --tag alpha
+          # The dist-tag is the prerelease label — `alpha`, `beta`, `rc` — so `npm install @typhondb/client@beta` follows the line, and `latest`
+          # stays unset until 1.0.0.
+          DIST_TAG=$(echo "$VERSION" | sed -E 's/^[^-]+-([A-Za-z]+).*$/\1/')
+          npm publish "artifacts/typhondb-client-$VERSION.tgz" --access public --tag "$DIST_TAG"
 
   # ---- A GitHub Release for the tag: the native SDK archives (its only distribution), and every other artifact beside them. ----
   github-release:

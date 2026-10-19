@@ -97,7 +97,7 @@ main (default) ◄── feature/18-accesscontrol
                 ◄── feature/42-query-engine
                 ◄── fix/55-page-cache-bug
 
-Tags: v0.1.0, v0.2.0 (mark release points)
+Tags: 1.0.0-alpha.1, 1.0.0-alpha.2 (mark release points)
 ```
 
 ### Branch Types
@@ -119,18 +119,20 @@ Tags: v0.1.0, v0.2.0 (mark release points)
 
 ### Releases
 
-Releases are simply **tags on `main`**:
+Releases are simply **tags on `main`**, with no `v` prefix: MinVer reads the version from the tag, and pushing a prerelease-shaped tag runs
+`.github/workflows/release.yml` (NuGet, npm, the native SDK archives, the GitHub Release).
 
 ```bash
 # When ready for a release:
-git tag -a v0.1.0 -m "Telemetry foundation release"
-git push origin v0.1.0
-gh release create v0.1.0 --title "v0.1.0 - Telemetry Foundation" --generate-notes
+git tag -a 1.0.0-alpha.2 -m "1.0.0-alpha.2"
+git push origin 1.0.0-alpha.2
 ```
 
-**Versioning (pre-1.0):**
-- Breaking changes: bump MINOR (`0.1.0` → `0.2.0`)
-- Non-breaking changes: bump PATCH (`0.1.0` → `0.1.1`)
+**Versioning (towards 1.0):** one version for every package, the line `1.0.0-alpha.N` → `1.0.0-beta.N` → `1.0.0-rc.N` → `1.0.0`.
+- **alpha**: anything may still break; each release bumps N.
+- **beta**: the public API and the wire protocol are frozen; a break needs a reason and a note.
+- **rc**: no known blocker.
+- Until `1.0.0`, releases are prerelease-only — `release.yml` refuses a version without a `-label`.
 
 ### Linking to Documentation
 
