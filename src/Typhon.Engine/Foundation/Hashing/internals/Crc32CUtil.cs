@@ -35,6 +35,23 @@ internal static class Crc32CUtil
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Compute(ReadOnlySpan<byte> data) => ComputePartial(0xFFFFFFFF, data) ^ 0xFFFFFFFF;
 
+    /// <summary>Initial state of an incremental computation: <c>Finish(Append(Append(Start, a), b)) == Compute(a ++ b)</c>.</summary>
+    public const uint Start = 0xFFFFFFFF;
+
+    /// <summary>
+    /// Advances an incremental CRC32C state over <paramref name="data"/>. The state is the raw register, never inverted between calls, so any
+    /// split of a byte stream yields the same final value as one <see cref="Compute"/> over the whole of it.
+    /// </summary>
+    /// <param name="state"><see cref="Start"/>, or the value a previous <see cref="Append"/> returned.</param>
+    /// <param name="data">The next bytes of the stream.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Append(uint state, ReadOnlySpan<byte> data) => ComputePartial(state, data);
+
+    /// <summary>Turns an incremental state into the CRC32C of every byte appended to it.</summary>
+    /// <param name="state">The value the last <see cref="Append"/> returned.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Finish(uint state) => state ^ 0xFFFFFFFF;
+
     /// <summary>
     /// Compute CRC32C over a data span, skipping a region that is treated as zeros for CRC purposes.
     /// Used for self-referencing CRC fields where the CRC field itself must be excluded from the computation.
