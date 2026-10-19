@@ -63,7 +63,7 @@ public class StorageDurabilityIdentifierGateTests
     /// of a Roslyn dependency. Handles //, /* */, "...", verbatim @"...", and '...'; interpolation holes are
     /// treated as string content (a leaked identifier always also appears in plain declarations/signatures).
     /// </summary>
-    private static string StripCommentsAndStringLiterals(string src)
+    internal static string StripCommentsAndStringLiterals(string src)
     {
         var sb = new StringBuilder(src.Length);
         var n = src.Length;
@@ -179,7 +179,7 @@ public class StorageDurabilityIdentifierGateTests
     /// uses DeterministicSourcePaths, so <c>[CallerFilePath]</c> is remapped to <c>/_/…</c> and unusable here).
     /// The test <c>bin/</c> always lives under the repo, so the ancestor walk resolves it for both local and CI runs.
     /// </summary>
-    private static string LocateStorageDir()
+    internal static string LocateStorageDir()
     {
         var dir = AppContext.BaseDirectory;
         while (dir != null)

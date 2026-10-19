@@ -3042,13 +3042,32 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Writes a full page directly to the data file from the source buffer (used by the structural / direct-write paths).
     /// Also updates the tracked file size if the write extends beyond the current end of file.
     /// </summary>
-    internal void WritePageDirect(int filePageIndex, ReadOnlySpan<byte> source)
+    internal void WritePageDirect(int filePageIndex, ReadOnlySpan<byte> source) => IssueDataFileWrite(filePageIndex, 1, source);
+
+    /// <summary>
+    /// The synchronous half of the data-file write chokepoint (BKP-01): with <see cref="IssueDataFileWriteAsync"/>, the only code that calls
+    /// <c>RandomAccess.Write*</c> on the data file. Every page the engine writes passes through one of the two, so whatever must see every write
+    /// (the change map and write gate of online backup) lives here and nowhere else.
+    /// </summary>
+    /// <param name="filePageIndex">The first file page written.</param>
+    /// <param name="pageCount">How many consecutive pages <paramref name="source"/> holds.</param>
+    /// <param name="source">The bytes, <paramref name="pageCount"/> pages long.</param>
+    private void IssueDataFileWrite(int filePageIndex, int pageCount, ReadOnlySpan<byte> source)
     {
         PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort mid-write
         var pageOffset = filePageIndex * (long)PageSize;
         RandomAccess.Write(_fileHandle, source, pageOffset);
-        TrackFileGrowth(pageOffset + PageSize);
+        TrackFileGrowth(pageOffset + pageCount * (long)PageSize);
     }
+
+    /// <summary>
+    /// The asynchronous half of the data-file write chokepoint (BKP-01), used by <see cref="SavePageInternal"/>. It does not advance the
+    /// tracked file size (PS-08: <see cref="SavePages"/> does, once the batch is durable).
+    /// </summary>
+    /// <param name="filePageIndex">The first file page written.</param>
+    /// <param name="source">The bytes, a whole number of pages, read by the OS until the returned task completes.</param>
+    private ValueTask IssueDataFileWriteAsync(int filePageIndex, ReadOnlyMemory<byte> source)
+        => RandomAccess.WriteAsync(_fileHandle, source, filePageIndex * (long)PageSize);
 
     /// <summary>
     /// Maps a logical file-page index to the on-disk byte offset to read it from. The identity mapping by default; a
@@ -4194,11 +4213,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // page was already written (and fsynced) to its alternate slot by the protected-page redirect above.
             if (!redirected)
             {
-                PageWriteInterceptor?.Invoke(filePageIndex);   // test-only crash injection; throws to abort the checkpoint mid-cycle
                 plainWrittenThisPass = true;
-                var pageOffset = filePageIndex * (long)PageSize;
-                RandomAccess.Write(_fileHandle, staging.Span, pageOffset);
-                TrackFileGrowth(pageOffset + PageSize);
+                IssueDataFileWrite(filePageIndex, 1, staging.Span);   // its interceptor may throw to abort the checkpoint mid-cycle
             }
 
             // Partition in place: written pages to the front [0, writtenCount), skipped pages to the back [writtenCount, length). Swap (never overwrite) so the
@@ -4531,7 +4547,6 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         // Save the page to disk
         var filePageIndex = pi.FilePageIndex;
-        var pageOffset = filePageIndex * (long)PageSize;
         // A run never leaves its window (SavePages' run builder ends one on a window's last page), so its length fits an int.
         Debug.Assert((long)PageSize * length <= int.MaxValue, "A write run must fit one page-cache window.");
         var pageData = PageCacheWindow.PageRunMemory(_windows, firstMemPageIndex, length);
@@ -4553,7 +4568,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var writeBeginTs = writeScope.Header.StartTimestamp;
         writeScope.Dispose();
 
-        var writeTask = RandomAccess.WriteAsync(_fileHandle, pageData, pageOffset);
+        var writeTask = IssueDataFileWriteAsync(filePageIndex, pageData);
 
         // Async-completion tracking: opt-in via UnsuppressKind(PageCacheDiskWriteCompleted). Same gating logic as the read path — skip the
         // wrap when either the kickoff span is suppressed (nothing to correlate with) or the completion kind is suppressed (zero-alloc path).

@@ -599,6 +599,23 @@ jobs:
           fi
           echo "LOG-02: RecordFormat confined to Durability/internals/"
 
+      # BKP-01: online backup's change map, write gate and copy-before-write sit in the two PagedMMF methods that write the
+      # data file. A third RandomAccess.Write* in Storage/ is a write a backup can miss. DataFileWriteChokepointGateTests
+      # runs the same check with comments stripped and names the containing method; this is the no-build copy.
+      - name: BKP-01 — Storage/ writes the data file at exactly the two chokepoints
+        run: |
+          set -uo pipefail
+          hits=$(grep -rnP '\bRandomAccess\s*\.\s*Write(Async)?\s*\(' --include='*.cs' src/Typhon.Engine/Storage/ \
+                   | grep -vP '^[^:]+:\d+:\s*//' || true)
+          count=$(printf '%s' "$hits" | grep -c . || true)
+          stray=$(printf '%s' "$hits" | grep -v 'Storage/internals/PagedMMF.cs:' || true)
+          if [ "$count" -ne 2 ] || [ -n "$stray" ]; then
+            echo "::error::BKP-01 violated — Storage/ must write the data file only in PagedMMF.IssueDataFileWrite / IssueDataFileWriteAsync."
+            echo "$hits"
+            exit 1
+          fi
+          echo "BKP-01: two data-file write sites, both in PagedMMF"
+
       # Every `scope:` symbol in rules/ must exist in src/. Nine rules were scoped to symbols deleted months
       # earlier when this was first run by hand — a rule citing a dead name reads as obsolete when it is not,
       # which is worse than no rule. Blocking, and no longer carrying the `--baseline-rules` mode that demoted a
