@@ -23,7 +23,8 @@ export function formatField(archetype: string, name: string, raw: number): strin
     case 'aggro':
       return `${raw.toFixed(0)} m`;
     case 'region':
-      return raw < 0 ? 'wilderness' : `region ${raw}`;
+      // Sent as region + 1, with 0 for a structure in the wild: the field is a group set's key and a sparse index never files key 0.
+      return raw === 0 ? 'wilderness' : `region ${raw - 1}`;
     case 'template':
       return CREATURE_TEMPLATE_NAMES[raw] ?? String(raw);
     case 'mode':

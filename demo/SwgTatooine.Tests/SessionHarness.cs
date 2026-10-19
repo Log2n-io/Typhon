@@ -510,10 +510,42 @@ internal sealed class SessionHarness
         Assert.That(SpinWait.SpinUntil(
             () =>
             {
+                ThrowIfTickAborted(_sim);
                 Keepalive();
                 return _sim.Runtime.CurrentTickNumber >= target;
             },
             TimeSpan.FromSeconds(10)), Is.True, "the runtime stopped ticking");
+    }
+
+    /// <summary>
+    /// Throws the fault of an aborted tick, so a wait fails with the defect rather than with its own timeout.
+    /// </summary>
+    /// <param name="sim">The simulation being waited on.</param>
+    /// <remarks>
+    /// <b>Because a tick that aborts makes every wait in this file meaningless, and says so in the least useful way.</b> <c>AbortTickAndStop</c> is terminal:
+    /// the engine stops committing, so no session possesses a player, no interior is released and no chat is delivered — and each of those cases fails ten
+    /// seconds later reporting the thing it was waiting for. The exception that caused it reaches only the console, where a filtered test run never shows it.
+    /// <para>
+    /// Measured against the case that prompted this: an <c>[Index]</c> field on <c>Structure</c> made the engine refuse <c>EconomyTick</c>'s writable span
+    /// (#1187) and aborted tick 0. The suite reported "timed out waiting for both sessions to possess a player" and nothing else, and the diagnosis took an
+    /// hour. With this, the first wait throws the engine's own message, which names the rule, the component slot and the three APIs that would have been
+    /// correct.
+    /// </para>
+    /// <para>Checked inside the spin rather than after it, so the failure is immediate instead of ten seconds late.</para>
+    /// </remarks>
+    private static void ThrowIfTickAborted(TatooineSim sim)
+    {
+        var abort = sim.TickAbort;
+        if (abort == null)
+        {
+            return;
+        }
+
+        var (tick, reason, systemName, fault) = abort.Value;
+        throw new InvalidOperationException(
+            $"the engine aborted tick {tick} in system '{systemName}' ({reason}), so it has stopped committing and this wait can never finish. "
+            + "The abort is the failure; what this case was waiting for is a consequence of it.",
+            fault);
     }
 
     /// <summary>How long one link waits between PINGs: the engine's default ping period, <c>1000 / SubscriptionsOptions.PingHz</c>.</summary>
@@ -573,7 +605,12 @@ internal sealed class SessionHarness
             SpinWait.SpinUntil(
                 () =>
                 {
-                    _current?.Keepalive();
+                    if (_current != null)
+                    {
+                        ThrowIfTickAborted(_current._sim);
+                        _current.Keepalive();
+                    }
+
                     return condition();
                 },
                 TimeSpan.FromSeconds(10)),

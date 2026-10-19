@@ -118,6 +118,10 @@ public sealed partial class TatooineSim
                 // --max-sessions. Left at the engine's default, this is the ceiling a 10 000-bot fleet silently stopped at: 8 192, refused at connect time
                 // with nothing said on either side. Passed through so the number is the operator's, and printed below so it is not discovered by a run.
                 MaxSessions = _config.MaxSessions,
+
+                // Required once a group set is declared, and it is an allocation rather than a ceiling: every session holds this many keys and cursors per
+                // set whether it meets a city or not. See TatooineReplication.MaxCityGroupsPerSession for why four.
+                MaxGroupsPerSession = TatooineReplication.MaxCityGroupsPerSession,
             },
         });
 
@@ -162,6 +166,7 @@ public sealed partial class TatooineSim
         var aborts = 0;
         _runtime.OnTickAborted += (_, outcome) =>
         {
+            NoteTickAbort(outcome.TickNumber, outcome.Reason.ToString(), outcome.FailedSystemName, outcome.FailedSystemException);
             Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': {outcome.FailedSystemException}");
 
             // The artefact, on the first abort only, exactly as the measured path does it (P-3). For a server this is the whole of the diagnosis: there is no

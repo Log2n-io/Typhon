@@ -52,6 +52,92 @@ public struct StructureRealm
     public StructureRealm(ushort value) => Value = value;
 }
 
+/// <summary>Which region a structure belongs to — the city or point of interest it is part of — <b>encoded region + 1</b>, and 0 for one in the wild.</summary>
+/// <remarks>
+/// <para>
+/// <b>A component of its own, and not a field on <see cref="Structure"/>, because of the index.</b> The engine refuses a writable span over any component
+/// carrying an <c>[Index]</c> field, since a write through a span never reaches the index (#1187) — and <c>EconomyTick</c> takes exactly that span over
+/// <c>Structure</c> to bump a harvester's countdown and output in place. Satisfying the index there would mean routing the demo's measured per-tick write
+/// through <c>OpenMut().Set</c> to maintain an index the write cannot affect. Splitting the key out costs four bytes per structure and leaves that path
+/// untouched. It is also the shape the engine documents for a group set's key.
+/// </para>
+/// <para>
+/// <b>Why region + 1, which is not cosmetic.</b> A sparse index never files key 0, so 0 has to be the value that means "no group" — which agrees with the
+/// standing rule that optional data spells its absence as 0 and never as a sentinel like -1. The field this replaced used -1, against that rule from the day
+/// it was written. A reader wanting the region tests <c>Value != 0</c> and then takes <c>Value - 1</c>; the client does the same with the <c>region</c> it is
+/// sent. Cities and points of interest share one index space, a POI being <c>Cities.Count + poiIndex</c>, because they are one question ("which region?")
+/// and separating them would need a second field to say which kind of index this is.
+/// </para>
+/// <para>
+/// <b>Sparse, because about a tenth of the structures are in a region</b> — ~1 000 city and POI members against the player houses, factories and harvesters
+/// scattered over the planet, which are in none. A dense index would file an entry for every one of those under key 0 and never read it.
+/// </para>
+/// <para>
+/// <b>It is the only thing that says which city a shuttleport serves</b>, which is why it is persisted rather than derived: a world reopened from disk has to
+/// answer that without the generator. <c>WorldRebuild</c> reads it to rebuild the port table.
+/// </para>
+/// </remarks>
+[Component("Swg.StructureRegion", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct StructureRegion
+{
+    /// <summary>The region + 1, or 0 for a structure in the wild.</summary>
+    [Field, Index(AllowMultiple = true, Sparse = true), OnEnter(CodecKind.I16, Name = "region", Saturate = true)] public int Value;
+
+    public StructureRegion(int value) => Value = value;
+}
+
+/// <summary>A city's disc as a group set's region: the key its members carry, and the circle their session's reach is measured against.</summary>
+/// <remarks>
+/// <para>
+/// <b>A circle rather than a box, because the reach is measured to the extent's nearest point.</b> A square around a 456 m city reaches 41 % further at its
+/// corners than along its axes, so a session would join Mos Eisley's set from places that are plainly outside it. The cities are discs in the source data and
+/// a <c>BSphere2F</c> says so.
+/// </para>
+/// <para>
+/// <b>The key is <c>int</c> to match <see cref="StructureRegion"/>'s.</b> Keys compare as 64-bit and the engine refuses a set whose region and member keys
+/// differ in signedness, so this is not a free choice. It holds region + 1 exactly as the members do.
+/// </para>
+/// </remarks>
+[Component("Swg.CityArea", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CityArea
+{
+    /// <summary>The group's key: the city's index + 1, the same value its structures carry.</summary>
+    [Field] public int Key;
+
+    /// <summary>The city's disc, in planet coordinates.</summary>
+    [Field] public BSphere2F Circle;
+}
+
+/// <summary>Where a city region sits, which is the only reason it has a placement at all.</summary>
+/// <remarks>
+/// <b>A region belongs to its entity's realm only if its archetype is spatial.</b> One without a spatial field has no realm and its regions are realm 0's —
+/// which would hand every planet's sessions Tatooine's cities, since the demo spawns the same map on every planet and the keys would collide. The box is the
+/// city's disc, so the spatial index answers for it like anything else; nothing queries it today.
+/// </remarks>
+[Component("Swg.CityPlacement", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CityPlacement
+{
+    /// <summary>The city's bounding box.</summary>
+    [Field]
+    [SpatialIndex(1.0f)]
+    public AABB2F Bounds;
+}
+
+/// <summary>The realm a city region is in — which planet's cities these are.</summary>
+[Component("Swg.CityRegionRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CityRegionRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public CityRegionRealm(ushort value) => Value = value;
+}
+
 /// <summary>The realm a lair is in.</summary>
 [Component("Swg.LairRealm", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -902,17 +988,6 @@ public struct Structure
 {
     /// <summary>See <see cref="StructureKind"/>.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "kind", Saturate = true)] public int Kind;
-
-    /// <summary>
-    /// Which region this belongs to: a city by its index, a point of interest as <c>Cities.Count + poiIndex</c>, and -1 for a structure standing alone in
-    /// the wild.
-    /// </summary>
-    /// <remarks>
-    /// <b>It was documented to hold this and held 0 for every city building on the planet</b> (P-2). Nothing read it, so nothing noticed — but it is the only
-    /// thing that says which city a shuttleport serves, and a world reopened from disk has to answer that without the generator. Cities and points of interest
-    /// share one index space because they are one question ("which region?"), and separating them would need a second field to say which kind of index this is.
-    /// </remarks>
-    [Field, OnEnter(CodecKind.I16, Name = "region", Saturate = true)] public int OwnerRegion;
 
     /// <summary>
     /// This building's slot in the planet's door list — the index that decides which interior realm it leads to — or -1 when the building is not enterable.

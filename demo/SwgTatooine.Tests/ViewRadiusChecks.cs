@@ -59,6 +59,34 @@ public sealed class ViewRadiusChecks
         return config;
     }
 
+    /// <summary>
+    /// Stands the session's player just outside the widest city, so the buildings it holds are the sphere's business and not a group's.
+    /// </summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="player">The connected session.</param>
+    /// <remarks>
+    /// <b>Because the city group set holds a city's structures whatever the sphere does, which is what it is for.</b> A player inside a city already holds
+    /// every building the city has, so widening its radius delivers nothing new and narrowing it drops nothing — both of these cases passed vacuously, or
+    /// rather failed honestly, the day the set was declared. Standing outside the wall puts the buildings back under the radius's control.
+    /// <para>
+    /// Placed beyond the reach AND its hysteresis, with a margin: at exactly the reach the session would join and leave the set as the quantised position
+    /// moved, and a case would be measuring the set rather than the radius. The city's near edge then sits inside the widened sphere and outside the narrow
+    /// one, which is the condition both cases need.
+    /// </para>
+    /// </remarks>
+    private static void StandOutsideACity(TatooineSim sim, Player player)
+    {
+        var city = Worlds.WidestCity(sim);
+        var standoff = city.Radius + (float)(TatooineReplication.CityReachM + TatooineReplication.CityLeaveM) + 32f;
+        Assert.That(
+            (double)standoff,
+            Is.LessThan(TatooineReplication.PlayerMaxRadiusM),
+            "the premise: a player standing clear of the city's set must still reach its buildings at the widest radius");
+
+        Worlds.Park(sim, player.Session, city.X + standoff, city.Z);
+        player.Harness.Ticks(2);
+    }
+
     /// <summary>What the session holds, and what it was refused.</summary>
     private struct HoldSink : ITickSink
     {
@@ -214,6 +242,9 @@ public sealed class ViewRadiusChecks
 
         public SessionHarness Harness { get; }
 
+        /// <summary>This session's id, so a case can place the body it controls.</summary>
+        public SessionId Session => _link.Session;
+
         /// <summary>Decodes every frame that arrived since the last call.</summary>
         public HoldSink Drain()
         {
@@ -266,6 +297,7 @@ public sealed class ViewRadiusChecks
         sim.Initialize();
         _harness = new SessionHarness(sim);
         var player = new Player(_harness);
+        StandOutsideACity(sim, player);
         player.UntilSettled();
 
         var before = player.Holding(nameof(WorldObject));
@@ -309,6 +341,7 @@ public sealed class ViewRadiusChecks
         sim.Initialize();
         _harness = new SessionHarness(sim);
         var player = new Player(_harness);
+        StandOutsideACity(sim, player);
         player.UntilSettled();
 
         player.AskRadius((uint)TatooineReplication.PlayerMaxRadiusM);

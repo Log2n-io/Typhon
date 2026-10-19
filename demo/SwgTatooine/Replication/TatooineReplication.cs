@@ -1047,6 +1047,36 @@ public static partial class TatooineReplication
     /// <summary>The god region's aggregate tile, metres; its counts refresh once a second.</summary>
     private const double GodAggregateTileM = 256d;
 
+    /// <summary>The group set naming a city's structures: its shuttleport, terminals, buildings and props.</summary>
+    /// <remarks>
+    /// <b>Why a set and not a wider sphere.</b> Mos Eisley's radius is 456 m against a player's 192 m sphere, so a player at one edge of the city cannot see
+    /// the shuttleport at the other — and a bot's routing needs the port's position to decide between walking and flying. Widening the sphere to 456 m sends
+    /// 2.8x the bytes for every session everywhere; the set delivers a city's facilities only to the sessions actually in one.
+    /// </remarks>
+    public const string CitySet = "city";
+
+    /// <summary>How close to a city's edge a session must be to be served its structures, in metres.</summary>
+    /// <remarks>
+    /// Distance is measured to the circle's nearest point and is 0 inside it, so this is a margin outside the city wall rather than a radius. 64 m is about
+    /// three seconds at a run, which is enough for the facilities to have arrived by the time a player is among the buildings.
+    /// </remarks>
+    public const double CityReachM = 64d;
+
+    /// <summary>The hysteresis on <see cref="CitySet"/>: how much further a session must leave before the city is released, in metres.</summary>
+    /// <remarks>
+    /// Without it a session loitering on the boundary joins and leaves the set every few ticks, and each re-entry refills the whole city. 32 m on a 64 m
+    /// reach is half again, which costs a session that leaves for good one extra city's worth of held state for the few seconds it takes to walk clear.
+    /// </remarks>
+    public const double CityLeaveM = 32d;
+
+    /// <summary>How many group keys one session may hold at once (<c>SubscriptionsOptions.MaxGroupsPerSession</c>).</summary>
+    /// <remarks>
+    /// <b>Required once any set is declared, and it is a per-session allocation rather than a limit that is rarely reached:</b> a session holds this many keys
+    /// and cursors per set whether it uses them or not. Four, because the cities are kilometres apart and a session within reach of two at once is already an
+    /// edge case; the POI keys share the index space and can have regions later without changing this.
+    /// </remarks>
+    public const int MaxCityGroupsPerSession = 4;
+
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="automatic">Whether the engine detects changes itself instead of relying on the simulation's <c>Replicate</c> calls (experimental).</param>
@@ -1055,6 +1085,16 @@ public static partial class TatooineReplication
         ArgumentNullException.ThrowIfNull(subs);
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
+
+        // A city as a group: one CityRegion entity per city carries the key and the disc, and every structure of that city carries the same key in
+        // StructureRegion. A session whose sphere comes within CityReachM of the disc is served the whole city and told so once it is complete; it keeps it
+        // until it is CityLeaveM further out again. The members are positioned, so a session meets only the cities of the realm it is in.
+        //
+        // The key is region + 1 on both sides and 0 is no region, because the members' key field is a SPARSE index and a sparse index never files key 0.
+        subs.Groups(CitySet, g => g
+            .Region<CityRegion>(r => r.Key(CityRegion.Area, a => a.Key).Extent(CityRegion.Area, a => a.Circle))
+            .Member<WorldObject>(m => m.Key(WorldObject.Region, s => s.Value))
+            .Leave(CityLeaveM));
 
         // The admission hook. Without one the engine accepts every connection as a Spectator, so the demo had no role distinction, no cap, and no refusal
         // path — and neither the engine's admission surface nor an SDK's handling of a refusal was exercised by anything (SWG-07).
@@ -1125,7 +1165,11 @@ public static partial class TatooineReplication
                 .AroundControlled()
                 .Of<Player>()
                 .Of<CityNpc>()
-                .Of<Creature>();
+                .Of<Creature>()
+
+                // A bot routes on facilities it cannot see from one edge of a city, so it gets the city set even though it carries no WorldObject by
+                // geometry: the set's members arrive whether or not the observer names their archetype.
+                .Groups(CitySet, CityReachM);
             p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>());
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });
@@ -1150,7 +1194,8 @@ public static partial class TatooineReplication
                 .Of<Player>()
                 .Of<CityNpc>()
                 .Of<Creature>()
-                .Of<WorldObject>();
+                .Of<WorldObject>()
+                .Groups(CitySet, CityReachM);
 
             // Free here, unlike on the sphere above: a World observer fills once per realm from a cursor and has no crescent to sweep.
             p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
@@ -1170,7 +1215,10 @@ public static partial class TatooineReplication
                 .Of<Player>()
                 .Of<CityNpc>()
                 .Of<Creature>()
-                .Of<WorldObject>();
+                .Of<WorldObject>()
+
+                // Parity: a browser is served the same city set a bot is, because every capability a bot has has to be reachable from the client.
+                .Groups(CitySet, CityReachM);
             p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });

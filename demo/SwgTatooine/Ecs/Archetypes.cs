@@ -32,7 +32,27 @@ public partial class WorldObject : Archetype<WorldObject>
     [Position]
     public static readonly Comp<StructurePlacement> Bounds = Register<StructurePlacement>();
     public static readonly Comp<Structure> Struct = Register<Structure>();
+
+    /// <summary>The city or point of interest this belongs to: a group set's key, which is why it is not a field on <see cref="Struct"/>.</summary>
+    public static readonly Comp<StructureRegion> Region = Register<StructureRegion>();
     public static readonly Comp<StructureRealm> Realm = Register<StructureRealm>();
+}
+
+/// <summary>
+/// One entity per city, carrying that city's group key and its disc. Not replicated: it exists so the engine can decide which sessions are in which city.
+/// </summary>
+/// <remarks>
+/// <b>Spatial, and that is load-bearing.</b> A region archetype with no spatial field has no realm, so every region would be realm 0's — and because the
+/// demo spawns the same map on every planet, planet 1's sessions would be told about planet 0's cities under the same keys. With a placement each region
+/// belongs to its planet's realm and a session meets only its own planet's cities.
+/// </remarks>
+[Archetype(1, "City regions", ClusterDurability = ClusterDurability.Checkpoint)]
+public partial class CityRegion : Archetype<CityRegion>
+{
+    [Position]
+    public static readonly Comp<CityPlacement> Bounds = Register<CityPlacement>();
+    public static readonly Comp<CityArea> Area = Register<CityArea>();
+    public static readonly Comp<CityRegionRealm> Realm = Register<CityRegionRealm>();
 }
 
 /// <summary>

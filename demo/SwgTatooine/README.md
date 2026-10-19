@@ -339,7 +339,7 @@ With `--persist`, a second run **reopens** rather than builds. Everything that i
 realm registrations, `SetSpatialBarrierOnly`, the dormancy declarations — is re-issued, because none of it is persisted; only the contents are. The
 `WorldIndex` is then rebuilt **from the entities**, not by re-running the generator: cities and points of interest come from the map, which states them, while
 everything the generator's RNG produced (which building is a city's shuttleport, which buildings have doors and in what order) is read back off
-`Structure.OwnerRegion` and `Structure.PortalIndex`. Re-running the generator would describe the world as it was born rather than as it is, and would mean the
+`StructureRegion` and `Structure.PortalIndex`. Re-running the generator would describe the world as it was born rather than as it is, and would mean the
 demo could never open a database it had not made itself.
 
 Possession does not survive a restart: a player that some client was driving when the world was saved comes back on the simulation's own activity mix, because

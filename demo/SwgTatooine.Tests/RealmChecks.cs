@@ -20,6 +20,59 @@ internal static class Worlds
         Unpaced = true,
     };
 
+    /// <summary>Puts the player a session controls at a place in a realm, parked, and returns it.</summary>
+    /// <param name="sim">The simulation.</param>
+    /// <param name="session">The session whose player to place.</param>
+    /// <param name="x">Where, east.</param>
+    /// <param name="z">Where, north.</param>
+    /// <param name="realm">Which realm, 0 for the planet.</param>
+    /// <returns>The player entity.</returns>
+    /// <remarks>
+    /// <b>Parked, not merely moved</b>: the activity is set to idle for longer than any case runs and the velocity zeroed, because a player that resumed
+    /// deciding would walk out of whatever the case placed it in — out of earshot, or out of a city whose group set the case is asserting on.
+    /// </remarks>
+    public static EntityId Park(TatooineSim sim, SessionId session, float x, float z, ushort realm = 0)
+    {
+        var entity = TatooineReplication.ControlledBy(sim.Dbe, session);
+        Assert.That(entity, Is.Not.EqualTo(EntityId.Null), "the session controls no player to place");
+
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        var player = tx.OpenMut(entity);
+
+        var state = player.Read(Player.State);
+        state.Activity = PlayerActivity.Idle;
+        state.ActivityTicks = int.MaxValue / 2;
+        player.Set(Player.State, state);
+        var move = player.Read(Player.Move);
+        move.VelX = 0f;
+        move.VelZ = 0f;
+        player.Set(Player.Move, move);
+
+        var at = default(PlayerPlacement);
+        at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
+        tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
+        tx.Commit();
+        return entity;
+    }
+
+    /// <summary>The widest city in a built world: the one whose radius most exceeds a player's sphere.</summary>
+    /// <param name="sim">A simulation whose world is built.</param>
+    /// <returns>Its index and its circle.</returns>
+    public static (int Index, float X, float Z, float Radius) WidestCity(TatooineSim sim)
+    {
+        var widest = 0;
+        for (var i = 0; i < sim.Index.Cities.Count; i++)
+        {
+            if (sim.Index.Cities[i].Radius > sim.Index.Cities[widest].Radius)
+            {
+                widest = i;
+            }
+        }
+
+        var city = sim.Index.Cities[widest];
+        return (widest, city.X, city.Z, city.Radius);
+    }
+
     public static string NewDirectory()
     {
         var dir = Path.Combine(Path.GetTempPath(), "typhon-swg-realms", Guid.NewGuid().ToString("N"));

@@ -114,6 +114,7 @@ public static class WorldRebuild
 
             var places = cluster.GetReadOnlySpan(WorldObject.Bounds);
             var structs = cluster.GetReadOnlySpan(WorldObject.Struct);
+            var regions = cluster.GetReadOnlySpan(WorldObject.Region);
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
                 var slot = BitOperations.TrailingZeroCount(bits);
@@ -133,10 +134,15 @@ public static class WorldRebuild
                         break;
                 }
 
-                if (st.Kind == StructureKind.Shuttleport && (uint)st.OwnerRegion < (uint)ports.Length)
+                // StructureRegion holds region + 1, 0 for the wild. The region itself is what indexes this table, so the test is an explicit "has one"
+                // rather than the (uint) cast this used to lean on: that worked only because the old -1 cast to a huge uint, and under the new encoding it
+                // would quietly file every wild structure under port 0.
+                var owner = regions[slot].Value;
+                var portRegion = owner - 1;
+                if (st.Kind == StructureKind.Shuttleport && owner != 0 && (uint)portRegion < (uint)ports.Length)
                 {
-                    ports[st.OwnerRegion] = (x, z);
-                    portsSeen[st.OwnerRegion] = true;
+                    ports[portRegion] = (x, z);
+                    portsSeen[portRegion] = true;
                 }
 
                 if (st.PortalIndex >= 0)

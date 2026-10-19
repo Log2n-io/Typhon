@@ -128,6 +128,7 @@ public sealed partial class TatooineSim
         var aborts = 0;
         _runtime.OnTickAborted += (_, outcome) =>
         {
+            NoteTickAbort(outcome.TickNumber, outcome.Reason.ToString(), outcome.FailedSystemName, outcome.FailedSystemException);
             if (aborts++ < 3)
             {
                 // The whole exception, stack included: a type and a message name a symptom, not the line that raised it.
@@ -181,6 +182,22 @@ public sealed partial class TatooineSim
 
     /// <summary>The crash artefact this run wrote, or <see langword="null"/> when it did not crash (P-3).</summary>
     public string CrashArtefactPath { get; private set; }
+
+    /// <summary>The first tick this sim aborted on, or <see langword="null"/> if none did.</summary>
+    /// <remarks>
+    /// <b>Recorded so that a waiting test can fail with the fault instead of with a timeout.</b> An aborted tick stops the engine committing, so every
+    /// session test downstream of it fails ten seconds later saying it timed out waiting for something the world can no longer do — four layers from the
+    /// cause. The exception itself only reaches a console. <c>SessionHarness</c> reads this and throws it, so the first failure names the defect.
+    /// </remarks>
+    public (long Tick, string Reason, string SystemName, Exception Fault)? TickAbort { get; private set; }
+
+    /// <summary>Records the first abort and nothing after it: a tick that aborts usually aborts again, and the first one holds the cause.</summary>
+    /// <param name="tick">The tick it happened on.</param>
+    /// <param name="reason">The outcome's reason.</param>
+    /// <param name="systemName">The system that failed.</param>
+    /// <param name="fault">Its exception, which may be null.</param>
+    private void NoteTickAbort(long tick, string reason, string systemName, Exception fault)
+        => TickAbort ??= (tick, reason, systemName, fault);
 
     /// <summary>
     /// Writes a crash artefact for this run: the fault, the ticks leading to it, the world and the configuration.

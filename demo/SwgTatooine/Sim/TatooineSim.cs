@@ -260,6 +260,10 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<PlayerSession>();
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();
+        Dbe.RegisterComponentFromAccessor<StructureRegion>();
+        Dbe.RegisterComponentFromAccessor<CityPlacement>();
+        Dbe.RegisterComponentFromAccessor<CityArea>();
+        Dbe.RegisterComponentFromAccessor<CityRegionRealm>();
         Dbe.RegisterComponentFromAccessor<Inventory>();
         Dbe.RegisterComponentFromAccessor<StructureRealm>();
         Dbe.RegisterComponentFromAccessor<LairRealm>();

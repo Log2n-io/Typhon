@@ -97,7 +97,7 @@ public static class WorldBuilder
                         index.Portals.Add((x, z));
                     }
 
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 12f, kind, ownerRegion: cityIndex, tickPeriod: 0, ref rng, portalIndex);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 12f, kind, ownerRegion: cityIndex + 1, tickPeriod: 0, ref rng, portalIndex);
                     census.StaticObjects++;
                 }
 
@@ -139,6 +139,29 @@ public static class WorldBuilder
 
                 tx.Commit();
                 made += n;
+            }
+
+            // The city's own region entity, which is what makes this city a group: its key is what every structure above carries, and its circle is what a
+            // session's reach is measured to. One per city per planet — the regions of a planet other than 0 are that planet's because this archetype is
+            // spatial (see CityRegion).
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                var bounds = new AABB2F
+                {
+                    MinX = city.X - city.Radius,
+                    MinY = city.Z - city.Radius,
+                    MaxX = city.X + city.Radius,
+                    MaxY = city.Z + city.Radius,
+                };
+                tx.Spawn<CityRegion>(
+                    CityRegion.Bounds.Set(new CityPlacement { Bounds = bounds }),
+                    CityRegion.Area.Set(new CityArea
+                    {
+                        Key = cityIndex + 1,
+                        Circle = new BSphere2F { CenterX = city.X, CenterY = city.Z, Radius = city.Radius },
+                    }),
+                    CityRegion.Realm.Set(new CityRegionRealm(_realm)));
+                tx.Commit();
             }
 
             index.Cities.Add((city.X, city.Z, city.Radius, city.PlayerWeight));
@@ -270,7 +293,7 @@ public static class WorldBuilder
         // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
         // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
         var terrain = TerrainField.Shared(config.ContentScale);
-        // A point of interest's region id continues the cities' numbering; see Structure.OwnerRegion.
+        // A point of interest's region id continues the cities' numbering; see Structure.OwnerRegion, which stores it + 1 so that 0 can mean "no region".
         var poiIndex = map.Cities.Count;
         foreach (var poi in map.Pois)
         {
@@ -279,7 +302,7 @@ public static class WorldBuilder
                 for (var i = 0; i < poi.Props; i++)
                 {
                     var (x, z) = rng.PointInDisc(poi.X, poi.Z, poi.Radius);
-                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 6f, StructureKind.PoiProp, ownerRegion: poiIndex, tickPeriod: 0, ref rng);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 6f, StructureKind.PoiProp, ownerRegion: poiIndex + 1, tickPeriod: 0, ref rng);
                     census.StaticObjects++;
                 }
 
@@ -486,7 +509,8 @@ public static class WorldBuilder
                         ? (StructureKind.Harvester, 600)
                         : (StructureKind.Factory, 1800);
 
-                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), kind == StructureKind.PlayerHouse ? 10f : 14f, kind, ownerRegion: -1,
+                // ownerRegion 0: these stand in the wild, and 0 is how Structure.OwnerRegion spells "no region" now that it is a sparse index's key.
+                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), kind == StructureKind.PlayerHouse ? 10f : 14f, kind, ownerRegion: 0,
                     tickPeriod: period, ref rng);
                 census.PlayerStructures++;
             }
@@ -804,14 +828,17 @@ public static class WorldBuilder
         var s = new Structure
         {
             Kind = kind,
-            OwnerRegion = ownerRegion,
             PortalIndex = portalIndex,
             TickPeriod = tickPeriod,
 
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
-        tx.Spawn<WorldObject>(WorldObject.Bounds.Set(in bounds), WorldObject.Struct.Set(in s), WorldObject.Realm.Set(new StructureRealm(_realm)));
+        tx.Spawn<WorldObject>(
+            WorldObject.Bounds.Set(in bounds),
+            WorldObject.Struct.Set(in s),
+            WorldObject.Region.Set(new StructureRegion(ownerRegion)),
+            WorldObject.Realm.Set(new StructureRealm(_realm)));
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>
