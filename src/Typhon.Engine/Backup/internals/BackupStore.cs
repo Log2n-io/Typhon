@@ -268,11 +268,16 @@ internal sealed class FileSystemBackupStore : IBackupPointStore
         _writerOptions = writerOptions;
     }
 
+    /// <summary>The last point a session of this store published, as the store recorded it: what the caller reports without reading the store again.</summary>
+    public CatalogPack LastPublished { get; private set; }
+
     /// <inheritdoc />
     public IBackupStoreSession OpenSession(Guid databaseId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        return BackupStore.OpenForWrite(_root, databaseId, createIfMissing: true, _fs, _log, _writerOptions);
+        var session = BackupStore.OpenForWrite(_root, databaseId, createIfMissing: true, _fs, _log, _writerOptions);
+        session.Published = pack => LastPublished = pack;
+        return session;
     }
 }
 
@@ -292,6 +297,9 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
     private uint _highWater;
     private uint _lastAllocated;
     private PackWriter _open;
+
+    /// <summary>Called with each point once it is durable and visible, before the catalog (a cache) is updated.</summary>
+    internal Action<CatalogPack> Published { get; set; }
 
     private BackupStore(IStoreFileSystem fs, ILogger log, PackWriterOptions writerOptions, StorePaths paths, StoreIdentityFile identity,
         IDisposable storeLock)
@@ -599,10 +607,11 @@ internal sealed class BackupStore : IBackupStoreSession, IPackPublisher
         }
 
         // The pack is durable and visible: from here nothing fails the publish. The catalog is a cache.
+        var published = CatalogPack.From(Path.GetFileName(final), writer.FileLength, writer.Header, writer.Footer);
+        Published?.Invoke(published);
         try
         {
-            var file = Path.GetFileName(final);
-            var packs = new List<CatalogPack>(_view.Catalog.Packs) { CatalogPack.From(file, writer.FileLength, writer.Header, writer.Footer) };
+            var packs = new List<CatalogPack>(_view.Catalog.Packs) { published };
             _view.Catalog = StoreCatalog.Build(_identity, StoreCatalog.Fingerprint(_fs.EnumerateFiles(_paths.Packs)), _highWater, packs,
                 new List<CatalogUnreadable>(_view.Catalog.Unreadable));
             WriteCatalogIfChanged();

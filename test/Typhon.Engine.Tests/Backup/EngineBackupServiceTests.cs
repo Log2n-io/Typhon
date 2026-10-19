@@ -202,6 +202,66 @@ class EngineBackupServiceTests : BackupTestBase<EngineBackupServiceTests>
     private static string[] PackBuffers(IResource coordinator)
         => coordinator.Children.Select(c => c.Id).Where(id => id.StartsWith("Backup.Pack", StringComparison.Ordinal)).ToArray();
 
+    /// <summary>
+    /// M4: once the point is published nothing may report a failure for it. The summary comes from what the store published, not from reading the
+    /// store again: here the store turns unreadable the moment the pack is renamed into place, and the call still returns the published point.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void AStoreUnreadableRightAfterThePublish_StillReturnsThePublishedPoint()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Spawn(dbe, 50);
+        var fs = new UnreadableAfterPublish();
+        ((BackupService)dbe.Backup).StoreFileSystem = fs;
+
+        var point = Create(dbe);
+        Assert.That(fs.Published, Is.True, "premise: the store turned unreadable after the publish");
+        Assert.That(point.BackupId, Is.EqualTo(1u));
+        Assert.That(point.Kind, Is.EqualTo(BackupPointKind.Full));
+        Assert.That(File.Exists(Path.Combine(_store, "packs", point.PackFile)), Is.True);
+    }
+
+    /// <summary>The real disk, until a pack is renamed into place; after that every read of the store fails.</summary>
+    private sealed class UnreadableAfterPublish : IStoreFileSystem
+    {
+        private readonly IStoreFileSystem _disk = StoreFileSystem.Instance;
+
+        public bool Published { get; private set; }
+
+        public IStoreFile OpenCreateNew(string path, long preallocationSize = 0) => _disk.OpenCreateNew(path, preallocationSize);
+
+        public IStoreFile OpenRead(string path) => Published ? throw new IOException("the store is gone") : _disk.OpenRead(path);
+
+        public IDisposable TryLockExclusive(string path) => _disk.TryLockExclusive(path);
+
+        public bool ProbeExclusive(string path) => _disk.ProbeExclusive(path);
+
+        public void Rename(string source, string destination, bool replace)
+        {
+            _disk.Rename(source, destination, replace);
+            Published |= destination.EndsWith(".tpack", StringComparison.Ordinal);
+        }
+
+        public void FlushDirectory(string directory) => _disk.FlushDirectory(directory);
+
+        public bool FileExists(string path) => _disk.FileExists(path);
+
+        public bool DirectoryExists(string path) => _disk.DirectoryExists(path);
+
+        public void CreateDirectory(string path) => _disk.CreateDirectory(path);
+
+        public void DeleteFile(string path) => _disk.DeleteFile(path);
+
+        public void DeleteDirectory(string path) => _disk.DeleteDirectory(path);
+
+        public IReadOnlyList<StoreFileEntry> EnumerateFiles(string directory) =>
+            Published ? throw new IOException("the store is gone") : _disk.EnumerateFiles(directory);
+
+        public bool IsBundleHeldByLiveProcess(string bundleDirectory) => _disk.IsBundleHeldByLiveProcess(bundleDirectory);
+    }
+
     [Test]
     public void BadArguments_AreRejectedBeforeAnyCapture()
     {
