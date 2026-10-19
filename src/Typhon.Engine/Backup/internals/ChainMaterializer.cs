@@ -128,7 +128,7 @@ internal static class ChainMaterializer
         var heads = new PackPageEntry[k];
         var heap = new PriorityQueue<int, uint>(k);
         var damaged = new List<DamagedPage>();
-        var buffer = new NativeBuffer(WriteBufferBytes);
+        var buffer = NativeBuffer.Allocate(WriteBufferBytes, null, null);   // restore runs with no engine
         long bytesWritten = 0;
         var zeroPages = 0;
         try

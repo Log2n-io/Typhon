@@ -158,6 +158,50 @@ class EngineBackupServiceTests : BackupTestBase<EngineBackupServiceTests>
         Assert.That(next.ParentId, Is.EqualTo(first.BackupId));
     }
 
+    /// <summary>
+    /// The pack's write buffers are the engine's memory: children of the backup coordinator while a point is written, so the resource tree and the
+    /// unmanaged-memory gauges see them, and released when the point completes or is abandoned.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    public void ThePacksWriteBuffers_AreTheCoordinatorsResources_WhileThePointIsWritten_AndReleasedAfter()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var ids = Spawn(dbe, 200);
+        var coordinator = dbe.BackupCoordinator;
+        string[] whileWriting = null;
+        using var cts = new CancellationTokenSource();
+        var cancelAt = (CapturePhase)byte.MaxValue;
+        coordinator.Probe = (phase, _) =>
+        {
+            if (phase == CapturePhase.ScannerClaimed && whileWriting == null)
+            {
+                whileWriting = PackBuffers(coordinator);
+            }
+
+            if (phase == cancelAt)
+            {
+                cts.Cancel();
+            }
+        };
+
+        var first = Create(dbe);
+        Assert.That(whileWriting, Is.SupersetOf(new[] { $"Backup.Pack{first.BackupId}.Buffer0", $"Backup.Pack{first.BackupId}.Buffer1" }),
+            "the write buffers are allocated under the coordinator");
+        Assert.That(PackBuffers(coordinator), Is.Empty, "released once the point is published");
+
+        whileWriting = null;
+        cancelAt = CapturePhase.ScannerClaimed;
+        Update(dbe, ids, 9);
+        Assert.ThrowsAsync<BackupAbortedException>(() => dbe.Backup.CreateAsync(_store, ct: cts.Token));
+        Assert.That(whileWriting, Is.Not.Empty, "premise: the abandoned point had its buffers");
+        Assert.That(PackBuffers(coordinator), Is.Empty, "released once the point is abandoned");
+    }
+
+    private static string[] PackBuffers(IResource coordinator)
+        => coordinator.Children.Select(c => c.Id).Where(id => id.StartsWith("Backup.Pack", StringComparison.Ordinal)).ToArray();
+
     [Test]
     public void BadArguments_AreRejectedBeforeAnyCapture()
     {

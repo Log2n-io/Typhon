@@ -21,10 +21,13 @@ internal interface IPackPublisher
     string Publish(PackWriter writer);
 }
 
-/// <summary>Tuning a test can lower.</summary>
+/// <summary>Tuning a test can lower, and where the write buffers come from.</summary>
 internal sealed class PackWriterOptions
 {
     public static readonly PackWriterOptions Default = new();
+
+    /// <summary>The engine whose resource tree the write buffers belong to (online capture); <c>null</c> for an engine-free tool.</summary>
+    public BufferOwner Owner { get; init; }
 
     /// <summary>Size of each of the two write buffers.</summary>
     public int BufferSize { get; init; } = 4 << 20;
@@ -176,7 +179,11 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
             throw new ArgumentOutOfRangeException(nameof(_options.BufferSize), _options.BufferSize, "smaller than one tail block frame");
         }
 
-        _buffers = [new NativeBuffer(_options.BufferSize), new NativeBuffer(_options.BufferSize)];
+        _buffers =
+        [
+            NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer0"),
+            NativeBuffer.Allocate(_options.BufferSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.Buffer1"),
+        ];
         _seen = new ulong[(imagePages + 63) >> 6];
         _index = new PackIndexRuns(_fs, TempPath + PackFormat.SidecarInfix, _options.IndexHeapEntries);
         _header.WriteTo(Reserve(PackFormat.HeaderSize));
@@ -263,7 +270,7 @@ internal sealed class PackWriter : IBackupPointSink, IDisposable
             Fail($"tail segment {segmentId} declares {declaredSize} bytes, not a positive multiple of {PackFormat.WalSegmentHeaderSize}");
         }
 
-        _tailBlock ??= new NativeBuffer(PackFormat.TailBlockSize);
+        _tailBlock ??= NativeBuffer.Allocate(PackFormat.TailBlockSize, _options.Owner, $"Backup.Pack{_identity.BackupId}.TailBlock");
         _segment = new TailSegmentEntry { SegmentId = segmentId, FirstLsn = firstLsn, RawCrc = Crc32CUtil.Start, FirstBlock = _blocks.Count };
         _declaredSize = declaredSize;
         _tailFill = 0;

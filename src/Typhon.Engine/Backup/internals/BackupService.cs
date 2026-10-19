@@ -20,7 +20,10 @@ internal sealed class BackupService(DatabaseEngine engine) : IBackupService
 
         var coordinator = engine.BackupCoordinator
                           ?? throw new BackupAbortedException(BackupAbortReason.EngineStopping, "the engine is not open.");
-        var point = await coordinator.CaptureAsync(new FileSystemBackupStore(storePath), requested, ct).ConfigureAwait(false);
+        // The pack's write buffers are the engine's: children of the coordinator, in the resource tree and the unmanaged-memory gauges.
+        var writer = new PackWriterOptions { Owner = new BufferOwner(engine.MemoryAllocator, coordinator) };
+        var store = new FileSystemBackupStore(storePath, writerOptions: writer);
+        var point = await coordinator.CaptureAsync(store, requested, ct).ConfigureAwait(false);
         return BackupOperations.Summarize(StoreView.Open(storePath).Find(point.BackupId).Original);
     }
 }
