@@ -377,8 +377,9 @@ export class SourceList {
 }
 
 /**
- * The groups (14 § 3.5): this frame's lifecycle records — `kind[i]`, `set[i]`, `key[i]` for i in `[0, count)` — and the
- * groups held complete, from a `GROUP_COMPLETE` until its `GROUP_RELEASED` or a `RESET`.
+ * The groups (14 § 3.5): this frame's lifecycle records — `kind[i]`, `set[i]`, `key[i]` for i in `[0, count)` — the
+ * groups held complete, from a `GROUP_COMPLETE` until its `GROUP_RELEASED` or a `RESET`, and each Region set's count of
+ * groups met and not held (`GROUP_TRUNCATED`).
  */
 export class GroupState {
   kind: number[] = [];
@@ -387,6 +388,15 @@ export class GroupState {
   count = 0;
   private readonly complete = new Map<number, Set<bigint>>();
   private completeCount = 0;
+  private readonly over = new Map<number, number>();
+
+  /**
+   * How many groups of a Region set the session's observer meets and does not hold, past the server's
+   * `MaxGroupsPerSession` (#1407): 0 when it holds every group it meets — the set's selection is whole.
+   */
+  overLimit(set: number): number {
+    return this.over.get(set) ?? 0;
+  }
 
   /** Whether a group is held complete: every current member is in the store. */
   isComplete(set: number, key: bigint | number): boolean {
@@ -419,6 +429,16 @@ export class GroupState {
     this.kind[this.count] = kind;
     this.set[this.count] = set;
     this.key[this.count++] = key;
+    if (kind === SourceStatus.GroupTruncated) {
+      if (key === 0n) {
+        this.over.delete(set);
+      } else {
+        this.over.set(set, Number(key));
+      }
+
+      return true;
+    }
+
     let keys = this.complete.get(set);
     if (kind === SourceStatus.GroupComplete) {
       if (keys === undefined) {
@@ -432,7 +452,7 @@ export class GroupState {
 
       keys.add(key);
       this.completeCount++;
-    } else if (keys?.delete(key) === true) {
+    } else if (kind === SourceStatus.GroupReleased && keys?.delete(key) === true) {
       // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
       this.completeCount--;
     }
@@ -443,6 +463,7 @@ export class GroupState {
   clear(): void {
     this.complete.clear();
     this.completeCount = 0;
+    this.over.clear();
   }
 }
 

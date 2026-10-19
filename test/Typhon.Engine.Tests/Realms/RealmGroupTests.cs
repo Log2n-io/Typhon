@@ -468,4 +468,75 @@ class RealmGroupTests : TestBase<RealmGroupTests>
             Assert.That(inRealm0.NetIds(plan), Does.Contain((uint)inRealm0.Events.Received[0].Fields["A"]));
         });
     }
+
+    /// <summary>
+    /// A realm-local slot a session gave back by leaving the realm, taken by another session of the same generation number: the newcomer starts from no
+    /// key — it fills and completes the town it meets — never from the keys the slot's last session held (#1407).
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-33")]
+    [VerifiesRule("SUB-28")]
+    public void ASessionTakingTheRealmSlotAnotherLeftHoldsNoneOfItsKeys()
+    {
+        using var dbe = SetupEngine();
+        Town(dbe, 0, 8, 50f, 50f);
+        Town(dbe, 1, 7, 0f, 0f);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            // Beyond a Sphere at the town's centre: held through the town alone.
+            tx.Spawn<RealmResident>(RealmResident.Pos.Set(new RealmPos { Bounds = new AABB2F { MinX = 90, MinY = 90, MaxX = 90, MaxY = 90 }, Realm = 0 }),
+                RealmResident.Key.Set(new GroupKey { Town = 8 }));
+            tx.Commit();
+        }
+
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<RealmResident>(a => a.Motion(RealmResident.Pos, m => m.Teleport(200)));
+            subs.Groups("town", g => g.Region<RealmTown>(r => r.Key(RealmTown.Zone, z => z.Key).Extent(RealmTown.Zone, z => z.Extent))
+                .Member<RealmResident>(m => m.Key(RealmResident.Key, k => k.Town)));
+            subs.Profile(Profile, p => p.Sphere(30).Groups("town", 5));
+        }, nameof(ASessionTakingTheRealmSlotAnotherLeftHoldsNoneOfItsKeys), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxGroupsPerSession = 4,
+            ReplicationCellM = 10,
+        });
+        harness.RunFence = true;
+        var commands = harness.Subscriptions.Commands;
+        var plan = harness.PlanIndex(nameof(RealmResident));
+
+        void Run(SessionId session, int ticks)
+        {
+            for (var t = 0; t < ticks; t++)
+            {
+                harness.RunTick(harness.Tick + 1);
+                harness.Deliver(session);
+            }
+        }
+
+        var first = harness.OpenSessions(1, Profile)[0];
+        Assert.That(commands.Enter(first, RealmId.Default), Is.True);
+        harness.Sessions.SetViewpoint(first, new Vector3D(50d, 50d, 0d));
+        Run(first, 4);
+        Assert.That(harness.Replica(first).NetIds(plan), Has.Length.EqualTo(1), "precondition: town 8 held in realm 0");
+        var slot = harness.Subscriptions.Hub.LocalSlot(first, 0);
+
+        // To realm 1: its realm-0 slot goes back, its group state still in it.
+        Assert.That(commands.Enter(first, new RealmId(1)), Is.True);
+        harness.Sessions.SetViewpoint(first, new Vector3D(0d, 0d, 0d));
+        Run(first, 2);
+
+        var second = harness.OpenSessions(1, Profile)[0];
+        Assert.That(second.Generation, Is.EqualTo(first.Generation), "precondition: a generation the slot's state could mistake for its own");
+        Assert.That(commands.Enter(second, RealmId.Default), Is.True);
+        harness.Sessions.SetViewpoint(second, new Vector3D(50d, 50d, 0d));
+        Run(second, 4);
+        Assert.That(harness.Subscriptions.Hub.LocalSlot(second, 0), Is.EqualTo(slot), "precondition: the newcomer took the slot the first gave back");
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(second).NetIds(plan), Has.Length.EqualTo(1), "town 8's resident entered for the newcomer");
+            Assert.That(harness.Replica(second).Store.IsGroupComplete(0, 8), Is.True, "and town 8 completed for it");
+            Assert.That(harness.Replica(second).Store.Anomalies, Is.Zero);
+        });
+    }
 }

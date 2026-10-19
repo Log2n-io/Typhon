@@ -125,8 +125,8 @@ public sealed class WorldStore
     public List<(ushort RequestId, byte Status, ushort Code)> Sources { get; } = [];
 
     /// <summary>
-    /// This frame's group lifecycle records (14 § 3.5), in stream order: <see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>,
-    /// the set's catalog index and the key.
+    /// This frame's group lifecycle records (14 § 3.5), in stream order: <see cref="SourceStatus.GroupComplete"/>, <see cref="SourceStatus.GroupReleased"/> or
+    /// <see cref="SourceStatus.GroupTruncated"/>, the set's catalog index and the key — for a truncation, the count left out.
     /// </summary>
     public List<(byte Kind, uint Set, long Key)> Groups { get; } = [];
 
@@ -138,6 +138,16 @@ public sealed class WorldStore
 
     private readonly HashSet<(uint Set, long Key)> _completeGroups = [];
 
+    private readonly Dictionary<uint, uint> _overLimit = [];
+
+    /// <summary>
+    /// How many groups of a Region set the session's observer meets and does not hold, past the server's <c>MaxGroupsPerSession</c> (#1407): 0 when it holds
+    /// every group it meets — the set's selection is whole, and its completed groups are all there is.
+    /// </summary>
+    /// <param name="set">The set's catalog index.</param>
+    /// <returns>The count of the last <c>GROUP_TRUNCATED</c> since the last <c>RESET</c>, or 0.</returns>
+    public uint GroupSetOverLimit(uint set) => _overLimit.GetValueOrDefault(set);
+
     /// <summary>Whether a group is held complete: its <c>GROUP_COMPLETE</c> arrived, and neither its <c>GROUP_RELEASED</c> nor a <c>RESET</c> since.</summary>
     /// <param name="set">The set's catalog index.</param>
     /// <param name="key">The group's key.</param>
@@ -147,18 +157,31 @@ public sealed class WorldStore
     internal void Group(byte kind, uint set, long key)
     {
         Groups.Add((kind, set, key));
-        if (kind == SourceStatus.GroupComplete)
+        switch (kind)
         {
-            // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
-            if (!_completeGroups.Add((set, key)))
-            {
-                Anomalies++;
-            }
-        }
-        else
-        {
-            // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
-            _completeGroups.Remove((set, key));
+            case SourceStatus.GroupComplete:
+                // Once per hold (SUB-33): a second completion with no release between is the server's inconsistency, absorbed.
+                if (!_completeGroups.Add((set, key)))
+                {
+                    Anomalies++;
+                }
+
+                break;
+            case SourceStatus.GroupReleased:
+                // A group released mid-fill was never complete: nothing to remove, and nothing wrong.
+                _completeGroups.Remove((set, key));
+                break;
+            case SourceStatus.GroupTruncated:
+                if (key == 0)
+                {
+                    _overLimit.Remove(set);
+                }
+                else
+                {
+                    _overLimit[set] = (uint)key;
+                }
+
+                break;
         }
     }
 
@@ -299,6 +322,7 @@ public sealed class WorldStore
 
         Self.Clear();
         _completeGroups.Clear();
+        _overLimit.Clear();
     }
 }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <span>
 #include <sstream>
 
 #include "apply/frame_applier.hpp"
@@ -327,7 +328,7 @@ struct GroupRecordInput {
     std::int64_t key;
 };
 
-std::vector<std::uint8_t> GroupsFrame(std::uint32_t tick, std::uint8_t flags, std::initializer_list<GroupRecordInput> records)
+std::vector<std::uint8_t> GroupsFrame(std::uint32_t tick, std::uint8_t flags, std::span<const GroupRecordInput> records)
 {
     WireWriter w;
     w.U8(MessageType::Tick);
@@ -345,6 +346,11 @@ std::vector<std::uint8_t> GroupsFrame(std::uint32_t tick, std::uint8_t flags, st
 
     w.EndLengthPrefixed(mark);
     return {w.Written().begin(), w.Written().end()};
+}
+
+std::vector<std::uint8_t> GroupsFrame(std::uint32_t tick, std::uint8_t flags, std::initializer_list<GroupRecordInput> records)
+{
+    return GroupsFrame(tick, flags, std::span<const GroupRecordInput>(records.begin(), records.size()));
 }
 
 }  // namespace
@@ -373,6 +379,117 @@ TEST(Groups_AGroupIsCompleteUntilReleasedOrResetAndASecondCompletionIsAnAnomaly)
 
     applier.Apply(GroupsFrame(5, 0, {{SourceStatus::GroupReleased, 0, 5}}));
     CHECK_EQ(applier.CompleteGroups().size(), 0u);
+}
+
+// #1407: one frame's completions and releases, out of key order and interleaved, give what applying them in stream order gives - through the one-by-one
+// path (a handful of records) and the end-of-frame merge (more than SmallGroupChangeCount) alike.
+TEST(Groups_AFramesCompletionsAndReleasesApplyAsInStreamOrder)
+{
+    for (const bool many : {false, true})
+    {
+        FrameApplier applier(PlanOf("catalog-kitchen-sink"));
+        applier.Apply(GroupsFrame(1, 0, {{SourceStatus::GroupComplete, 0, 9}, {SourceStatus::GroupComplete, 0, 2}, {SourceStatus::GroupComplete, 1, -4}}));
+        std::vector<GroupRecordInput> records{
+            {SourceStatus::GroupComplete, 0, 7},
+            {SourceStatus::GroupReleased, 0, 9},
+            {SourceStatus::GroupComplete, 0, 9},
+            {SourceStatus::GroupReleased, 0, 2},
+            {SourceStatus::GroupComplete, 0, 1},
+            {SourceStatus::GroupReleased, 1, 8},
+            {SourceStatus::GroupComplete, 0, 11},
+            {SourceStatus::GroupReleased, 0, 11},
+        };
+        if (many)
+        {
+            for (std::int64_t k = 0; k < 10; k++)
+            {
+                records.push_back({SourceStatus::GroupComplete, 1, 1000 - k});
+            }
+        }
+
+        applier.Apply(GroupsFrame(2, 0, records));
+        const auto complete = applier.CompleteGroups();
+        CHECK_EQ(complete.size(), many ? 14u : 4u);
+        CHECK(complete[0] == (std::pair<std::uint32_t, std::int64_t>{0, 1}));
+        CHECK(complete[1] == (std::pair<std::uint32_t, std::int64_t>{0, 7}));
+        CHECK(complete[2] == (std::pair<std::uint32_t, std::int64_t>{0, 9}));
+        CHECK(complete[3] == (std::pair<std::uint32_t, std::int64_t>{1, -4}));
+        CHECK(!applier.IsGroupComplete(0, 11));
+        CHECK(!applier.IsGroupComplete(0, 2));
+        CHECK_EQ(applier.IsGroupComplete(1, 995), many);
+        CHECK_EQ(applier.World().anomalies, 0u);
+
+        // A second completion with no release between - of a held key, and of a key new in this frame - is one anomaly each.
+        std::vector<GroupRecordInput> twice{{SourceStatus::GroupComplete, 0, 7}, {SourceStatus::GroupComplete, 0, 12}, {SourceStatus::GroupComplete, 0, 12}};
+        if (many)
+        {
+            for (std::int64_t k = 0; k < 10; k++)
+            {
+                twice.push_back({SourceStatus::GroupReleased, 1, 1000 - k});
+            }
+        }
+
+        applier.Apply(GroupsFrame(3, 0, twice));
+        CHECK_EQ(applier.World().anomalies, 2u);
+        CHECK(applier.IsGroupComplete(0, 12));
+        CHECK_EQ(applier.CompleteGroups().size(), 5u);
+    }
+}
+
+// #1407: a frame that throws after some group records leaves none of them behind - the next frame, a RESET, holds no group.
+TEST(Groups_AFrameThatThrowsLeavesNoGroupChangeBehind)
+{
+    const auto plan = PlanOf("catalog-kitchen-sink");
+    FrameApplier applier(plan);
+    const auto undeclared = static_cast<std::uint32_t>(plan->GroupSets().size());
+    CHECK_THROWS(WireFormatError,
+        applier.Apply(GroupsFrame(1, 0, {{SourceStatus::GroupComplete, 0, 5}, {SourceStatus::GroupComplete, undeclared, 1}})));
+    applier.Apply(GroupsFrame(2, TickFlags::Reset, {}));
+    CHECK(!applier.IsGroupComplete(0, 5));
+    CHECK_EQ(applier.CompleteGroups().size(), 0u);
+    CHECK_EQ(applier.World().anomalies, 0u);
+}
+
+// #1407: a Region set's truncation count holds until it changes or a RESET, and is never a release.
+TEST(Groups_ATruncationCountHoldsUntilItChangesOrAReset)
+{
+    FrameApplier applier(PlanOf("catalog-kitchen-sink"));
+    const auto truncated = [](std::uint32_t tick, std::uint8_t flags, std::uint32_t set, std::uint32_t over)
+    {
+        WireWriter w;
+        w.U8(MessageType::Tick);
+        w.U32(tick);
+        w.U8(flags);
+        w.U8(BlockType::Sources);
+        const std::size_t mark = w.BeginLengthPrefixed();
+        w.Varu(2);
+        w.U8(SourceStatus::GroupComplete);
+        w.Varu(set);
+        w.Vari64(5);
+        w.U8(SourceStatus::GroupTruncated);
+        w.Varu(set);
+        w.Varu(over);
+        w.EndLengthPrefixed(mark);
+        return std::vector<std::uint8_t>{w.Written().begin(), w.Written().end()};
+    };
+
+    applier.Apply(truncated(1, 0, 0, 70000));
+    CHECK_EQ(applier.GroupSetOverLimit(0), 70000u);
+    CHECK_EQ(applier.GroupSetOverLimit(1), 0u);
+    CHECK(applier.IsGroupComplete(0, 5));
+    CHECK_EQ(applier.Groups().size(), 2u);
+
+    applier.Apply(GroupsFrame(2, 0, {}));
+    CHECK_EQ(applier.GroupSetOverLimit(0), 70000u);
+
+    applier.Apply(truncated(3, 0, 0, 0));
+    CHECK_EQ(applier.GroupSetOverLimit(0), 0u);
+    CHECK(applier.IsGroupComplete(0, 5));
+
+    applier.Apply(truncated(4, 0, 1, 3));
+    applier.Apply(GroupsFrame(5, TickFlags::Reset, {}));
+    CHECK_EQ(applier.GroupSetOverLimit(1), 0u);
+    CHECK_EQ(applier.World().anomalies, 1u);   // frames 3 and 4 completed group 5 of sets 0 and 1: set 0's twice
 }
 
 TEST(Groups_ARecordNamingAnUndeclaredSetIsMalformed)

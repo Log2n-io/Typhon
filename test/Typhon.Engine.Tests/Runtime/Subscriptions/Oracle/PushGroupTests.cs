@@ -430,6 +430,7 @@ class PushGroupTests : TestBase<PushGroupTests>
             Assert.That(store.CompleteGroupCount, Is.EqualTo(8), "the bound");
             Assert.That(store.CompleteGroups.Select(g => g.Key), Is.EquivalentTo(nearest), "the nearest eight");
             Assert.That(harness.Subscriptions.Push.GroupsOverLimit, Is.GreaterThan(0), "the rest counted");
+            Assert.That(store.GroupSetOverLimit(0), Is.EqualTo(2), "and the session told how many");
         });
 
         // Walk west by steps under a cell: the held ones are kept while they stay in reach, whatever is nearer.
@@ -1152,10 +1153,10 @@ class PushGroupTests : TestBase<PushGroupTests>
 
     [Test]
     [VerifiesRule("SUB-33")]
-    public void TooManyKeysPerSessionIsRefused() =>
-        RefusedAtFreeze(s => GroupTestSchema.Declare(s, Radius, Reach, Margin), "MaxGroupsPerSession = 5000", new SubscriptionsOptions
+    public void ABoundAboveTheRailIsRefused() =>
+        RefusedAtFreeze(s => GroupTestSchema.Declare(s, Radius, Reach, Margin), "MaxGroupsPerSession = 1048577", new SubscriptionsOptions
         {
-            IngressBytesPerSecond = TestIngress.Budget, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius), MaxGroupsPerSession = 5000,
+            IngressBytesPerSecond = TestIngress.Budget, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius), MaxGroupsPerSession = (1 << 20) + 1,
         });
 
     /// <summary>The engine's set index is the catalog's: two sets declared out of name order, each record naming the set it belongs to.</summary>

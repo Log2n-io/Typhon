@@ -106,8 +106,8 @@ export const Capabilities = {
 } as const;
 
 /**
- * A `SOURCES` record's kind (14 § 3.5): every record leads with it. The first two are a request's outcome, the last two a
- * group's lifecycle.
+ * A `SOURCES` record's kind (14 § 3.5): every record leads with it. The first two are a request's outcome, the next two a
+ * group's lifecycle, the last a Region set's truncation.
  */
 export const SourceStatus = {
   /** `SOURCE_APPLIED { u16 requestId }`. */
@@ -118,6 +118,12 @@ export const SourceStatus = {
   GroupComplete: 2,
   /** `GROUP_RELEASED { varu set | vari key }`: no longer held; its members' leaves are in the same frame. */
   GroupReleased: 3,
+  /**
+   * `GROUP_TRUNCATED { varu set | varu over }` (#1407): the session's observer meets `over` more groups of a Region set
+   * than the server's `MaxGroupsPerSession` lets it hold; 0 once it holds every group it meets. Sent whenever the count
+   * changes, and again after a `RESET`.
+   */
+  GroupTruncated: 4,
 } as const;
 
 /** Reason codes of an `ACKS` rejection record. Codes 128–255 belong to the application. */

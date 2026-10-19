@@ -227,13 +227,20 @@ public sealed class SubscriptionsOptions
     public int EnterBudgetPerFrame { get; init; } = 500;
 
     /// <summary>
-    /// The most groups one session holds in each group set at once (14 § 3, P2): the bound on a group set's only per-session cost, the held keys and their
-    /// fill cursors. Required when a group set is declared — 0, the default, refuses to start then.
+    /// The most groups one session holds in each group set at once (14 § 3, P2): the application's declared worst case. Required when a group set is
+    /// declared — 0, the default, refuses to start then; at most 1 048 576.
     /// </summary>
     /// <remarks>
-    /// A region the session meets past this many is not held, and counted. A session's group state costs about 24 B a key, twice (committed and
-    /// pending), per declared set. It is also <c>SubscribeRequest</c>'s burst (clamped to 5–1 024), so a client subscribing every key it may hold at
-    /// once is taken in one tick.
+    /// <para>
+    /// A bound, not a reservation (#1407): a session's group state costs the keys it holds — about 12 B a slot, committed and pending each, at most
+    /// four slots a key — and its per-frame group work grows with them, whatever this says. It bounds the keys admitted: one the session no longer
+    /// meets, kept held while a frame's releases are spent, can keep it above the bound for a few frames.
+    /// </para>
+    /// <para>
+    /// A region the session meets past this many is not held: the kept ones and then the nearest are, and the session is told how many it left out
+    /// (<c>GROUP_TRUNCATED</c>). It is also <c>SubscribeRequest</c>'s burst, clamped to 5–1 024, so a client subscribing up to 1 024 keys at once is taken
+    /// in one tick.
+    /// </para>
     /// </remarks>
     public int MaxGroupsPerSession { get; init; }
 

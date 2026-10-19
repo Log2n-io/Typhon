@@ -65,6 +65,7 @@ internal sealed unsafe partial class PushHub
         _plans = plans;
         GroupSets = sets;
         _lazy = new bool[plans.Length];
+        _lazySet = new bool[sets.Length];
         foreach (var set in sets)
         {
             foreach (var member in set.Members)
@@ -72,6 +73,7 @@ internal sealed unsafe partial class PushHub
                 if (plans[member.Plan].Position == null)
                 {
                     _lazy[member.Plan] = true;
+                    _lazySet[set.Index] = true;
                     _anyLazy = true;
                 }
             }
@@ -101,6 +103,14 @@ internal sealed unsafe partial class PushHub
             _unplacedLog[t] = new UnplacedTick();
         }
     }
+
+    /// <summary>
+    /// Whether set <paramref name="set"/> has a positionless member: the only sets whose held keys decide replication state, so the only ones collected
+    /// (#1407).
+    /// </summary>
+    internal bool IsLazySet(int set) => (uint)set < (uint)_lazySet.Length && _lazySet[set];
+
+    private bool[] _lazySet = [];
 
     /// <summary>Whether plan <paramref name="archetype"/> is a positionless member: no cell, no realm, state only while a held key needs it.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -167,8 +177,6 @@ internal sealed unsafe partial class PushHub
     /// <summary>Whether some session holds, or is moving to, key <paramref name="key"/> of set <paramref name="set"/>.</summary>
     internal bool IsWanted(int set, long key) => key != 0 && _wanted[set].AsSpan(0, _wantedCount[set]).BinarySearch(key) >= 0;
 
-    private bool WasWanted(int set, long key) => _wantedBefore[set].AsSpan(0, _wantedBeforeCount[set]).BinarySearch(key) >= 0;
-
     /// <summary>The keys of <paramref name="set"/> some session holds now, for tests.</summary>
     internal ReadOnlySpan<long> WantedForTest(int set) => _wanted[set].AsSpan(0, _wantedCount[set]);
 
@@ -211,11 +219,19 @@ internal sealed unsafe partial class PushHub
                 continue;
             }
 
+            // Both lists are sorted: the keys wanted before are walked once alongside.
             var keys = _wanted[set.Index];
+            var before = _wantedBefore[set.Index];
+            var walk = 0;
             for (var i = 0; i < _wantedCount[set.Index]; i++)
             {
                 var key = keys[i];
-                if (WasWanted(set.Index, key))
+                while (walk < _wantedBeforeCount[set.Index] && before[walk] < key)
+                {
+                    walk++;
+                }
+
+                if (walk < _wantedBeforeCount[set.Index] && before[walk] == key)
                 {
                     continue;
                 }

@@ -57,7 +57,10 @@ export interface SourceInput {
   readonly code?: number;
 }
 
-/** A group lifecycle record: {@link SourceStatus.GroupComplete} or {@link SourceStatus.GroupReleased}. */
+/**
+ * A group lifecycle record: {@link SourceStatus.GroupComplete}, {@link SourceStatus.GroupReleased} or
+ * {@link SourceStatus.GroupTruncated}, whose `key` is the count left out.
+ */
 export interface GroupInput {
   readonly kind: number;
   readonly set: number;
@@ -281,8 +284,12 @@ export function writeSourcesBlock(
   for (const g of groups) {
     w.u8(uintInRange(g.kind, 0xff, 'kind'));
     w.varu(uintInRange(g.set, 0xffffffff, 'set'));
-    wordsOf(g.key, true, words, 0, 'key');
-    w.vari64Words(words[LOW_WORD]!, words[HIGH_WORD]!);
+    if (g.kind === SourceStatus.GroupTruncated) {
+      w.varu(uintInRange(Number(g.key), 0xffffffff, 'over'));
+    } else {
+      wordsOf(g.key, true, words, 0, 'key');
+      w.vari64Words(words[LOW_WORD]!, words[HIGH_WORD]!);
+    }
   }
 
   endBlock(w, mark);

@@ -137,7 +137,8 @@ struct SourceEntry {
     std::uint32_t code;
 };
 
-// This frame's group lifecycle records (SOURCES, 14 § 3.5): SourceStatus::GroupComplete or GroupReleased, the set's index, the key.
+// This frame's group lifecycle records (SOURCES, 14 § 3.5): SourceStatus::GroupComplete, GroupReleased or GroupTruncated, the set's index, the key -
+// for a truncation, the count left out.
 // Laid out as the C API's typhon_group_record, which a span of these is handed out as.
 struct GroupEntry {
     std::uint32_t kind;

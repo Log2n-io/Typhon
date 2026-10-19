@@ -19,7 +19,10 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The runtime's compiled group sets, by set index; empty when none is declared, and then nothing below runs.</summary>
     internal CompiledGroupSet[] GroupSets = [];
 
-    /// <summary>The most keys a session holds per set (<see cref="SubscriptionsOptions.MaxGroupsPerSession"/>).</summary>
+    /// <summary>
+    /// The most keys a session holds per set (<see cref="SubscriptionsOptions.MaxGroupsPerSession"/>): an admission bound only — a session's group state
+    /// costs the keys it holds (#1407).
+    /// </summary>
     internal int MaxGroupsPerSession;
 
     /// <summary>The explicit sets' per-session keys and answers (14 § 4), engine-wide; null when no set is explicit.</summary>
@@ -84,8 +87,13 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Key changes this replication recorded, summed over ticks. Diagnostic.</summary>
     internal long KeyChangesRecorded;
 
-    /// <summary>Regions a session met past <see cref="MaxGroupsPerSession"/> and could not hold, summed over frames.</summary>
+    /// <summary>
+    /// Regions a session met past <see cref="MaxGroupsPerSession"/> and could not hold, summed over frames; each session is told its own count.
+    /// </summary>
     internal long GroupsOverLimit;
+
+    /// <summary>Releases a frame kept held past its release budget, to a later frame (#1407), summed. Diagnostic.</summary>
+    internal long GroupReleasesDeferred;
 
     /// <summary>RESET frames gathered while the session held a key still filling: each refills it from its first member. Diagnostic.</summary>
     internal long GroupResetsMidFill;
@@ -94,8 +102,8 @@ internal abstract unsafe partial class PushReplication
     internal virtual bool AnyGroupFillingForTest() => false;
 
     /// <summary>
-    /// Every key a session here holds or is moving to, to <paramref name="hub"/> (14 § 5): what decides which positionless members need replication state.
-    /// Serial, at the blocks step.
+    /// Every key a session here holds or is moving to in a set with a positionless member, to <paramref name="hub"/> (14 § 5): what decides which
+    /// positionless members need replication state. Serial, at the blocks step.
     /// </summary>
     internal void CollectHeldKeys(PushHub hub)
     {
@@ -113,9 +121,17 @@ internal abstract unsafe partial class PushReplication
             }
 
             var gs = GroupStateAtOrNull(local);
-            if (gs != null && gs.Generation == owner.Generation)
+            if (gs == null || gs.Generation != owner.Generation)
             {
-                gs.CollectKeys(hub);
+                continue;
+            }
+
+            for (var set = 0; set < gs.SetCount; set++)
+            {
+                if (hub.IsLazySet(set))
+                {
+                    gs.CollectKeys(hub, set);
+                }
             }
         }
     }

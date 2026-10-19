@@ -59,7 +59,7 @@ public static class BlockTypes
 
 /// <summary>
 /// A <c>SOURCES</c> record's kind (03 § 3, amended by Phase 4's 14 § 3.5): every record leads with it. The first two are a request's outcome — and keep the
-/// names they had as a status — the last two a group's lifecycle.
+/// names they had as a status — the next two a group's lifecycle, the last a Region set's truncation.
 /// </summary>
 public static class SourceStatus
 {
@@ -74,6 +74,13 @@ public static class SourceStatus
 
     /// <summary><c>GROUP_RELEASED { varu set | vari key }</c>: the group is no longer held; its members' leaves are in the same frame.</summary>
     public const byte GroupReleased = 3;
+
+    /// <summary>
+    /// <c>GROUP_TRUNCATED { varu set | varu over }</c> (#1407): the session's observer meets <c>over</c> more groups of a Region set than it may hold
+    /// (<c>MaxGroupsPerSession</c>), which it does not hold; 0 once it holds every group it meets again. Sent whenever the count changes, and again after a
+    /// RESET. A set with no record since the last RESET is whole.
+    /// </summary>
+    public const byte GroupTruncated = 4;
 }
 
 /// <summary>
@@ -197,9 +204,11 @@ public interface ITickSink : IFieldSink
     /// and ignores them; a struct that does not implement it is boxed once per group record to reach it. A <c>ref struct</c> sink cannot use a default
     /// method and implements it.
     /// </summary>
-    /// <param name="kind"><see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>.</param>
+    /// <param name="kind">
+    /// <see cref="SourceStatus.GroupComplete"/>, <see cref="SourceStatus.GroupReleased"/> or <see cref="SourceStatus.GroupTruncated"/>.
+    /// </param>
     /// <param name="set">The group set's index in the catalog.</param>
-    /// <param name="key">The group's key.</param>
+    /// <param name="key">The group's key; for <see cref="SourceStatus.GroupTruncated"/>, how many groups the session does not hold.</param>
     void Group(byte kind, uint set, long key) { }
 
     /// <summary>An <c>AGG</c> block begins.</summary>
@@ -382,13 +391,14 @@ public static class TickReader
                                 break;
                             case SourceStatus.GroupComplete:
                             case SourceStatus.GroupReleased:
+                            case SourceStatus.GroupTruncated:
                                 var set = block.ReadVaru();
                                 if (set >= (uint)plan.GroupSets.Length)
                                 {
                                     throw WireFormatException.Malformed($"SOURCES group set {set} is not in the catalog");
                                 }
 
-                                sink.Group(kind, set, block.ReadVari64());
+                                sink.Group(kind, set, kind == SourceStatus.GroupTruncated ? block.ReadVaru() : block.ReadVari64());
                                 break;
                             default:
                                 throw WireFormatException.Malformed($"SOURCES record kind {kind} is unknown");
@@ -1089,14 +1099,23 @@ public static class TickWriter
 
     /// <summary>Writes one group lifecycle record inside an open <c>SOURCES</c> block.</summary>
     /// <param name="w">The writer.</param>
-    /// <param name="kind"><see cref="SourceStatus.GroupComplete"/> or <see cref="SourceStatus.GroupReleased"/>.</param>
+    /// <param name="kind">
+    /// <see cref="SourceStatus.GroupComplete"/>, <see cref="SourceStatus.GroupReleased"/> or <see cref="SourceStatus.GroupTruncated"/>.
+    /// </param>
     /// <param name="set">The group set's index.</param>
-    /// <param name="key">The group's key.</param>
+    /// <param name="key">The group's key; for <see cref="SourceStatus.GroupTruncated"/>, the count left out (0 to <see cref="uint.MaxValue"/>).</param>
     public static void WriteGroupRecord(ref WireWriter w, byte kind, uint set, long key)
     {
         w.WriteU8(kind);
         w.WriteVaru(set);
-        w.WriteVari64(key);
+        if (kind == SourceStatus.GroupTruncated)
+        {
+            w.WriteVaru((uint)key);
+        }
+        else
+        {
+            w.WriteVari64(key);
+        }
     }
 
     /// <summary>Writes an <c>AGG</c> block. Cells must be in ascending order.</summary>

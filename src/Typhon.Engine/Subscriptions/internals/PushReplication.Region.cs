@@ -278,6 +278,11 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
         // A session whose committed geometry is another shape's holds what that shape named: only a RESET says what it holds now.
         var reset = st.NeedsReset || forceReset || (st.Anchored && !r.Anchored);
+        // Groups are a Sphere's (14 § 3.8): keys a session held under one are given back here, and the frame resets so the client drops them too.
+        if (HasGroups && DropGroups(slotIndex, session.Generation))
+        {
+            reset = true;
+        }
         var rows = RegionRows;
         var w = RegionWindow;
 

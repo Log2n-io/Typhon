@@ -653,6 +653,11 @@ int32_t typhon_group_is_complete(const typhon_client* client, uint32_t set, int6
     return client != nullptr && client->client->Applier() != nullptr && client->client->Applier()->IsGroupComplete(set, key) ? 1 : 0;
 }
 
+uint32_t typhon_group_set_over_limit(const typhon_client* client, uint32_t set)
+{
+    return client != nullptr && client->client->Applier() != nullptr ? client->client->Applier()->GroupSetOverLimit(set) : 0u;
+}
+
 typhon_status typhon_group_set_index(const typhon_client* client, const char* name, uint32_t* out)
 {
     return Guard(const_cast<typhon_client*>(client),
