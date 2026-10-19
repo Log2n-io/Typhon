@@ -21,6 +21,7 @@ string endpoint, kind, fuzzMode, accountsFile, authBaseArg;
 Uri endpointUri;
 int bots, seconds, hz, connectBatch, connectRate, tourSeconds, planets, fuzz, fuzzRate, signupConcurrency, accountBase, maxBots, chunkSize;
 double regionM, wanderSeconds;
+bool brain;
 try
 {
     var defaults = new BotSwarmOptions();
@@ -57,6 +58,11 @@ try
     // --kind player only: MoveDir is Roles(Player). 0 leaves the avatars standing where they spawned, which is what every run before
     // this one measured -- replication only, with the intent path, the spatial index and cluster migration untouched.
     wanderSeconds = r.Dbl("--wander-seconds", defaults.WanderSeconds, "seconds a player bot holds a heading; 0 stands still", min: 0d);
+
+    // --kind player only, and it REPLACES wandering: a thinking bot travels between cities, idles in them, hunts what it finds and takes
+    // shuttles, which clumps the population and changes the shape of every interest set. Off by default because that is a different
+    // workload rather than a better version of the same one, and flipping it silently would make two runs incomparable.
+    brain = r.Switch("--brain", "player bots decide for themselves from what they are sent, instead of wandering");
     // Every god camera moves to the next planet on this period (Realms G3); the report counts the switches applied and the RealmNews heard.
     tourSeconds = r.Int("--god-tour", defaults.TourEverySeconds, "seconds between planet switches; 0 never tours", min: 0);
     planets = r.Int("--planets", defaults.Planets, "planets a touring camera cycles through", min: 1);
@@ -207,6 +213,7 @@ var options = new BotSwarmOptions
     Kind = kind,
     RegionRadiusM = regionM,
     WanderSeconds = wanderSeconds,
+    Brain = brain,
     TourEverySeconds = tourSeconds,
     Planets = planets,
 
@@ -453,6 +460,12 @@ var intentsSent = swarm.IntentsSent();
 Console.WriteLine(intentsSent == 0
     ? $"movement: NO intents sent — the population stood where it spawned (--wander-seconds {wanderSeconds})"
     : $"movement: {intentsSent} MoveDir intents sent, {(double)intentsSent / Math.Max(1, opened):F0} per session");
+
+if (brain)
+{
+    var decisions = swarm.Decisions();
+    Console.WriteLine($"brain: {decisions.Boardings} shuttle boarding(s) asked for, {decisions.Hunts} hunt(s) begun");
+}
 
 if (swarm.Disconnects.Count == 0)
 {

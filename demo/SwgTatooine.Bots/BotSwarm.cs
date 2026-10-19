@@ -1,10 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SwgTatooine.Bots.Brain;
 using Typhon.Client;
 using Typhon.Protocol;
 
@@ -82,6 +83,21 @@ public sealed class BotSwarmOptions
 
     /// <summary>The speed class a wandering player asks for; 2 is <c>Run</c>, the server's default gait.</summary>
     public byte WanderSpeedClass { get; init; } = 2;
+
+    /// <summary>Whether player bots decide for themselves from what they are sent, instead of wandering on a scripted heading.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Off by default, because it is a different workload and not a better version of the same one.</b> A wandering bot
+    /// walks a random course forever, which loads the spatial index evenly and is what every existing measurement was
+    /// taken against. A thinking bot travels between cities, stands still in them, hunts what it finds and takes
+    /// shuttles — so it clumps, it idles, and its interest set changes shape. Flipping this silently would make two runs
+    /// incomparable while both reported a median.
+    /// </para>
+    /// <para>
+    /// It replaces wandering rather than adding to it: two things steering one body would fight over the heading.
+    /// </para>
+    /// </remarks>
+    public bool Brain { get; init; }
 
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
     public double CameraSpeedMps { get; init; } = 12;
@@ -214,6 +230,11 @@ public sealed class BotSwarm : IAsyncDisposable
     /// protocol faults rather than one that fails to compile.
     /// </remarks>
     private const string MoveDirCommand = "MoveDir";
+
+    /// <summary>The commands a thinking bot sends besides a heading, named as the server declares them.</summary>
+    private const string SetTargetCommand = "SetTarget";
+
+    private const string BoardShuttleCommand = "BoardShuttle";
 
     /// <summary>Bots driven concurrently within one tick.</summary>
     /// <remarks>
@@ -845,6 +866,31 @@ public sealed class BotSwarm : IAsyncDisposable
         }
 
         return sent;
+    }
+
+    /// <summary>What the brains decided, which is the only evidence a thinking run produces that a wandering one does not.</summary>
+    /// <returns>Shuttle boardings asked for, and hunts begun.</returns>
+    /// <remarks>
+    /// <b>Counted for the reason the movement intents are: the absence was invisible.</b> A fleet whose brains never chose to travel
+    /// or never reached a port looks exactly like a healthy fleet of walkers, and the first version of this sent two intents per
+    /// session in 45 seconds while every number in the report said the run was fine.
+    /// </remarks>
+    public (long Boardings, long Hunts) Decisions()
+    {
+        long boardings = 0;
+        long hunts = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            boardings += Volatile.Read(ref bot.BoardingsAsked);
+            hunts += Volatile.Read(ref bot.HuntsStarted);
+        }
+
+        return (boardings, hunts);
     }
 
     private readonly Dictionary<ushort, int> _disconnects = [];
@@ -1733,7 +1779,9 @@ public sealed class BotSwarm : IAsyncDisposable
             var touring = _options.TourEverySeconds > 0 && _options.Planets > 1 && _options.Kind != "player";
 
             // Players only: MoveDir is Roles(Player), so a god camera asking to walk would be refused a command it has no body for.
-            var wandering = _options.WanderSeconds > 0 && _options.Kind == "player";
+            // The brain replaces wandering rather than joining it: two things steering one body would fight over the heading.
+            var thinking = _options.Brain && _options.Kind == "player";
+            var wandering = !thinking && _options.WanderSeconds > 0 && _options.Kind == "player";
 
             // Indexed for the same reason DisposeAsync is: the body awaits.
             var live = BotCount;
@@ -1761,7 +1809,7 @@ public sealed class BotSwarm : IAsyncDisposable
                 for (var k = 0; k < size; k++)
                 {
                     // b + k + 1 preserves the old one-based position, which the tour's stagger is phased on.
-                    driving[k] = DriveOneAsync(_bots[b + k], b + k + 1, touring, tourPeriod, moveRegions, wandering, ct);
+                    driving[k] = DriveOneAsync(_bots[b + k], b + k + 1, touring, tourPeriod, moveRegions, wandering, thinking, ct);
                 }
 
                 await Task.WhenAll(driving).ConfigureAwait(false);
@@ -1944,13 +1992,15 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <param name="tourPeriod">Ticks between a camera's planet switches.</param>
     /// <param name="moveRegions">Whether this tick moves the god cameras' regions.</param>
     /// <param name="wandering">Whether players are walking this run.</param>
+    /// <param name="thinking">Whether players are deciding for themselves this run.</param>
     /// <param name="ct">Cancels the sends.</param>
     /// <remarks>
     /// <b>Every exception is contained here rather than at the batch.</b> These run under a <c>WhenAll</c>, which reports only the
     /// first fault and would let one bot's dead socket cancel the rest of its batch — so the per-bot guarantee the old loop made with
     /// a try/catch inside the body has to be made inside the task instead.
     /// </remarks>
-    private async Task DriveOneAsync(Bot bot, int position, bool touring, long tourPeriod, bool moveRegions, bool wandering, CancellationToken ct)
+    private async Task DriveOneAsync(Bot bot, int position, bool touring, long tourPeriod, bool moveRegions, bool wandering, bool thinking,
+        CancellationToken ct)
     {
         // Null-checked as well as connection-checked, because a shrink lowers the count before it empties the slots: the driver can
         // read a count that still includes a bot the reconciler is in the middle of retiring. Lowering the count first is the right
@@ -1979,6 +2029,11 @@ public sealed class BotSwarm : IAsyncDisposable
             if (wandering)
             {
                 await bot.WanderAsync(Ticks, _options, ct).ConfigureAwait(false);
+            }
+
+            if (thinking)
+            {
+                await bot.ThinkAsync(Ticks, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -2074,6 +2129,16 @@ public sealed class BotSwarm : IAsyncDisposable
         public long ToursAsked;
         public long RealmSwitches;
         public long IntentsSent;
+
+        /// <summary>Shuttle boardings this bot has asked for, and lairs it has decided to hunt: what the brain actually did.</summary>
+        public long BoardingsAsked;
+
+        public long HuntsStarted;
+
+        /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
+        private readonly BotBrain _brain;
+
+        private readonly Perception _eyes;
         public readonly NewsCounter News = new();
 
         public Bot(int index, BotSwarmOptions options)
@@ -2090,6 +2155,14 @@ public sealed class BotSwarm : IAsyncDisposable
             // the first turn is staggered too: every avatar turning on one tick would be N commands in a single server tick, which is
             // the mistake the planet tour already staggers to avoid.
             _wander = (uint)((index * 2654435761u) | 1u);
+            if (options.Brain)
+            {
+                // Its own stream, from its own index, for the reason the wanderer's is: a run has to reproduce, and a thousand bots
+                // sharing one stream would decide in lockstep. A different multiplier from the wanderer's so a bot's course and its
+                // choices are not the same sequence read twice.
+                _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz);
+                _eyes = new Perception();
+            }
             _heading = (float)((index * golden) % (Math.PI * 2));
 
             // <b>Zero, so the FIRST heading is sent on the first tick this bot is driven.</b> This was `index % dwellTicks`, which
@@ -2218,6 +2291,64 @@ public sealed class BotSwarm : IAsyncDisposable
 
             await Client.SendCommandAsync(MoveDirCommand, values, ct).ConfigureAwait(false);
             IntentsSent++;
+        }
+
+        /// <summary>Decides from what this bot was sent, and sends what it decided.</summary>
+        /// <param name="tick">The driver's tick, which the timed goals count in.</param>
+        /// <param name="ct">Cancels the send.</param>
+        /// <remarks>
+        /// <b>Perception, decision, send — and only the last of the three touches the wire.</b> The decision is a pure function of a
+        /// <c>Perceived</c>, so it is tested without a server; this method is the plumbing that cannot be.
+        /// <para>
+        /// Every intent below is a command a browser has. That is the property this phase exists to protect: the server has no branch
+        /// on bot-ness, so there is nothing for it to tell apart.
+        /// </para>
+        /// </remarks>
+        public async Task ThinkAsync(long tick, CancellationToken ct)
+        {
+            if (_brain == null || Client.Plan == null)
+            {
+                return;
+            }
+
+            var world = _eyes.Read(Client.Store, _brain.Facilities);
+            var intent = _brain.Decide(in world, tick);
+            switch (intent.Kind)
+            {
+                case IntentKind.Move when Client.Plan.CommandByName(MoveDirCommand) != null:
+                    await Client.SendCommandAsync(
+                        MoveDirCommand,
+                        new RecordValues
+                        {
+                            ["heading"] = FieldValue.Of((double)intent.Heading),
+                            ["speedClass"] = FieldValue.Of((double)intent.SpeedClass),
+                            ["changePhase"] = FieldValue.Of(0.0),
+                        },
+                        ct).ConfigureAwait(false);
+                    IntentsSent++;
+                    break;
+
+                case IntentKind.Attack when Client.Plan.CommandByName(SetTargetCommand) != null:
+                    await Client.SendCommandAsync(
+                        SetTargetCommand,
+                        new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
+                        ct).ConfigureAwait(false);
+                    IntentsSent++;
+                    HuntsStarted++;
+                    break;
+
+                case IntentKind.Board when Client.Plan.CommandByName(BoardShuttleCommand) != null:
+                    await Client.SendCommandAsync(
+                        BoardShuttleCommand,
+                        new RecordValues { ["destCity"] = FieldValue.Of((double)intent.City) },
+                        ct).ConfigureAwait(false);
+                    IntentsSent++;
+                    BoardingsAsked++;
+                    break;
+
+                default:
+                    break;   // nothing to say this tick, which is what idling and waiting look like on the wire
+            }
         }
 
         public async Task SendRegionAsync(long tick, BotSwarmOptions options, CancellationToken ct)
