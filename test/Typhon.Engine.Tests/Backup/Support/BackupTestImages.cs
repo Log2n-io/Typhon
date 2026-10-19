@@ -129,6 +129,35 @@ internal static class BackupTestImages
         };
     }
 
+    /// <summary>
+    /// A copy of <paramref name="image"/> whose meta pair records another on-disk format revision, restamped so it still verifies (the
+    /// <c>DamageKit.ForgeFormatRevision</c> technique, in memory).
+    /// </summary>
+    public static BackupTestImage WithFormatRevision(BackupTestImage image, int revision)
+    {
+        var pages = (byte[][])image.Pages.Clone();
+        for (var slot = 0; slot <= 1; slot++)
+        {
+            var page = (byte[])image.Pages[slot].Clone();
+            // RootFileHeader at the page-base header's end; its revision field is at +32 (BootstrapReader's layout).
+            BitConverter.GetBytes(revision).CopyTo(page, PagedMMF.PageBaseHeaderSize + 32);
+            PagedMMF.StampPageForWrite(page, PageSectorFooter.ReadFilePageIndex(page), allowSectorFooter: false);
+            pages[slot] = page;
+        }
+
+        return new BackupTestImage
+        {
+            DatabaseName = image.DatabaseName,
+            DatabaseId = image.DatabaseId,
+            CheckpointLsn = image.CheckpointLsn,
+            Clean = image.Clean,
+            FormatRevision = revision,
+            Pages = pages,
+            WalSegments = image.WalSegments,
+            BundlePath = image.BundlePath,
+        };
+    }
+
     /// <summary>The DI graph the integrity fixtures use, with the WAL inside the bundle and a small cache.</summary>
     public static ServiceProvider BuildProvider(string name, string dbDir, string walDir, bool forceCrashRecovery = false)
     {

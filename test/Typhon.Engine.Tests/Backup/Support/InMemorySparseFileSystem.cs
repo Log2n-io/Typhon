@@ -117,6 +117,11 @@ internal class InMemorySparseFileSystem : IStoreFileSystem
     {
     }
 
+    /// <summary>Called when a directory is renamed, before <see cref="AfterRename"/>: its subtree moves with it, atomically.</summary>
+    protected virtual void OnRenameDirectory(string source, string destination)
+    {
+    }
+
     /// <summary>Called by <see cref="FlushDirectory"/>; the crash model commits the directory's entries here (Linux).</summary>
     protected virtual void OnFlushDirectory(string directory)
     {
@@ -240,6 +245,7 @@ internal class InMemorySparseFileSystem : IStoreFileSystem
                 Files[dst + kv.Key[src.Length..]] = kv.Value;
             }
 
+            OnRenameDirectory(src, dst);
             AfterRename();
             return;
         }
@@ -565,6 +571,7 @@ internal enum CrashModelKind
 internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
 {
     private readonly CrashModelKind _kind;
+    private readonly List<(string Source, string Destination)> _pendingDirectoryRenames = [];
     private HashSet<string> _durableDirectories = new(StringComparer.Ordinal);
     private Dictionary<string, Node> _durableFiles = new(StringComparer.Ordinal);
     private int _crashAt = -1;
@@ -601,6 +608,7 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
     public void Crash()
     {
         _crashAt = -1;
+        _pendingDirectoryRenames.Clear();
         InvalidateHandles();
         Directories.Clear();
         foreach (var d in _durableDirectories)
@@ -649,11 +657,63 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
         }
     }
 
+    protected override void OnRenameDirectory(string source, string destination)
+    {
+        if (_kind == CrashModelKind.Linux)
+        {
+            _pendingDirectoryRenames.Add((source, destination));
+        }
+    }
+
     protected override void OnFlushDirectory(string directory)
     {
         if (_kind != CrashModelKind.Linux)
         {
             return;
+        }
+
+        // A directory renamed into this one carries its durable subtree with it: on POSIX the entries live in the directory itself, so the
+        // rename moves them all at once, and it is this directory's flush that makes the new name durable.
+        for (var i = 0; i < _pendingDirectoryRenames.Count; i++)
+        {
+            var (src, dst) = _pendingDirectoryRenames[i];
+            if (ParentOf(dst) != directory)
+            {
+                continue;
+            }
+
+            var prefix = src + "/";
+            var dirs = new List<string>();
+            foreach (var d in _durableDirectories)
+            {
+                if (d == src || d.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    dirs.Add(d);
+                }
+            }
+
+            foreach (var d in dirs)
+            {
+                _durableDirectories.Remove(d);
+                _durableDirectories.Add(dst + d[src.Length..]);
+            }
+
+            var files = new List<KeyValuePair<string, Node>>();
+            foreach (var kv in _durableFiles)
+            {
+                if (kv.Key.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    files.Add(kv);
+                }
+            }
+
+            foreach (var kv in files)
+            {
+                _durableFiles.Remove(kv.Key);
+                _durableFiles[dst + kv.Key[src.Length..]] = kv.Value;
+            }
+
+            _pendingDirectoryRenames.RemoveAt(i--);
         }
 
         _durableDirectories.RemoveWhere(d => ParentOf(d) == directory && !Directories.Contains(d));
@@ -704,6 +764,7 @@ internal sealed class CrashModelFileSystem : InMemorySparseFileSystem
 
     private void CommitAll()
     {
+        _pendingDirectoryRenames.Clear();
         _durableDirectories = new HashSet<string>(Directories, StringComparer.Ordinal);
         _durableFiles = new Dictionary<string, Node>(Files, StringComparer.Ordinal);
     }
